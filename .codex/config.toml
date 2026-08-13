@@ -1,0 +1,25 @@
+# DBlusBlus project-specific Codex configuration.
+
+# Database/system work benefits from deeper reasoning than the global default.
+model_reasoning_effort = "high"
+
+# Keep project operations sandboxed to the workspace.
+sandbox_mode = "workspace-write"
+
+# Keep approval behavior conservative.
+approval_policy = "untrusted"
+approvals_reviewer = "user"
+
+# The build/test process should not need network access.
+[sandbox_workspace_write]
+network_access = false
+
+# Keep higher-autonomy behavior disabled for now.
+[agents]
+enabled = false
+
+[features]
+goals = false
+hooks = false
+apps = false
+skill_mcp_dependency_install = false

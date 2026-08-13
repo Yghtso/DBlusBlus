@@ -1,0 +1,51 @@
+# CMake / build directories
+/build/
+/build-*/
+/cmake-build-*/
+
+# CMake user-specific presets
+CMakeUserPresets.json
+
+# Generated compilation database links/copies
+/compile_commands.json
+
+# Testing
+Testing/
+
+# Coverage
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+
+# Sanitizer / crash output
+*.core
+core
+core.*
+vgcore.*
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE/editor metadata
+.idea/
+.vscode/
+
+# OS metadata
+.DS_Store
+
+# Query/database runtime artifacts
+*.db
+*.wal
+*.heap
+*.btree
+*.fsm
+
+# Temporary database/spill directories
+tmp/
+temp/
