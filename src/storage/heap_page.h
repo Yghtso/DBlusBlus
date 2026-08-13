@@ -149,6 +149,25 @@ struct HeapPageMarkDeadResult {
     }
 };
 
+enum class HeapPageCompactError : std::uint8_t {
+    NONE,
+    PAGE_INVALID,
+    UNSUPPORTED_SLOT_STATE,
+    TUPLE_RANGE_OUT_OF_BOUNDS,
+    OVERLAPPING_TUPLE_RANGES,
+};
+
+struct HeapPageCompactResult {
+    HeapPageCompactError error{HeapPageCompactError::NONE};
+    HeapPageValidationError page_error{HeapPageValidationError::NONE};
+    SlotId slot_id{INVALID_SLOT_ID};
+    SlotId other_slot_id{INVALID_SLOT_ID};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return error == HeapPageCompactError::NONE;
+    }
+};
+
 class HeapPage {
   public:
     explicit HeapPage(Page& page) noexcept;
@@ -158,6 +177,7 @@ class HeapPage {
     [[nodiscard]] HeapPageValidationResult Validate() const noexcept;
     [[nodiscard]] HeapPageInsertResult Insert(std::span<const std::byte> tuple) noexcept;
     [[nodiscard]] HeapPageMarkDeadResult MarkDead(SlotId slot_id) noexcept;
+    [[nodiscard]] HeapPageCompactResult Compact() noexcept;
     [[nodiscard]] std::optional<std::span<const std::byte>>
     TupleBytes(SlotId slot_id) const noexcept;
 

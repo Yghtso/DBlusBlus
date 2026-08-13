@@ -2127,9 +2127,40 @@ The initial insertion path does not assign any other meaning to `aux`. A future
 feature that gives `aux` operational meaning for `NORMAL` slots requires an
 explicitly compatible rule or a coordinated heap-page format revision.
 
+### DEAD slot coordinates before and after physical reclamation
+
+A `NORMAL -> DEAD` transition does not immediately reclaim tuple bytes.
+
+Before compaction, a `DEAD` slot may therefore retain its previous:
+
+```text
+tuple_offset
+tuple_length
+aux
+```
+
+while the old tuple bytes remain physically present.
+
+Once compaction physically discards the payload of a `DEAD` slot, heap-page
+format version 1 requires the canonical persisted coordinates:
+
+```text
+tuple_offset = 0
+tuple_length = 0
+state        = DEAD
+aux          = preserved
+```
+
+Clearing the coordinates prevents a reclaimed `DEAD` slot from continuing to
+point into free space or into tuple bytes that were moved for another slot.
+
+This canonicalization does **not** make the slot `UNUSED`, reusable, or part of
+the free-slot list. Its `SlotId` and persistent `DEAD` state remain unchanged
+until the later delayed-reuse protocol explicitly permits a state transition.
+
 At this stage, no additional tuple-range or `aux` semantics are assigned to
-`UNUSED`, `DEAD`, or `REDIRECT_RESERVED`. `NORMAL` entries must reference tuple
-bytes wholly within the tuple-data region and within the page.
+`UNUSED` or `REDIRECT_RESERVED`. `NORMAL` entries must reference tuple bytes
+wholly within the tuple-data region and within the page.
 
 ### Stable slot semantics
 
@@ -2700,6 +2731,28 @@ Heap-page compaction is allowed to move physical tuple bytes inside the page.
 It must update slot offsets atomically while holding the exclusive page latch.
 
 Because RIDs use slot numbers, compaction must not change the RID.
+
+Compaction may physically discard tuple bytes only for slots that are already
+persistently `DEAD`; the page layer does not itself decide that transition is
+globally safe.
+
+After discarding a `DEAD` payload, compaction canonicalizes that slot to:
+
+```text
+tuple_offset = 0
+tuple_length = 0
+state        = DEAD
+aux          = preserved
+```
+
+`slot_count`, slot-directory positions, and `SlotId` values remain unchanged.
+Compaction therefore increases contiguous free space without making the `DEAD`
+slot reusable.
+
+Retained `NORMAL` tuple ranges must be non-overlapping for compaction to proceed.
+The v1 implementation may enforce this as a compaction precondition rather than
+as a universal `HeapPage` validation rule until broader validation semantics are
+specified.
 
 Compaction must not reclaim MVCC-dead tuples merely because they appear dead locally.
 
