@@ -93,25 +93,25 @@ DecodeFileSuperblock(std::span<const std::byte> source) noexcept;
 
 All multibyte integers are little-endian.
 
-| Offset | Size | Field | Encoding/required value |
-|---:|---:|---|---|
-| 0 | 2 | `page_type` | `PageType::SUPERBLOCK` (`0`) |
-| 2 | 2 | `format_version` | `FILE_SUPERBLOCK_FORMAT_VERSION` (`1`) |
-| 4 | 4 | `flags` | raw superblock flags |
-| 8 | 8 | `page_lsn` | superblock page LSN |
-| 16 | 4 | `checksum_crc32c` | CRC32C of bytes 0–8191 with bytes 16–19 zero |
-| 20 | 2 | `header_size` | `72` |
-| 22 | 2 | common reserved | zero |
-| 24 | 8 | `page_no` | `0` |
-| 32 | 8 | magic | ASCII bytes `DBLUSBLS` |
-| 40 | 2 | `file_kind` | explicit `FileKind` code |
-| 42 | 2 | alignment reserved | zero |
-| 44 | 4 | `page_size` | `8192` (`00 20 00 00`) |
-| 48 | 4 | `file_id` | `FileId` |
-| 52 | 4 | alignment reserved | zero |
-| 56 | 8 | `object_id` | table/index/catalog object identifier |
-| 64 | 8 | `creation_epoch` | opaque 64-bit creation epoch |
-| 72 | 8120 | reserved | zero |
+| Offset | Size | Field              | Encoding/required value                      |
+| -----: | ---: | ------------------ | -------------------------------------------- |
+|      0 |    2 | `page_type`        | `PageType::SUPERBLOCK` (`0`)                 |
+|      2 |    2 | `format_version`   | `FILE_SUPERBLOCK_FORMAT_VERSION` (`1`)       |
+|      4 |    4 | `flags`            | raw superblock flags                         |
+|      8 |    8 | `page_lsn`         | superblock page LSN                          |
+|     16 |    4 | `checksum_crc32c`  | CRC32C of bytes 0–8191 with bytes 16–19 zero |
+|     20 |    2 | `header_size`      | `72`                                         |
+|     22 |    2 | common reserved    | zero                                         |
+|     24 |    8 | `page_no`          | `0`                                          |
+|     32 |    8 | magic              | ASCII bytes `DBLUSBLS`                       |
+|     40 |    2 | `file_kind`        | explicit `FileKind` code                     |
+|     42 |    2 | alignment reserved | zero                                         |
+|     44 |    4 | `page_size`        | `8192` (`00 20 00 00`)                       |
+|     48 |    4 | `file_id`          | `FileId`                                     |
+|     52 |    4 | alignment reserved | zero                                         |
+|     56 |    8 | `object_id`        | table/index/catalog object identifier        |
+|     64 |    8 | `creation_epoch`   | opaque 64-bit creation epoch                 |
+|     72 | 8120 | reserved           | zero                                         |
 
 The representative layout test pins the canonical page checksum to `0xFCB8C685`, stored as bytes
 `85 C6 B8 FC` at offsets 16–19.

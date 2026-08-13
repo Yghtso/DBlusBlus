@@ -1788,6 +1788,25 @@ new page_no = current_file_page_count
 extend file by one page
 ```
 
+A newly created random-access page file begins at zero bytes / zero pages.
+Higher-level file-creation logic explicitly allocates and initializes page `0`
+as the superblock; `DiskManager::CreateFile` does not implicitly create it.
+
+Page allocation is explicit. A page write to an unallocated `page_no` must fail
+rather than implicitly extending the file or creating a sparse page. Initial
+allocation occurs through the append-first extension path.
+
+The compound append operation:
+
+```text
+discover current aligned page count
++
+extend file by exactly one PAGE_SIZE page
+```
+
+must be serialized with concurrent extensions of the same managed storage so
+two callers cannot receive the same `PageNo`.
+
 This keeps page allocation understandable and deterministic.
 
 Whole-file shrinking is not required.
@@ -2653,6 +2672,21 @@ public:
 
 The actual API may differ, but the responsibility boundary must remain.
 
+### File lifecycle boundary
+
+Creating an OS file and initializing its database superblock are separate
+operations.
+
+`DiskManager` may create/register an empty file, but it does not choose the
+file kind, encode page `0`, or validate file-kind-specific metadata. A higher
+storage layer is responsible for allocating and writing the superblock during
+database-file creation and for validating persistent identity when that
+validation layer is introduced.
+
+A `FileId` remains a database-level identifier. POSIX file descriptors are
+private process-local resources owned by the disk layer and must not escape as
+persistent identity.
+
 ---
 
 # 87. File I/O Semantics
@@ -2672,6 +2706,27 @@ A short read/write must be handled explicitly.
 
 Do not assume one syscall always transfers the requested number of bytes.
 
+Retry `pread`, `pwrite`, `fstat`, `ftruncate`, and `fdatasync` when interrupted
+by `EINTR`, subject to the syscall's normal Linux semantics. Do not blindly
+retry `close` after `EINTR`, because the descriptor may already have been
+released and reused.
+
+A normal page read requests exactly `PAGE_SIZE` bytes. EOF before the requested
+page begins is a missing-page error. EOF after transferring only part of the
+page is a short-read/corruption-style I/O error. Failed reads must not expose a
+partially initialized destination page.
+
+`WritePage` writes only pages that are already allocated. It must not
+implicitly extend the file, create sparse pages, or combine allocation with
+ordinary page replacement. Allocation uses the explicit append-first extension
+path from §60.
+
+Page-file sizes must be exact multiples of `PAGE_SIZE`. Misaligned sizes are an
+error and must not be rounded or silently repaired by the disk layer.
+
+Physical page-offset arithmetic must be checked before I/O so the complete
+`PAGE_SIZE` page extent fits in the platform's positional-I/O offset type.
+
 Errors must include enough context to identify:
 
 ```text
@@ -2681,7 +2736,18 @@ operation
 errno
 ```
 
-A normal page read must never silently return a partially initialized page.
+For page-file durability, the initial implementation uses:
+
+```text
+fdatasync
+```
+
+with retry on `EINTR`. This is the page-file sync primitive for v1 unless a
+later architecture revision demonstrates a need for stronger metadata
+semantics from `fsync`.
+
+`pread`/`pwrite` are positional and must not depend on or mutate a shared file
+offset.
 
 ---
 
