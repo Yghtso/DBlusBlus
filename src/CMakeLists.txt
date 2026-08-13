@@ -7,6 +7,7 @@ target_sources(
         common/file_superblock.cpp
         common/types.cpp
         storage/disk_manager.cpp
+        storage/heap_page.cpp
         storage/page.cpp
         storage/page_file.cpp
 
@@ -17,6 +18,7 @@ target_sources(
         common/page_header.h
         common/types.h
         storage/disk_manager.h
+        storage/heap_page.h
         storage/page.h
         storage/page_file.h
 )
