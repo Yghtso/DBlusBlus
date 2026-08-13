@@ -7,6 +7,7 @@ add_executable(dblusblus_tests)
 target_sources(
     dblusblus_tests
     PRIVATE
+        crc32c_test.cpp
         encoding_test.cpp
         page_header_test.cpp
         smoke_test.cpp

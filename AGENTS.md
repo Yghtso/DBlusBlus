@@ -267,4 +267,20 @@ When finishing non-trivial implementation work, report:
 - tests/checks run,
 - sanitizer results when applicable,
 - benchmarks run when applicable,
-- known limitations or deferred work.
+
+## Development log
+
+Completed implementation milestones should add a concise Markdown entry
+under `devlog/`.
+
+Devlog entries are append-only historical records.
+
+Do not rewrite, delete, or retroactively "clean up" older entries unless
+explicitly requested.
+
+Devlog entries should record facts from the completed task:
+scope, files changed, architecture sections used, verification performed,
+assumptions, and deferred work.
+
+Do not use the devlog as an architecture authority.
+`ARCHITECTURE_LOCKED_V1.md` remains authoritative. known limitations or deferred work.
