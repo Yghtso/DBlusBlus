@@ -2117,6 +2117,16 @@ format version 1 and must be rejected by structural decoding/validation.
 
 They need not be used by the first implementation.
 
+For heap-page format version 1, every newly created `NORMAL` slot must persist:
+
+```text
+aux = 0
+```
+
+The initial insertion path does not assign any other meaning to `aux`. A future
+feature that gives `aux` operational meaning for `NORMAL` slots requires an
+explicitly compatible rule or a coordinated heap-page format revision.
+
 At this stage, no additional tuple-range or `aux` semantics are assigned to
 `UNUSED`, `DEAD`, or `REDIRECT_RESERVED`. `NORMAL` entries must reference tuple
 bytes wholly within the tuple-data region and within the page.
@@ -2193,6 +2203,25 @@ maximum tuple size
 <
 PAGE_SIZE - page headers - at least one slot entry
 ```
+
+For the initial 8192-byte heap-page format:
+
+```text
+PAGE_SIZE                 = 8192
+heap total header         = 48
+one slot entry            = 8
+
+maximum accepted raw tuple payload = 8135 bytes
+```
+
+The strict inequality is intentional for v1. A payload of 8136 bytes is
+rejected even though it would make the slot directory and tuple region meet
+exactly with zero free bytes remaining.
+
+This raw-page byte limit is a storage-format bound, not yet a statement about
+the minimum or maximum size of a semantically valid encoded SQL tuple. The
+tuple codec may impose a smaller maximum once its own mandatory header and
+layout rules are applied.
 
 Attempting to insert an oversized tuple should return a clear unsupported/row-too-large error.
 

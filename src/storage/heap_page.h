@@ -18,6 +18,8 @@ inline constexpr std::size_t HEAP_PAGE_HEADER_ENCODED_SIZE = 16;
 inline constexpr std::uint16_t HEAP_PAGE_TOTAL_HEADER_SIZE = 48;
 inline constexpr std::size_t HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE = 8;
 inline constexpr std::size_t HEAP_PAGE_SLOT_DIRECTORY_OFFSET = HEAP_PAGE_TOTAL_HEADER_SIZE;
+inline constexpr std::size_t HEAP_PAGE_MAX_RAW_TUPLE_SIZE =
+    PAGE_SIZE - HEAP_PAGE_TOTAL_HEADER_SIZE - HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE - 1;
 
 inline constexpr std::size_t HEAP_PAGE_SLOT_COUNT_OFFSET = 32;
 inline constexpr std::size_t HEAP_PAGE_FREE_SLOT_HEAD_OFFSET = 34;
@@ -112,6 +114,24 @@ struct HeapPageValidationResult {
     }
 };
 
+enum class HeapPageInsertError : std::uint8_t {
+    NONE,
+    PAGE_INVALID,
+    TUPLE_TOO_LARGE,
+    INSUFFICIENT_SPACE,
+    SLOT_ID_EXHAUSTED,
+};
+
+struct HeapPageInsertResult {
+    std::optional<Rid> rid;
+    HeapPageInsertError error{HeapPageInsertError::NONE};
+    HeapPageValidationError page_error{HeapPageValidationError::NONE};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return rid.has_value();
+    }
+};
+
 class HeapPage {
   public:
     explicit HeapPage(Page& page) noexcept;
@@ -119,6 +139,9 @@ class HeapPage {
     [[nodiscard]] bool Initialize(std::uint32_t flags = 0, Lsn page_lsn = INVALID_LSN) noexcept;
     [[nodiscard]] std::optional<HeapPageHeader> Header() const noexcept;
     [[nodiscard]] HeapPageValidationResult Validate() const noexcept;
+    [[nodiscard]] HeapPageInsertResult Insert(std::span<const std::byte> tuple) noexcept;
+    [[nodiscard]] std::optional<std::span<const std::byte>>
+    TupleBytes(SlotId slot_id) const noexcept;
 
   private:
     Page* page_;
