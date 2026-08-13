@@ -7,6 +7,7 @@ target_sources(
 
     PUBLIC
         common/encoding.h
+        common/page_header.h
         common/types.h
 )
 
