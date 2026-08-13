@@ -12,6 +12,7 @@
 
 namespace dblusblus {
 
+inline constexpr std::size_t PAGE_SIZE = 8192;
 inline constexpr std::size_t COMMON_PAGE_HEADER_ENCODED_SIZE = 32;
 
 // The persisted page_type field is locked at 16 bits.
