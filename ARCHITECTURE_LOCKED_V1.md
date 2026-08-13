@@ -1779,17 +1779,23 @@ Before WAL integration it may remain `INVALID_LSN`.
 
 ## LOCKED
 
-Initial page type enum conceptually contains:
+Initial page type enum and persisted numeric codes are:
 
 ```text
-SUPERBLOCK
-HEAP_DATA
-FSM_DATA
-BTREE_INTERNAL
-BTREE_LEAF
-BTREE_FREE
-CATALOG_DATA
+0 = SUPERBLOCK
+1 = HEAP_DATA
+2 = FSM_DATA
+3 = BTREE_INTERNAL
+4 = BTREE_LEAF
+5 = BTREE_FREE
+6 = CATALOG_DATA
 ```
+
+The persisted `page_type` field is a 16-bit unsigned integer encoded little-endian.
+
+These numeric codes are part of the persistent page-format contract and must not be changed or reordered merely by changing the source-language enum declaration.
+
+Future page types must receive new explicit numeric codes rather than renumbering existing values.
 
 Page-type-specific parsing must validate that the actual page type matches the expected type.
 

@@ -8,6 +8,7 @@ target_sources(
     dblusblus_tests
     PRIVATE
         encoding_test.cpp
+        page_header_test.cpp
         smoke_test.cpp
 )
 
