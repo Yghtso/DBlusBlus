@@ -221,5 +221,5 @@ The architecture does not currently lock the following persisted choices made by
 - superblock-specific offsets 32–71 and total `header_size = 72`;
 - strict rejection of nonzero reserved bytes.
 
-These choices should be considered for addition to `ARCHITECTURE_LOCKED_V1.md` if accepted as the
+These choices should be considered for addition to `ARCHITECTURE.md` if accepted as the
 persistent v1 contract.

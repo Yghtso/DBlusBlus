@@ -17,9 +17,9 @@ Prefer an implementation that exposes an important database or systems mechanism
 
 ## Architecture authority
 
-`ARCHITECTURE_LOCKED_V1.md` is the authoritative architecture contract for this project.
+`ARCHITECTURE.md` is the authoritative architecture contract for this project.
 
-Before implementing or materially changing a subsystem, read the relevant portions of `ARCHITECTURE_LOCKED_V1.md`.
+Before implementing or materially changing a subsystem, read the relevant portions of `ARCHITECTURE.md`.
 
 Decisions marked `LOCKED` are hard architectural constraints.
 
@@ -283,4 +283,4 @@ scope, files changed, architecture sections used, verification performed,
 assumptions, and deferred work.
 
 Do not use the devlog as an architecture authority.
-`ARCHITECTURE_LOCKED_V1.md` remains authoritative. known limitations or deferred work.
+`ARCHITECTURE.md` remains authoritative. known limitations or deferred work.
