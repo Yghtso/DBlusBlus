@@ -21,6 +21,8 @@ constexpr std::size_t LOWER_OFFSET = 4;
 constexpr std::size_t UPPER_OFFSET = 6;
 constexpr std::size_t PRUNE_HINT_OFFSET = 8;
 constexpr std::size_t RESERVED_OFFSET = 12;
+constexpr std::size_t MAX_HEAP_PAGE_SLOT_COUNT =
+    (PAGE_SIZE - HEAP_PAGE_SLOT_DIRECTORY_OFFSET) / HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE;
 
 [[nodiscard]] constexpr bool IsValidHeapSlotState(HeapSlotState state) noexcept {
     switch (state) {
@@ -423,6 +425,164 @@ HeapPageMarkDeadResult HeapPage::MarkDead(SlotId slot_id) noexcept {
     std::ranges::copy(encoded_slot,
                       page_->Bytes().begin() + static_cast<std::ptrdiff_t>(slot_offset));
     return HeapPageMarkDeadResult{};
+}
+
+HeapPageCompactResult HeapPage::Compact() noexcept {
+    const auto validation = Validate();
+    if (!validation || !validation.heap_header.has_value()) {
+        return HeapPageCompactResult{
+            .error = HeapPageCompactError::PAGE_INVALID,
+            .page_error = validation.error,
+        };
+    }
+
+    const HeapPageHeader original_header = *validation.heap_header;
+    std::array<HeapSlotEntry, MAX_HEAP_PAGE_SLOT_COUNT> planned_slots{};
+    std::array<std::uint16_t, MAX_HEAP_PAGE_SLOT_COUNT> source_offsets{};
+    std::array<std::uint16_t, MAX_HEAP_PAGE_SLOT_COUNT> source_lengths{};
+    std::array<SlotId, MAX_HEAP_PAGE_SLOT_COUNT> live_order{};
+    std::array<SlotId, MAX_HEAP_PAGE_SLOT_COUNT> range_order{};
+    std::size_t live_count = 0;
+    std::size_t range_count = 0;
+
+    for (std::uint32_t index = 0; index < original_header.slot_count; ++index) {
+        const auto slot_id = static_cast<SlotId>(index);
+        const std::size_t slot_offset =
+            HEAP_PAGE_SLOT_DIRECTORY_OFFSET + (index * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
+        const auto decoded_slot = DecodeHeapSlotEntry(
+            page_->Bytes().subspan(slot_offset, HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
+        if (!decoded_slot.entry.has_value()) {
+            return HeapPageCompactResult{
+                .error = HeapPageCompactError::PAGE_INVALID,
+                .page_error = decoded_slot.error == HeapSlotEntryDecodeError::INVALID_SLOT_STATE
+                                  ? HeapPageValidationError::INVALID_SLOT_STATE
+                                  : HeapPageValidationError::SLOT_DIRECTORY_OUT_OF_BOUNDS,
+                .slot_id = slot_id,
+            };
+        }
+
+        const HeapSlotEntry slot = *decoded_slot.entry;
+        planned_slots[index] = slot;
+        source_offsets[index] = slot.tuple_offset;
+        source_lengths[index] = slot.tuple_length;
+
+        switch (slot.state) {
+        case HeapSlotState::NORMAL:
+            live_order[live_count++] = slot_id;
+            break;
+        case HeapSlotState::DEAD: {
+            const std::size_t tuple_offset = slot.tuple_offset;
+            const std::size_t tuple_length = slot.tuple_length;
+            if (tuple_offset > PAGE_SIZE ||
+                (tuple_length > 0 && (tuple_offset < original_header.upper ||
+                                      tuple_length > PAGE_SIZE - tuple_offset))) {
+                return HeapPageCompactResult{
+                    .error = HeapPageCompactError::TUPLE_RANGE_OUT_OF_BOUNDS,
+                    .slot_id = slot_id,
+                };
+            }
+            planned_slots[index].tuple_offset = 0;
+            planned_slots[index].tuple_length = 0;
+            break;
+        }
+        case HeapSlotState::UNUSED:
+        case HeapSlotState::REDIRECT_RESERVED:
+            return HeapPageCompactResult{
+                .error = HeapPageCompactError::UNSUPPORTED_SLOT_STATE,
+                .slot_id = slot_id,
+            };
+        }
+
+        if (source_lengths[index] > 0) {
+            range_order[range_count++] = slot_id;
+        }
+    }
+
+    auto ranges = std::span{range_order}.first(range_count);
+    std::ranges::sort(ranges, [&](SlotId left, SlotId right) {
+        if (source_offsets[left] != source_offsets[right]) {
+            return source_offsets[left] < source_offsets[right];
+        }
+        return left < right;
+    });
+    for (std::size_t index = 1; index < ranges.size(); ++index) {
+        const SlotId previous = ranges[index - 1];
+        const SlotId current = ranges[index];
+        const std::size_t previous_end =
+            static_cast<std::size_t>(source_offsets[previous]) + source_lengths[previous];
+        if (source_offsets[current] < previous_end) {
+            return HeapPageCompactResult{
+                .error = HeapPageCompactError::OVERLAPPING_TUPLE_RANGES,
+                .slot_id = current,
+                .other_slot_id = previous,
+            };
+        }
+    }
+
+    auto live_slots = std::span{live_order}.first(live_count);
+    std::ranges::sort(live_slots, [&](SlotId left, SlotId right) {
+        if (source_offsets[left] != source_offsets[right]) {
+            return source_offsets[left] > source_offsets[right];
+        }
+        return left < right;
+    });
+
+    std::size_t new_upper = PAGE_SIZE;
+    for (const SlotId slot_id : live_slots) {
+        new_upper -= source_lengths[slot_id];
+        if (new_upper < source_offsets[slot_id]) {
+            return HeapPageCompactResult{
+                .error = HeapPageCompactError::OVERLAPPING_TUPLE_RANGES,
+                .slot_id = slot_id,
+            };
+        }
+        planned_slots[slot_id].tuple_offset = static_cast<std::uint16_t>(new_upper);
+    }
+    if (new_upper < original_header.lower) {
+        return HeapPageCompactResult{
+            .error = HeapPageCompactError::PAGE_INVALID,
+            .page_error = HeapPageValidationError::LOWER_AFTER_UPPER,
+        };
+    }
+
+    HeapPageHeader updated_header = original_header;
+    updated_header.upper = static_cast<std::uint16_t>(new_upper);
+    std::array<std::array<std::byte, HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE>, MAX_HEAP_PAGE_SLOT_COUNT>
+        encoded_slots{};
+    for (std::uint32_t index = 0; index < original_header.slot_count; ++index) {
+        if (!EncodeHeapSlotEntry(encoded_slots[index], planned_slots[index])) {
+            return HeapPageCompactResult{
+                .error = HeapPageCompactError::PAGE_INVALID,
+                .slot_id = static_cast<SlotId>(index),
+            };
+        }
+    }
+    std::array<std::byte, HEAP_PAGE_HEADER_ENCODED_SIZE> encoded_header{};
+    if (!EncodeHeapPageHeader(encoded_header, updated_header)) {
+        return HeapPageCompactResult{
+            .error = HeapPageCompactError::PAGE_INVALID,
+        };
+    }
+
+    auto page_bytes = page_->Bytes();
+    for (const SlotId slot_id : live_slots) {
+        const std::size_t tuple_length = source_lengths[slot_id];
+        const std::size_t destination = planned_slots[slot_id].tuple_offset;
+        const std::size_t source = source_offsets[slot_id];
+        if (tuple_length > 0 && destination != source) {
+            std::memmove(page_bytes.data() + destination, page_bytes.data() + source, tuple_length);
+        }
+    }
+    for (std::uint32_t index = 0; index < original_header.slot_count; ++index) {
+        const std::size_t slot_offset =
+            HEAP_PAGE_SLOT_DIRECTORY_OFFSET + (index * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
+        std::ranges::copy(encoded_slots[index],
+                          page_bytes.begin() + static_cast<std::ptrdiff_t>(slot_offset));
+    }
+    std::ranges::copy(encoded_header,
+                      page_bytes.begin() + static_cast<std::ptrdiff_t>(HEAP_PAGE_HEADER_OFFSET));
+
+    return HeapPageCompactResult{};
 }
 
 std::optional<std::span<const std::byte>> HeapPage::TupleBytes(SlotId slot_id) const noexcept {

@@ -1026,6 +1026,472 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
     EXPECT_TRUE(std::ranges::equal(*third, expected_third));
 }
 
+TEST(HeapPageCompactionTest, ReclaimsDeadPayloadAndPreservesStableRids) {
+    Page page = InitializedHeapPage(PageId{.file_id = 51, .page_no = 57});
+    HeapPage heap_page{page};
+    constexpr std::array first{std::byte{0xA1}, std::byte{0xA2}};
+    constexpr std::array second{std::byte{0xB1}, std::byte{0xB2}, std::byte{0xB3}};
+    constexpr std::array third{std::byte{0xC1}, std::byte{0xC2}, std::byte{0xC3}, std::byte{0xC4}};
+    const auto first_insert = heap_page.Insert(first);
+    const auto second_insert = heap_page.Insert(second);
+    const auto third_insert = heap_page.Insert(third);
+    if (!first_insert.rid.has_value() || !second_insert.rid.has_value() ||
+        !third_insert.rid.has_value()) {
+        ADD_FAILURE() << "sequential insertion failed";
+        return;
+    }
+    const Rid first_rid = *first_insert.rid;
+    const Rid second_rid = *second_insert.rid;
+    const Rid third_rid = *third_insert.rid;
+    ASSERT_TRUE(heap_page.MarkDead(second_rid.slot));
+    auto dead_before_compaction = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
+    if (!dead_before_compaction.entry.has_value()) {
+        ADD_FAILURE() << "DEAD slot did not decode before compaction";
+        return;
+    }
+    dead_before_compaction.entry->aux = 0xA55A;
+    ASSERT_TRUE(
+        EncodeHeapSlotEntry(SlotBytes(page, second_rid.slot), *dead_before_compaction.entry));
+
+    const auto original_header = heap_page.Header();
+    if (!original_header.has_value()) {
+        ADD_FAILURE() << "heap header did not decode before compaction";
+        return;
+    }
+    const auto original_common_header = page.DecodeHeader();
+    if (!original_common_header.has_value()) {
+        ADD_FAILURE() << "common header did not decode before compaction";
+        return;
+    }
+
+    const auto result = heap_page.Compact();
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, HeapPageCompactError::NONE);
+    ASSERT_TRUE(heap_page.Validate());
+
+    const auto compacted_header = heap_page.Header();
+    if (!compacted_header.has_value()) {
+        ADD_FAILURE() << "heap header did not decode after compaction";
+        return;
+    }
+    EXPECT_EQ(compacted_header->slot_count, original_header->slot_count);
+    EXPECT_EQ(compacted_header->lower, original_header->lower);
+    EXPECT_EQ(compacted_header->upper, original_header->upper + second.size());
+    EXPECT_EQ(compacted_header->free_slot_head, original_header->free_slot_head);
+    EXPECT_EQ(compacted_header->prune_hint, original_header->prune_hint);
+    EXPECT_EQ(compacted_header->reserved, original_header->reserved);
+    const auto compacted_common_header = page.DecodeHeader();
+    if (!compacted_common_header.has_value()) {
+        ADD_FAILURE() << "common header did not decode after compaction";
+        return;
+    }
+    EXPECT_EQ(*compacted_common_header, *original_common_header);
+
+    const auto first_slot = DecodeHeapSlotEntry(SlotBytes(page, first_rid.slot));
+    const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
+    const auto third_slot = DecodeHeapSlotEntry(SlotBytes(page, third_rid.slot));
+    if (!first_slot.entry.has_value() || !dead_slot.entry.has_value() ||
+        !third_slot.entry.has_value()) {
+        ADD_FAILURE() << "compacted slot did not decode";
+        return;
+    }
+    EXPECT_EQ(first_slot.entry->tuple_offset, PAGE_SIZE - first.size());
+    EXPECT_EQ(third_slot.entry->tuple_offset, PAGE_SIZE - first.size() - third.size());
+    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot.entry->tuple_offset, std::uint16_t{0});
+    EXPECT_EQ(dead_slot.entry->tuple_length, std::uint16_t{0});
+    EXPECT_EQ(dead_slot.entry->aux, std::uint16_t{0xA55A});
+
+    const auto stored_first = heap_page.TupleBytes(first_rid.slot);
+    const auto stored_third = heap_page.TupleBytes(third_rid.slot);
+    if (!stored_first.has_value() || !stored_third.has_value()) {
+        ADD_FAILURE() << "live tuple was not retrievable after compaction";
+        return;
+    }
+    EXPECT_TRUE(std::ranges::equal(*stored_first, first));
+    EXPECT_FALSE(heap_page.TupleBytes(second_rid.slot).has_value());
+    EXPECT_TRUE(std::ranges::equal(*stored_third, third));
+    EXPECT_EQ(first_rid, (Rid{.page = page.Id(), .slot = 0}));
+    EXPECT_EQ(second_rid, (Rid{.page = page.Id(), .slot = 1}));
+    EXPECT_EQ(third_rid, (Rid{.page = page.Id(), .slot = 2}));
+
+    constexpr std::array expected_packed{std::byte{0xC1},
+                                         std::byte{0xC2},
+                                         std::byte{0xC3},
+                                         std::byte{0xC4},
+                                         std::byte{0xA1},
+                                         std::byte{0xA2}};
+    EXPECT_TRUE(std::ranges::equal(
+        page.Bytes().subspan(compacted_header->upper, expected_packed.size()), expected_packed));
+
+    const auto once_compacted = CopyPageBytes(page);
+    EXPECT_TRUE(heap_page.Compact());
+    EXPECT_EQ(CopyPageBytes(page), once_compacted);
+}
+
+TEST(HeapPageCompactionTest, HandlesDeadTupleAtEveryPhysicalPositionDeterministically) {
+    constexpr std::array payloads{
+        std::array{std::byte{0x10}, std::byte{0x11}},
+        std::array{std::byte{0x20}, std::byte{0x21}},
+        std::array{std::byte{0x30}, std::byte{0x31}},
+    };
+
+    for (std::size_t dead_index = 0; dead_index < payloads.size(); ++dead_index) {
+        const auto dead_slot_id = static_cast<SlotId>(dead_index);
+        Page page = InitializedHeapPage();
+        HeapPage heap_page{page};
+        for (const auto& payload : payloads) {
+            ASSERT_TRUE(heap_page.Insert(payload));
+        }
+        ASSERT_TRUE(heap_page.MarkDead(dead_slot_id));
+        ASSERT_TRUE(heap_page.Compact());
+
+        const auto header = heap_page.Header();
+        if (!header.has_value()) {
+            ADD_FAILURE() << "heap header did not decode after positional compaction";
+            continue;
+        }
+        EXPECT_EQ(header->upper, PAGE_SIZE - (2 * (payloads.size() - 1)));
+
+        std::size_t expected_offset = PAGE_SIZE;
+        for (std::size_t slot_index = 0; slot_index < payloads.size(); ++slot_index) {
+            const auto slot_id = static_cast<SlotId>(slot_index);
+            const auto slot = DecodeHeapSlotEntry(SlotBytes(page, slot_id));
+            if (!slot.entry.has_value()) {
+                ADD_FAILURE() << "positional slot did not decode";
+                continue;
+            }
+            if (slot_id == dead_slot_id) {
+                EXPECT_EQ(slot.entry->state, HeapSlotState::DEAD);
+                EXPECT_EQ(slot.entry->tuple_offset, std::uint16_t{0});
+                EXPECT_EQ(slot.entry->tuple_length, std::uint16_t{0});
+                EXPECT_FALSE(heap_page.TupleBytes(slot_id).has_value());
+                continue;
+            }
+
+            expected_offset -= payloads[slot_index].size();
+            EXPECT_EQ(slot.entry->state, HeapSlotState::NORMAL);
+            EXPECT_EQ(slot.entry->tuple_offset, expected_offset);
+            const auto stored = heap_page.TupleBytes(slot_id);
+            if (!stored.has_value()) {
+                ADD_FAILURE() << "positional live tuple was not retrievable";
+                continue;
+            }
+            EXPECT_TRUE(std::ranges::equal(*stored, payloads[slot_index]));
+        }
+    }
+}
+
+TEST(HeapPageCompactionTest, ReclaimsMultipleDeadPayloadsAndPreservesNormalZeroLengthTuple) {
+    Page page = InitializedHeapPage();
+    HeapPage heap_page{page};
+    constexpr std::array first{
+        std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14}};
+    constexpr std::array third{std::byte{0x30}, std::byte{0x31}, std::byte{0x32}, std::byte{0x33}};
+    constexpr std::array fourth{std::byte{0x40}, std::byte{0x41}, std::byte{0x42}};
+    ASSERT_TRUE(heap_page.Insert(first));
+    ASSERT_TRUE(heap_page.Insert(std::span<const std::byte>{}));
+    ASSERT_TRUE(heap_page.Insert(third));
+    ASSERT_TRUE(heap_page.Insert(fourth));
+    ASSERT_TRUE(heap_page.MarkDead(0));
+    ASSERT_TRUE(heap_page.MarkDead(2));
+    const auto before = heap_page.Header();
+    if (!before.has_value()) {
+        ADD_FAILURE() << "heap header did not decode before multi-DEAD compaction";
+        return;
+    }
+
+    ASSERT_TRUE(heap_page.Compact());
+    const auto after = heap_page.Header();
+    if (!after.has_value()) {
+        ADD_FAILURE() << "heap header did not decode after multi-DEAD compaction";
+        return;
+    }
+    EXPECT_EQ(after->upper, before->upper + first.size() + third.size());
+    EXPECT_EQ(after->upper, PAGE_SIZE - fourth.size());
+    EXPECT_FALSE(heap_page.TupleBytes(0).has_value());
+    const auto zero_length = heap_page.TupleBytes(1);
+    const auto stored_fourth = heap_page.TupleBytes(3);
+    if (!zero_length.has_value() || !stored_fourth.has_value()) {
+        ADD_FAILURE() << "live tuple was not retrievable after multi-DEAD compaction";
+        return;
+    }
+    EXPECT_TRUE(zero_length->empty());
+    EXPECT_TRUE(std::ranges::equal(*stored_fourth, fourth));
+
+    const auto zero_slot = DecodeHeapSlotEntry(SlotBytes(page, 1));
+    if (!zero_slot.entry.has_value()) {
+        ADD_FAILURE() << "zero-length NORMAL slot did not decode";
+        return;
+    }
+    EXPECT_EQ(zero_slot.entry->state, HeapSlotState::NORMAL);
+    EXPECT_EQ(zero_slot.entry->tuple_length, std::uint16_t{0});
+    EXPECT_LE(zero_slot.entry->tuple_offset, PAGE_SIZE);
+}
+
+TEST(HeapPageCompactionTest, AllDeadRetainsSlotsAndRestoresTupleRegionToPageEnd) {
+    Page page = InitializedHeapPage();
+    HeapPage heap_page{page};
+    constexpr std::array first{std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13}};
+    constexpr std::array third{std::byte{0x30}, std::byte{0x31}, std::byte{0x32}};
+    ASSERT_TRUE(heap_page.Insert(first));
+    ASSERT_TRUE(heap_page.Insert(std::span<const std::byte>{}));
+    ASSERT_TRUE(heap_page.Insert(third));
+    ASSERT_TRUE(heap_page.MarkDead(0));
+    ASSERT_TRUE(heap_page.MarkDead(1));
+    ASSERT_TRUE(heap_page.MarkDead(2));
+
+    ASSERT_TRUE(heap_page.Compact());
+    const auto header = heap_page.Header();
+    if (!header.has_value()) {
+        ADD_FAILURE() << "all-DEAD heap header did not decode";
+        return;
+    }
+    EXPECT_EQ(header->slot_count, std::uint16_t{3});
+    EXPECT_EQ(header->lower, HEAP_PAGE_TOTAL_HEADER_SIZE + (3 * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
+    EXPECT_EQ(header->upper, std::uint16_t{PAGE_SIZE});
+    EXPECT_EQ(header->free_slot_head, INVALID_SLOT_ID);
+    for (SlotId slot_id = 0; slot_id < header->slot_count; ++slot_id) {
+        const auto slot = DecodeHeapSlotEntry(SlotBytes(page, slot_id));
+        if (!slot.entry.has_value()) {
+            ADD_FAILURE() << "all-DEAD slot did not decode";
+            continue;
+        }
+        EXPECT_EQ(slot.entry->state, HeapSlotState::DEAD);
+        EXPECT_EQ(slot.entry->tuple_offset, std::uint16_t{0});
+        EXPECT_EQ(slot.entry->tuple_length, std::uint16_t{0});
+        EXPECT_FALSE(heap_page.TupleBytes(slot_id).has_value());
+    }
+    EXPECT_TRUE(heap_page.Validate());
+
+    const auto compacted = CopyPageBytes(page);
+    EXPECT_TRUE(heap_page.Compact());
+    EXPECT_EQ(CopyPageBytes(page), compacted);
+}
+
+TEST(HeapPageCompactionTest, RejectsUnsafeLayoutsWithoutMutation) {
+    const auto expect_unchanged = [](Page& page,
+                                     HeapPageCompactError expected_error,
+                                     HeapPageValidationError expected_page_error =
+                                         HeapPageValidationError::NONE) {
+        const auto before = CopyPageBytes(page);
+        const auto result = HeapPage{page}.Compact();
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, expected_error);
+        EXPECT_EQ(result.page_error, expected_page_error);
+        EXPECT_EQ(CopyPageBytes(page), before);
+    };
+
+    Page corrupt_page = InitializedHeapPage();
+    auto common_header = corrupt_page.DecodeHeader();
+    if (!common_header.has_value()) {
+        ADD_FAILURE() << "initialized common header did not decode";
+        return;
+    }
+    common_header->page_type = PageType::FSM_DATA;
+    WriteCommonHeader(corrupt_page, *common_header);
+    expect_unchanged(
+        corrupt_page, HeapPageCompactError::PAGE_INVALID, HeapPageValidationError::WRONG_PAGE_TYPE);
+
+    Page invalid_normal_range = InitializedHeapPage();
+    ConfigureOneNormalSlot(invalid_normal_range, PAGE_SIZE - 1, 2);
+    expect_unchanged(invalid_normal_range,
+                     HeapPageCompactError::PAGE_INVALID,
+                     HeapPageValidationError::NORMAL_TUPLE_OUT_OF_BOUNDS);
+
+    Page invalid_dead_range = InitializedHeapPage();
+    ConfigureOneNormalSlot(invalid_dead_range);
+    ASSERT_TRUE(HeapPage{invalid_dead_range}.MarkDead(0));
+    auto dead_slot = DecodeHeapSlotEntry(SlotBytes(invalid_dead_range, 0));
+    if (!dead_slot.entry.has_value()) {
+        ADD_FAILURE() << "DEAD slot did not decode for range corruption";
+        return;
+    }
+    dead_slot.entry->tuple_offset = 0;
+    dead_slot.entry->tuple_length = 1;
+    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(invalid_dead_range, 0), *dead_slot.entry));
+    ASSERT_TRUE(HeapPage{invalid_dead_range}.Validate());
+    expect_unchanged(invalid_dead_range, HeapPageCompactError::TUPLE_RANGE_OUT_OF_BOUNDS);
+
+    Page overlapping = InitializedHeapPage();
+    constexpr std::array tuple{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04}};
+    ASSERT_TRUE(HeapPage{overlapping}.Insert(tuple));
+    ASSERT_TRUE(HeapPage{overlapping}.Insert(tuple));
+    auto overlapping_slot = DecodeHeapSlotEntry(SlotBytes(overlapping, 1));
+    if (!overlapping_slot.entry.has_value()) {
+        ADD_FAILURE() << "overlapping slot did not decode";
+        return;
+    }
+    overlapping_slot.entry->tuple_offset = PAGE_SIZE - tuple.size() - 1;
+    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(overlapping, 1), *overlapping_slot.entry));
+    ASSERT_TRUE(HeapPage{overlapping}.Validate());
+    expect_unchanged(overlapping, HeapPageCompactError::OVERLAPPING_TUPLE_RANGES);
+
+    for (const auto state : {HeapSlotState::UNUSED, HeapSlotState::REDIRECT_RESERVED}) {
+        Page unsupported = InitializedHeapPage();
+        ConfigureOneNormalSlot(unsupported);
+        auto slot = DecodeHeapSlotEntry(SlotBytes(unsupported, 0));
+        if (!slot.entry.has_value()) {
+            ADD_FAILURE() << "unsupported-state slot did not decode";
+            continue;
+        }
+        slot.entry->state = state;
+        ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(unsupported, 0), *slot.entry));
+        ASSERT_TRUE(HeapPage{unsupported}.Validate());
+        expect_unchanged(unsupported, HeapPageCompactError::UNSUPPORTED_SLOT_STATE);
+    }
+
+    Page invalid_persisted_state = InitializedHeapPage();
+    ConfigureOneNormalSlot(invalid_persisted_state);
+    ASSERT_TRUE(
+        EncodeLittleEndian(SlotBytes(invalid_persisted_state, 0).subspan(HEAP_SLOT_FLAGS_OFFSET, 2),
+                           std::uint16_t{99}));
+    expect_unchanged(invalid_persisted_state,
+                     HeapPageCompactError::PAGE_INVALID,
+                     HeapPageValidationError::INVALID_SLOT_STATE);
+}
+
+TEST(HeapPageCompactionTest, ReclaimedSpaceSupportsAppendOnlyInsertionWithoutSlotReuse) {
+    Page page = InitializedHeapPage();
+    HeapPage heap_page{page};
+    std::array<std::byte, 100> retained{};
+    std::array<std::byte, 8000> reclaimed{};
+    std::array<std::byte, 30> replacement{};
+    std::ranges::fill(retained, std::byte{0x11});
+    std::ranges::fill(reclaimed, std::byte{0x22});
+    std::ranges::fill(replacement, std::byte{0x33});
+    ASSERT_TRUE(heap_page.Insert(retained));
+    ASSERT_TRUE(heap_page.Insert(reclaimed));
+    ASSERT_TRUE(heap_page.MarkDead(1));
+
+    const auto before_failed_insert = CopyPageBytes(page);
+    const auto failed_insert = heap_page.Insert(replacement);
+    EXPECT_FALSE(failed_insert);
+    EXPECT_EQ(failed_insert.error, HeapPageInsertError::INSUFFICIENT_SPACE);
+    EXPECT_EQ(CopyPageBytes(page), before_failed_insert);
+
+    ASSERT_TRUE(heap_page.Compact());
+    const auto replacement_insert = heap_page.Insert(replacement);
+    if (!replacement_insert.rid.has_value()) {
+        ADD_FAILURE() << "post-compaction insertion failed";
+        return;
+    }
+    EXPECT_EQ(replacement_insert.rid->slot, SlotId{2});
+    const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(page, 1));
+    if (!dead_slot.entry.has_value()) {
+        ADD_FAILURE() << "DEAD slot did not decode after append-only insertion";
+        return;
+    }
+    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot.entry->tuple_offset, std::uint16_t{0});
+    EXPECT_EQ(dead_slot.entry->tuple_length, std::uint16_t{0});
+    const auto header = heap_page.Header();
+    if (!header.has_value()) {
+        ADD_FAILURE() << "heap header did not decode after append-only insertion";
+        return;
+    }
+    EXPECT_EQ(header->slot_count, std::uint16_t{3});
+    const auto stored_replacement = heap_page.TupleBytes(2);
+    if (!stored_replacement.has_value()) {
+        ADD_FAILURE() << "post-compaction tuple was not retrievable";
+        return;
+    }
+    EXPECT_TRUE(std::ranges::equal(*stored_replacement, replacement));
+}
+
+TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloads) {
+    TemporaryDirectory temporary_directory;
+    ASSERT_TRUE(temporary_directory.valid());
+    const auto path = temporary_directory.File("heap-compact.pages");
+    constexpr FileId file_id = 52;
+    constexpr std::uint64_t object_id = 7003;
+    PageId page_id{};
+
+    {
+        DiskManager manager;
+        auto page_file = PageFile::Create(manager,
+                                          path,
+                                          FileSuperblock{
+                                              .file_kind = FileKind::HEAP,
+                                              .file_id = file_id,
+                                              .object_id = object_id,
+                                              .creation_epoch = 9003,
+                                          });
+        if (!page_file.page_file.has_value()) {
+            ADD_FAILURE() << "heap page file creation failed";
+            return;
+        }
+        const auto allocation = page_file.page_file->AllocatePage();
+        if (!allocation.page_id.has_value()) {
+            ADD_FAILURE() << "heap page allocation failed";
+            return;
+        }
+        page_id = *allocation.page_id;
+
+        Page page{page_id};
+        HeapPage heap_page{page};
+        ASSERT_TRUE(heap_page.Initialize());
+        constexpr std::array first{std::byte{0x01}, std::byte{0x02}};
+        constexpr std::array second{
+            std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13}};
+        constexpr std::array third{std::byte{0x20}, std::byte{0x21}, std::byte{0x22}};
+        ASSERT_TRUE(heap_page.Insert(first));
+        ASSERT_TRUE(heap_page.Insert(second));
+        ASSERT_TRUE(heap_page.Insert(third));
+        ASSERT_TRUE(heap_page.MarkDead(1));
+        ASSERT_TRUE(heap_page.Compact());
+        ASSERT_TRUE(manager.WritePage(page_id, page.Bytes()));
+        ASSERT_TRUE(manager.SyncFile(file_id));
+    }
+
+    DiskManager reopened_manager;
+    auto reopened = PageFile::Open(reopened_manager, path, file_id, FileKind::HEAP, object_id);
+    if (!reopened.page_file.has_value()) {
+        ADD_FAILURE() << "heap page file reopen failed";
+        return;
+    }
+    Page read{page_id};
+    ASSERT_TRUE(reopened_manager.ReadPage(page_id, read.Bytes()));
+    HeapPage heap_page{read};
+    ASSERT_TRUE(heap_page.Validate());
+
+    const auto header = heap_page.Header();
+    if (!header.has_value()) {
+        ADD_FAILURE() << "persisted compacted header did not decode";
+        return;
+    }
+    EXPECT_EQ(header->slot_count, std::uint16_t{3});
+    EXPECT_EQ(header->lower, HEAP_PAGE_TOTAL_HEADER_SIZE + (3 * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
+    EXPECT_EQ(header->upper, PAGE_SIZE - 5);
+    EXPECT_EQ(header->free_slot_head, INVALID_SLOT_ID);
+
+    const auto first_slot = DecodeHeapSlotEntry(SlotBytes(read, 0));
+    const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(read, 1));
+    const auto third_slot = DecodeHeapSlotEntry(SlotBytes(read, 2));
+    if (!first_slot.entry.has_value() || !dead_slot.entry.has_value() ||
+        !third_slot.entry.has_value()) {
+        ADD_FAILURE() << "persisted compacted slot did not decode";
+        return;
+    }
+    EXPECT_EQ(first_slot.entry->tuple_offset, PAGE_SIZE - 2);
+    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot.entry->tuple_offset, std::uint16_t{0});
+    EXPECT_EQ(dead_slot.entry->tuple_length, std::uint16_t{0});
+    EXPECT_EQ(third_slot.entry->tuple_offset, PAGE_SIZE - 5);
+    EXPECT_FALSE(heap_page.TupleBytes(1).has_value());
+
+    const auto first = heap_page.TupleBytes(0);
+    const auto third = heap_page.TupleBytes(2);
+    if (!first.has_value() || !third.has_value()) {
+        ADD_FAILURE() << "persisted live tuple was not retrievable";
+        return;
+    }
+    constexpr std::array expected_first{std::byte{0x01}, std::byte{0x02}};
+    constexpr std::array expected_third{std::byte{0x20}, std::byte{0x21}, std::byte{0x22}};
+    EXPECT_TRUE(std::ranges::equal(*first, expected_first));
+    EXPECT_TRUE(std::ranges::equal(*third, expected_third));
+}
+
 TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) {
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.valid());
