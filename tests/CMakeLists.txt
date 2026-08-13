@@ -16,6 +16,7 @@ target_sources(
         page_file_test.cpp
         page_test.cpp
         smoke_test.cpp
+        tuple_header_test.cpp
 )
 
 target_link_libraries(
