@@ -6,6 +6,7 @@ target_sources(
         common/types.cpp
 
     PUBLIC
+        common/encoding.h
         common/types.h
 )
 
