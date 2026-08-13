@@ -132,6 +132,23 @@ struct HeapPageInsertResult {
     }
 };
 
+enum class HeapPageMarkDeadError : std::uint8_t {
+    NONE,
+    PAGE_INVALID,
+    SLOT_OUT_OF_RANGE,
+    INVALID_SLOT_STATE,
+    ALREADY_DEAD,
+};
+
+struct HeapPageMarkDeadResult {
+    HeapPageMarkDeadError error{HeapPageMarkDeadError::NONE};
+    HeapPageValidationError page_error{HeapPageValidationError::NONE};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return error == HeapPageMarkDeadError::NONE;
+    }
+};
+
 class HeapPage {
   public:
     explicit HeapPage(Page& page) noexcept;
@@ -140,6 +157,7 @@ class HeapPage {
     [[nodiscard]] std::optional<HeapPageHeader> Header() const noexcept;
     [[nodiscard]] HeapPageValidationResult Validate() const noexcept;
     [[nodiscard]] HeapPageInsertResult Insert(std::span<const std::byte> tuple) noexcept;
+    [[nodiscard]] HeapPageMarkDeadResult MarkDead(SlotId slot_id) noexcept;
     [[nodiscard]] std::optional<std::span<const std::byte>>
     TupleBytes(SlotId slot_id) const noexcept;
 

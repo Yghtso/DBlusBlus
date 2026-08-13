@@ -369,6 +369,62 @@ HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept
     };
 }
 
+HeapPageMarkDeadResult HeapPage::MarkDead(SlotId slot_id) noexcept {
+    const auto validation = Validate();
+    if (!validation || !validation.heap_header.has_value()) {
+        return HeapPageMarkDeadResult{
+            .error = HeapPageMarkDeadError::PAGE_INVALID,
+            .page_error = validation.error,
+        };
+    }
+    if (slot_id >= validation.heap_header->slot_count) {
+        return HeapPageMarkDeadResult{
+            .error = HeapPageMarkDeadError::SLOT_OUT_OF_RANGE,
+        };
+    }
+
+    const std::size_t slot_offset =
+        HEAP_PAGE_SLOT_DIRECTORY_OFFSET +
+        (static_cast<std::size_t>(slot_id) * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
+    const auto decoded_slot =
+        DecodeHeapSlotEntry(page_->Bytes().subspan(slot_offset, HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
+    if (!decoded_slot.entry.has_value()) {
+        return HeapPageMarkDeadResult{
+            .error = HeapPageMarkDeadError::PAGE_INVALID,
+            .page_error = decoded_slot.error == HeapSlotEntryDecodeError::INVALID_SLOT_STATE
+                              ? HeapPageValidationError::INVALID_SLOT_STATE
+                              : HeapPageValidationError::SLOT_DIRECTORY_OUT_OF_BOUNDS,
+        };
+    }
+
+    HeapSlotEntry updated_slot = *decoded_slot.entry;
+    switch (updated_slot.state) {
+    case HeapSlotState::NORMAL:
+        break;
+    case HeapSlotState::DEAD:
+        return HeapPageMarkDeadResult{
+            .error = HeapPageMarkDeadError::ALREADY_DEAD,
+        };
+    case HeapSlotState::UNUSED:
+    case HeapSlotState::REDIRECT_RESERVED:
+        return HeapPageMarkDeadResult{
+            .error = HeapPageMarkDeadError::INVALID_SLOT_STATE,
+        };
+    }
+
+    updated_slot.state = HeapSlotState::DEAD;
+    std::array<std::byte, HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE> encoded_slot{};
+    if (!EncodeHeapSlotEntry(encoded_slot, updated_slot)) {
+        return HeapPageMarkDeadResult{
+            .error = HeapPageMarkDeadError::PAGE_INVALID,
+        };
+    }
+
+    std::ranges::copy(encoded_slot,
+                      page_->Bytes().begin() + static_cast<std::ptrdiff_t>(slot_offset));
+    return HeapPageMarkDeadResult{};
+}
+
 std::optional<std::span<const std::byte>> HeapPage::TupleBytes(SlotId slot_id) const noexcept {
     const auto validation = Validate();
     if (!validation || !validation.heap_header.has_value() ||

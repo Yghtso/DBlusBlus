@@ -221,4 +221,3 @@ deferred.
    current locked strict inequality and accepts at most 8135 bytes.
 3. Should the future tuple codec reject zero-length physical payloads? The raw page layer currently
    accepts them because no such restriction is locked here.
-

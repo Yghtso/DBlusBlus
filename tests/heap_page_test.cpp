@@ -762,6 +762,270 @@ TEST(HeapPageInsertionTest, TupleBytesRejectsInvalidAndNonNormalSlots) {
     EXPECT_FALSE(heap_page.TupleBytes(0).has_value());
 }
 
+TEST(HeapPageDeadTransitionTest, MarksNormalSlotDeadWithoutReclaimingBytesOrIdentity) {
+    Page page = InitializedHeapPage(PageId{.file_id = 31, .page_no = 37});
+    HeapPage heap_page{page};
+    constexpr std::array tuple{std::byte{0x00}, std::byte{0x41}, std::byte{0x80}, std::byte{0xFF}};
+    const auto insertion = heap_page.Insert(tuple);
+    if (!insertion.rid.has_value()) {
+        ADD_FAILURE() << "tuple insertion did not return a RID";
+        return;
+    }
+    const Rid original_rid = *insertion.rid;
+
+    auto original_slot = DecodeHeapSlotEntry(SlotBytes(page, original_rid.slot));
+    if (!original_slot.entry.has_value()) {
+        ADD_FAILURE() << "inserted slot did not decode";
+        return;
+    }
+    original_slot.entry->aux = 0xA55A;
+    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(page, original_rid.slot), *original_slot.entry));
+    const HeapSlotEntry expected_preserved_slot = *original_slot.entry;
+
+    const auto original_header = heap_page.Header();
+    if (!original_header.has_value()) {
+        ADD_FAILURE() << "heap header did not decode before transition";
+        return;
+    }
+    const auto before = CopyPageBytes(page);
+    const auto before_tuple = heap_page.TupleBytes(original_rid.slot);
+    if (!before_tuple.has_value()) {
+        ADD_FAILURE() << "NORMAL tuple was not retrievable before transition";
+        return;
+    }
+    EXPECT_TRUE(std::ranges::equal(*before_tuple, tuple));
+
+    const auto result = heap_page.MarkDead(original_rid.slot);
+    EXPECT_TRUE(result);
+    EXPECT_EQ(result.error, HeapPageMarkDeadError::NONE);
+
+    const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(page, original_rid.slot));
+    if (!dead_slot.entry.has_value()) {
+        ADD_FAILURE() << "DEAD slot did not decode";
+        return;
+    }
+    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot.entry->tuple_offset, expected_preserved_slot.tuple_offset);
+    EXPECT_EQ(dead_slot.entry->tuple_length, expected_preserved_slot.tuple_length);
+    EXPECT_EQ(dead_slot.entry->aux, expected_preserved_slot.aux);
+
+    const auto current_header = heap_page.Header();
+    if (!current_header.has_value()) {
+        ADD_FAILURE() << "heap header did not decode after transition";
+        return;
+    }
+    EXPECT_EQ(*current_header, *original_header);
+    EXPECT_EQ(current_header->free_slot_head, INVALID_SLOT_ID);
+    EXPECT_EQ(original_rid, (Rid{.page = page.Id(), .slot = 0}));
+    EXPECT_FALSE(heap_page.TupleBytes(original_rid.slot).has_value());
+    EXPECT_TRUE(std::ranges::equal(
+        page.Bytes().subspan(dead_slot.entry->tuple_offset, dead_slot.entry->tuple_length), tuple));
+
+    const auto after = CopyPageBytes(page);
+    const std::size_t state_byte_offset = HEAP_PAGE_SLOT_DIRECTORY_OFFSET + HEAP_SLOT_FLAGS_OFFSET;
+    for (std::size_t index = 0; index < PAGE_SIZE; ++index) {
+        if (index == state_byte_offset) {
+            EXPECT_EQ(after[index], std::byte{0x02});
+        } else {
+            EXPECT_EQ(after[index], before[index]);
+        }
+    }
+}
+
+TEST(HeapPageDeadTransitionTest, LeavesNeighboringNormalSlotsAndRidsUnchanged) {
+    Page page = InitializedHeapPage();
+    HeapPage heap_page{page};
+    constexpr std::array first{std::byte{0x10}, std::byte{0x11}};
+    constexpr std::array second{std::byte{0x20}, std::byte{0x21}, std::byte{0x22}};
+    constexpr std::array third{std::byte{0x30}, std::byte{0x31}};
+    const auto first_insert = heap_page.Insert(first);
+    const auto second_insert = heap_page.Insert(second);
+    const auto third_insert = heap_page.Insert(third);
+    if (!first_insert.rid.has_value() || !second_insert.rid.has_value() ||
+        !third_insert.rid.has_value()) {
+        ADD_FAILURE() << "sequential insertion failed";
+        return;
+    }
+    const Rid first_rid = *first_insert.rid;
+    const Rid second_rid = *second_insert.rid;
+    const Rid third_rid = *third_insert.rid;
+    const auto first_slot_before = DecodeHeapSlotEntry(SlotBytes(page, first_rid.slot));
+    const auto second_slot_before = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
+    const auto third_slot_before = DecodeHeapSlotEntry(SlotBytes(page, third_rid.slot));
+    if (!first_slot_before.entry.has_value() || !second_slot_before.entry.has_value() ||
+        !third_slot_before.entry.has_value()) {
+        ADD_FAILURE() << "one of the inserted slots did not decode";
+        return;
+    }
+
+    ASSERT_TRUE(heap_page.MarkDead(second_rid.slot));
+
+    const auto first_slot_after = DecodeHeapSlotEntry(SlotBytes(page, first_rid.slot));
+    const auto second_slot_after = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
+    const auto third_slot_after = DecodeHeapSlotEntry(SlotBytes(page, third_rid.slot));
+    if (!first_slot_after.entry.has_value() || !second_slot_after.entry.has_value() ||
+        !third_slot_after.entry.has_value()) {
+        ADD_FAILURE() << "one of the transitioned slots did not decode";
+        return;
+    }
+    EXPECT_EQ(*first_slot_after.entry, *first_slot_before.entry);
+    EXPECT_EQ(*third_slot_after.entry, *third_slot_before.entry);
+    EXPECT_EQ(second_slot_after.entry->tuple_offset, second_slot_before.entry->tuple_offset);
+    EXPECT_EQ(second_slot_after.entry->tuple_length, second_slot_before.entry->tuple_length);
+    EXPECT_EQ(second_slot_after.entry->aux, second_slot_before.entry->aux);
+    EXPECT_EQ(second_slot_after.entry->state, HeapSlotState::DEAD);
+
+    const auto stored_first = heap_page.TupleBytes(first_rid.slot);
+    const auto stored_third = heap_page.TupleBytes(third_rid.slot);
+    if (!stored_first.has_value() || !stored_third.has_value()) {
+        ADD_FAILURE() << "neighboring NORMAL tuple was not retrievable";
+        return;
+    }
+    EXPECT_TRUE(std::ranges::equal(*stored_first, first));
+    EXPECT_FALSE(heap_page.TupleBytes(second_rid.slot).has_value());
+    EXPECT_TRUE(std::ranges::equal(*stored_third, third));
+    EXPECT_EQ(first_rid.slot, SlotId{0});
+    EXPECT_EQ(second_rid.slot, SlotId{1});
+    EXPECT_EQ(third_rid.slot, SlotId{2});
+}
+
+TEST(HeapPageDeadTransitionTest, RejectsDisallowedTransitionsWithoutMutation) {
+    const auto expect_unchanged = [](Page& page,
+                                     SlotId slot_id,
+                                     HeapPageMarkDeadError expected_error,
+                                     HeapPageValidationError expected_page_error =
+                                         HeapPageValidationError::NONE) {
+        const auto before = CopyPageBytes(page);
+        const auto result = HeapPage{page}.MarkDead(slot_id);
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, expected_error);
+        EXPECT_EQ(result.page_error, expected_page_error);
+        EXPECT_EQ(CopyPageBytes(page), before);
+    };
+
+    Page out_of_range = InitializedHeapPage();
+    expect_unchanged(out_of_range, 0, HeapPageMarkDeadError::SLOT_OUT_OF_RANGE);
+    expect_unchanged(out_of_range, INVALID_SLOT_ID, HeapPageMarkDeadError::SLOT_OUT_OF_RANGE);
+
+    Page corrupt = InitializedHeapPage();
+    auto common_header = corrupt.DecodeHeader();
+    if (!common_header.has_value()) {
+        ADD_FAILURE() << "initialized common header did not decode";
+        return;
+    }
+    common_header->page_type = PageType::FSM_DATA;
+    WriteCommonHeader(corrupt, *common_header);
+    expect_unchanged(
+        corrupt, 0, HeapPageMarkDeadError::PAGE_INVALID, HeapPageValidationError::WRONG_PAGE_TYPE);
+
+    for (const auto state : {HeapSlotState::UNUSED, HeapSlotState::REDIRECT_RESERVED}) {
+        Page disallowed = InitializedHeapPage();
+        ConfigureOneNormalSlot(disallowed);
+        auto slot = DecodeHeapSlotEntry(SlotBytes(disallowed, 0));
+        if (!slot.entry.has_value()) {
+            ADD_FAILURE() << "configured slot did not decode";
+            continue;
+        }
+        slot.entry->state = state;
+        ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(disallowed, 0), *slot.entry));
+        ASSERT_TRUE(HeapPage{disallowed}.Validate());
+        expect_unchanged(disallowed, 0, HeapPageMarkDeadError::INVALID_SLOT_STATE);
+    }
+
+    Page invalid_persisted_state = InitializedHeapPage();
+    ConfigureOneNormalSlot(invalid_persisted_state);
+    ASSERT_TRUE(
+        EncodeLittleEndian(SlotBytes(invalid_persisted_state, 0).subspan(HEAP_SLOT_FLAGS_OFFSET, 2),
+                           std::uint16_t{99}));
+    expect_unchanged(invalid_persisted_state,
+                     0,
+                     HeapPageMarkDeadError::PAGE_INVALID,
+                     HeapPageValidationError::INVALID_SLOT_STATE);
+
+    Page already_dead = InitializedHeapPage();
+    ConfigureOneNormalSlot(already_dead);
+    ASSERT_TRUE(HeapPage{already_dead}.MarkDead(0));
+    expect_unchanged(already_dead, 0, HeapPageMarkDeadError::ALREADY_DEAD);
+}
+
+TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupleBytes) {
+    TemporaryDirectory temporary_directory;
+    ASSERT_TRUE(temporary_directory.valid());
+    const auto path = temporary_directory.File("heap-dead.pages");
+    constexpr FileId file_id = 42;
+    constexpr std::uint64_t object_id = 7002;
+    PageId page_id{};
+
+    {
+        DiskManager manager;
+        auto page_file = PageFile::Create(manager,
+                                          path,
+                                          FileSuperblock{
+                                              .file_kind = FileKind::HEAP,
+                                              .file_id = file_id,
+                                              .object_id = object_id,
+                                              .creation_epoch = 9002,
+                                          });
+        if (!page_file.page_file.has_value()) {
+            ADD_FAILURE() << "heap page file creation failed";
+            return;
+        }
+        const auto allocation = page_file.page_file->AllocatePage();
+        if (!allocation.page_id.has_value()) {
+            ADD_FAILURE() << "heap page allocation failed";
+            return;
+        }
+        page_id = *allocation.page_id;
+
+        Page page{page_id};
+        HeapPage heap_page{page};
+        ASSERT_TRUE(heap_page.Initialize());
+        constexpr std::array first{std::byte{0x01}, std::byte{0x02}};
+        constexpr std::array second{std::byte{0x10}, std::byte{0x00}, std::byte{0xFF}};
+        constexpr std::array third{std::byte{0x20}};
+        ASSERT_TRUE(heap_page.Insert(first));
+        ASSERT_TRUE(heap_page.Insert(second));
+        ASSERT_TRUE(heap_page.Insert(third));
+        ASSERT_TRUE(heap_page.MarkDead(1));
+        ASSERT_TRUE(manager.WritePage(page_id, page.Bytes()));
+        ASSERT_TRUE(manager.SyncFile(file_id));
+    }
+
+    DiskManager reopened_manager;
+    auto reopened = PageFile::Open(reopened_manager, path, file_id, FileKind::HEAP, object_id);
+    if (!reopened.page_file.has_value()) {
+        ADD_FAILURE() << "heap page file reopen failed";
+        return;
+    }
+    Page read{page_id};
+    ASSERT_TRUE(reopened_manager.ReadPage(page_id, read.Bytes()));
+    HeapPage read_heap_page{read};
+    ASSERT_TRUE(read_heap_page.Validate());
+
+    const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(read, 1));
+    if (!dead_slot.entry.has_value()) {
+        ADD_FAILURE() << "persisted DEAD slot did not decode";
+        return;
+    }
+    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
+    EXPECT_FALSE(read_heap_page.TupleBytes(1).has_value());
+    constexpr std::array expected_dead_bytes{std::byte{0x10}, std::byte{0x00}, std::byte{0xFF}};
+    EXPECT_TRUE(std::ranges::equal(
+        read.Bytes().subspan(dead_slot.entry->tuple_offset, dead_slot.entry->tuple_length),
+        expected_dead_bytes));
+
+    const auto first = read_heap_page.TupleBytes(0);
+    const auto third = read_heap_page.TupleBytes(2);
+    if (!first.has_value() || !third.has_value()) {
+        ADD_FAILURE() << "unaffected persisted NORMAL tuple was not retrievable";
+        return;
+    }
+    constexpr std::array expected_first{std::byte{0x01}, std::byte{0x02}};
+    constexpr std::array expected_third{std::byte{0x20}};
+    EXPECT_TRUE(std::ranges::equal(*first, expected_first));
+    EXPECT_TRUE(std::ranges::equal(*third, expected_third));
+}
+
 TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) {
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.valid());
