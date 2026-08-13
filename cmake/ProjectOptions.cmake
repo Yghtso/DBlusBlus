@@ -16,4 +16,6 @@ function(dblusblus_setup_project_options)
 
     dblusblus_enable_static_analyzers()
 
+    set(CMAKE_CXX_CLANG_TIDY "${CMAKE_CXX_CLANG_TIDY}" PARENT_SCOPE)
+
 endfunction()
