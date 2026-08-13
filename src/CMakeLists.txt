@@ -8,6 +8,7 @@ target_sources(
         common/types.cpp
         storage/disk_manager.cpp
         storage/page.cpp
+        storage/page_file.cpp
 
     PUBLIC
         common/crc32c.h
@@ -17,6 +18,7 @@ target_sources(
         common/types.h
         storage/disk_manager.h
         storage/page.h
+        storage/page_file.h
 )
 
 target_include_directories(
