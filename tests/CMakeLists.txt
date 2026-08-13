@@ -12,6 +12,7 @@ target_sources(
         encoding_test.cpp
         file_superblock_test.cpp
         page_header_test.cpp
+        page_file_test.cpp
         page_test.cpp
         smoke_test.cpp
 )
