@@ -7,6 +7,7 @@ target_sources(
         common/file_superblock.cpp
         common/types.cpp
         storage/disk_manager.cpp
+        storage/page.cpp
 
     PUBLIC
         common/crc32c.h
@@ -15,6 +16,7 @@ target_sources(
         common/page_header.h
         common/types.h
         storage/disk_manager.h
+        storage/page.h
 )
 
 target_include_directories(
