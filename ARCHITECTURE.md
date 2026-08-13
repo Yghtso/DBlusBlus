@@ -2298,6 +2298,22 @@ offset  size  field
 total   48 bytes
 ```
 
+All multi-byte fields are little-endian.
+
+For tuple-header format v1:
+
+```text
+header_bytes = 48
+reserved     = 0
+```
+
+`header_bytes` describes only the fixed 48-byte tuple-header prefix. It does
+not include the null bitmap that follows it.
+
+The four reserved bytes at offsets `44..47` must be written as zero and must be
+zero when decoding tuple-header format v1. Assigning them semantics requires a
+coordinated format revision.
+
 ### `xmin`
 
 Transaction that created this tuple version.
@@ -2328,6 +2344,8 @@ transaction identity
 statement/command visibility
 ```
 
+`CommandId` zero is valid and must not be treated as an invalid sentinel.
+
 ### Previous-version pointer
 
 ```text
@@ -2342,6 +2360,20 @@ If no previous version exists:
 prev_page_no = INVALID_PAGE_NO
 prev_slot    = INVALID_SLOT_ID
 ```
+
+Tuple-header v1 requires the pair to be internally consistent:
+
+```text
+no previous version:
+    prev_page_no = INVALID_PAGE_NO
+    prev_slot    = INVALID_SLOT_ID
+
+previous version present:
+    prev_page_no != INVALID_PAGE_NO
+    prev_slot    != INVALID_SLOT_ID
+```
+
+A mixed sentinel/non-sentinel pair is structurally invalid.
 
 This creates a backward version chain.
 
@@ -2362,17 +2394,36 @@ Do not store `FileId` in the tuple-version link because all versions of a row be
 
 Reserve tuple flags for facts about the physical tuple version.
 
-Initial candidates:
+Tuple-header v1 initially assigns only the physical-layout flags:
 
 ```text
-HAS_NULLS
-HAS_VARLEN
+HAS_NULLS  = 0x0001
+HAS_VARLEN = 0x0002
+```
+
+The known-mask for tuple-header v1 is therefore:
+
+```text
+0x0003
+```
+
+All other bits are invalid in tuple-header format v1 and must be rejected on
+encode/decode rather than silently preserved.
+
+The following candidates remain reserved/deferred until their operational,
+visibility, and recovery semantics are explicitly defined:
+
+```text
 IS_DELETED_HINT
 CHAIN_ROOT
 CHAIN_MEMBER
 ```
 
-Only persist a flag when it has a well-defined recovery/visibility meaning.
+Existing persisted flag masks must not be renumbered. Future flags require new
+explicit bit assignments and compatibility consideration.
+
+Only persist a flag when it has a well-defined physical/recovery/visibility
+meaning.
 
 Do not use ad-hoc flags as substitutes for transaction status.
 
