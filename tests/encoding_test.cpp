@@ -10,6 +10,9 @@
 namespace dblusblus {
 namespace {
 
+static_assert(PAGE_ID_ENCODED_SIZE == 12);
+static_assert(RID_ENCODED_SIZE == 16);
+
 template <detail::FixedWidthInteger Integer>
 void ExpectRoundTrip(Integer value) {
     std::array<std::byte, sizeof(Integer)> buffer{};
@@ -21,6 +24,30 @@ void ExpectRoundTrip(Integer value) {
         return;
     }
     EXPECT_EQ(*decoded, value);
+}
+
+void ExpectPageIdRoundTrip(const PageId& expected) {
+    std::array<std::byte, PAGE_ID_ENCODED_SIZE> buffer{};
+
+    ASSERT_TRUE(EncodePageId(buffer, expected));
+    const auto decoded = DecodePageId(buffer);
+    if (!decoded.has_value()) {
+        ADD_FAILURE() << "PageId decode unexpectedly failed";
+        return;
+    }
+    EXPECT_EQ(*decoded, expected);
+}
+
+void ExpectRidRoundTrip(const Rid& expected) {
+    std::array<std::byte, RID_ENCODED_SIZE> buffer{};
+
+    ASSERT_TRUE(EncodeRid(buffer, expected));
+    const auto decoded = DecodeRid(buffer);
+    if (!decoded.has_value()) {
+        ADD_FAILURE() << "Rid decode unexpectedly failed";
+        return;
+    }
+    EXPECT_EQ(*decoded, expected);
 }
 
 TEST(EncodingTest, EmitsExactLittleEndianBytes) {
@@ -119,6 +146,167 @@ TEST(EncodingTest, RejectsBuffersThatAreTooSmall) {
     EXPECT_FALSE(EncodeLittleEndian(short_buffer, std::uint32_t{42}));
     EXPECT_EQ(buffer, original);
     EXPECT_FALSE(DecodeLittleEndian<std::uint32_t>(short_buffer).has_value());
+}
+
+TEST(PageIdCodecTest, UsesLockedEncodedSize) {
+    EXPECT_EQ(PAGE_ID_ENCODED_SIZE, std::size_t{12});
+}
+
+TEST(PageIdCodecTest, EmitsExactPersistedBytes) {
+    const PageId page_id{
+        .file_id = FileId{0x01020304U},
+        .page_no = PageNo{0x05060708090A0B0CULL},
+    };
+    std::array<std::byte, PAGE_ID_ENCODED_SIZE> buffer{};
+    constexpr std::array expected{
+        std::byte{0x04},
+        std::byte{0x03},
+        std::byte{0x02},
+        std::byte{0x01},
+        std::byte{0x0C},
+        std::byte{0x0B},
+        std::byte{0x0A},
+        std::byte{0x09},
+        std::byte{0x08},
+        std::byte{0x07},
+        std::byte{0x06},
+        std::byte{0x05},
+    };
+
+    ASSERT_TRUE(EncodePageId(buffer, page_id));
+    EXPECT_EQ(buffer, expected);
+}
+
+TEST(PageIdCodecTest, RoundTripsRegularSentinelAndBoundaryValues) {
+    ExpectPageIdRoundTrip(PageId{.file_id = FileId{7}, .page_no = PageNo{42}});
+    ExpectPageIdRoundTrip(PageId{});
+    ExpectPageIdRoundTrip(PageId{.file_id = FileId{0}, .page_no = PageNo{0}});
+    ExpectPageIdRoundTrip(PageId{
+        .file_id = std::numeric_limits<FileId>::max(),
+        .page_no = std::numeric_limits<PageNo>::max(),
+    });
+}
+
+TEST(PageIdCodecTest, SupportsUnalignedSpans) {
+    constexpr auto padding = std::byte{0xA5};
+    const PageId expected{.file_id = FileId{11}, .page_no = PageNo{29}};
+    std::array<std::byte, PAGE_ID_ENCODED_SIZE + 2> buffer{};
+    buffer.fill(padding);
+    auto encoded = std::span<std::byte>{buffer}.subspan(1, PAGE_ID_ENCODED_SIZE);
+
+    ASSERT_TRUE(EncodePageId(encoded, expected));
+    EXPECT_EQ(buffer.front(), padding);
+    EXPECT_EQ(buffer.back(), padding);
+
+    const auto decoded = DecodePageId(encoded);
+    if (!decoded.has_value()) {
+        ADD_FAILURE() << "PageId decode unexpectedly failed";
+        return;
+    }
+    EXPECT_EQ(*decoded, expected);
+}
+
+TEST(PageIdCodecTest, RejectsUndersizedBuffersWithoutModification) {
+    constexpr auto padding = std::byte{0xA5};
+    std::array<std::byte, PAGE_ID_ENCODED_SIZE> buffer{};
+    buffer.fill(padding);
+    const auto original = buffer;
+    auto undersized = std::span<std::byte>{buffer}.first(PAGE_ID_ENCODED_SIZE - 1);
+
+    EXPECT_FALSE(EncodePageId(undersized, PageId{}));
+    EXPECT_EQ(buffer, original);
+    EXPECT_FALSE(DecodePageId(undersized).has_value());
+}
+
+TEST(RidCodecTest, UsesLockedEncodedSize) {
+    EXPECT_EQ(RID_ENCODED_SIZE, std::size_t{16});
+}
+
+TEST(RidCodecTest, EmitsExactPersistedBytes) {
+    const Rid rid{
+        .page =
+            PageId{
+                .file_id = FileId{0x01020304U},
+                .page_no = PageNo{0x05060708090A0B0CULL},
+            },
+        .slot = SlotId{0x0D0EU},
+    };
+    std::array<std::byte, RID_ENCODED_SIZE> buffer{};
+    constexpr std::array expected{
+        std::byte{0x04},
+        std::byte{0x03},
+        std::byte{0x02},
+        std::byte{0x01},
+        std::byte{0x0C},
+        std::byte{0x0B},
+        std::byte{0x0A},
+        std::byte{0x09},
+        std::byte{0x08},
+        std::byte{0x07},
+        std::byte{0x06},
+        std::byte{0x05},
+        std::byte{0x0E},
+        std::byte{0x0D},
+        std::byte{0x00},
+        std::byte{0x00},
+    };
+
+    ASSERT_TRUE(EncodeRid(buffer, rid));
+    EXPECT_EQ(buffer, expected);
+}
+
+TEST(RidCodecTest, RoundTripsRegularSentinelAndBoundaryValues) {
+    ExpectRidRoundTrip(Rid{
+        .page = PageId{.file_id = FileId{7}, .page_no = PageNo{42}},
+        .slot = SlotId{3},
+    });
+    ExpectRidRoundTrip(Rid{});
+    ExpectRidRoundTrip(Rid{
+        .page = PageId{.file_id = FileId{0}, .page_no = PageNo{0}},
+        .slot = SlotId{0},
+    });
+    ExpectRidRoundTrip(Rid{
+        .page =
+            PageId{
+                .file_id = std::numeric_limits<FileId>::max(),
+                .page_no = std::numeric_limits<PageNo>::max(),
+            },
+        .slot = std::numeric_limits<SlotId>::max(),
+    });
+}
+
+TEST(RidCodecTest, SupportsUnalignedSpans) {
+    constexpr auto padding = std::byte{0xA5};
+    const Rid expected{
+        .page = PageId{.file_id = FileId{11}, .page_no = PageNo{29}},
+        .slot = SlotId{5},
+    };
+    std::array<std::byte, RID_ENCODED_SIZE + 2> buffer{};
+    buffer.fill(padding);
+    auto encoded = std::span<std::byte>{buffer}.subspan(1, RID_ENCODED_SIZE);
+
+    ASSERT_TRUE(EncodeRid(encoded, expected));
+    EXPECT_EQ(buffer.front(), padding);
+    EXPECT_EQ(buffer.back(), padding);
+
+    const auto decoded = DecodeRid(encoded);
+    if (!decoded.has_value()) {
+        ADD_FAILURE() << "Rid decode unexpectedly failed";
+        return;
+    }
+    EXPECT_EQ(*decoded, expected);
+}
+
+TEST(RidCodecTest, RejectsUndersizedBuffersWithoutModification) {
+    constexpr auto padding = std::byte{0xA5};
+    std::array<std::byte, RID_ENCODED_SIZE> buffer{};
+    buffer.fill(padding);
+    const auto original = buffer;
+    auto undersized = std::span<std::byte>{buffer}.first(RID_ENCODED_SIZE - 1);
+
+    EXPECT_FALSE(EncodeRid(undersized, Rid{}));
+    EXPECT_EQ(buffer, original);
+    EXPECT_FALSE(DecodeRid(undersized).has_value());
 }
 
 } // namespace

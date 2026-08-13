@@ -1,6 +1,8 @@
 #ifndef DBLUSBLUS_COMMON_ENCODING_H_
 #define DBLUSBLUS_COMMON_ENCODING_H_
 
+#include "common/types.h"
+
 #include <bit>
 #include <concepts>
 #include <cstddef>
@@ -10,7 +12,16 @@
 #include <type_traits>
 
 namespace dblusblus {
+
+inline constexpr std::size_t PAGE_ID_ENCODED_SIZE = 12;
+inline constexpr std::size_t RID_ENCODED_SIZE = 16;
+
 namespace detail {
+
+inline constexpr std::size_t PAGE_ID_FILE_ID_OFFSET = 0;
+inline constexpr std::size_t PAGE_ID_PAGE_NO_OFFSET = 4;
+inline constexpr std::size_t RID_SLOT_ID_OFFSET = 12;
+inline constexpr std::size_t RID_RESERVED_OFFSET = 14;
 
 template <typename Integer>
 concept FixedWidthInteger =
@@ -56,6 +67,72 @@ DecodeLittleEndian(std::span<const std::byte> source) noexcept {
     }
 
     return std::bit_cast<Integer>(bits);
+}
+
+[[nodiscard]] constexpr bool EncodePageId(std::span<std::byte> destination,
+                                          const PageId& page_id) noexcept {
+    if (destination.size() < PAGE_ID_ENCODED_SIZE) {
+        return false;
+    }
+
+    const bool file_id_encoded = EncodeLittleEndian(
+        destination.subspan(detail::PAGE_ID_FILE_ID_OFFSET, sizeof(FileId)), page_id.file_id);
+    const bool page_no_encoded = EncodeLittleEndian(
+        destination.subspan(detail::PAGE_ID_PAGE_NO_OFFSET, sizeof(PageNo)), page_id.page_no);
+    return file_id_encoded && page_no_encoded;
+}
+
+[[nodiscard]] constexpr std::optional<PageId>
+DecodePageId(std::span<const std::byte> source) noexcept {
+    if (source.size() < PAGE_ID_ENCODED_SIZE) {
+        return std::nullopt;
+    }
+
+    const auto file_id =
+        DecodeLittleEndian<FileId>(source.subspan(detail::PAGE_ID_FILE_ID_OFFSET, sizeof(FileId)));
+    if (!file_id.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto page_no =
+        DecodeLittleEndian<PageNo>(source.subspan(detail::PAGE_ID_PAGE_NO_OFFSET, sizeof(PageNo)));
+    if (!page_no.has_value()) {
+        return std::nullopt;
+    }
+
+    return PageId{.file_id = *file_id, .page_no = *page_no};
+}
+
+[[nodiscard]] constexpr bool EncodeRid(std::span<std::byte> destination, const Rid& rid) noexcept {
+    if (destination.size() < RID_ENCODED_SIZE) {
+        return false;
+    }
+
+    const bool page_encoded = EncodePageId(destination.first(PAGE_ID_ENCODED_SIZE), rid.page);
+    const bool slot_encoded = EncodeLittleEndian(
+        destination.subspan(detail::RID_SLOT_ID_OFFSET, sizeof(SlotId)), rid.slot);
+    const bool reserved_encoded = EncodeLittleEndian(
+        destination.subspan(detail::RID_RESERVED_OFFSET, sizeof(std::uint16_t)), std::uint16_t{0});
+    return page_encoded && slot_encoded && reserved_encoded;
+}
+
+[[nodiscard]] constexpr std::optional<Rid> DecodeRid(std::span<const std::byte> source) noexcept {
+    if (source.size() < RID_ENCODED_SIZE) {
+        return std::nullopt;
+    }
+
+    const auto page = DecodePageId(source.first(PAGE_ID_ENCODED_SIZE));
+    if (!page.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto slot =
+        DecodeLittleEndian<SlotId>(source.subspan(detail::RID_SLOT_ID_OFFSET, sizeof(SlotId)));
+    if (!slot.has_value()) {
+        return std::nullopt;
+    }
+
+    return Rid{.page = *page, .slot = *slot};
 }
 
 } // namespace dblusblus
