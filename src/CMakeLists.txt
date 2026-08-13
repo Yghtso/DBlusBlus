@@ -10,6 +10,7 @@ target_sources(
         storage/heap_page.cpp
         storage/page.cpp
         storage/page_file.cpp
+        storage/tuple_header.cpp
 
     PUBLIC
         common/crc32c.h
@@ -21,6 +22,7 @@ target_sources(
         storage/heap_page.h
         storage/page.h
         storage/page_file.h
+        storage/tuple_header.h
 )
 
 target_include_directories(
