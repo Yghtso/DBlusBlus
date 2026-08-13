@@ -2,8 +2,12 @@
 
 #include "common/encoding.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -281,6 +285,108 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
         .error = HeapPageValidationError::NONE,
         .slot_id = INVALID_SLOT_ID,
     };
+}
+
+HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept {
+    const auto validation = Validate();
+    if (!validation || !validation.heap_header.has_value()) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::PAGE_INVALID,
+            .page_error = validation.error,
+        };
+    }
+    if (tuple.size() > std::numeric_limits<std::uint16_t>::max() ||
+        tuple.size() > HEAP_PAGE_MAX_RAW_TUPLE_SIZE) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::TUPLE_TOO_LARGE,
+        };
+    }
+
+    HeapPageHeader updated_header = *validation.heap_header;
+    if (updated_header.slot_count == std::numeric_limits<std::uint16_t>::max()) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::SLOT_ID_EXHAUSTED,
+        };
+    }
+
+    const std::size_t available_space =
+        static_cast<std::size_t>(updated_header.upper) - updated_header.lower;
+    const std::size_t required_space = tuple.size() + HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE;
+    if (required_space > available_space) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::INSUFFICIENT_SPACE,
+        };
+    }
+
+    const SlotId slot_id = updated_header.slot_count;
+    const std::size_t slot_offset = updated_header.lower;
+    const std::size_t new_lower = slot_offset + HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE;
+    const std::size_t new_upper = static_cast<std::size_t>(updated_header.upper) - tuple.size();
+    if (new_lower > std::numeric_limits<std::uint16_t>::max() ||
+        new_upper > std::numeric_limits<std::uint16_t>::max()) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::PAGE_INVALID,
+            .page_error = HeapPageValidationError::SLOT_DIRECTORY_OUT_OF_BOUNDS,
+        };
+    }
+
+    const HeapSlotEntry slot{
+        .tuple_offset = static_cast<std::uint16_t>(new_upper),
+        .tuple_length = static_cast<std::uint16_t>(tuple.size()),
+        .state = HeapSlotState::NORMAL,
+        .aux = 0,
+    };
+    ++updated_header.slot_count;
+    updated_header.lower = static_cast<std::uint16_t>(new_lower);
+    updated_header.upper = static_cast<std::uint16_t>(new_upper);
+
+    std::array<std::byte, HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE> encoded_slot{};
+    std::array<std::byte, HEAP_PAGE_HEADER_ENCODED_SIZE> encoded_header{};
+    if (!EncodeHeapSlotEntry(encoded_slot, slot) ||
+        !EncodeHeapPageHeader(encoded_header, updated_header)) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::PAGE_INVALID,
+        };
+    }
+
+    auto page_bytes = page_->Bytes();
+    if (!tuple.empty()) {
+        std::memmove(page_bytes.data() + new_upper, tuple.data(), tuple.size());
+    }
+    std::ranges::copy(encoded_slot, page_bytes.begin() + static_cast<std::ptrdiff_t>(slot_offset));
+    std::ranges::copy(encoded_header,
+                      page_bytes.begin() + static_cast<std::ptrdiff_t>(HEAP_PAGE_HEADER_OFFSET));
+
+    return HeapPageInsertResult{
+        .rid = Rid{.page = page_->Id(), .slot = slot_id},
+        .error = HeapPageInsertError::NONE,
+    };
+}
+
+std::optional<std::span<const std::byte>> HeapPage::TupleBytes(SlotId slot_id) const noexcept {
+    const auto validation = Validate();
+    if (!validation || !validation.heap_header.has_value() ||
+        slot_id >= validation.heap_header->slot_count) {
+        return std::nullopt;
+    }
+
+    const std::size_t slot_offset =
+        HEAP_PAGE_SLOT_DIRECTORY_OFFSET +
+        (static_cast<std::size_t>(slot_id) * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
+    const Page& page = *page_;
+    const auto decoded_slot =
+        DecodeHeapSlotEntry(page.Bytes().subspan(slot_offset, HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
+    if (!decoded_slot.entry.has_value() || decoded_slot.entry->state != HeapSlotState::NORMAL) {
+        return std::nullopt;
+    }
+
+    return page.Bytes().subspan(decoded_slot.entry->tuple_offset, decoded_slot.entry->tuple_length);
 }
 
 } // namespace dblusblus
