@@ -1981,6 +1981,23 @@ Without `ORDER BY`, SQL results remain unordered semantically.
 
 Immediately after the 32-byte common page header, a heap page contains a small heap-specific header.
 
+The initial persisted `HEAP_DATA` page format version is:
+
+```text
+format_version = 1
+```
+
+For v1 heap pages, the common header must contain:
+
+```text
+page_type      = HEAP_DATA
+format_version = 1
+header_size    = 48
+reserved16     = 0
+```
+
+The persisted `page_no` must match the page's logical `PageId.page_no`.
+
 Logical layout:
 
 ```text
@@ -1996,6 +2013,8 @@ offset-from-page  size  field
 total page header = 48 bytes
 ```
 
+All multi-byte fields are little-endian.
+
 Definitions:
 
 ```text
@@ -2009,13 +2028,52 @@ free bytes
     upper - lower
 ```
 
+For v1:
+
+```text
+lower = 48 + slot_count * 8
+```
+
+and valid page geometry requires:
+
+```text
+48 <= lower <= upper <= PAGE_SIZE
+```
+
 Tuple bytes grow from the end of the page downward.
 
 Slot entries grow from the header upward.
 
-`free_slot_head` may initially remain unused, but its format is reserved for efficient slot reuse.
+### Empty free-slot list
 
-`prune_hint` may initially be zero; it is reserved for future vacuum/pruning hints.
+The persisted empty-list sentinel is:
+
+```text
+free_slot_head = INVALID_SLOT_ID = UINT16_MAX = 0xFFFF
+```
+
+A blank heap page therefore stores `slot_count = 0` and
+`free_slot_head = INVALID_SLOT_ID`.
+
+Nonempty free-list linkage remains deferred until slot reuse is implemented.
+The field is reserved so that later slot reuse can avoid scanning the complete
+slot directory.
+
+### Reserved and hint fields
+
+For heap-page format version 1:
+
+```text
+common reserved16 = 0
+heap reserved      = 0
+```
+
+Decoding/structural validation must reject nonzero values for either reserved
+field. Assigning semantics to either reserved field requires coordinated
+format-version handling.
+
+`prune_hint` is initialized to zero and remains only a future vacuum/pruning
+hint until its semantics are explicitly specified.
 
 ---
 
@@ -2036,18 +2094,32 @@ offset  size  field
 total   8 bytes
 ```
 
-Initial slot states:
+All multi-byte fields are little-endian.
+
+The initial persisted 16-bit slot-state codes are:
 
 ```text
-UNUSED
-NORMAL
-DEAD
-REDIRECT_RESERVED
+0 = UNUSED
+1 = NORMAL
+2 = DEAD
+3 = REDIRECT_RESERVED
 ```
+
+These numeric codes are part of the persistent heap-page v1 format and must not
+depend on source-language enum declaration order. Existing codes must not be
+renumbered. Future states must receive new explicit numeric codes or be
+introduced through an explicit format revision when compatibility requires it.
+
+Persisted slot-state values outside the defined set are invalid for heap-page
+format version 1 and must be rejected by structural decoding/validation.
 
 `REDIRECT_RESERVED` and `aux` are intentionally reserved for a future HOT-like optimization.
 
 They need not be used by the first implementation.
+
+At this stage, no additional tuple-range or `aux` semantics are assigned to
+`UNUSED`, `DEAD`, or `REDIRECT_RESERVED`. `NORMAL` entries must reference tuple
+bytes wholly within the tuple-data region and within the page.
 
 ### Stable slot semantics
 
