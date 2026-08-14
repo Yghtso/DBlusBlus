@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <utility>
@@ -16,11 +17,11 @@
 namespace dblusblus {
 namespace {
 
-[[nodiscard]] bool IsNullValue(const FixedTupleValue& value) noexcept {
+[[nodiscard]] bool IsNullValue(const TupleValue& value) noexcept {
     return std::holds_alternative<std::monostate>(value);
 }
 
-[[nodiscard]] bool ValueMatchesType(PhysicalType type, const FixedTupleValue& value) noexcept {
+[[nodiscard]] bool ValueMatchesType(PhysicalType type, const TupleValue& value) noexcept {
     switch (type) {
     case PhysicalType::BOOLEAN:
         return std::holds_alternative<bool>(value);
@@ -35,27 +36,67 @@ namespace {
     case PhysicalType::TIMESTAMP:
         return std::holds_alternative<TimestampPhysicalValue>(value);
     case PhysicalType::VARCHAR:
-        return false;
+        return std::holds_alternative<VarcharValue>(value);
     }
     return false;
 }
 
-[[nodiscard]] FixedTupleCodecError TupleErrorFromScalar(FixedScalarCodecError error) noexcept {
+[[nodiscard]] TupleCodecError TupleErrorFromScalar(FixedScalarCodecError error) noexcept {
     switch (error) {
     case FixedScalarCodecError::NONE:
-        return FixedTupleCodecError::NONE;
+        return TupleCodecError::NONE;
     case FixedScalarCodecError::TYPE_MISMATCH:
-        return FixedTupleCodecError::TYPE_MISMATCH;
+        return TupleCodecError::TYPE_MISMATCH;
     case FixedScalarCodecError::UNSUPPORTED_VARLEN_TYPE:
-        return FixedTupleCodecError::UNSUPPORTED_VARLEN_TYPE;
+        return TupleCodecError::MALFORMED_TUPLE;
     case FixedScalarCodecError::INVALID_BOOLEAN:
-        return FixedTupleCodecError::INVALID_BOOLEAN;
+        return TupleCodecError::INVALID_BOOLEAN;
     case FixedScalarCodecError::DESTINATION_TOO_SMALL:
     case FixedScalarCodecError::SOURCE_TOO_SMALL:
     case FixedScalarCodecError::INVALID_PHYSICAL_TYPE:
-        return FixedTupleCodecError::MALFORMED_TUPLE;
+        return TupleCodecError::MALFORMED_TUPLE;
     }
-    return FixedTupleCodecError::MALFORMED_TUPLE;
+    return TupleCodecError::MALFORMED_TUPLE;
+}
+
+[[nodiscard]] TupleCodecError TupleErrorFromSizePlanning(TupleSizePlanningError error) noexcept {
+    switch (error) {
+    case TupleSizePlanningError::NONE:
+        return TupleCodecError::NONE;
+    case TupleSizePlanningError::VARCHAR_LENGTH_TOO_LARGE:
+        return TupleCodecError::VARCHAR_LENGTH_TOO_LARGE;
+    case TupleSizePlanningError::SIZE_OVERFLOW:
+    case TupleSizePlanningError::TUPLE_TOO_LARGE:
+        return TupleCodecError::TUPLE_TOO_LARGE;
+    case TupleSizePlanningError::VARLEN_VALUE_COUNT_MISMATCH:
+        return TupleCodecError::MALFORMED_TUPLE;
+    }
+    return TupleCodecError::MALFORMED_TUPLE;
+}
+
+[[nodiscard]] std::size_t VarlenSchemaColumnIndex(const TuplePhysicalLayout& layout,
+                                                  std::size_t varlen_index) noexcept {
+    std::size_t current_varlen_index = 0;
+    for (std::size_t column_index = 0; column_index < layout.ColumnCount(); ++column_index) {
+        if (layout.Columns()[column_index].type != PhysicalType::VARCHAR) {
+            continue;
+        }
+        if (current_varlen_index == varlen_index) {
+            return column_index;
+        }
+        ++current_varlen_index;
+    }
+    return layout.ColumnCount();
+}
+
+[[nodiscard]] bool CheckedDescriptorEnd(const VarcharDescriptor& descriptor,
+                                        std::uint32_t& end) noexcept {
+    if (descriptor.payload_length >
+        std::numeric_limits<std::uint32_t>::max() - descriptor.payload_offset) {
+        return false;
+    }
+    end = descriptor.payload_offset + descriptor.payload_length;
+    return true;
 }
 
 [[nodiscard]] std::uint8_t UnusedBitmapBitMask(std::size_t column_count) noexcept {
@@ -68,9 +109,61 @@ namespace {
 
 } // namespace
 
+VarcharDescriptorCodecError EncodeVarcharDescriptor(std::span<std::byte> destination,
+                                                    const VarcharDescriptor& descriptor) noexcept {
+    if (destination.size() < VARCHAR_DESCRIPTOR_ENCODED_SIZE) {
+        return VarcharDescriptorCodecError::BUFFER_TOO_SMALL;
+    }
+
+    std::array<std::byte, VARCHAR_DESCRIPTOR_ENCODED_SIZE> encoded{};
+    const auto encoded_bytes = std::span<std::byte>{encoded};
+    const bool encoded_all =
+        EncodeLittleEndian(encoded_bytes.subspan(VARCHAR_DESCRIPTOR_OFFSET_OFFSET,
+                                                 sizeof(descriptor.payload_offset)),
+                           descriptor.payload_offset) &&
+        EncodeLittleEndian(encoded_bytes.subspan(VARCHAR_DESCRIPTOR_LENGTH_OFFSET,
+                                                 sizeof(descriptor.payload_length)),
+                           descriptor.payload_length);
+    if (!encoded_all) {
+        return VarcharDescriptorCodecError::BUFFER_TOO_SMALL;
+    }
+
+    std::ranges::copy(encoded, destination.begin());
+    return VarcharDescriptorCodecError::NONE;
+}
+
+VarcharDescriptorDecodeResult DecodeVarcharDescriptor(std::span<const std::byte> source) noexcept {
+    if (source.size() < VARCHAR_DESCRIPTOR_ENCODED_SIZE) {
+        return {
+            .descriptor = std::nullopt,
+            .error = VarcharDescriptorCodecError::BUFFER_TOO_SMALL,
+        };
+    }
+
+    const auto payload_offset = DecodeLittleEndian<std::uint32_t>(
+        source.subspan(VARCHAR_DESCRIPTOR_OFFSET_OFFSET, sizeof(std::uint32_t)));
+    const auto payload_length = DecodeLittleEndian<std::uint32_t>(
+        source.subspan(VARCHAR_DESCRIPTOR_LENGTH_OFFSET, sizeof(std::uint32_t)));
+    if (!payload_offset.has_value() || !payload_length.has_value()) {
+        return {
+            .descriptor = std::nullopt,
+            .error = VarcharDescriptorCodecError::BUFFER_TOO_SMALL,
+        };
+    }
+
+    return {
+        .descriptor =
+            VarcharDescriptor{
+                .payload_offset = *payload_offset,
+                .payload_length = *payload_length,
+            },
+        .error = VarcharDescriptorCodecError::NONE,
+    };
+}
+
 FixedScalarCodecError EncodeFixedScalar(std::span<std::byte> destination,
                                         PhysicalType type,
-                                        const FixedTupleValue& value) noexcept {
+                                        const TupleValue& value) noexcept {
     const auto width = PhysicalTypeWidth(type);
     if (!width.has_value()) {
         return FixedScalarCodecError::INVALID_PHYSICAL_TYPE;
@@ -168,14 +261,14 @@ FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
             return {.value = std::nullopt, .error = FixedScalarCodecError::INVALID_BOOLEAN};
         }
         return {
-            .value = FixedTupleValue{encoded == 1U},
+            .value = TupleValue{encoded == 1U},
             .error = FixedScalarCodecError::NONE,
         };
     }
     case PhysicalType::INT32: {
         const auto decoded = DecodeLittleEndian<std::int32_t>(source.first(INT32_PHYSICAL_SIZE));
         return {
-            .value = decoded.has_value() ? std::optional<FixedTupleValue>{*decoded} : std::nullopt,
+            .value = decoded.has_value() ? std::optional<TupleValue>{*decoded} : std::nullopt,
             .error = decoded.has_value() ? FixedScalarCodecError::NONE
                                          : FixedScalarCodecError::SOURCE_TOO_SMALL,
         };
@@ -183,7 +276,7 @@ FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
     case PhysicalType::INT64: {
         const auto decoded = DecodeLittleEndian<std::int64_t>(source.first(INT64_PHYSICAL_SIZE));
         return {
-            .value = decoded.has_value() ? std::optional<FixedTupleValue>{*decoded} : std::nullopt,
+            .value = decoded.has_value() ? std::optional<TupleValue>{*decoded} : std::nullopt,
             .error = decoded.has_value() ? FixedScalarCodecError::NONE
                                          : FixedScalarCodecError::SOURCE_TOO_SMALL,
         };
@@ -192,7 +285,7 @@ FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
         const auto decoded = DecodeLittleEndian<std::uint64_t>(source.first(FLOAT64_PHYSICAL_SIZE));
         return {
             .value = decoded.has_value()
-                         ? std::optional<FixedTupleValue>{Float64PhysicalValue{.bits = *decoded}}
+                         ? std::optional<TupleValue>{Float64PhysicalValue{.bits = *decoded}}
                          : std::nullopt,
             .error = decoded.has_value() ? FixedScalarCodecError::NONE
                                          : FixedScalarCodecError::SOURCE_TOO_SMALL,
@@ -202,7 +295,7 @@ FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
         const auto decoded = DecodeLittleEndian<std::int32_t>(source.first(DATE_PHYSICAL_SIZE));
         return {
             .value = decoded.has_value()
-                         ? std::optional<FixedTupleValue>{DatePhysicalValue{.value = *decoded}}
+                         ? std::optional<TupleValue>{DatePhysicalValue{.value = *decoded}}
                          : std::nullopt,
             .error = decoded.has_value() ? FixedScalarCodecError::NONE
                                          : FixedScalarCodecError::SOURCE_TOO_SMALL,
@@ -213,7 +306,7 @@ FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
             DecodeLittleEndian<std::int64_t>(source.first(TIMESTAMP_PHYSICAL_SIZE));
         return {
             .value = decoded.has_value()
-                         ? std::optional<FixedTupleValue>{TimestampPhysicalValue{.value = *decoded}}
+                         ? std::optional<TupleValue>{TimestampPhysicalValue{.value = *decoded}}
                          : std::nullopt,
             .error = decoded.has_value() ? FixedScalarCodecError::NONE
                                          : FixedScalarCodecError::SOURCE_TOO_SMALL,
@@ -228,33 +321,24 @@ FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
     return {.value = std::nullopt, .error = FixedScalarCodecError::INVALID_PHYSICAL_TYPE};
 }
 
-FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
-                                        const TupleVersionMetadata& metadata,
-                                        std::span<const FixedTupleValue> values) {
+TupleEncodeResult EncodeTuple(const TuplePhysicalLayout& layout,
+                              const TupleVersionMetadata& metadata,
+                              std::span<const TupleValue> values) {
     if (values.size() != layout.ColumnCount()) {
         return {
             .tuple = std::nullopt,
-            .error = FixedTupleCodecError::COLUMN_COUNT_MISMATCH,
+            .error = TupleCodecError::COLUMN_COUNT_MISMATCH,
         };
     }
-    if (layout.MinimumTupleSize() > HEAP_PAGE_MAX_RAW_TUPLE_SIZE) {
-        return {.tuple = std::nullopt, .error = FixedTupleCodecError::TUPLE_TOO_LARGE};
-    }
-
     bool has_nulls = false;
+    std::vector<VarlenValueSize> varlen_sizes;
+    varlen_sizes.reserve(layout.VarlenColumnCount());
     for (std::size_t index = 0; index < values.size(); ++index) {
         const auto* column = layout.Column(index);
         if (column == nullptr) {
             return {
                 .tuple = std::nullopt,
-                .error = FixedTupleCodecError::MALFORMED_TUPLE,
-                .column_index = index,
-            };
-        }
-        if (column->type == PhysicalType::VARCHAR) {
-            return {
-                .tuple = std::nullopt,
-                .error = FixedTupleCodecError::UNSUPPORTED_VARLEN_TYPE,
+                .error = TupleCodecError::MALFORMED_TUPLE,
                 .column_index = index,
             };
         }
@@ -262,21 +346,46 @@ FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
             if (!column->nullable) {
                 return {
                     .tuple = std::nullopt,
-                    .error = FixedTupleCodecError::NULL_NOT_ALLOWED,
+                    .error = TupleCodecError::NULL_NOT_ALLOWED,
                     .column_index = index,
                 };
             }
             has_nulls = true;
+            if (column->type == PhysicalType::VARCHAR) {
+                varlen_sizes.push_back(VarlenValueSize{.length = 0, .is_null = true});
+            }
             continue;
         }
         if (!ValueMatchesType(column->type, values[index])) {
             return {
                 .tuple = std::nullopt,
-                .error = FixedTupleCodecError::TYPE_MISMATCH,
+                .error = TupleCodecError::TYPE_MISMATCH,
                 .column_index = index,
             };
         }
+        if (column->type == PhysicalType::VARCHAR) {
+            const auto* varchar = std::get_if<VarcharValue>(&values[index]);
+            if (varchar == nullptr) {
+                return {
+                    .tuple = std::nullopt,
+                    .error = TupleCodecError::TYPE_MISMATCH,
+                    .column_index = index,
+                };
+            }
+            varlen_sizes.push_back(
+                VarlenValueSize{.length = varchar->bytes.size(), .is_null = false});
+        }
     }
+
+    const auto size_planning = layout.PlanTupleSize(varlen_sizes);
+    if (!size_planning.plan.has_value()) {
+        return {
+            .tuple = std::nullopt,
+            .error = TupleErrorFromSizePlanning(size_planning.error),
+            .column_index = VarlenSchemaColumnIndex(layout, size_planning.varlen_index),
+        };
+    }
+    const auto& size_plan = *size_planning.plan;
 
     const TupleHeader header{
         .xmin = metadata.xmin,
@@ -285,7 +394,9 @@ FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
         .cmax = metadata.cmax,
         .prev_page_no = metadata.prev_page_no,
         .prev_slot = metadata.prev_slot,
-        .tuple_flags = has_nulls ? TUPLE_FLAG_HAS_NULLS : TupleFlags{0},
+        .tuple_flags = static_cast<TupleFlags>(
+            (has_nulls ? TUPLE_FLAG_HAS_NULLS : TupleFlags{0}) |
+            (layout.HasVarlenColumns() ? TUPLE_FLAG_HAS_VARLEN : TupleFlags{0})),
         .header_bytes = TUPLE_HEADER_ENCODED_SIZE,
         .null_bitmap_bytes = layout.NullBitmapSize(),
         .schema_version = layout.SchemaVersion(),
@@ -295,14 +406,15 @@ FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
     if (!EncodeTupleHeader(encoded_header, header)) {
         return {
             .tuple = std::nullopt,
-            .error = FixedTupleCodecError::INVALID_HEADER_METADATA,
+            .error = TupleCodecError::INVALID_HEADER_METADATA,
         };
     }
 
-    std::vector<std::byte> tuple(layout.MinimumTupleSize(), std::byte{0});
+    std::vector<std::byte> tuple(size_plan.total_size, std::byte{0});
     std::ranges::copy(encoded_header, tuple.begin());
     auto tuple_bytes = std::span<std::byte>{tuple};
     auto bitmap = tuple_bytes.subspan(TUPLE_HEADER_ENCODED_SIZE, layout.NullBitmapSize());
+    std::size_t payload_cursor = layout.VarlenPayloadOffset();
 
     for (std::size_t index = 0; index < values.size(); ++index) {
         const auto& column = layout.Columns()[index];
@@ -311,10 +423,50 @@ FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
             if (bitmap_error != NullBitmapError::NONE) {
                 return {
                     .tuple = std::nullopt,
-                    .error = FixedTupleCodecError::MALFORMED_TUPLE,
+                    .error = TupleCodecError::MALFORMED_TUPLE,
                     .column_index = index,
                 };
             }
+            if (column.type == PhysicalType::VARCHAR &&
+                EncodeVarcharDescriptor(
+                    tuple_bytes.subspan(column.fixed_offset, column.fixed_width),
+                    VarcharDescriptor{}) != VarcharDescriptorCodecError::NONE) {
+                return {
+                    .tuple = std::nullopt,
+                    .error = TupleCodecError::MALFORMED_TUPLE,
+                    .column_index = index,
+                };
+            }
+            continue;
+        }
+
+        if (column.type == PhysicalType::VARCHAR) {
+            const auto* varchar = std::get_if<VarcharValue>(&values[index]);
+            if (varchar == nullptr || payload_cursor > std::numeric_limits<std::uint32_t>::max() ||
+                varchar->bytes.size() > std::numeric_limits<std::uint32_t>::max()) {
+                return {
+                    .tuple = std::nullopt,
+                    .error = TupleCodecError::MALFORMED_TUPLE,
+                    .column_index = index,
+                };
+            }
+            const VarcharDescriptor descriptor{
+                .payload_offset = static_cast<std::uint32_t>(payload_cursor),
+                .payload_length = static_cast<std::uint32_t>(varchar->bytes.size()),
+            };
+            if (EncodeVarcharDescriptor(
+                    tuple_bytes.subspan(column.fixed_offset, column.fixed_width), descriptor) !=
+                    VarcharDescriptorCodecError::NONE ||
+                payload_cursor > tuple.size() ||
+                varchar->bytes.size() > tuple.size() - payload_cursor) {
+                return {
+                    .tuple = std::nullopt,
+                    .error = TupleCodecError::MALFORMED_TUPLE,
+                    .column_index = index,
+                };
+            }
+            std::ranges::copy(varchar->bytes, tuple_bytes.subspan(payload_cursor).begin());
+            payload_cursor += varchar->bytes.size();
             continue;
         }
 
@@ -331,26 +483,27 @@ FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
         }
     }
 
-    return {.tuple = std::move(tuple), .error = FixedTupleCodecError::NONE};
+    if (payload_cursor != size_plan.total_size) {
+        return {.tuple = std::nullopt, .error = TupleCodecError::MALFORMED_TUPLE};
+    }
+
+    return {.tuple = std::move(tuple), .error = TupleCodecError::NONE};
 }
 
-FixedTupleValidationResult ValidateFixedTuple(const TuplePhysicalLayout& layout,
-                                              std::span<const std::byte> tuple) noexcept {
-    if (layout.HasVarlenColumns()) {
-        return {
-            .header = std::nullopt,
-            .error = FixedTupleCodecError::UNSUPPORTED_VARLEN_TYPE,
-        };
-    }
+TupleValidationResult ValidateTuple(const TuplePhysicalLayout& layout,
+                                    std::span<const std::byte> tuple) noexcept {
     if (tuple.size() < layout.MinimumTupleSize()) {
-        return {.header = std::nullopt, .error = FixedTupleCodecError::MALFORMED_TUPLE};
+        return {.header = std::nullopt, .error = TupleCodecError::MALFORMED_TUPLE};
+    }
+    if (tuple.size() > HEAP_PAGE_MAX_RAW_TUPLE_SIZE) {
+        return {.header = std::nullopt, .error = TupleCodecError::TUPLE_TOO_LARGE};
     }
 
     const auto decoded_header = DecodeTupleHeader(tuple.first(TUPLE_HEADER_ENCODED_SIZE));
     if (!decoded_header.header.has_value()) {
         return {
             .header = std::nullopt,
-            .error = FixedTupleCodecError::MALFORMED_TUPLE,
+            .error = TupleCodecError::MALFORMED_TUPLE,
             .header_error = decoded_header.error,
         };
     }
@@ -358,12 +511,15 @@ FixedTupleValidationResult ValidateFixedTuple(const TuplePhysicalLayout& layout,
     if (header.schema_version != layout.SchemaVersion()) {
         return {
             .header = std::nullopt,
-            .error = FixedTupleCodecError::SCHEMA_VERSION_MISMATCH,
+            .error = TupleCodecError::SCHEMA_VERSION_MISMATCH,
         };
     }
-    if (header.null_bitmap_bytes != layout.NullBitmapSize() ||
-        (header.tuple_flags & TUPLE_FLAG_HAS_VARLEN) != 0) {
-        return {.header = std::nullopt, .error = FixedTupleCodecError::MALFORMED_TUPLE};
+    if (header.null_bitmap_bytes != layout.NullBitmapSize()) {
+        return {.header = std::nullopt, .error = TupleCodecError::MALFORMED_TUPLE};
+    }
+    const bool flag_has_varlen = (header.tuple_flags & TUPLE_FLAG_HAS_VARLEN) != 0;
+    if (flag_has_varlen != layout.HasVarlenColumns()) {
+        return {.header = std::nullopt, .error = TupleCodecError::VARLEN_FLAG_MISMATCH};
     }
 
     const auto bitmap = tuple.subspan(TUPLE_HEADER_ENCODED_SIZE, layout.NullBitmapSize());
@@ -371,7 +527,7 @@ FixedTupleValidationResult ValidateFixedTuple(const TuplePhysicalLayout& layout,
         const auto unused_mask = UnusedBitmapBitMask(layout.ColumnCount());
         const auto last_byte = std::to_integer<std::uint8_t>(bitmap.back());
         if ((last_byte & unused_mask) != 0) {
-            return {.header = std::nullopt, .error = FixedTupleCodecError::MALFORMED_TUPLE};
+            return {.header = std::nullopt, .error = TupleCodecError::MALFORMED_TUPLE};
         }
     }
 
@@ -381,7 +537,7 @@ FixedTupleValidationResult ValidateFixedTuple(const TuplePhysicalLayout& layout,
         if (!null_state) {
             return {
                 .header = std::nullopt,
-                .error = FixedTupleCodecError::MALFORMED_TUPLE,
+                .error = TupleCodecError::MALFORMED_TUPLE,
                 .column_index = index,
             };
         }
@@ -391,7 +547,7 @@ FixedTupleValidationResult ValidateFixedTuple(const TuplePhysicalLayout& layout,
         if (!layout.Columns()[index].nullable) {
             return {
                 .header = std::nullopt,
-                .error = FixedTupleCodecError::NULL_NOT_ALLOWED,
+                .error = TupleCodecError::NULL_NOT_ALLOWED,
                 .column_index = index,
             };
         }
@@ -400,20 +556,80 @@ FixedTupleValidationResult ValidateFixedTuple(const TuplePhysicalLayout& layout,
 
     const bool flag_has_nulls = (header.tuple_flags & TUPLE_FLAG_HAS_NULLS) != 0;
     if (flag_has_nulls != has_nulls) {
-        return {.header = std::nullopt, .error = FixedTupleCodecError::FLAG_BITMAP_MISMATCH};
+        return {.header = std::nullopt, .error = TupleCodecError::FLAG_BITMAP_MISMATCH};
     }
 
-    return {.header = header, .error = FixedTupleCodecError::NONE};
+    std::size_t expected_payload_offset = layout.VarlenPayloadOffset();
+    for (std::size_t index = 0; index < layout.ColumnCount(); ++index) {
+        const auto& column = layout.Columns()[index];
+        if (column.type != PhysicalType::VARCHAR) {
+            continue;
+        }
+
+        const auto decoded_descriptor =
+            DecodeVarcharDescriptor(tuple.subspan(column.fixed_offset, column.fixed_width));
+        if (!decoded_descriptor.descriptor.has_value()) {
+            return {
+                .header = std::nullopt,
+                .error = TupleCodecError::INVALID_VARLEN_DESCRIPTOR,
+                .column_index = index,
+            };
+        }
+        const auto& descriptor = *decoded_descriptor.descriptor;
+        const auto null_state = IsNull(bitmap, layout.ColumnCount(), index);
+        if (!null_state) {
+            return {
+                .header = std::nullopt,
+                .error = TupleCodecError::MALFORMED_TUPLE,
+                .column_index = index,
+            };
+        }
+        if (null_state.is_null) {
+            if (descriptor != VarcharDescriptor{}) {
+                return {
+                    .header = std::nullopt,
+                    .error = TupleCodecError::INVALID_VARLEN_DESCRIPTOR,
+                    .column_index = index,
+                };
+            }
+            continue;
+        }
+
+        std::uint32_t descriptor_end = 0;
+        if (descriptor.payload_offset < layout.VarlenPayloadOffset() ||
+            !CheckedDescriptorEnd(descriptor, descriptor_end) ||
+            descriptor.payload_offset > tuple.size() || descriptor_end > tuple.size()) {
+            return {
+                .header = std::nullopt,
+                .error = TupleCodecError::INVALID_VARLEN_DESCRIPTOR,
+                .column_index = index,
+            };
+        }
+        if (descriptor.payload_offset != expected_payload_offset) {
+            return {
+                .header = std::nullopt,
+                .error = TupleCodecError::VARLEN_OFFSET_MISMATCH,
+                .column_index = index,
+            };
+        }
+        expected_payload_offset = descriptor_end;
+    }
+
+    if (expected_payload_offset != tuple.size()) {
+        return {.header = std::nullopt, .error = TupleCodecError::TRAILING_BYTES};
+    }
+
+    return {.header = header, .error = TupleCodecError::NONE};
 }
 
-FixedTupleDecodeResult DecodeFixedTupleValue(const TuplePhysicalLayout& layout,
-                                             std::span<const std::byte> tuple,
-                                             std::size_t column_index) noexcept {
+TupleDecodeResult DecodeTupleValue(const TuplePhysicalLayout& layout,
+                                   std::span<const std::byte> tuple,
+                                   std::size_t column_index) noexcept {
     if (column_index >= layout.ColumnCount()) {
-        return {.value = std::nullopt, .error = FixedTupleCodecError::COLUMN_OUT_OF_RANGE};
+        return {.value = std::nullopt, .error = TupleCodecError::COLUMN_OUT_OF_RANGE};
     }
 
-    const auto validation = ValidateFixedTuple(layout, tuple);
+    const auto validation = ValidateTuple(layout, tuple);
     if (!validation.header.has_value()) {
         return {
             .value = std::nullopt,
@@ -425,16 +641,33 @@ FixedTupleDecodeResult DecodeFixedTupleValue(const TuplePhysicalLayout& layout,
     const auto bitmap = tuple.subspan(TUPLE_HEADER_ENCODED_SIZE, layout.NullBitmapSize());
     const auto null_state = IsNull(bitmap, layout.ColumnCount(), column_index);
     if (!null_state) {
-        return {.value = std::nullopt, .error = FixedTupleCodecError::MALFORMED_TUPLE};
+        return {.value = std::nullopt, .error = TupleCodecError::MALFORMED_TUPLE};
     }
     if (null_state.is_null) {
         return {
-            .value = FixedTupleValue{std::monostate{}},
-            .error = FixedTupleCodecError::NONE,
+            .value = TupleValue{std::monostate{}},
+            .error = TupleCodecError::NONE,
         };
     }
 
     const auto& column = layout.Columns()[column_index];
+    if (column.type == PhysicalType::VARCHAR) {
+        const auto decoded_descriptor =
+            DecodeVarcharDescriptor(tuple.subspan(column.fixed_offset, column.fixed_width));
+        if (!decoded_descriptor.descriptor.has_value()) {
+            return {
+                .value = std::nullopt,
+                .error = TupleCodecError::INVALID_VARLEN_DESCRIPTOR,
+            };
+        }
+        const auto& descriptor = *decoded_descriptor.descriptor;
+        return {
+            .value = TupleValue{VarcharValue{
+                .bytes = tuple.subspan(descriptor.payload_offset, descriptor.payload_length)}},
+            .error = TupleCodecError::NONE,
+        };
+    }
+
     const auto decoded =
         DecodeFixedScalar(column.type, tuple.subspan(column.fixed_offset, column.fixed_width));
     if (!decoded.value.has_value()) {
@@ -443,7 +676,7 @@ FixedTupleDecodeResult DecodeFixedTupleValue(const TuplePhysicalLayout& layout,
             .error = TupleErrorFromScalar(decoded.error),
         };
     }
-    return {.value = decoded.value, .error = FixedTupleCodecError::NONE};
+    return {.value = decoded.value, .error = TupleCodecError::NONE};
 }
 
 } // namespace dblusblus

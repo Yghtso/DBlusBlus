@@ -3,6 +3,7 @@
 
 #include "storage/tuple_layout.h"
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,33 @@
 #include <vector>
 
 namespace dblusblus {
+
+struct VarcharDescriptor {
+    std::uint32_t payload_offset{0};
+    std::uint32_t payload_length{0};
+
+    bool operator==(const VarcharDescriptor&) const = default;
+};
+
+enum class VarcharDescriptorCodecError : std::uint8_t {
+    NONE,
+    BUFFER_TOO_SMALL,
+};
+
+struct VarcharDescriptorDecodeResult {
+    std::optional<VarcharDescriptor> descriptor;
+    VarcharDescriptorCodecError error{VarcharDescriptorCodecError::NONE};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return descriptor.has_value();
+    }
+};
+
+[[nodiscard]] VarcharDescriptorCodecError
+EncodeVarcharDescriptor(std::span<std::byte> destination,
+                        const VarcharDescriptor& descriptor) noexcept;
+[[nodiscard]] VarcharDescriptorDecodeResult
+DecodeVarcharDescriptor(std::span<const std::byte> source) noexcept;
 
 struct Float64PhysicalValue {
     std::uint64_t bits{0};
@@ -39,16 +67,25 @@ struct TimestampPhysicalValue {
     bool operator==(const TimestampPhysicalValue&) const = default;
 };
 
-// Construction/testing representation for storage tuples. This is not the execution engine's
-// future row-at-a-time or vectorized value representation. All alternatives are fixed-size and
-// std::variant stores them inline.
-using FixedTupleValue = std::variant<std::monostate,
-                                     bool,
-                                     std::int32_t,
-                                     std::int64_t,
-                                     Float64PhysicalValue,
-                                     DatePhysicalValue,
-                                     TimestampPhysicalValue>;
+struct VarcharValue {
+    std::span<const std::byte> bytes;
+
+    [[nodiscard]] bool operator==(const VarcharValue& other) const noexcept {
+        return std::ranges::equal(bytes, other.bytes);
+    }
+};
+
+// Construction/testing and storage-decode representation. VarcharValue is a non-owning input view
+// during encode and a non-owning tuple-backed view after decode. This is not the future execution
+// engine's row-at-a-time or vectorized value representation.
+using TupleValue = std::variant<std::monostate,
+                                bool,
+                                std::int32_t,
+                                std::int64_t,
+                                Float64PhysicalValue,
+                                DatePhysicalValue,
+                                TimestampPhysicalValue,
+                                VarcharValue>;
 
 enum class FixedScalarCodecError : std::uint8_t {
     NONE,
@@ -61,7 +98,7 @@ enum class FixedScalarCodecError : std::uint8_t {
 };
 
 struct FixedScalarDecodeResult {
-    std::optional<FixedTupleValue> value;
+    std::optional<TupleValue> value;
     FixedScalarCodecError error{FixedScalarCodecError::NONE};
 
     [[nodiscard]] explicit operator bool() const noexcept {
@@ -71,7 +108,7 @@ struct FixedScalarDecodeResult {
 
 [[nodiscard]] FixedScalarCodecError EncodeFixedScalar(std::span<std::byte> destination,
                                                       PhysicalType type,
-                                                      const FixedTupleValue& value) noexcept;
+                                                      const TupleValue& value) noexcept;
 [[nodiscard]] FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
                                                         std::span<const std::byte> source) noexcept;
 
@@ -86,24 +123,28 @@ struct TupleVersionMetadata {
     bool operator==(const TupleVersionMetadata&) const = default;
 };
 
-enum class FixedTupleCodecError : std::uint8_t {
+enum class TupleCodecError : std::uint8_t {
     NONE,
     COLUMN_COUNT_MISMATCH,
     COLUMN_OUT_OF_RANGE,
     TYPE_MISMATCH,
     NULL_NOT_ALLOWED,
-    UNSUPPORTED_VARLEN_TYPE,
+    VARCHAR_LENGTH_TOO_LARGE,
     TUPLE_TOO_LARGE,
     INVALID_HEADER_METADATA,
     MALFORMED_TUPLE,
     SCHEMA_VERSION_MISMATCH,
     INVALID_BOOLEAN,
     FLAG_BITMAP_MISMATCH,
+    VARLEN_FLAG_MISMATCH,
+    INVALID_VARLEN_DESCRIPTOR,
+    VARLEN_OFFSET_MISMATCH,
+    TRAILING_BYTES,
 };
 
-struct FixedTupleEncodeResult {
+struct TupleEncodeResult {
     std::optional<std::vector<std::byte>> tuple;
-    FixedTupleCodecError error{FixedTupleCodecError::NONE};
+    TupleCodecError error{TupleCodecError::NONE};
     std::size_t column_index{0};
 
     [[nodiscard]] explicit operator bool() const noexcept {
@@ -111,9 +152,9 @@ struct FixedTupleEncodeResult {
     }
 };
 
-struct FixedTupleValidationResult {
+struct TupleValidationResult {
     std::optional<TupleHeader> header;
-    FixedTupleCodecError error{FixedTupleCodecError::NONE};
+    TupleCodecError error{TupleCodecError::NONE};
     TupleHeaderDecodeError header_error{TupleHeaderDecodeError::NONE};
     std::size_t column_index{0};
 
@@ -122,9 +163,9 @@ struct FixedTupleValidationResult {
     }
 };
 
-struct FixedTupleDecodeResult {
-    std::optional<FixedTupleValue> value;
-    FixedTupleCodecError error{FixedTupleCodecError::NONE};
+struct TupleDecodeResult {
+    std::optional<TupleValue> value;
+    TupleCodecError error{TupleCodecError::NONE};
     TupleHeaderDecodeError header_error{TupleHeaderDecodeError::NONE};
 
     [[nodiscard]] explicit operator bool() const noexcept {
@@ -134,16 +175,17 @@ struct FixedTupleDecodeResult {
 
 // This owning-vector encoder is a storage construction primitive. It is intentionally not the
 // allocation model for future vectorized execution.
-[[nodiscard]] FixedTupleEncodeResult EncodeFixedTuple(const TuplePhysicalLayout& layout,
-                                                      const TupleVersionMetadata& metadata,
-                                                      std::span<const FixedTupleValue> values);
+[[nodiscard]] TupleEncodeResult EncodeTuple(const TuplePhysicalLayout& layout,
+                                            const TupleVersionMetadata& metadata,
+                                            std::span<const TupleValue> values);
 
-[[nodiscard]] FixedTupleValidationResult
-ValidateFixedTuple(const TuplePhysicalLayout& layout, std::span<const std::byte> tuple) noexcept;
+[[nodiscard]] TupleValidationResult ValidateTuple(const TuplePhysicalLayout& layout,
+                                                  std::span<const std::byte> tuple) noexcept;
 
-[[nodiscard]] FixedTupleDecodeResult DecodeFixedTupleValue(const TuplePhysicalLayout& layout,
-                                                           std::span<const std::byte> tuple,
-                                                           std::size_t column_index) noexcept;
+// A decoded VarcharValue borrows from tuple and must not outlive that span's backing storage.
+[[nodiscard]] TupleDecodeResult DecodeTupleValue(const TuplePhysicalLayout& layout,
+                                                 std::span<const std::byte> tuple,
+                                                 std::size_t column_index) noexcept;
 
 static_assert(sizeof(double) == sizeof(std::uint64_t));
 
