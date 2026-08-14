@@ -32,7 +32,7 @@ template <typename Value>
 }
 
 void ExpectScalarRoundTrip(PhysicalType type,
-                           const FixedTupleValue& expected_value,
+                           const TupleValue& expected_value,
                            std::span<const std::byte> expected_bytes) {
     std::array<std::byte, TIMESTAMP_PHYSICAL_SIZE> encoded{};
     ASSERT_EQ(EncodeFixedScalar(encoded, type, expected_value), FixedScalarCodecError::NONE);
@@ -52,21 +52,21 @@ void ExpectScalarRoundTrip(PhysicalType type,
 void ExpectTupleValue(const TuplePhysicalLayout& layout,
                       std::span<const std::byte> tuple,
                       std::size_t column_index,
-                      const FixedTupleValue& expected) {
-    const auto decoded = DecodeFixedTupleValue(layout, tuple, column_index);
+                      const TupleValue& expected) {
+    const auto decoded = DecodeTupleValue(layout, tuple, column_index);
     if (!decoded.value.has_value()) {
         ADD_FAILURE() << "fixed tuple column " << column_index << " unexpectedly failed to decode";
         return;
     }
-    EXPECT_EQ(decoded.error, FixedTupleCodecError::NONE);
+    EXPECT_EQ(decoded.error, TupleCodecError::NONE);
     EXPECT_EQ(*decoded.value, expected);
 }
 
 TEST(FixedScalarCodecTest, EncodesBooleanAsExactlyZeroOrOneAndRejectsOtherBytes) {
     constexpr std::array false_bytes{std::byte{0x00}};
     constexpr std::array true_bytes{std::byte{0x01}};
-    ExpectScalarRoundTrip(PhysicalType::BOOLEAN, FixedTupleValue{false}, false_bytes);
-    ExpectScalarRoundTrip(PhysicalType::BOOLEAN, FixedTupleValue{true}, true_bytes);
+    ExpectScalarRoundTrip(PhysicalType::BOOLEAN, TupleValue{false}, false_bytes);
+    ExpectScalarRoundTrip(PhysicalType::BOOLEAN, TupleValue{true}, true_bytes);
 
     constexpr std::array malformed{std::byte{0x02}};
     const auto decoded = DecodeFixedScalar(PhysicalType::BOOLEAN, malformed);
@@ -97,8 +97,7 @@ TEST(FixedScalarCodecTest, EncodesInt32TwosComplementLittleEndianExactly) {
     };
 
     for (const auto& test_case : cases) {
-        ExpectScalarRoundTrip(
-            PhysicalType::INT32, FixedTupleValue{test_case.value}, test_case.bytes);
+        ExpectScalarRoundTrip(PhysicalType::INT32, TupleValue{test_case.value}, test_case.bytes);
     }
 }
 
@@ -155,8 +154,7 @@ TEST(FixedScalarCodecTest, EncodesInt64TwosComplementLittleEndianExactly) {
     };
 
     for (const auto& test_case : cases) {
-        ExpectScalarRoundTrip(
-            PhysicalType::INT64, FixedTupleValue{test_case.value}, test_case.bytes);
+        ExpectScalarRoundTrip(PhysicalType::INT64, TupleValue{test_case.value}, test_case.bytes);
     }
 }
 
@@ -176,7 +174,7 @@ TEST(FixedScalarCodecTest, PreservesEveryFloat64PayloadBit) {
         ASSERT_TRUE(EncodeLittleEndian(expected_bytes, expected_bits));
         const auto value = Float64PhysicalValue::FromDouble(std::bit_cast<double>(expected_bits));
         ASSERT_EQ(value.bits, expected_bits);
-        ExpectScalarRoundTrip(PhysicalType::FLOAT64, FixedTupleValue{value}, expected_bytes);
+        ExpectScalarRoundTrip(PhysicalType::FLOAT64, TupleValue{value}, expected_bytes);
 
         const auto decoded = DecodeFixedScalar(PhysicalType::FLOAT64, expected_bytes);
         const auto* decoded_value = RequireOptional(decoded.value, "decoded FLOAT64");
@@ -195,9 +193,9 @@ TEST(FixedScalarCodecTest, TreatsDateAndTimestampAsRawSignedPhysicalScalars) {
     constexpr std::array date_negative{
         std::byte{0xFC}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
     ExpectScalarRoundTrip(
-        PhysicalType::DATE, FixedTupleValue{DatePhysicalValue{.value = 0x01020304}}, date_positive);
+        PhysicalType::DATE, TupleValue{DatePhysicalValue{.value = 0x01020304}}, date_positive);
     ExpectScalarRoundTrip(
-        PhysicalType::DATE, FixedTupleValue{DatePhysicalValue{.value = -4}}, date_negative);
+        PhysicalType::DATE, TupleValue{DatePhysicalValue{.value = -4}}, date_negative);
 
     constexpr std::array timestamp_positive{std::byte{0x08},
                                             std::byte{0x07},
@@ -216,28 +214,26 @@ TEST(FixedScalarCodecTest, TreatsDateAndTimestampAsRawSignedPhysicalScalars) {
                                             std::byte{0xFF},
                                             std::byte{0xFF}};
     ExpectScalarRoundTrip(PhysicalType::TIMESTAMP,
-                          FixedTupleValue{TimestampPhysicalValue{.value = 0x0102030405060708LL}},
+                          TupleValue{TimestampPhysicalValue{.value = 0x0102030405060708LL}},
                           timestamp_positive);
     ExpectScalarRoundTrip(PhysicalType::TIMESTAMP,
-                          FixedTupleValue{TimestampPhysicalValue{.value = -8}},
+                          TupleValue{TimestampPhysicalValue{.value = -8}},
                           timestamp_negative);
 }
 
 TEST(FixedScalarCodecTest, RejectsMismatchesVarlenInvalidTypesAndShortBuffers) {
     std::array<std::byte, INT64_PHYSICAL_SIZE> destination{};
-    EXPECT_EQ(EncodeFixedScalar(destination, PhysicalType::INT32, FixedTupleValue{std::int64_t{1}}),
+    EXPECT_EQ(EncodeFixedScalar(destination, PhysicalType::INT32, TupleValue{std::int64_t{1}}),
               FixedScalarCodecError::TYPE_MISMATCH);
-    EXPECT_EQ(
-        EncodeFixedScalar(destination, PhysicalType::INT32, FixedTupleValue{std::monostate{}}),
-        FixedScalarCodecError::TYPE_MISMATCH);
-    EXPECT_EQ(EncodeFixedScalar(destination, PhysicalType::VARCHAR, FixedTupleValue{false}),
+    EXPECT_EQ(EncodeFixedScalar(destination, PhysicalType::INT32, TupleValue{std::monostate{}}),
+              FixedScalarCodecError::TYPE_MISMATCH);
+    EXPECT_EQ(EncodeFixedScalar(destination, PhysicalType::VARCHAR, TupleValue{false}),
               FixedScalarCodecError::UNSUPPORTED_VARLEN_TYPE);
-    EXPECT_EQ(
-        EncodeFixedScalar(destination, static_cast<PhysicalType>(0xFFU), FixedTupleValue{false}),
-        FixedScalarCodecError::INVALID_PHYSICAL_TYPE);
+    EXPECT_EQ(EncodeFixedScalar(destination, static_cast<PhysicalType>(0xFFU), TupleValue{false}),
+              FixedScalarCodecError::INVALID_PHYSICAL_TYPE);
     EXPECT_EQ(EncodeFixedScalar(std::span{destination}.first(3),
                                 PhysicalType::INT32,
-                                FixedTupleValue{std::int32_t{1}}),
+                                TupleValue{std::int32_t{1}}),
               FixedScalarCodecError::DESTINATION_TOO_SMALL);
 
     EXPECT_EQ(DecodeFixedScalar(PhysicalType::INT64, std::span{destination}.first(7)).error,
@@ -265,12 +261,12 @@ TEST(FixedTupleCodecTest, EncodesAndDecodesExactMixedFixedTuple) {
     const auto& layout = *layout_pointer;
     const auto float_value = Float64PhysicalValue::FromDouble(-2.5);
     const std::array values{
-        FixedTupleValue{true},
-        FixedTupleValue{std::int32_t{0x01020304}},
-        FixedTupleValue{std::int64_t{-1}},
-        FixedTupleValue{float_value},
-        FixedTupleValue{DatePhysicalValue{.value = -2}},
-        FixedTupleValue{TimestampPhysicalValue{.value = 0x0102030405060708LL}},
+        TupleValue{true},
+        TupleValue{std::int32_t{0x01020304}},
+        TupleValue{std::int64_t{-1}},
+        TupleValue{float_value},
+        TupleValue{DatePhysicalValue{.value = -2}},
+        TupleValue{TimestampPhysicalValue{.value = 0x0102030405060708LL}},
     };
     const TupleVersionMetadata metadata{
         .xmin = TxnId{17},
@@ -281,7 +277,7 @@ TEST(FixedTupleCodecTest, EncodesAndDecodesExactMixedFixedTuple) {
         .prev_slot = SlotId{7},
     };
 
-    const auto encoded = EncodeFixedTuple(layout, metadata, values);
+    const auto encoded = EncodeTuple(layout, metadata, values);
     const auto* tuple_pointer = RequireOptional(encoded.tuple, "mixed encoded tuple");
     if (tuple_pointer == nullptr) {
         return;
@@ -297,7 +293,7 @@ TEST(FixedTupleCodecTest, EncodesAndDecodesExactMixedFixedTuple) {
     ASSERT_EQ(layout.Columns()[4].fixed_offset, 70U);
     ASSERT_EQ(layout.Columns()[5].fixed_offset, 74U);
 
-    const auto validation = ValidateFixedTuple(layout, tuple);
+    const auto validation = ValidateTuple(layout, tuple);
     const auto* header = RequireOptional(validation.header, "validated mixed tuple header");
     if (header == nullptr) {
         return;
@@ -361,11 +357,11 @@ TEST(FixedTupleCodecTest, DerivesNullBitmapFlagAndZeroesNullFixedBytesAcrossBoun
     }
     const auto& layout = *layout_pointer;
 
-    std::array<FixedTupleValue, 10> values{};
-    values.fill(FixedTupleValue{true});
-    values[0] = FixedTupleValue{std::monostate{}};
-    values[8] = FixedTupleValue{std::monostate{}};
-    const auto encoded = EncodeFixedTuple(layout, TupleVersionMetadata{}, values);
+    std::array<TupleValue, 10> values{};
+    values.fill(TupleValue{true});
+    values[0] = TupleValue{std::monostate{}};
+    values[8] = TupleValue{std::monostate{}};
+    const auto encoded = EncodeTuple(layout, TupleVersionMetadata{}, values);
     const auto* tuple_pointer = RequireOptional(encoded.tuple, "bitmap boundary tuple");
     if (tuple_pointer == nullptr) {
         return;
@@ -385,9 +381,9 @@ TEST(FixedTupleCodecTest, DerivesNullBitmapFlagAndZeroesNullFixedBytesAcrossBoun
         return;
     }
     EXPECT_EQ(decoded_header->tuple_flags, TUPLE_FLAG_HAS_NULLS);
-    ExpectTupleValue(layout, tuple, 0, FixedTupleValue{std::monostate{}});
-    ExpectTupleValue(layout, tuple, 8, FixedTupleValue{std::monostate{}});
-    ExpectTupleValue(layout, tuple, 9, FixedTupleValue{true});
+    ExpectTupleValue(layout, tuple, 0, TupleValue{std::monostate{}});
+    ExpectTupleValue(layout, tuple, 8, TupleValue{std::monostate{}});
+    ExpectTupleValue(layout, tuple, 9, TupleValue{true});
 }
 
 TEST(FixedTupleCodecTest, ClearsHasNullsWhenAllNullableColumnsArePresent) {
@@ -400,9 +396,9 @@ TEST(FixedTupleCodecTest, ClearsHasNullsWhenAllNullableColumnsArePresent) {
     if (layout == nullptr) {
         return;
     }
-    const std::array values{FixedTupleValue{false}, FixedTupleValue{std::int32_t{0}}};
+    const std::array values{TupleValue{false}, TupleValue{std::int32_t{0}}};
 
-    const auto encoded = EncodeFixedTuple(*layout, TupleVersionMetadata{}, values);
+    const auto encoded = EncodeTuple(*layout, TupleVersionMetadata{}, values);
     const auto* tuple = RequireOptional(encoded.tuple, "all-present tuple");
     if (tuple == nullptr) {
         return;
@@ -425,18 +421,18 @@ TEST(FixedTupleCodecTest, RejectsNullForNotNullColumnWithoutTuple) {
     if (layout == nullptr) {
         return;
     }
-    const std::array values{FixedTupleValue{std::monostate{}}};
+    const std::array values{TupleValue{std::monostate{}}};
 
-    const auto encoded = EncodeFixedTuple(*layout, TupleVersionMetadata{}, values);
+    const auto encoded = EncodeTuple(*layout, TupleVersionMetadata{}, values);
     EXPECT_FALSE(encoded.tuple.has_value());
-    EXPECT_EQ(encoded.error, FixedTupleCodecError::NULL_NOT_ALLOWED);
+    EXPECT_EQ(encoded.error, TupleCodecError::NULL_NOT_ALLOWED);
     EXPECT_EQ(encoded.column_index, 0U);
 }
 
 TEST(FixedTupleCodecTest, RejectsEveryFixedTypeMismatchWithoutTuple) {
     struct Case {
         PhysicalType expected_type;
-        FixedTupleValue wrong_value;
+        TupleValue wrong_value;
     };
     const std::array cases{
         Case{.expected_type = PhysicalType::BOOLEAN, .wrong_value = std::int32_t{1}},
@@ -457,14 +453,14 @@ TEST(FixedTupleCodecTest, RejectsEveryFixedTypeMismatchWithoutTuple) {
             return;
         }
         const std::array values{test_case.wrong_value};
-        const auto encoded = EncodeFixedTuple(*layout, TupleVersionMetadata{}, values);
+        const auto encoded = EncodeTuple(*layout, TupleVersionMetadata{}, values);
         EXPECT_FALSE(encoded.tuple.has_value());
-        EXPECT_EQ(encoded.error, FixedTupleCodecError::TYPE_MISMATCH);
+        EXPECT_EQ(encoded.error, TupleCodecError::TYPE_MISMATCH);
         EXPECT_EQ(encoded.column_index, 0U);
     }
 }
 
-TEST(FixedTupleCodecTest, RejectsColumnCountVarlenAndInvalidMetadataWithoutTuple) {
+TEST(FixedTupleCodecTest, RejectsColumnCountAndInvalidMetadataWithoutTuple) {
     constexpr std::array fixed_columns{
         PhysicalColumnSpec{.type = PhysicalType::INT32, .nullable = false},
     };
@@ -473,33 +469,17 @@ TEST(FixedTupleCodecTest, RejectsColumnCountVarlenAndInvalidMetadataWithoutTuple
     if (fixed_layout == nullptr) {
         return;
     }
-    EXPECT_EQ(EncodeFixedTuple(*fixed_layout, TupleVersionMetadata{}, {}).error,
-              FixedTupleCodecError::COLUMN_COUNT_MISMATCH);
-
-    constexpr std::array varchar_columns{
-        PhysicalColumnSpec{.type = PhysicalType::VARCHAR, .nullable = true},
-    };
-    const auto varchar_built = BuildTuplePhysicalLayout(varchar_columns, SchemaVer{1});
-    const auto* varchar_layout = RequireOptional(varchar_built.layout, "VARCHAR layout");
-    if (varchar_layout == nullptr) {
-        return;
-    }
-    const std::array null_value{FixedTupleValue{std::monostate{}}};
-    EXPECT_EQ(EncodeFixedTuple(*varchar_layout, TupleVersionMetadata{}, null_value).error,
-              FixedTupleCodecError::UNSUPPORTED_VARLEN_TYPE);
-    const std::vector<std::byte> unencoded_varchar_tuple(varchar_layout->MinimumTupleSize(),
-                                                         std::byte{0});
-    EXPECT_EQ(ValidateFixedTuple(*varchar_layout, unencoded_varchar_tuple).error,
-              FixedTupleCodecError::UNSUPPORTED_VARLEN_TYPE);
+    EXPECT_EQ(EncodeTuple(*fixed_layout, TupleVersionMetadata{}, {}).error,
+              TupleCodecError::COLUMN_COUNT_MISMATCH);
 
     const TupleVersionMetadata malformed_previous{
         .prev_page_no = INVALID_PAGE_NO,
         .prev_slot = SlotId{3},
     };
-    const std::array fixed_value{FixedTupleValue{std::int32_t{1}}};
-    const auto malformed = EncodeFixedTuple(*fixed_layout, malformed_previous, fixed_value);
+    const std::array fixed_value{TupleValue{std::int32_t{1}}};
+    const auto malformed = EncodeTuple(*fixed_layout, malformed_previous, fixed_value);
     EXPECT_FALSE(malformed.tuple.has_value());
-    EXPECT_EQ(malformed.error, FixedTupleCodecError::INVALID_HEADER_METADATA);
+    EXPECT_EQ(malformed.error, TupleCodecError::INVALID_HEADER_METADATA);
 }
 
 TEST(FixedTupleCodecTest, SupportsZeroColumnSchemaAndLayoutOwnedSchemaVersion) {
@@ -512,13 +492,13 @@ TEST(FixedTupleCodecTest, SupportsZeroColumnSchemaAndLayoutOwnedSchemaVersion) {
     const auto& layout = *layout_pointer;
     const TupleVersionMetadata metadata{.xmin = TxnId{11}, .cmin = CommandId{2}};
 
-    const auto encoded = EncodeFixedTuple(layout, metadata, {});
+    const auto encoded = EncodeTuple(layout, metadata, {});
     const auto* tuple = RequireOptional(encoded.tuple, "zero-column tuple");
     if (tuple == nullptr) {
         return;
     }
     EXPECT_EQ(tuple->size(), TUPLE_HEADER_ENCODED_SIZE);
-    const auto validation = ValidateFixedTuple(layout, *tuple);
+    const auto validation = ValidateTuple(layout, *tuple);
     const auto* header = RequireOptional(validation.header, "zero-column tuple header");
     if (header == nullptr) {
         return;
@@ -528,8 +508,7 @@ TEST(FixedTupleCodecTest, SupportsZeroColumnSchemaAndLayoutOwnedSchemaVersion) {
     EXPECT_EQ(header->null_bitmap_bytes, 0U);
     EXPECT_EQ(header->tuple_flags, 0U);
     EXPECT_EQ(header->reserved, 0U);
-    EXPECT_EQ(DecodeFixedTupleValue(layout, *tuple, 0).error,
-              FixedTupleCodecError::COLUMN_OUT_OF_RANGE);
+    EXPECT_EQ(DecodeTupleValue(layout, *tuple, 0).error, TupleCodecError::COLUMN_OUT_OF_RANGE);
 
     const auto other_layout =
         BuildTuplePhysicalLayout(std::span<const PhysicalColumnSpec>{}, SchemaVer{42});
@@ -537,8 +516,8 @@ TEST(FixedTupleCodecTest, SupportsZeroColumnSchemaAndLayoutOwnedSchemaVersion) {
     if (other_layout_pointer == nullptr) {
         return;
     }
-    EXPECT_EQ(ValidateFixedTuple(*other_layout_pointer, *tuple).error,
-              FixedTupleCodecError::SCHEMA_VERSION_MISMATCH);
+    EXPECT_EQ(ValidateTuple(*other_layout_pointer, *tuple).error,
+              TupleCodecError::SCHEMA_VERSION_MISMATCH);
 }
 
 TEST(FixedTupleCodecTest, StrictlyRejectsFlagBitmapAndUnusedBitNoncanonicalTuples) {
@@ -552,8 +531,8 @@ TEST(FixedTupleCodecTest, StrictlyRejectsFlagBitmapAndUnusedBitNoncanonicalTuple
     }
     const auto& layout = *layout_pointer;
 
-    const std::array null_value{FixedTupleValue{std::monostate{}}};
-    const auto null_encoded = EncodeFixedTuple(layout, TupleVersionMetadata{}, null_value);
+    const std::array null_value{TupleValue{std::monostate{}}};
+    const auto null_encoded = EncodeTuple(layout, TupleVersionMetadata{}, null_value);
     const auto* null_tuple = RequireOptional(null_encoded.tuple, "NULL tuple");
     if (null_tuple == nullptr) {
         return;
@@ -562,11 +541,11 @@ TEST(FixedTupleCodecTest, StrictlyRejectsFlagBitmapAndUnusedBitNoncanonicalTuple
     ASSERT_TRUE(EncodeLittleEndian(
         std::span{null_without_flag}.subspan(TUPLE_HEADER_FLAGS_OFFSET, sizeof(TupleFlags)),
         TupleFlags{0}));
-    EXPECT_EQ(ValidateFixedTuple(layout, null_without_flag).error,
-              FixedTupleCodecError::FLAG_BITMAP_MISMATCH);
+    EXPECT_EQ(ValidateTuple(layout, null_without_flag).error,
+              TupleCodecError::FLAG_BITMAP_MISMATCH);
 
-    const std::array present_value{FixedTupleValue{true}};
-    const auto present_encoded = EncodeFixedTuple(layout, TupleVersionMetadata{}, present_value);
+    const std::array present_value{TupleValue{true}};
+    const auto present_encoded = EncodeTuple(layout, TupleVersionMetadata{}, present_value);
     const auto* present_tuple = RequireOptional(present_encoded.tuple, "present tuple");
     if (present_tuple == nullptr) {
         return;
@@ -575,19 +554,19 @@ TEST(FixedTupleCodecTest, StrictlyRejectsFlagBitmapAndUnusedBitNoncanonicalTuple
     ASSERT_TRUE(EncodeLittleEndian(
         std::span{present_with_flag}.subspan(TUPLE_HEADER_FLAGS_OFFSET, sizeof(TupleFlags)),
         TUPLE_FLAG_HAS_NULLS));
-    EXPECT_EQ(ValidateFixedTuple(layout, present_with_flag).error,
-              FixedTupleCodecError::FLAG_BITMAP_MISMATCH);
+    EXPECT_EQ(ValidateTuple(layout, present_with_flag).error,
+              TupleCodecError::FLAG_BITMAP_MISMATCH);
 
     auto unused_bit = *present_tuple;
     unused_bit[TUPLE_HEADER_ENCODED_SIZE] = std::byte{0x80};
-    EXPECT_EQ(ValidateFixedTuple(layout, unused_bit).error, FixedTupleCodecError::MALFORMED_TUPLE);
+    EXPECT_EQ(ValidateTuple(layout, unused_bit).error, TupleCodecError::MALFORMED_TUPLE);
 
     auto unexpected_varlen = *present_tuple;
     ASSERT_TRUE(EncodeLittleEndian(
         std::span{unexpected_varlen}.subspan(TUPLE_HEADER_FLAGS_OFFSET, sizeof(TupleFlags)),
         TUPLE_FLAG_HAS_VARLEN));
-    EXPECT_EQ(ValidateFixedTuple(layout, unexpected_varlen).error,
-              FixedTupleCodecError::MALFORMED_TUPLE);
+    EXPECT_EQ(ValidateTuple(layout, unexpected_varlen).error,
+              TupleCodecError::VARLEN_FLAG_MISMATCH);
 }
 
 TEST(FixedTupleCodecTest, RejectsHeaderLayoutCorruptionAndTruncation) {
@@ -600,8 +579,8 @@ TEST(FixedTupleCodecTest, RejectsHeaderLayoutCorruptionAndTruncation) {
         return;
     }
     const auto& layout = *layout_pointer;
-    const std::array values{FixedTupleValue{std::int32_t{1}}};
-    const auto encoded = EncodeFixedTuple(layout, TupleVersionMetadata{}, values);
+    const std::array values{TupleValue{std::int32_t{1}}};
+    const auto encoded = EncodeTuple(layout, TupleVersionMetadata{}, values);
     const auto* tuple = RequireOptional(encoded.tuple, "corruption-test tuple");
     if (tuple == nullptr) {
         return;
@@ -612,8 +591,8 @@ TEST(FixedTupleCodecTest, RejectsHeaderLayoutCorruptionAndTruncation) {
     ASSERT_TRUE(EncodeLittleEndian(std::span{wrong_header_size}.subspan(
                                        TUPLE_HEADER_HEADER_BYTES_OFFSET, sizeof(std::uint16_t)),
                                    std::uint16_t{47}));
-    const auto header_size_result = ValidateFixedTuple(layout, wrong_header_size);
-    EXPECT_EQ(header_size_result.error, FixedTupleCodecError::MALFORMED_TUPLE);
+    const auto header_size_result = ValidateTuple(layout, wrong_header_size);
+    EXPECT_EQ(header_size_result.error, TupleCodecError::MALFORMED_TUPLE);
     EXPECT_EQ(header_size_result.header_error, TupleHeaderDecodeError::INVALID_HEADER_SIZE);
 
     auto wrong_bitmap_size = valid;
@@ -621,39 +600,38 @@ TEST(FixedTupleCodecTest, RejectsHeaderLayoutCorruptionAndTruncation) {
         EncodeLittleEndian(std::span{wrong_bitmap_size}.subspan(
                                TUPLE_HEADER_NULL_BITMAP_BYTES_OFFSET, sizeof(std::uint16_t)),
                            std::uint16_t{2}));
-    EXPECT_EQ(ValidateFixedTuple(layout, wrong_bitmap_size).error,
-              FixedTupleCodecError::MALFORMED_TUPLE);
+    EXPECT_EQ(ValidateTuple(layout, wrong_bitmap_size).error, TupleCodecError::MALFORMED_TUPLE);
 
     auto wrong_schema_version = valid;
     ASSERT_TRUE(EncodeLittleEndian(std::span{wrong_schema_version}.subspan(
                                        TUPLE_HEADER_SCHEMA_VERSION_OFFSET, sizeof(SchemaVer)),
                                    SchemaVer{8}));
-    EXPECT_EQ(ValidateFixedTuple(layout, wrong_schema_version).error,
-              FixedTupleCodecError::SCHEMA_VERSION_MISMATCH);
+    EXPECT_EQ(ValidateTuple(layout, wrong_schema_version).error,
+              TupleCodecError::SCHEMA_VERSION_MISMATCH);
 
     auto unknown_flags = valid;
     ASSERT_TRUE(EncodeLittleEndian(
         std::span{unknown_flags}.subspan(TUPLE_HEADER_FLAGS_OFFSET, sizeof(TupleFlags)),
         TupleFlags{0x0004}));
-    EXPECT_EQ(ValidateFixedTuple(layout, unknown_flags).header_error,
+    EXPECT_EQ(ValidateTuple(layout, unknown_flags).header_error,
               TupleHeaderDecodeError::INVALID_FLAGS);
 
     auto nonzero_reserved = valid;
     ASSERT_TRUE(EncodeLittleEndian(
         std::span{nonzero_reserved}.subspan(TUPLE_HEADER_RESERVED_OFFSET, sizeof(std::uint32_t)),
         std::uint32_t{1}));
-    EXPECT_EQ(ValidateFixedTuple(layout, nonzero_reserved).header_error,
+    EXPECT_EQ(ValidateTuple(layout, nonzero_reserved).header_error,
               TupleHeaderDecodeError::NONZERO_RESERVED);
 
     auto malformed_previous = valid;
     ASSERT_TRUE(EncodeLittleEndian(
         std::span{malformed_previous}.subspan(TUPLE_HEADER_PREV_SLOT_OFFSET, sizeof(SlotId)),
         SlotId{3}));
-    EXPECT_EQ(ValidateFixedTuple(layout, malformed_previous).header_error,
+    EXPECT_EQ(ValidateTuple(layout, malformed_previous).header_error,
               TupleHeaderDecodeError::INVALID_PREVIOUS_VERSION_POINTER);
 
-    EXPECT_EQ(ValidateFixedTuple(layout, std::span{valid}.first(valid.size() - 1U)).error,
-              FixedTupleCodecError::MALFORMED_TUPLE);
+    EXPECT_EQ(ValidateTuple(layout, std::span{valid}.first(valid.size() - 1U)).error,
+              TupleCodecError::MALFORMED_TUPLE);
 }
 
 TEST(FixedTupleCodecTest, RejectsMalformedBooleanInOtherwiseValidTuple) {
@@ -666,8 +644,8 @@ TEST(FixedTupleCodecTest, RejectsMalformedBooleanInOtherwiseValidTuple) {
         return;
     }
     const auto& layout = *layout_pointer;
-    const std::array values{FixedTupleValue{false}};
-    const auto encoded = EncodeFixedTuple(layout, TupleVersionMetadata{}, values);
+    const std::array values{TupleValue{false}};
+    const auto encoded = EncodeTuple(layout, TupleVersionMetadata{}, values);
     const auto* tuple = RequireOptional(encoded.tuple, "BOOLEAN corruption tuple");
     if (tuple == nullptr) {
         return;
@@ -675,9 +653,8 @@ TEST(FixedTupleCodecTest, RejectsMalformedBooleanInOtherwiseValidTuple) {
     auto malformed = *tuple;
     malformed[layout.Columns()[0].fixed_offset] = std::byte{0x02};
 
-    EXPECT_TRUE(ValidateFixedTuple(layout, malformed));
-    EXPECT_EQ(DecodeFixedTupleValue(layout, malformed, 0).error,
-              FixedTupleCodecError::INVALID_BOOLEAN);
+    EXPECT_TRUE(ValidateTuple(layout, malformed));
+    EXPECT_EQ(DecodeTupleValue(layout, malformed, 0).error, TupleCodecError::INVALID_BOOLEAN);
 }
 
 TEST(FixedTupleCodecTest, ComposesWithHeapPageOpaqueInsertionAndRetrieval) {
@@ -693,12 +670,12 @@ TEST(FixedTupleCodecTest, ComposesWithHeapPageOpaqueInsertionAndRetrieval) {
     }
     const auto& layout = *layout_pointer;
     const std::array values{
-        FixedTupleValue{true},
-        FixedTupleValue{std::monostate{}},
-        FixedTupleValue{TimestampPhysicalValue{.value = -17}},
+        TupleValue{true},
+        TupleValue{std::monostate{}},
+        TupleValue{TimestampPhysicalValue{.value = -17}},
     };
-    const auto encoded = EncodeFixedTuple(
-        layout, TupleVersionMetadata{.xmin = TxnId{29}, .cmin = CommandId{4}}, values);
+    const auto encoded =
+        EncodeTuple(layout, TupleVersionMetadata{.xmin = TxnId{29}, .cmin = CommandId{4}}, values);
     const auto* tuple = RequireOptional(encoded.tuple, "HeapPage composition tuple");
     if (tuple == nullptr) {
         return;

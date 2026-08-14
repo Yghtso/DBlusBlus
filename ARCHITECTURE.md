@@ -2410,6 +2410,22 @@ The known-mask for tuple-header v1 is therefore:
 All other bits are invalid in tuple-header format v1 and must be rejected on
 encode/decode rather than silently preserved.
 
+For tuple format v1, `HAS_VARLEN` is canonical:
+
+```text
+HAS_VARLEN is set
+    iff
+the interpreting physical schema contains at least one VARCHAR column
+```
+
+This rule describes the tuple's physical schema/layout, not whether this
+particular tuple has nonzero variable payload bytes. Therefore `HAS_VARLEN`
+remains set when every VARCHAR value is NULL or an empty non-NULL value, and
+must be clear for a fixed-only schema.
+
+Schema-directed tuple validation must reject either mismatch direction between
+`HAS_VARLEN` and the interpreting physical layout.
+
 The following candidates remain reserved/deferred until their operational,
 visibility, and recovery semantics are explicitly defined:
 
@@ -2434,6 +2450,22 @@ Transaction commit/abort state belongs to transaction-management structures.
 # 72. Tuple Data Layout
 
 ## LOCKED: schema-directed compact binary layout
+
+For tuple format v1, the canonical physical tuple length is exact:
+
+```text
+tuple_size =
+    MinimumTupleSize()
+    + sum(payload_length of each non-NULL VARCHAR)
+```
+
+No unreferenced trailing bytes are permitted.
+
+Schema-directed tuple validation must reject any tuple whose final canonical
+varlen payload cursor does not equal the supplied tuple byte length. This
+applies to both varlen and fixed-only schemas; a fixed-only tuple therefore has
+exactly `MinimumTupleSize()` bytes.
+
 
 Physical tuple:
 
@@ -2667,24 +2699,90 @@ struct serialization is not.
 
 # 75. VARCHAR Representation
 
-## LOCKED: inline varlen payload with descriptor
+## LOCKED
 
-A VARCHAR column's fixed-area slot contains:
+Each VARCHAR column owns an 8-byte descriptor in the fixed area:
 
 ```text
-offset   uint32_t
-length   uint32_t
+descriptor +0..3 = uint32 payload_offset
+descriptor +4..7 = uint32 payload_length
 ```
 
-The referenced bytes live in the variable-length payload area of the same tuple.
+Both fields are little-endian.
 
-The offset is relative to the beginning of the tuple.
+`payload_offset` is absolute relative to tuple byte zero.
 
-No null terminator is required.
+The payload itself is stored inline in the same tuple. No terminator byte is
+stored; length is explicit.
 
-Strings may contain arbitrary bytes as determined by the SQL string semantics.
+For tuple format v1, every non-NULL VARCHAR descriptor must point at or after
+the tuple's `VarlenPayloadOffset()`, and checked:
 
-The database must not use `strlen()` to discover persisted VARCHAR length.
+```text
+payload_offset + payload_length
+```
+
+must remain within the exact physical tuple length.
+
+### Canonical NULL VARCHAR descriptor
+
+A NULL VARCHAR is identified by its null-bitmap bit and must persist the
+canonical descriptor:
+
+```text
+payload_offset = 0
+payload_length = 0
+```
+
+Schema-directed tuple validation must reject any other descriptor under a set
+NULL bit.
+
+NULL VARCHAR values contribute zero payload bytes.
+
+### Canonical present VARCHAR packing
+
+Present VARCHAR payloads are packed consecutively in physical schema-column
+order beginning at:
+
+```text
+VarlenPayloadOffset()
+```
+
+Validation walks VARCHAR columns in physical schema order while maintaining an
+expected payload cursor.
+
+For each present VARCHAR:
+
+```text
+descriptor.payload_offset = expected_payload_offset
+expected_payload_offset += descriptor.payload_length
+```
+
+Therefore tuple format v1 permits no:
+
+- gaps,
+- overlaps,
+- backward payload offsets,
+- reordered VARCHAR payload ranges,
+- references into the tuple header, null bitmap, or fixed area.
+
+A present empty VARCHAR is distinct from NULL:
+
+```text
+null bit        = 0
+payload_length  = 0
+payload_offset  = current expected payload cursor
+```
+
+Because the length is zero, multiple present empty VARCHAR values may point at
+the same current cursor.
+
+VARCHAR payload bytes are opaque storage bytes. The storage layer does not
+define UTF-8 validity, collation, locale, character count, `VARCHAR(n)`
+semantics, or a terminator convention.
+
+Large/overflow values remain deferred; the complete tuple must fit the v1
+inline tuple-size limit.
 
 ---
 
