@@ -74,6 +74,23 @@ std::size_t FsmCategoryMinimumUsableBytes(std::uint8_t category) noexcept {
     return (scaled + FSM_CATEGORY_MAX - 1U) / FSM_CATEGORY_MAX;
 }
 
+FsmMinimumCategoryResult
+MinimumFsmCategoryForTupleBytes(std::size_t required_tuple_bytes) noexcept {
+    if (required_tuple_bytes > FSM_MAX_USABLE_INSERTION_BYTES) {
+        return {
+            .category = std::nullopt,
+            .error = FsmTupleRequestError::TUPLE_TOO_LARGE,
+        };
+    }
+    if (required_tuple_bytes == 0) {
+        return {.category = std::uint8_t{0}};
+    }
+
+    const std::size_t category =
+        (((required_tuple_bytes - 1U) * FSM_CATEGORY_MAX) / FSM_MAX_USABLE_INSERTION_BYTES) + 1U;
+    return {.category = static_cast<std::uint8_t>(category)};
+}
+
 FsmPageMappingResult FsmLocationForHeapPage(PageNo heap_page_no) noexcept {
     if (heap_page_no == 0 || heap_page_no == INVALID_PAGE_NO) {
         return {
