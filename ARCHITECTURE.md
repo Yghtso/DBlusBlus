@@ -2462,28 +2462,89 @@ Do not repeatedly rediscover column offsets by walking every preceding field dur
 
 ## LOCKED
 
-Use one bit per nullable column.
+Tuple format v1 allocates exactly one null bit for every physical schema column,
+including columns declared `NOT NULL`.
 
-Conceptually:
+Therefore:
+
+```text
+null_bit_index(column_i) = i
+
+null_bitmap_bytes =
+    column_count / 8
+    + (column_count % 8 != 0 ? 1 : 0)
+```
+
+Equivalently:
+
+```text
+null_bitmap_bytes = ceil(column_count / 8)
+```
+
+The resulting byte count must fit the persisted 16-bit
+`TupleHeader::null_bitmap_bytes` field.
+
+A zero-column physical schema has:
+
+```text
+null_bitmap_bytes = 0
+```
+
+### Persisted bit meaning
 
 ```text
 bit = 1  => value is NULL
 bit = 0  => value is present
 ```
 
-Exact bit ordering must be documented and tested.
+### Persisted bit ordering
 
-Recommended ordering:
+Bits are assigned LSB-first by physical schema-column index:
 
 ```text
-column 0 -> least-significant bit of byte 0
-column 1 -> next bit
+column 0  -> byte 0, bit 0 (least-significant bit)
+column 1  -> byte 0, bit 1
 ...
+column 7  -> byte 0, bit 7 (most-significant bit)
+column 8  -> byte 1, bit 0
+...
+column 15 -> byte 1, bit 7
 ```
 
-Columns declared `NOT NULL` may still have schema-level knowledge that avoids checking their bit in optimized execution.
+In general:
 
-For format simplicity, v1 may allocate bits for all columns.
+```text
+byte_index = column_index / 8
+bit_index  = column_index % 8
+bit_mask   = 1 << bit_index
+```
+
+This ordering is part of the persistent tuple-format v1 contract and must not
+depend on host bitfield layout, source-language implementation details, or ABI
+conventions.
+
+### Nullable versus `NOT NULL`
+
+The bitmap allocation rule is independent of the schema's nullable declaration.
+
+A column declared `NOT NULL` still owns its physical null bit so that:
+
+- physical column-to-bit mapping remains stable and direct,
+- bitmap size depends only on physical column count,
+- schema evolution does not require remapping later column bits merely because
+  nullability metadata changes,
+- decoding remains straightforward.
+
+The physical layout may separately retain whether a column is declared
+nullable. SQL/catalog or tuple-encoding logic is responsible for rejecting a
+NULL value supplied for a `NOT NULL` column.
+
+Low-level bitmap primitives do not themselves enforce SQL `NOT NULL`
+constraints.
+
+`HAS_NULLS` remains a per-tuple physical fact. It must not be inferred merely
+from the schema having nullable columns; a tuple with no NULL values may leave
+`HAS_NULLS` unset even though its schema permits NULLs.
 
 ---
 
