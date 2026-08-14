@@ -10,6 +10,7 @@ target_sources(
         storage/heap_page.cpp
         storage/page.cpp
         storage/page_file.cpp
+        storage/tuple_codec.cpp
         storage/tuple_header.cpp
         storage/tuple_layout.cpp
 
@@ -23,6 +24,7 @@ target_sources(
         storage/heap_page.h
         storage/page.h
         storage/page_file.h
+        storage/tuple_codec.h
         storage/tuple_header.h
         storage/tuple_layout.h
 )

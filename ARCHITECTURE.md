@@ -2542,9 +2542,60 @@ NULL value supplied for a `NOT NULL` column.
 Low-level bitmap primitives do not themselves enforce SQL `NOT NULL`
 constraints.
 
-`HAS_NULLS` remains a per-tuple physical fact. It must not be inferred merely
-from the schema having nullable columns; a tuple with no NULL values may leave
-`HAS_NULLS` unset even though its schema permits NULLs.
+Schema-directed tuple validation, however, must reject a persisted NULL bit for
+a column declared `NOT NULL` in the schema version used to interpret that tuple.
+This is corruption/incompatibility relative to that schema, not merely a query-
+time constraint violation.
+
+### Canonical bitmap and `HAS_NULLS` rules
+
+For tuple format v1, unused high bits in the final null-bitmap byte must be zero.
+
+For example, with 10 physical columns, only bits `0..1` of the second bitmap
+byte are used; bits `2..7` of that byte must be zero. Schema-directed tuple
+decoding/validation must reject nonzero unused high bits.
+
+`HAS_NULLS` is a per-tuple physical fact and is canonical:
+
+```text
+HAS_NULLS is set
+    iff
+at least one used null-bitmap bit is set
+```
+
+Therefore both mismatch directions are invalid in tuple format v1:
+
+```text
+HAS_NULLS set, but no used NULL bit exists     -> invalid
+NULL bit exists, but HAS_NULLS is not set      -> invalid
+```
+
+Nullable declarations alone do not set `HAS_NULLS`.
+
+### Bytes reserved for NULL fixed-width values
+
+A v1 writer must deterministically write zero into the fixed-area bytes reserved
+for a NULL fixed-width column.
+
+Those bytes are semantically unread while the corresponding null bit is set.
+Tuple-format v1 readers are not required to reject nonzero bytes underneath a
+NULL bit; schema-directed meaning comes from the bitmap, not those reserved
+bytes.
+
+This deliberately distinguishes:
+
+```text
+canonical writer output
+```
+
+from:
+
+```text
+minimum reader validity requirements
+```
+
+and leaves room for future diagnostic or compatibility policy without changing
+the physical column offsets.
 
 ---
 
@@ -2552,26 +2603,65 @@ from the schema having nullable columns; a tuple with no NULL values may leave
 
 ## LOCKED
 
-Initial physical widths:
+Initial physical widths and scalar representations:
 
 ```text
 BOOLEAN      1 byte
-INT32        4 bytes
-INT64        8 bytes
-FLOAT64      8 bytes
-DATE         4 bytes
-TIMESTAMP    8 bytes
+INT32        4 bytes signed
+INT64        8 bytes signed
+FLOAT64      8 bytes IEEE-754 binary64 payload
+DATE         4 bytes signed physical scalar
+TIMESTAMP    8 bytes signed physical scalar
 ```
 
-Disk encoding is little-endian.
+Disk byte order is little-endian.
 
-Do not use C++ ABI-specific representations for persisted values.
+Do not use C++ ABI-specific object layout for persisted values.
 
-For example:
+### BOOLEAN
 
-- BOOLEAN is explicitly `0` or `1`,
-- FLOAT64 is encoded using its IEEE-754 64-bit representation,
-- DATE/TIMESTAMP units are defined by the SQL type layer and then serialized as explicit integers.
+Persist exactly:
+
+```text
+false = 0x00
+true  = 0x01
+```
+
+Any other persisted byte is invalid BOOLEAN data in tuple format v1.
+
+### Signed integer representation
+
+`INT32`, `INT64`, `DATE`, and `TIMESTAMP` persist their signed two's-complement
+bit patterns at their locked widths, then encode those bits little-endian.
+
+This representation is part of the persistent format and must not depend on
+native struct layout, alignment, or host byte order.
+
+`DATE` is physically a signed 32-bit scalar.
+
+`TIMESTAMP` is physically a signed 64-bit scalar.
+
+Their SQL-level epoch, unit, precision, calendar, and time-zone semantics remain
+deferred to the SQL type layer; storage codecs must not invent those semantics.
+
+### FLOAT64
+
+`FLOAT64` persists the exact IEEE-754 binary64 payload bits as a 64-bit value
+encoded little-endian.
+
+The storage codec must preserve all 64 payload bits exactly, including:
+
+- `+0.0` versus `-0.0`,
+- positive and negative infinity,
+- NaN sign,
+- quiet/signaling bit state,
+- NaN payload bits.
+
+Tuple-format v1 does not canonicalize NaNs.
+
+A standards-safe bit conversion such as `std::bit_cast<uint64_t>(double)` plus
+explicit little-endian integer encoding is appropriate. Raw ABI-dependent
+struct serialization is not.
 
 ---
 
