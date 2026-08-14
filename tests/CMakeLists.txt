@@ -19,6 +19,7 @@ target_sources(
         page_test.cpp
         smoke_test.cpp
         tuple_codec_test.cpp
+        tuple_codec_property_test.cpp
         tuple_header_test.cpp
         tuple_layout_test.cpp
         tuple_varlen_codec_test.cpp

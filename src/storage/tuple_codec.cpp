@@ -542,6 +542,18 @@ TupleValidationResult ValidateTuple(const TuplePhysicalLayout& layout,
             };
         }
         if (!null_state.is_null) {
+            const auto& column = layout.Columns()[index];
+            if (column.type == PhysicalType::BOOLEAN) {
+                const auto decoded = DecodeFixedScalar(
+                    column.type, tuple.subspan(column.fixed_offset, column.fixed_width));
+                if (!decoded.value.has_value()) {
+                    return {
+                        .header = std::nullopt,
+                        .error = TupleErrorFromScalar(decoded.error),
+                        .column_index = index,
+                    };
+                }
+            }
             continue;
         }
         if (!layout.Columns()[index].nullable) {
