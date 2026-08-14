@@ -2953,27 +2953,315 @@ Each heap relation has:
 table_<id>.fsm
 ```
 
-The FSM records an approximate free-space category for each heap page.
-
-Use a compact category such as:
+The FSM is a separate page-based file with:
 
 ```text
-0..255
+page 0       FileSuperblock with FileKind::FSM
+page 1..N    FSM_DATA pages
 ```
 
-where larger values mean more available insertion space.
+The FSM records one approximate one-byte free-space category for each ordinary
+heap data page.
 
-The exact byte-to-space conversion must be deterministic.
-
-Example conceptual mapping:
+Persisted category domain:
 
 ```text
-category = floor(free_bytes * 255 / usable_page_bytes)
+uint8_t category
+
+0   = least represented insertion capacity
+255 = greatest represented insertion capacity
 ```
 
-### In-memory accelerator
+Larger category values mean more available insertion space.
 
-At runtime, maintain bucketed candidate sets derived from FSM information.
+The FSM is advisory performance metadata. It never replaces verification of the
+actual heap-page geometry before insertion.
+
+## 82.1 v1 free-space category semantics
+
+The input to the category conversion is the validated heap page's current
+contiguous free-space gap:
+
+```text
+free_bytes = upper - lower
+```
+
+For the v1 heap layout:
+
+```text
+maximum contiguous gap
+    = PAGE_SIZE - HEAP_PAGE_TOTAL_HEADER_SIZE
+    = 8192 - 48
+    = 8144 bytes
+```
+
+The persisted FSM category represents **conservative tuple-payload insertion
+capacity assuming a new slot entry is required**.
+
+The current append-only insertion path requires one 8-byte slot entry, so v1
+defines:
+
+```text
+bounded_free =
+    min(free_bytes, 8144)
+
+usable_insertion_bytes =
+    min(
+        max(bounded_free - 8, 0),
+        8135
+    )
+```
+
+where:
+
+```text
+8    = HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE
+8135 = HEAP_PAGE_MAX_RAW_TUPLE_SIZE
+```
+
+The exact v1 category conversion is:
+
+```text
+category =
+    floor(usable_insertion_bytes * 255 / 8135)
+```
+
+The conversion uses integer arithmetic only.
+
+Inputs above the physical 8144-byte contiguous-gap maximum are clamped to 8144
+before the slot deduction.
+
+This mapping is monotonic.
+
+The persisted interpretation deliberately remains conservative if future slot
+reuse avoids the 8-byte new-slot cost; FSM metadata must not overstate usable
+space merely because a later insertion path may sometimes reuse a slot.
+
+Representative locked boundaries include:
+
+```text
+free_bytes 0, 1, 8, 9, 39 -> category 0
+free_bytes 40             -> category 1
+free_bytes 4075           -> category 127
+free_bytes 8142           -> category 254
+free_bytes 8143, 8144     -> category 255
+```
+
+## 82.2 Category lower-bound interpretation
+
+The inverse helper for v1 is an **inclusive lower bound** on represented usable
+tuple-payload bytes, not an upper bound or midpoint.
+
+For persisted category `c`:
+
+```text
+minimum_usable(c) =
+    ceil(c * 8135 / 255)
+```
+
+Using integer arithmetic:
+
+```text
+minimum_usable(c) =
+    (c * 8135 + 254) / 255
+```
+
+Representative values:
+
+```text
+category 0   -> 0
+category 1   -> 32
+category 127 -> 4052
+category 254 -> 8104
+category 255 -> 8135
+```
+
+A later candidate search may use this represented lower bound, but the real
+heap page must still be fetched and checked because FSM entries may be stale.
+
+## 82.3 FSM_DATA persisted page format
+
+Initial persisted FSM data-page format:
+
+```text
+page_type      = FSM_DATA
+format_version = 1
+header_size    = 48
+```
+
+Complete 8192-byte layout:
+
+```text
+offset  size  field
+------  ----  -------------------------------------------------
+0       32    common page header
+32      8     first_heap_page_no, uint64 little-endian
+40      2     entry_count, uint16 little-endian
+42      2     FSM reserved16 = 0
+44      4     FSM reserved32 = 0
+48      8144  one-byte category entries
+---------------------------------------------------------------
+total   8192
+```
+
+The FSM-specific header therefore occupies 16 bytes after the 32-byte common
+page header.
+
+All multi-byte fields are explicitly little-endian.
+
+For FSM_DATA format version 1:
+
+```text
+common reserved16 = 0
+FSM reserved16    = 0
+FSM reserved32    = 0
+```
+
+Structural decoding/validation must reject nonzero reserved fields.
+
+The entry region begins at byte 48 and contains exactly:
+
+```text
+8144
+```
+
+one-byte entry slots.
+
+Every byte value `0..255` is a valid category for an initialized entry.
+
+There is no hierarchical FSM level, tree node, pointer, or per-entry metadata
+in v1.
+
+## 82.4 Heap-page to FSM-entry mapping
+
+Heap page 0 is the heap-file superblock and has no ordinary FSM category entry.
+
+`INVALID_PAGE_NO` is also not a valid FSM target.
+
+For ordinary heap data page number `H`:
+
+```text
+heap_data_index = H - 1
+
+fsm_page_index =
+    heap_data_index / 8144
+
+fsm_page_no =
+    1 + fsm_page_index
+
+entry_index =
+    heap_data_index % 8144
+```
+
+FSM file page 0 remains its FileSuperblock.
+
+Therefore:
+
+```text
+heap page 1
+    -> FSM page 1, entry 0
+
+heap page 8144
+    -> FSM page 1, entry 8143
+
+heap page 8145
+    -> FSM page 2, entry 0
+```
+
+Mapping arithmetic must be checked for overflow rather than wrapping.
+
+For FSM data-page number `P`, the first represented heap page is:
+
+```text
+first_heap_page_no =
+    1 + (P - 1) * 8144
+```
+
+The persisted `first_heap_page_no` must equal this deterministic value for the
+physical FSM page number.
+
+FSM file page 0 and `INVALID_PAGE_NO` are invalid FSM_DATA page numbers.
+
+A represented heap-page range must not overflow or include the invalid
+heap-page sentinel.
+
+## 82.5 `entry_count` semantics
+
+`entry_count` is the number of currently initialized entries in a contiguous
+prefix of one FSM_DATA page.
+
+Valid entry indices are:
+
+```text
+[0, entry_count)
+```
+
+with:
+
+```text
+0 <= entry_count <= 8144
+```
+
+The initialized prefix corresponds to currently represented existing heap
+pages beginning at the page's persisted `first_heap_page_no`.
+
+Entries at indices:
+
+```text
+entry_index >= entry_count
+```
+
+are uninitialized future-entry storage and must persist as byte zero in FSM
+format v1.
+
+Structural validation must reject a nonzero byte in this uninitialized suffix.
+
+Entry access/update operations must reject indices outside the initialized
+prefix.
+
+A later relation-wide FSM owner may grow the initialized prefix as new heap
+pages are allocated; that runtime ownership policy is separate from the page
+format.
+
+## 82.6 Blank FSM_DATA page initialization
+
+A newly initialized FSM_DATA page deterministically zeroes the complete page,
+then writes its explicit common and FSM-specific headers.
+
+Common-header defaults before WAL integration:
+
+```text
+page_type      = FSM_DATA
+format_version = 1
+header_size    = 48
+page_no        = actual FSM PageId.page_no
+flags          = 0 unless explicitly supplied
+page_lsn       = INVALID_LSN unless explicitly supplied
+checksum_crc32c = 0
+reserved16     = 0
+```
+
+FSM-specific initialization writes:
+
+```text
+first_heap_page_no = deterministic value derived from FSM page number
+entry_count        = caller-selected initialized prefix length
+reserved16         = 0
+reserved32         = 0
+```
+
+All category bytes initially remain zero.
+
+Before WAL/recovery integration, ordinary FSM_DATA page mutation does not
+advance `page_lsn` or generate/update a whole-page CRC32C checksum.
+
+From the recovery milestone onward, the global checksum/WAL policies in the
+page and recovery contracts apply.
+
+## 82.7 In-memory accelerator
+
+At runtime, the relation-wide FSM subsystem may maintain bucketed candidate sets
+derived from persisted FSM information.
 
 Conceptually:
 
@@ -2984,9 +3272,12 @@ bucket[1]
 bucket[255]
 ```
 
-Insertion asks for a bucket capable of satisfying the requested size.
+Insertion asks for a candidate category capable of satisfying the requested
+size.
 
-### FSM is advisory
+This runtime accelerator is not part of the persisted FSM_DATA page format.
+
+## 82.8 FSM is advisory
 
 Because a crash or concurrent modification can make FSM information stale:
 
@@ -2995,12 +3286,12 @@ candidate page
     ↓
 fetch + latch
     ↓
-verify actual free space
+verify actual heap-page free space
 ```
 
 is mandatory.
 
-If wrong, repair the FSM entry and retry.
+If the candidate is wrong, repair the FSM entry as appropriate and retry.
 
 This design teaches an important database principle:
 
@@ -3014,11 +3305,34 @@ This design teaches an important database principle:
 
 FSM state is a performance optimization, not the sole source of correctness.
 
+The persisted category byte is an advisory approximation of the page's
+insertion capacity under the deterministic v1 mapping in §82.
+
+A stale category may cause:
+
+- an unnecessary candidate-page fetch,
+- a usable page to be temporarily overlooked,
+- later FSM repair/rebuild work,
+
+but it must not cause an insertion to bypass actual `HeapPage` free-space
+verification.
+
 Therefore recovery may tolerate stale FSM entries.
 
-At startup or during maintenance, the system must be able to repair/rebuild FSM data by scanning heap-page headers.
+At startup or during maintenance, the system must be able to repair/rebuild FSM
+data by scanning heap-page headers.
 
-This avoids making every free-space hint update part of the critical durability path.
+This avoids making every free-space hint update part of the critical durability
+path.
+
+The flat v1 persisted FSM format is authoritative only for:
+
+- deterministic heap-page-to-entry addressing,
+- initialized-prefix metadata,
+- category byte interpretation,
+- page-format validation.
+
+It is not authoritative for whether a heap insertion is currently possible.
 
 ---
 
