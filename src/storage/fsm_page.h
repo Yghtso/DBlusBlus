@@ -31,6 +31,24 @@ inline constexpr std::size_t FSM_MAX_USABLE_INSERTION_BYTES = HEAP_PAGE_MAX_RAW_
 // Returns the inclusive lower bound of usable tuple bytes represented by category.
 [[nodiscard]] std::size_t FsmCategoryMinimumUsableBytes(std::uint8_t category) noexcept;
 
+enum class FsmTupleRequestError : std::uint8_t {
+    NONE,
+    TUPLE_TOO_LARGE,
+};
+
+struct FsmMinimumCategoryResult {
+    std::optional<std::uint8_t> category;
+    FsmTupleRequestError error{FsmTupleRequestError::NONE};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return category.has_value();
+    }
+};
+
+// Returns the smallest category whose represented lower bound can satisfy the raw tuple size.
+[[nodiscard]] FsmMinimumCategoryResult
+MinimumFsmCategoryForTupleBytes(std::size_t required_tuple_bytes) noexcept;
+
 struct FsmEntryLocation {
     PageNo fsm_page_no{INVALID_PAGE_NO};
     std::uint16_t entry_index{0};

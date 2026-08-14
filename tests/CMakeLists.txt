@@ -11,6 +11,7 @@ target_sources(
         disk_manager_test.cpp
         encoding_test.cpp
         file_superblock_test.cpp
+        fsm_candidate_index_test.cpp
         fsm_page_test.cpp
         heap_page_test.cpp
         page_header_test.cpp
