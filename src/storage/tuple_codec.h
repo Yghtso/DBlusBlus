@@ -7,6 +7,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <variant>
@@ -188,6 +189,7 @@ struct TupleDecodeResult {
                                                  std::size_t column_index) noexcept;
 
 static_assert(sizeof(double) == sizeof(std::uint64_t));
+static_assert(std::numeric_limits<double>::is_iec559);
 
 } // namespace dblusblus
 

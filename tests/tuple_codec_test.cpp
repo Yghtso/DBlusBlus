@@ -653,7 +653,9 @@ TEST(FixedTupleCodecTest, RejectsMalformedBooleanInOtherwiseValidTuple) {
     auto malformed = *tuple;
     malformed[layout.Columns()[0].fixed_offset] = std::byte{0x02};
 
-    EXPECT_TRUE(ValidateTuple(layout, malformed));
+    const auto validation = ValidateTuple(layout, malformed);
+    EXPECT_EQ(validation.error, TupleCodecError::INVALID_BOOLEAN);
+    EXPECT_EQ(validation.column_index, 0U);
     EXPECT_EQ(DecodeTupleValue(layout, malformed, 0).error, TupleCodecError::INVALID_BOOLEAN);
 }
 

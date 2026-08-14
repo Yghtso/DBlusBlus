@@ -2466,7 +2466,6 @@ varlen payload cursor does not equal the supplied tuple byte length. This
 applies to both varlen and fixed-only schemas; a fixed-only tuple therefore has
 exactly `MinimumTupleSize()` bytes.
 
-
 Physical tuple:
 
 ```text
@@ -4351,6 +4350,16 @@ Physical RID ordering is numeric lexicographic order:
 
 ```text
 (heap_file_id, heap_page_no, heap_slot_id)
+```
+
+Persistent RID, bytes 14..15:
+
+```text
+reserved = 0
+v1 encoder:
+    MUST write zero
+v1 decoder:
+    MUST reject nonzero reserved bytes
 ```
 
 ---
