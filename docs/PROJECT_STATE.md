@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-15  
-Current checkpoint: Milestone `0026` — Concurrent DiskManager File-Extension Verification
+Current checkpoint: Milestone `0027` — PageFile Lifetime Contract Documentation
 Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
 
 ---
@@ -11,6 +11,8 @@ Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture 
 Phase 1 raw storage is complete at the BufferPool boundary.
 
 All currently required BufferPool-independent storage primitives are present, and no known correctness issue blocks the next architectural phase.
+
+The pre-Phase-2 sanity findings F1, F2, and F3 are closed.
 
 Phase 2 buffer management has not started.
 
@@ -150,6 +152,11 @@ Implemented the page-file lifecycle above `DiskManager`:
 - file identity checks,
 - append-first ordinary page allocation,
 - move-only lifecycle ownership.
+
+`PageFile` holds a non-owning `DiskManager` pointer. Its public API contract now states that the
+manager outlives the `PageFile`, external code leaves its registered FileId under `PageFile`
+control, destruction closes that registration, and moves transfer cleanup responsibility while
+leaving the source non-owning. No runtime ownership model changed.
 
 Page allocation remains page-type agnostic.
 
@@ -602,6 +609,7 @@ The first work in that phase will establish buffered page ownership and lifetime
 0024  Generic BTREE superblock codec guard
 0025  HEAP_DATA ordinary page-number validation
 0026  Concurrent DiskManager file-extension verification
+0027  PageFile non-owning lifetime contract documentation
 ```
 
 Detailed milestone history remains in `devlog/`.
