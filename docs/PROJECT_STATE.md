@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-15  
-Current checkpoint: Milestone `0022` — HEAP_DATA/FSM_DATA Zero-Only Common Flags
+Current checkpoint: Milestone `0023` — Heap UNUSED/Free-List Structural Validation
 Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
 
 ---
@@ -167,6 +167,11 @@ page size              8192 bytes
 ```
 
 Implemented explicit slot states, slot-directory encoding, deterministic blank-page initialization, and structural validation.
+
+Structural validation enforces the canonical persisted `UNUSED` representation and free-list
+structure: zero tuple coordinates, valid next-free links, a valid-or-sentinel head, acyclic
+traversal through only `UNUSED` slots, and complete exactly-once membership of every `UNUSED`
+slot. This validation does not create `UNUSED` slots or implement slot reuse.
 
 ### Raw insertion — `0011`
 
@@ -470,9 +475,9 @@ Its relation-wide page access and lifetime model depends on BufferPool integrati
 Current verified results:
 
 ```text
-Clang Debug            189 / 189 passed
-Clang ASan + UBSan     189 / 189 passed
-GCC Debug              189 / 189 passed
+Clang Debug            202 / 202 passed
+Clang ASan + UBSan     202 / 202 passed
+GCC Debug              202 / 202 passed
 clang-tidy             clean
 clang-format           clean
 git diff --check       clean
@@ -487,10 +492,9 @@ No Phase 1 storage benchmark suite exists yet beyond the generic benchmark smoke
 
 ## 11. Architecture / implementation consistency items
 
-The currently verified mismatch set in implemented code contains two categories:
+The currently verified mismatch set in implemented code contains one category:
 
-1. BTREE FileSuperblock codec,
-2. heap UNUSED/free-list validation.
+1. BTREE FileSuperblock codec.
 
 These are implementation mismatches against settled architecture contracts. Unimplemented later subsystems remain deferred work rather than mismatches.
 
@@ -514,16 +518,6 @@ No code change has yet reconciled this mismatch. A later implementation fix must
 - reject `FileKind::BTREE` in the generic codec until that specialized support exists.
 
 The current BTREE implementation remains deferred; this consistency item does not start index or BufferPool implementation.
-
-### Heap UNUSED/free-list validation
-
-The accepted v1 architecture requires canonical zero tuple coordinates for `UNUSED` slots, `aux` next-free links, a valid-or-sentinel `free_slot_head`, an in-range acyclic list containing every reusable `UNUSED` slot exactly once, and no `NORMAL` or `DEAD` list members, as specified by `ARCHITECTURE.md` §§5.3.2, 5.4.2, and 5.21.
-
-The current `HeapPage::Validate` checks `free_slot_head` only in limited cases and primarily applies tuple coordinate/range checks to `NORMAL` slots. It can accept an `UNUSED` slot with nonzero tuple coordinates that is not represented correctly in the free list.
-
-This is an **implementation mismatch**, not an open architecture question and not evidence against the Chapter-14 reclamation contract. Immediate DEAD-slot reuse remains forbidden; delayed `DEAD -> UNUSED` reuse remains governed by Chapter 14.
-
-No code strategy is selected here. A later implementation task must either fully validate the canonical `UNUSED`/free-list invariants or reject persisted `UNUSED`/free-list states that the implementation cannot yet validate safely.
 
 ---
 
@@ -611,6 +605,7 @@ The first work in that phase will establish buffered page ownership and lifetime
 0020  Phase 1 raw-storage completion and hardening audit
 0021  Persistent RID reserved-byte decoder enforcement
 0022  HEAP_DATA/FSM_DATA zero-only common flags
+0023  Heap UNUSED/free-list structural validation
 ```
 
 Detailed milestone history remains in `devlog/`.
