@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-15  
-Current checkpoint: Milestone `0023` — Heap UNUSED/Free-List Structural Validation
+Current checkpoint: Milestone `0024` — Generic BTREE Superblock Codec Guard
 Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
 
 ---
@@ -111,6 +111,10 @@ Implemented the persistent 8192-byte file superblock with:
 - creation epoch,
 - reserved-zero validation,
 - CRC32C validation.
+
+The current generic 72-byte codec supports `HEAP`, `FSM`, and `CATALOG`. It recognizes the
+architecture-defined `BTREE` kind and numeric code but rejects generic BTREE encoding and decoding
+until the future B+ tree owner provides the canonical 128-byte specialized codec.
 
 ### DiskManager — `0007`
 
@@ -401,7 +405,7 @@ PAGE_SIZE                         8192
 
 CommonPageHeader                    32 bytes
 FileSuperblock common prefix        72 bytes
-BTREE FileSuperblock header        128 bytes required by architecture; current codec mismatch (§11)
+BTREE FileSuperblock header        128 bytes; future specialized B+ codec
 
 Heap page total header              48 bytes
 Heap slot entry                       8 bytes
@@ -475,9 +479,9 @@ Its relation-wide page access and lifetime model depends on BufferPool integrati
 Current verified results:
 
 ```text
-Clang Debug            202 / 202 passed
-Clang ASan + UBSan     202 / 202 passed
-GCC Debug              202 / 202 passed
+Clang Debug            205 / 205 passed
+Clang ASan + UBSan     205 / 205 passed
+GCC Debug              205 / 205 passed
 clang-tidy             clean
 clang-format           clean
 git diff --check       clean
@@ -492,32 +496,13 @@ No Phase 1 storage benchmark suite exists yet beyond the generic benchmark smoke
 
 ## 11. Architecture / implementation consistency items
 
-The currently verified mismatch set in implemented code contains one category:
+Currently implemented Phase 1 functionality has no known architecture mismatches.
 
-1. BTREE FileSuperblock codec.
-
-These are implementation mismatches against settled architecture contracts. Unimplemented later subsystems remain deferred work rather than mismatches.
-
-### BTREE FileSuperblock codec
-
-The accepted v1 architecture requires:
-
-```text
-BTREE FileSuperblock:
-    header_size = 128
-    bytes 72..127 = canonical fixed BTREE extension
-```
-
-The current generic `FileSuperblock` codec recognizes `FileKind::BTREE`, but emits and accepts only the generic 72-byte header and requires bytes after byte 71 to be zero.
-
-This is an **implementation mismatch**, not an open architecture question. The persisted BTREE superblock format remains settled by `ARCHITECTURE.md` §§4.10 and 8.2.1.
-
-No code change has yet reconciled this mismatch. A later implementation fix must either:
-
-- dispatch `FileKind::BTREE` to a codec for the canonical specialized 128-byte superblock, or
-- reject `FileKind::BTREE` in the generic codec until that specialized support exists.
-
-The current BTREE implementation remains deferred; this consistency item does not start index or BufferPool implementation.
+The generic 72-byte `FileSuperblock` codec explicitly rejects `FileKind::BTREE`; this is an
+unsupported current capability rather than acceptance of a noncanonical BTREE representation.
+The settled 128-byte BTREE superblock and bytes `72..127` extension remain deferred to the future
+specialized B+ tree codec. Unimplemented later subsystems remain deferred work rather than
+mismatches.
 
 ---
 
@@ -550,6 +535,7 @@ Deferred until the required buffer-management layer exists:
 Not implemented:
 
 - B+ tree,
+- canonical specialized 128-byte BTREE FileSuperblock codec,
 - transactions,
 - MVCC visibility,
 - write-conflict handling,
@@ -606,6 +592,7 @@ The first work in that phase will establish buffered page ownership and lifetime
 0021  Persistent RID reserved-byte decoder enforcement
 0022  HEAP_DATA/FSM_DATA zero-only common flags
 0023  Heap UNUSED/free-list structural validation
+0024  Generic BTREE superblock codec guard
 ```
 
 Detailed milestone history remains in `devlog/`.

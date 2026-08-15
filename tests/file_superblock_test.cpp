@@ -74,7 +74,7 @@ TEST(FileSuperblockTest, UsesExplicitFormatConstantsAndFileKindCodes) {
 
 TEST(FileSuperblockTest, EmitsExactPersistedLayoutAndDeterministicReservedBytes) {
     const FileSuperblock superblock{
-        .file_kind = FileKind::BTREE,
+        .file_kind = FileKind::HEAP,
         .file_id = FileId{0x0C0B0A09U},
         .flags = std::uint32_t{0x04030201U},
         .page_lsn = Lsn{0x0C0B0A0908070605ULL},
@@ -106,7 +106,7 @@ TEST(FileSuperblockTest, EmitsExactPersistedLayoutAndDeterministicReservedBytes)
         std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
         std::byte{0x00}, std::byte{0x00}, std::byte{'D'},  std::byte{'B'},  std::byte{'L'},
         std::byte{'U'},  std::byte{'S'},  std::byte{'B'},  std::byte{'L'},  std::byte{'S'},
-        std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
         std::byte{0x20}, std::byte{0x00}, std::byte{0x00}, std::byte{0x09}, std::byte{0x0A},
         std::byte{0x0B}, std::byte{0x0C}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
         std::byte{0x00}, std::byte{0x0D}, std::byte{0x0E}, std::byte{0x0F}, std::byte{0x10},
@@ -132,14 +132,13 @@ TEST(FileSuperblockTest, EmitsExactPersistedLayoutAndDeterministicReservedBytes)
         ADD_FAILURE() << "superblock checksum unexpectedly missing";
         return;
     }
-    EXPECT_EQ(*stored_checksum, std::uint32_t{0xFCB8C685U});
+    EXPECT_EQ(*stored_checksum, std::uint32_t{0xFE76015CU});
     EXPECT_EQ(*stored_checksum, *computed_checksum);
 }
 
-TEST(FileSuperblockTest, RoundTripsEveryFileKindAndBoundaryValues) {
+TEST(FileSuperblockTest, RoundTripsEveryGenericFileKindAndBoundaryValues) {
     constexpr std::array file_kinds{
         FileKind::HEAP,
-        FileKind::BTREE,
         FileKind::FSM,
         FileKind::CATALOG,
     };
@@ -154,6 +153,32 @@ TEST(FileSuperblockTest, RoundTripsEveryFileKindAndBoundaryValues) {
             .creation_epoch = std::numeric_limits<std::uint64_t>::max(),
         });
     }
+}
+
+TEST(FileSuperblockTest, GenericEncoderRejectsBtreeWithoutModifyingDestination) {
+    std::array<std::byte, PAGE_SIZE> page{};
+    page.fill(std::byte{0xA5});
+    const auto original = page;
+    const FileSuperblock btree{
+        .file_kind = FileKind::BTREE,
+        .file_id = FileId{42},
+        .object_id = 84,
+    };
+
+    EXPECT_FALSE(EncodeFileSuperblock(page, btree));
+    EXPECT_EQ(page, original);
+}
+
+TEST(FileSuperblockTest, GenericDecoderRejectsBtreeForGenericAndSpecializedHeaderSizes) {
+    std::array<std::byte, PAGE_SIZE> generic_header{};
+    ASSERT_TRUE(EncodeFileSuperblock(generic_header, FileSuperblock{}));
+    ReplaceFieldAndRefreshChecksum(
+        generic_header, FILE_KIND_OFFSET, static_cast<std::uint16_t>(FileKind::BTREE));
+    ExpectDecodeError(generic_header, FileSuperblockDecodeError::UNSUPPORTED_FILE_KIND);
+
+    auto specialized_header = generic_header;
+    ReplaceFieldAndRefreshChecksum(specialized_header, HEADER_SIZE_OFFSET, std::uint16_t{128});
+    ExpectDecodeError(specialized_header, FileSuperblockDecodeError::UNSUPPORTED_FILE_KIND);
 }
 
 TEST(FileSuperblockTest, RejectsUndersizedBuffersWithoutModifyingDestination) {

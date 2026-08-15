@@ -121,7 +121,7 @@ TEST(PageFileTest, ReopensValidatedFileAndRetainsPageCountAfterAllocations) {
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.valid());
     const auto path = temporary_directory.File("reopen.pages");
-    const auto expected = MakeSuperblock(FileId{102}, FileKind::BTREE, 7102, 9102);
+    const auto expected = MakeSuperblock(FileId{102}, FileKind::HEAP, 7102, 9102);
     DiskManager manager;
 
     {
@@ -318,12 +318,11 @@ TEST(PageFileTest, KeepsIndependentFileAllocationSequences) {
     EXPECT_EQ(*first_page_two.page_id, (PageId{.file_id = 109, .page_no = 2}));
 }
 
-TEST(PageFileTest, SupportsEveryLockedRandomAccessFileKind) {
+TEST(PageFileTest, SupportsEveryGenericSuperblockFileKind) {
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.valid());
     constexpr std::array file_kinds{
         FileKind::HEAP,
-        FileKind::BTREE,
         FileKind::FSM,
         FileKind::CATALOG,
     };
@@ -342,6 +341,27 @@ TEST(PageFileTest, SupportsEveryLockedRandomAccessFileKind) {
         auto opened = PageFile::Open(manager, path, file_id, file_kinds[index], object_id);
         EXPECT_TRUE(opened);
     }
+}
+
+TEST(PageFileTest, RejectsBtreeCreationThroughGenericSuperblockCodec) {
+    TemporaryDirectory temporary_directory;
+    ASSERT_TRUE(temporary_directory.valid());
+    const auto path = temporary_directory.File("btree.pages");
+    const auto superblock = MakeSuperblock(FileId{124}, FileKind::BTREE, 7124, 9124);
+    DiskManager manager;
+
+    const auto created = PageFile::Create(manager, path, superblock);
+    EXPECT_FALSE(created);
+    EXPECT_EQ(created.error.code, PageFileErrorCode::SUPERBLOCK_ENCODING_FAILED);
+    EXPECT_TRUE(std::filesystem::exists(path));
+    EXPECT_EQ(std::filesystem::file_size(path), PAGE_SIZE);
+
+    ASSERT_TRUE(manager.OpenFile(superblock.file_id, path));
+    Page page_zero{PageId{.file_id = superblock.file_id, .page_no = 0}};
+    ASSERT_TRUE(manager.ReadPage(page_zero.Id(), page_zero.Bytes()));
+    EXPECT_TRUE(std::ranges::all_of(page_zero.Bytes(),
+                                    [](std::byte value) { return value == std::byte{0}; }));
+    EXPECT_TRUE(manager.CloseFile(superblock.file_id));
 }
 
 TEST(PageFileTest, PreservesDiskCreationFailuresWithoutTruncatingOrConflicting) {

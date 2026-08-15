@@ -37,13 +37,26 @@ static_assert(RESERVED32_OFFSET + sizeof(std::uint32_t) == OBJECT_ID_OFFSET);
 static_assert(OBJECT_ID_OFFSET + sizeof(std::uint64_t) == CREATION_EPOCH_OFFSET);
 static_assert(CREATION_EPOCH_OFFSET + sizeof(std::uint64_t) == FILE_SUPERBLOCK_HEADER_SIZE);
 
-[[nodiscard]] constexpr bool IsValidFileKind(FileKind file_kind) noexcept {
+[[nodiscard]] constexpr bool IsRecognizedFileKind(FileKind file_kind) noexcept {
     switch (file_kind) {
     case FileKind::HEAP:
     case FileKind::BTREE:
     case FileKind::FSM:
     case FileKind::CATALOG:
         return true;
+    }
+
+    return false;
+}
+
+[[nodiscard]] constexpr bool IsSupportedGenericFileKind(FileKind file_kind) noexcept {
+    switch (file_kind) {
+    case FileKind::HEAP:
+    case FileKind::FSM:
+    case FileKind::CATALOG:
+        return true;
+    case FileKind::BTREE:
+        return false;
     }
 
     return false;
@@ -73,7 +86,7 @@ ComputeFileSuperblockChecksum(std::span<const std::byte> page) noexcept {
 
 bool EncodeFileSuperblock(std::span<std::byte> destination,
                           const FileSuperblock& superblock) noexcept {
-    if (destination.size() < PAGE_SIZE || !IsValidFileKind(superblock.file_kind)) {
+    if (destination.size() < PAGE_SIZE || !IsSupportedGenericFileKind(superblock.file_kind)) {
         return false;
     }
 
@@ -146,9 +159,6 @@ FileSuperblockDecodeResult DecodeFileSuperblock(std::span<const std::byte> sourc
     if (common_header->format_version != FILE_SUPERBLOCK_FORMAT_VERSION) {
         return DecodeFailure(FileSuperblockDecodeError::UNSUPPORTED_FORMAT_VERSION);
     }
-    if (common_header->header_size != FILE_SUPERBLOCK_HEADER_SIZE) {
-        return DecodeFailure(FileSuperblockDecodeError::WRONG_HEADER_SIZE);
-    }
     if (common_header->page_no != 0) {
         return DecodeFailure(FileSuperblockDecodeError::WRONG_PAGE_NUMBER);
     }
@@ -165,8 +175,14 @@ FileSuperblockDecodeResult DecodeFileSuperblock(std::span<const std::byte> sourc
         return DecodeFailure(FileSuperblockDecodeError::BUFFER_TOO_SMALL);
     }
     const auto file_kind = static_cast<FileKind>(*raw_file_kind);
-    if (!IsValidFileKind(file_kind)) {
+    if (!IsRecognizedFileKind(file_kind)) {
         return DecodeFailure(FileSuperblockDecodeError::INVALID_FILE_KIND);
+    }
+    if (!IsSupportedGenericFileKind(file_kind)) {
+        return DecodeFailure(FileSuperblockDecodeError::UNSUPPORTED_FILE_KIND);
+    }
+    if (common_header->header_size != FILE_SUPERBLOCK_HEADER_SIZE) {
+        return DecodeFailure(FileSuperblockDecodeError::WRONG_HEADER_SIZE);
     }
 
     const auto persisted_page_size =
