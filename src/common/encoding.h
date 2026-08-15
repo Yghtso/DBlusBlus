@@ -121,6 +121,11 @@ DecodePageId(std::span<const std::byte> source) noexcept {
         return std::nullopt;
     }
 
+    if (source[detail::RID_RESERVED_OFFSET] != std::byte{0} ||
+        source[detail::RID_RESERVED_OFFSET + 1] != std::byte{0}) {
+        return std::nullopt;
+    }
+
     const auto page = DecodePageId(source.first(PAGE_ID_ENCODED_SIZE));
     if (!page.has_value()) {
         return std::nullopt;

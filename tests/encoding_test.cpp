@@ -253,6 +253,8 @@ TEST(RidCodecTest, EmitsExactPersistedBytes) {
 
     ASSERT_TRUE(EncodeRid(buffer, rid));
     EXPECT_EQ(buffer, expected);
+    EXPECT_EQ(buffer[detail::RID_RESERVED_OFFSET], std::byte{0});
+    EXPECT_EQ(buffer[detail::RID_RESERVED_OFFSET + 1], std::byte{0});
 }
 
 TEST(RidCodecTest, RoundTripsRegularSentinelAndBoundaryValues) {
@@ -307,6 +309,39 @@ TEST(RidCodecTest, RejectsUndersizedBuffersWithoutModification) {
     EXPECT_FALSE(EncodeRid(undersized, Rid{}));
     EXPECT_EQ(buffer, original);
     EXPECT_FALSE(DecodeRid(undersized).has_value());
+}
+
+TEST(RidCodecTest, RejectsNonzeroFirstReservedByte) {
+    constexpr std::array invalid_values{std::byte{0x01}, std::byte{0xFF}};
+
+    for (const auto invalid_value : invalid_values) {
+        std::array<std::byte, RID_ENCODED_SIZE> buffer{};
+        ASSERT_TRUE(EncodeRid(buffer, Rid{}));
+        buffer[detail::RID_RESERVED_OFFSET] = invalid_value;
+
+        EXPECT_FALSE(DecodeRid(buffer).has_value());
+    }
+}
+
+TEST(RidCodecTest, RejectsNonzeroSecondReservedByte) {
+    constexpr std::array invalid_values{std::byte{0x01}, std::byte{0xFF}};
+
+    for (const auto invalid_value : invalid_values) {
+        std::array<std::byte, RID_ENCODED_SIZE> buffer{};
+        ASSERT_TRUE(EncodeRid(buffer, Rid{}));
+        buffer[detail::RID_RESERVED_OFFSET + 1] = invalid_value;
+
+        EXPECT_FALSE(DecodeRid(buffer).has_value());
+    }
+}
+
+TEST(RidCodecTest, RejectsBothNonzeroReservedBytes) {
+    std::array<std::byte, RID_ENCODED_SIZE> buffer{};
+    ASSERT_TRUE(EncodeRid(buffer, Rid{}));
+    buffer[detail::RID_RESERVED_OFFSET] = std::byte{0x01};
+    buffer[detail::RID_RESERVED_OFFSET + 1] = std::byte{0xFF};
+
+    EXPECT_FALSE(DecodeRid(buffer).has_value());
 }
 
 } // namespace
