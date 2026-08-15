@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-15  
-Current checkpoint: Milestone `0024` — Generic BTREE Superblock Codec Guard
+Current checkpoint: Milestone `0025` — HEAP_DATA Ordinary Page-Number Validation
 Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
 
 ---
@@ -10,7 +10,7 @@ Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture 
 
 Phase 1 raw storage is complete at the BufferPool boundary.
 
-The Phase 1 audit found all currently required BufferPool-independent storage primitives present. One tuple-validation bug was found and fixed during the audit, and no remaining correctness issue was found that blocks the next architectural phase.
+All currently required BufferPool-independent storage primitives are present, and no known correctness issue blocks the next architectural phase.
 
 Phase 2 buffer management has not started.
 
@@ -159,6 +159,9 @@ Implemented `HEAP_DATA` format version 1.
 
 `HeapPage` initialization always writes common-header flags as zero, and validation rejects any
 persisted HEAP_DATA page with nonzero common flags.
+
+Initialization and validation reject page `0` and `INVALID_PAGE_NO`; HEAP_DATA pages require an
+ordinary PageNo beginning at `1`.
 
 Current physical geometry:
 
@@ -479,9 +482,9 @@ Its relation-wide page access and lifetime model depends on BufferPool integrati
 Current verified results:
 
 ```text
-Clang Debug            205 / 205 passed
-Clang ASan + UBSan     205 / 205 passed
-GCC Debug              205 / 205 passed
+Clang Debug            208 / 208 passed
+Clang ASan + UBSan     208 / 208 passed
+GCC Debug              208 / 208 passed
 clang-tidy             clean
 clang-format           clean
 git diff --check       clean
@@ -593,6 +596,7 @@ The first work in that phase will establish buffered page ownership and lifetime
 0022  HEAP_DATA/FSM_DATA zero-only common flags
 0023  Heap UNUSED/free-list structural validation
 0024  Generic BTREE superblock codec guard
+0025  HEAP_DATA ordinary page-number validation
 ```
 
 Detailed milestone history remains in `devlog/`.
