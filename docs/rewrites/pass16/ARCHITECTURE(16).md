@@ -18834,9 +18834,9 @@ Items listed here are future possibilities or staged functionality, not requirem
 
 ## D.1 V1 architecture status
 
-No unresolved v1 core-architecture question remains in the current v1 contract.
+No unresolved v1 core-architecture question remains at this cutover.
 
-Every identified architecture gap affecting v1 semantics or persistent formats is either:
+Every architecture gap discovered during design reconciliation that affected v1 semantics or persistent formats was either:
 
 - resolved explicitly and integrated into its owning chapter, or
 - classified as intentionally deferred functionality in Appendix C.

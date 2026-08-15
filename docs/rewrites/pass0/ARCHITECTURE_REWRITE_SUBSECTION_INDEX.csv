@@ -1,0 +1,1630 @@
+line,level,parent_old_section,heading
+1,1,,Performance-First Relational Database — Architecture Contract
+9,2,0,0. How Codex should use this file
+34,1,1,1. Project Goal
+51,1,2,2. Non-Goals
+73,1,3,3. Architectural Principles
+75,2,3,3.1 Layering
+112,2,3,3.2 Correctness before micro-optimization
+125,2,3,3.3 Performance model
+142,1,4,4. Platform
+144,2,4,LOCKED: Linux-first
+164,1,5,5. Implementation Language
+166,2,5,LOCKED: C++20
+174,3,5,Why C++20 was selected
+196,3,5,Locked rationale
+213,1,6,6. Persistent Storage Model
+215,2,6,LOCKED: page-oriented storage
+242,1,7,7. File Organization
+244,2,7,LOCKED: multiple database files
+270,1,8,8. Disk / I/O Layer
+272,2,8,"LOCKED: explicit I/O, not mmap"
+295,3,8,Later experiments
+307,1,9,9. On-Disk Serialization
+309,2,9,LOCKED: explicit binary encoding
+331,1,10,10. Table Storage
+333,2,10,LOCKED: row-oriented heap tables
+348,1,11,11. Heap Page Layout
+350,2,11,LOCKED: slotted pages
+388,1,12,12. Tuple Representation
+390,2,12,LOCKED: compact binary tuples
+415,1,13,13. Free-Space Management
+417,2,13,LOCKED: explicit free-space metadata
+427,1,14,14. Buffer Pool
+429,2,14,LOCKED: explicit database-managed buffer pool
+460,1,15,15. Buffer Replacement
+462,2,15,LOCKED: CLOCK initially
+484,1,16,16. Indexing
+486,2,16,LOCKED: B+ tree as the primary general-purpose index
+519,1,17,17. B+ Tree Concurrency
+521,2,17,LOCKED: page latches separate from transaction locks
+543,1,18,18. MVCC
+545,2,18,LOCKED: Heap-version MVCC
+553,3,18,Architecture
+588,3,18,Locked rationale
+608,1,19,19. Transaction Model
+610,2,19,LOCKED: MVCC snapshots + explicit write conflict control
+646,1,20,20. Locks
+648,2,20,LOCKED: fine-grained logical locks for writes
+664,1,21,21. Write-Ahead Log
+666,2,21,LOCKED: WAL is mandatory
+689,1,22,22. Commit Path
+691,2,22,LOCKED: group commit
+707,1,23,23. Buffer/WAL Policy
+709,2,23,LOCKED: STEAL + NO-FORCE
+711,3,23,NO-FORCE
+715,3,23,STEAL
+723,1,24,24. Crash Recovery
+725,2,24,"LOCKED: ARIES-inspired recovery, implemented incrementally"
+748,1,25,25. Checkpointing
+750,2,25,LOCKED: fuzzy/background-compatible checkpoints
+758,1,26,26. Vacuum / Garbage Collection
+760,2,26,LOCKED if heap-version MVCC is selected
+778,1,27,27. Catalog
+780,2,27,LOCKED: relational system catalog
+798,1,28,28. SQL Front End
+800,2,28,LOCKED: implement our own limited parser
+823,1,29,29. Binder
+825,2,29,LOCKED: parser and binder are separate
+844,1,30,30. Logical Query Representation
+846,2,30,LOCKED: relational algebra-style logical plan
+867,1,31,31. Query Rewrite
+869,2,31,LOCKED: rule-based logical optimization before costing
+886,1,32,32. Statistics
+888,2,32,LOCKED: explicit table/column statistics
+904,1,33,33. Cost-Based Optimizer
+906,2,33,LOCKED
+924,1,34,34. Join Ordering
+926,2,34,LOCKED: dynamic programming for small join sets
+936,1,35,35. Physical Operators
+938,2,35,LOCKED: logical and physical plans are distinct
+960,1,36,36. Execution Model
+962,2,36,LOCKED: vectorized/chunk-at-a-time execution
+999,1,37,37. Execution Data Layout
+1001,2,37,LOCKED: typed vectors inside chunks
+1031,1,38,38. Primary Join Algorithms
+1033,2,38,LOCKED implementation order
+1050,1,39,39. Aggregation
+1052,2,39,LOCKED: hash aggregation first
+1064,1,40,40. Sorting
+1066,2,40,"LOCKED: in-memory sort first, external sort later"
+1076,1,41,41. Query Memory Management
+1078,2,41,LOCKED: query-scoped arenas/pools
+1098,1,42,42. Parallelism
+1100,2,42,"LOCKED: concurrency-ready architecture, parallel execution later"
+1115,1,43,43. Threading / Shared State
+1117,2,43,LOCKED
+1133,1,44,44. Error Handling
+1135,2,44,LOCKED
+1151,1,45,45. Testing Philosophy
+1153,2,45,LOCKED
+1157,3,45,Unit tests
+1161,3,45,Property/randomized tests
+1171,3,45,Crash tests
+1175,3,45,Differential tests
+1179,3,45,Concurrency stress tests
+1190,1,46,46. Benchmarking Philosophy
+1192,2,46,LOCKED
+1225,1,47,47. Observability
+1227,2,47,LOCKED
+1250,1,48,48. Explain
+1252,2,48,LOCKED
+1273,1,49,49. Suggested Implementation Order
+1277,2,49,Phase 1 — Raw storage
+1287,2,49,Phase 2 — Buffer management
+1295,2,49,Phase 3 — Indexes
+1305,2,49,Phase 4 — Transactions and durability
+1317,2,49,Phase 5 — Catalog and SQL
+1327,2,49,Phase 6 — Query execution
+1341,2,49,Phase 7 — Optimization
+1352,2,49,Phase 8 — Performance work
+1363,1,50,50. Architecture Invariants
+1382,1,51,51. Locked Architecture Decisions
+1403,1,52,52. Working Philosophy
+1425,1,53,53. Concrete Storage Engine Contract
+1427,2,53,LOCKED
+1446,1,54,54. Fundamental Identifier Types
+1448,2,54,LOCKED
+1486,1,55,55. PageId
+1488,2,55,LOCKED
+1532,1,56,56. RID
+1534,2,56,LOCKED
+1557,1,57,57. Index-to-Heap Addressing
+1559,2,57,LOCKED: indexes reference physical tuple-version RIDs
+1575,3,57,Consequence for UPDATE
+1595,3,57,Consequence for index scans
+1615,3,57,Future optimization
+1623,1,58,58. File Kinds
+1625,2,58,LOCKED
+1661,1,59,59. File Superblock
+1663,2,59,LOCKED
+1739,3,59,Superblock checksum
+1753,3,59,Superblock validation
+1780,1,60,60. Page Allocation Policy
+1782,2,60,LOCKED: append-first allocation
+1814,3,60,Page reuse
+1826,3,60,Why this choice
+1834,1,61,61. Common Page Header
+1836,2,61,LOCKED: 32-byte common header
+1859,3,61,Why store page_no inside the page?
+1868,3,61,`page_lsn`
+1878,1,62,62. Page Types
+1880,2,62,LOCKED
+1906,1,63,63. Page Checksums
+1908,2,63,LOCKED: checksum field reserved from day one
+1914,3,63,Before WAL/recovery milestone
+1918,3,63,From recovery milestone onward
+1936,1,64,64. Heap File Structure
+1938,2,64,LOCKED
+1962,1,65,65. Heap Scan Order
+1964,2,65,LOCKED: physical page order
+1978,1,66,66. Heap Data Page Header
+1980,2,66,LOCKED
+2047,3,66,Empty free-slot list
+2062,3,66,Reserved and hint fields
+2080,1,67,67. Slot Directory
+2082,2,67,LOCKED: 8-byte slot entries
+2130,3,67,DEAD slot coordinates before and after physical reclamation
+2165,3,67,Stable slot semantics
+2183,1,68,68. Heap Page Free-Space Geometry
+2185,2,68,LOCKED
+2222,1,69,69. Maximum Inline Tuple Size
+2224,2,69,LOCKED for v1
+2259,3,69,Later milestone
+2275,1,70,70. Tuple Header
+2277,2,70,LOCKED: explicit MVCC-aware tuple header
+2317,3,70,`xmin`
+2321,3,70,`xmax`
+2333,3,70,`cmin` / `cmax`
+2349,3,70,Previous-version pointer
+2391,1,71,71. Tuple Flags
+2393,2,71,LOCKED
+2450,1,72,72. Tuple Data Layout
+2452,2,72,LOCKED: schema-directed compact binary layout
+2492,1,73,73. Null Bitmap
+2494,2,73,LOCKED
+2524,3,73,Persisted bit meaning
+2531,3,73,Persisted bit ordering
+2557,3,73,Nullable versus `NOT NULL`
+2581,3,73,Canonical bitmap and `HAS_NULLS` rules
+2606,3,73,Bytes reserved for NULL fixed-width values
+2633,1,74,74. Fixed-Width Values
+2635,2,74,LOCKED
+2652,3,74,BOOLEAN
+2663,3,74,Signed integer representation
+2678,3,74,FLOAT64
+2699,1,75,75. VARCHAR Representation
+2701,2,75,LOCKED
+2726,3,75,Canonical NULL VARCHAR descriptor
+2741,3,75,Canonical present VARCHAR packing
+2788,1,76,76. Tuple Alignment
+2790,2,76,"LOCKED: compact persisted layout, aligned execution layout"
+2821,1,77,77. Schema Versioning
+2823,2,77,LOCKED: tuple carries schema version
+2839,1,78,78. INSERT Path
+2841,2,78,LOCKED
+2870,1,79,79. UPDATE Path
+2872,2,79,LOCKED: append a new physical version
+2892,3,79,Same-page preference
+2900,1,80,80. DELETE Path
+2902,2,80,LOCKED: logical deletion first
+2916,1,81,81. MVCC Visibility Boundary
+2918,2,81,LOCKED
+2945,1,82,82. Free-Space Map
+2947,2,82,LOCKED: separate approximate FSM
+2979,2,82,82.1 v1 free-space category semantics
+3049,2,82,82.2 Category lower-bound interpretation
+3081,2,82,82.3 FSM_DATA persisted page format
+3134,2,82,82.4 Heap-page to FSM-entry mapping
+3187,2,82,82.5 `entry_count` semantics
+3225,2,82,82.6 Blank FSM_DATA page initialization
+3260,2,82,82.7 In-memory accelerator
+3279,2,82,82.8 FSM is advisory
+3301,1,83,83. FSM Persistence Semantics
+3303,2,83,LOCKED
+3338,1,84,84. Heap Page Compaction
+3340,2,84,LOCKED
+3376,1,85,85. Vacuum Physical Reclamation
+3378,2,85,LOCKED
+3397,1,86,86. DiskManager Responsibilities
+3399,2,86,LOCKED
+3442,3,86,File lifecycle boundary
+3459,1,87,87. File I/O Semantics
+3461,2,87,LOCKED
+3521,1,88,88. BufferPool Responsibilities
+3523,2,88,LOCKED
+3547,1,89,89. Buffer Frame
+3549,2,89,LOCKED
+3571,1,90,90. Page Guards
+3573,2,90,LOCKED: RAII page ownership
+3604,1,91,91. Buffer-Pool Page Table
+3606,2,91,LOCKED: hash lookup abstraction
+3626,1,92,92. Pinning Semantics
+3628,2,92,LOCKED
+3646,1,93,93. Dirty-Page Semantics
+3648,2,93,LOCKED
+3662,1,94,94. WAL-before-Data Enforcement Point
+3664,2,94,LOCKED: enforced by BufferPool flush path
+3698,1,95,95. CLOCK Replacement Contract
+3700,2,95,LOCKED
+3724,1,96,96. Storage Object Boundaries
+3726,2,96,LOCKED
+3764,1,97,97. HeapPage API Shape
+3766,2,97,LOCKED conceptually
+3798,1,98,98. TupleCodec Boundary
+3800,2,98,LOCKED
+3830,1,99,99. Zero-Copy vs Decode Policy
+3832,2,99,"LOCKED: views in storage, vectors in execution"
+3852,1,100,100. Lifetime Safety Rule
+3854,2,100,LOCKED
+3873,1,101,101. Initial Module Layout
+3875,2,101,LOCKED as a recommended project structure
+3948,1,102,102. Storage-Layer Dependency Direction
+3950,2,102,LOCKED
+3972,1,103,103. Storage Milestone 1
+3974,2,103,LOCKED target
+4014,1,104,104. Storage Milestone 1 Required Tests
+4016,2,104,LOCKED
+4020,3,104,Slotted-page tests
+4029,3,104,Tuple codec tests
+4039,3,104,Disk tests
+4047,3,104,Buffer tests
+4067,3,104,Heap tests
+4077,1,105,105. Storage Milestone 1 Benchmarks
+4079,2,105,LOCKED
+4109,1,106,106. Deliberately Deferred Storage Features
+4111,2,106,LOCKED
+4135,1,107,107. Storage Decisions Record
+4137,2,107,LOCKED
+4166,1,108,108. Next Architecture Topic
+4202,1,109,109. B+ Tree Architecture Contract
+4204,2,109,LOCKED
+4228,1,110,110. B+ Tree File and Superblock
+4230,2,110,LOCKED
+4274,1,111,111. Index Key Schema
+4276,2,111,LOCKED
+4294,1,112,112. User Key vs Physical Key
+4296,2,112,LOCKED
+4332,1,113,113. Persistent RID Encoding in Indexes
+4334,2,113,LOCKED: 16 bytes
+4367,1,114,114. Order-Preserving Index Key Encoding
+4369,2,114,LOCKED: memcomparable encoding
+4394,1,115,115. Index Field Encoding
+4396,2,115,LOCKED
+4409,3,115,BOOLEAN
+4416,3,115,INT32 / DATE
+4426,3,115,INT64 / TIMESTAMP
+4434,3,115,FLOAT64
+4456,3,115,VARCHAR
+4477,1,116,116. Composite Keys
+4479,2,116,LOCKED
+4493,1,117,117. Maximum Encoded User Key
+4495,2,117,LOCKED for v1
+4522,1,118,118. Physical-Key Comparison and Search Sentinels
+4524,2,118,LOCKED
+4552,1,119,119. Node Page Organization
+4554,2,119,LOCKED
+4595,1,120,120. B+ Tree Slot Entry
+4597,2,120,LOCKED: 8 bytes
+4616,1,121,121. Leaf Header
+4618,2,121,LOCKED: 64 bytes total
+4640,1,122,122. Leaf Entry
+4642,2,122,LOCKED
+4661,1,123,123. Internal Header
+4663,2,123,LOCKED: 64 bytes total
+4688,1,124,124. Internal Entry
+4690,2,124,LOCKED
+4710,1,125,125. Internal Representation and Separator Semantics
+4712,2,125,LOCKED: routing lower bounds
+4755,1,126,126. When a Separator Must Change
+4757,2,126,LOCKED
+4778,1,127,127. Internal Search
+4780,2,127,LOCKED
+4802,1,128,128. Leaf Search
+4804,2,128,LOCKED
+4828,1,129,129. Split Trigger and Compaction
+4830,2,129,LOCKED
+4846,1,130,130. Leaf Split
+4848,2,130,LOCKED: byte-balanced
+4865,1,131,131. Leaf Sibling Links on Split
+4867,2,131,LOCKED
+4898,1,132,132. Internal Split
+4900,2,132,LOCKED
+4938,1,133,133. Root Split and Contraction
+4940,2,133,LOCKED
+4942,3,133,Root split
+4956,3,133,Root contraction
+4970,1,134,134. Occupancy and Underflow
+4972,2,134,LOCKED
+5007,1,135,135. Redistribution and Merge Policy
+5009,2,135,LOCKED
+5024,1,136,136. Leaf Merge
+5026,2,136,LOCKED
+5053,1,137,137. Internal Rebalancing
+5055,2,137,LOCKED
+5071,1,138,138. Tree-Local Free Page List
+5073,2,138,LOCKED
+5106,1,139,139. Safe Page Reuse
+5108,2,139,LOCKED
+5122,1,140,140. Point Lookup Concurrency
+5124,2,140,LOCKED: read latch coupling
+5144,1,141,141. Write Concurrency
+5146,2,141,LOCKED: write latch crabbing
+5163,3,141,Insert safety
+5169,3,141,Delete safety
+5177,1,142,142. Root Metadata Synchronization
+5179,2,142,LOCKED
+5194,1,143,143. Latch Ordering
+5196,2,143,LOCKED
+5198,3,143,Vertical
+5206,3,143,Horizontal leaf operations
+5226,1,144,144. Forward Range Scan
+5228,2,144,LOCKED
+5245,1,145,145. Leaf Handoff During Range Scan
+5247,2,145,LOCKED: latch coupled
+5262,1,146,146. Reverse Scans
+5264,2,146,DEFERRED
+5282,1,147,147. B+ Tree API Boundary
+5284,2,147,LOCKED conceptually
+5314,1,148,148. IndexKeyCodec Boundary
+5316,2,148,LOCKED
+5339,1,149,149. Duplicate SQL Keys
+5341,2,149,LOCKED
+5357,1,150,150. Unique Index Enforcement
+5359,2,150,LOCKED architectural boundary
+5395,1,151,151. UNIQUE and NULL
+5397,2,151,LOCKED for v1
+5412,1,152,152. MVCC Interaction
+5414,2,152,LOCKED
+5450,1,153,153. Index-Only Scans
+5452,2,153,DEFERRED
+5465,1,154,154. UPDATE and DELETE Interaction
+5467,2,154,LOCKED
+5471,3,154,UPDATE
+5485,3,154,DELETE
+5495,1,155,155. Vacuum Index Cleanup
+5497,2,155,LOCKED
+5509,1,156,156. HOT-Like Optimization
+5511,2,156,"DEFERRED, explicitly planned"
+5521,1,157,157. Index Scan Cost Awareness
+5523,2,157,LOCKED
+5544,1,158,158. Prefix Compression
+5546,2,158,DEFERRED
+5552,3,158,Internal separator prefix truncation
+5564,3,158,Leaf prefix/suffix compression
+5576,1,159,159. Internal and Leaf Search Performance
+5578,2,159,LOCKED
+5603,1,160,160. Root/Internal Page Caching
+5605,2,160,LOCKED
+5617,1,161,161. Structural Modification vs User Transaction
+5619,2,161,LOCKED
+5662,1,162,162. WAL Direction for Structural Operations
+5664,2,162,LOCKED architectural direction
+5690,1,163,163. Page LSN and WAL Ordering
+5692,2,163,LOCKED
+5718,1,164,164. Structural Publication Invariant
+5720,2,164,LOCKED
+5737,1,165,165. Page Validation
+5739,2,165,LOCKED
+5762,1,166,166. Full Tree Verifier
+5764,2,166,LOCKED
+5787,1,167,167. B+ Tree Milestone 1
+5789,2,167,LOCKED
+5812,1,168,168. B+ Tree Milestone 2
+5814,2,168,LOCKED
+5832,1,169,169. B+ Tree Milestone 3
+5834,2,169,LOCKED
+5850,1,170,170. Required Deterministic Tests
+5852,2,170,LOCKED
+5886,1,171,171. Duplicate Stress Test
+5888,2,171,LOCKED
+5906,1,172,172. Randomized Tests
+5908,2,172,LOCKED
+5935,1,173,173. Concurrent Tests
+5937,2,173,LOCKED
+5955,1,174,174. B+ Tree Benchmarks
+5957,2,174,LOCKED
+5988,3,174,Hot tree
+5999,3,174,Larger-than-buffer tree
+6012,1,175,175. Deliberately Deferred B+ Tree Features
+6014,2,175,LOCKED
+6040,1,176,176. First Post-Correctness Optimization Candidates
+6042,2,176,LOCKED recommendation
+6059,1,177,177. B+ Tree Invariants
+6061,2,177,LOCKED
+6088,1,178,178. Decisions Added by the B+ Tree Architecture
+6090,2,178,LOCKED
+6127,1,179,179. Next Architecture Stage
+6168,1,180,"180. Transaction, MVCC, Locking, WAL, Recovery, and Vacuum Contract"
+6170,2,180,LOCKED
+6208,1,181,181. Architecture Refinement: No Physical User-Transaction Undo
+6210,2,181,LOCKED
+6228,3,181,Aborted INSERT
+6242,3,181,Aborted DELETE
+6254,3,181,Aborted UPDATE
+6288,1,182,182. Reserved Transaction IDs
+6290,2,182,LOCKED
+6316,1,183,183. Durable Transaction-ID Reservation
+6318,2,183,LOCKED: reserve ID blocks
+6350,1,184,184. Transaction Object
+6352,2,184,LOCKED conceptually
+6383,1,185,185. Isolation Levels
+6385,2,185,LOCKED
+6414,1,186,186. Command IDs
+6416,2,186,LOCKED
+6446,1,187,187. Snapshot Representation
+6448,2,187,LOCKED
+6462,3,187,`xmax`
+6478,3,187,`active`
+6488,3,187,`xmin`
+6508,1,188,188. Snapshot Capture Synchronization
+6510,2,188,LOCKED
+6541,1,189,189. READ COMMITTED Snapshots
+6543,2,189,LOCKED
+6565,1,190,190. REPEATABLE READ Snapshots
+6567,2,190,LOCKED
+6591,1,191,191. Transaction Status Store
+6593,2,191,LOCKED
+6623,1,192,192. Transaction Status Page Mapping
+6625,2,192,LOCKED
+6651,1,193,193. Transaction Status Lookup
+6653,2,193,LOCKED
+6685,1,194,194. Commit Status Publication
+6687,2,194,LOCKED
+6715,1,195,195. Abort Status Publication
+6717,2,195,LOCKED
+6745,1,196,196. Read-Only Transactions
+6747,2,196,LOCKED
+6766,1,197,197. Tuple Visibility: Creator Rule
+6768,2,197,LOCKED
+6811,1,198,198. Tuple Visibility: Deleter Rule
+6813,2,198,LOCKED
+6817,3,198,No deleter
+6825,3,198,Deleted/updated by current transaction
+6842,3,198,Other transaction
+6884,1,199,199. Visibility Algorithm Summary
+6886,2,199,LOCKED
+6904,1,200,200. Hint Cleanup
+6906,2,200,LOCKED
+6912,3,200,Aborted `xmax`
+6927,3,200,Ancient committed creator
+6944,1,201,201. Logical Lock Types
+6946,2,201,LOCKED
+6970,1,202,202. Tuple Write Lock Key
+6972,2,202,LOCKED
+6988,1,203,203. Critical Lock/Latch Rule
+6990,2,203,LOCKED
+7019,1,204,204. UPDATE / DELETE Write Conflict Protocol
+7021,2,204,LOCKED
+7033,3,204,`xmax == 0`
+7037,3,204,`xmax` belongs to self
+7041,3,204,`xmax` belongs to an aborted transaction
+7047,3,204,`xmax` belongs to an in-progress transaction
+7053,3,204,`xmax` belongs to a committed competing updater
+7059,1,205,205. READ COMMITTED Write Conflict Behavior
+7061,2,205,LOCKED
+7088,1,206,206. REPEATABLE READ Write Conflict Behavior
+7090,2,206,LOCKED
+7104,1,207,207. Lost-Update Prevention
+7106,2,207,LOCKED
+7126,1,208,208. Unique-Key Lock Key
+7128,2,208,LOCKED
+7143,1,209,209. Unique-Key Lock Protocol
+7145,2,209,LOCKED
+7167,1,210,210. Unique Check Semantics
+7169,2,210,LOCKED
+7185,1,211,211. Lock Duration
+7187,2,211,LOCKED: strict write locking
+7203,1,212,212. Lock Table
+7205,2,212,LOCKED
+7234,1,213,213. Deadlock Detection
+7236,2,213,LOCKED: wait-for graph
+7263,1,214,214. B+ Tree Latches Are Not LockManager Locks
+7265,2,214,LOCKED
+7283,1,215,215. WAL Physical Organization
+7285,2,215,"LOCKED: one logical WAL stream, segmented files"
+7319,1,216,216. WAL Record Alignment
+7321,2,216,LOCKED
+7342,1,217,217. WAL Record Header
+7344,2,217,LOCKED: 48-byte logical header
+7377,1,218,218. Per-Transaction WAL Chain
+7379,2,218,LOCKED
+7412,1,219,219. WAL Record Types
+7414,2,219,LOCKED initial set
+7441,1,220,220. PAGE_DELTA Record
+7443,2,220,LOCKED
+7482,1,221,221. PAGE_INIT Record
+7484,2,221,LOCKED
+7505,1,222,222. Torn-Page Protection
+7507,2,222,LOCKED: first-modification full-page images
+7529,1,223,223. Full-Page Image Semantics
+7531,2,223,LOCKED
+7558,1,224,224. Why Full-Page Images Are Checkpoint-Epoch Based
+7560,2,224,LOCKED rationale
+7584,1,225,225. B+ Tree Mini-Transactions
+7586,2,225,LOCKED
+7612,1,226,226. Atomic BTREE_MTR WAL Record
+7614,2,226,LOCKED
+7643,1,227,227. B+ Mini-Transaction No-Flush Barrier
+7645,2,227,LOCKED
+7683,1,228,228. B+ Tree Changes Survive User Abort
+7685,2,228,LOCKED
+7710,1,229,229. Heap WAL Ordering Relative to Index WAL
+7712,2,229,LOCKED
+7729,1,230,230. WAL Buffer
+7731,2,230,LOCKED
+7764,1,231,231. WAL Writer / Flusher
+7766,2,231,LOCKED
+7787,1,232,232. Group Commit
+7789,2,232,LOCKED
+7816,1,233,233. Commit Coordinator
+7818,2,233,LOCKED
+7839,1,234,234. Synchronous Commit
+7841,2,234,LOCKED for v1
+7861,1,235,235. Dirty Page recLSN
+7863,2,235,LOCKED
+7898,1,236,236. WAL-Before-Data Restatement
+7900,2,236,LOCKED
+7927,1,237,237. Database Control File
+7929,2,237,LOCKED
+7971,1,238,238. Control File Update Frequency
+7973,2,238,LOCKED
+7985,1,239,239. Fuzzy Checkpoint Goal
+7987,2,239,LOCKED
+7997,1,240,240. Checkpoint Protocol
+7999,2,240,LOCKED
+8019,1,241,241. Dirty-Page Table Checkpoint Entry
+8021,2,241,LOCKED
+8038,1,242,242. Active Writer Transaction Checkpoint Entry
+8040,2,242,LOCKED
+8057,1,243,243. Checkpoint Data Chunking
+8059,2,243,LOCKED
+8080,1,244,244. Checkpoint Redo Start
+8082,2,244,LOCKED
+8103,1,245,245. WAL Recycling
+8105,2,245,LOCKED
+8126,1,246,246. Recovery Startup: WAL Tail Validation
+8128,2,246,LOCKED
+8143,1,247,247. Recovery Phase 1: Analysis
+8145,2,247,LOCKED
+8162,3,247,PAGE records
+8170,3,247,BTREE_MTR
+8174,3,247,TXN_COMMIT
+8178,3,247,TXN_ABORT
+8186,1,248,248. Recovery Phase 2: Redo
+8188,2,248,LOCKED
+8198,3,248,PAGE_DELTA / PAGE_IMAGE / PAGE_INIT
+8204,3,248,BTREE_MTR
+8220,1,249,249. Redo and Corrupt/Torn Data Pages
+8222,2,249,LOCKED
+8244,1,250,250. Recovery Phase 3: Loser Resolution
+8246,2,250,LOCKED
+8267,1,251,251. No CLRs in v1 User-DML Recovery
+8269,2,251,LOCKED
+8283,1,252,252. Recovery of Transaction Status Pages
+8285,2,252,LOCKED
+8303,1,253,253. Recovery of Approximate Metadata
+8305,2,253,LOCKED
+8325,1,254,254. Recovery Completion
+8327,2,254,LOCKED
+8349,1,255,255. Crash-Recovery Correctness Principle
+8351,2,255,LOCKED
+8355,3,255,COMMIT returned success
+8363,3,255,COMMIT had not become durable
+8371,3,255,ABORTED or crash loser
+8383,1,256,256. Vacuum Global Visibility Horizon
+8385,2,256,LOCKED
+8407,1,257,257. Why Active Transactions Alone Are Not the Vacuum Horizon
+8409,2,257,LOCKED
+8433,1,258,258. Tuple Version Garbage Eligibility
+8435,2,258,LOCKED
+8439,3,258,Creator aborted
+8447,3,258,Version deleted/superseded long enough ago
+8465,1,259,259. Vacuum Treatment of In-Progress Metadata
+8467,2,259,LOCKED
+8482,1,260,260. Two-Phase Physical RID Reclamation
+8484,2,260,LOCKED
+8520,1,261,261. Read Epoch Manager
+8522,2,261,LOCKED
+8553,1,262,262. Why Snapshot Visibility Alone Is Not Enough for RID Reuse
+8555,2,262,LOCKED rationale
+8575,1,263,263. DEAD Slot Persistence Across Crash
+8577,2,263,LOCKED
+8592,1,264,264. Vacuum Index-Cleanup Protocol
+8594,2,264,LOCKED
+8620,1,265,265. Vacuum Version-Chain Splicing
+8622,2,265,LOCKED
+8651,1,266,266. Vacuum and Concurrent Updates
+8653,2,266,LOCKED
+8678,1,267,267. DEAD to UNUSED Transition
+8680,2,267,LOCKED
+8698,1,268,268. Vacuum Handling of Aborted `xmax`
+8700,2,268,LOCKED
+8721,1,269,269. Freezing Ancient Live Tuples
+8723,2,269,LOCKED
+8746,1,270,270. Transaction Status Truncation
+8748,2,270,"LOCKED architecture, later operational milestone"
+8772,1,271,271. Vacuum and B+ Tree Garbage
+8774,2,271,LOCKED
+8797,1,272,272. Vacuum and FSM
+8799,2,272,LOCKED
+8813,1,273,273. Vacuum and Statistics
+8815,2,273,LOCKED
+8834,1,274,274. Manual Vacuum First
+8836,2,274,LOCKED implementation order
+8857,1,275,275. Transaction + Index + Heap INSERT Protocol
+8859,2,275,LOCKED high-level sequence
+8889,1,276,276. Transaction + Index + Heap UPDATE Protocol
+8891,2,276,LOCKED high-level sequence
+8928,1,277,277. Transaction + Heap DELETE Protocol
+8930,2,277,LOCKED high-level sequence
+8956,1,278,278. Transaction COMMIT Protocol
+8958,2,278,LOCKED detailed sequence
+8982,1,279,279. Transaction ABORT Protocol
+8984,2,279,LOCKED detailed sequence
+9005,1,280,280. Statement Retry Boundary
+9007,2,280,LOCKED
+9022,1,281,281. Error Categories
+9024,2,281,LOCKED
+9045,1,282,282. Transaction Observability
+9047,2,282,LOCKED
+9095,1,283,283. Transaction Debug Introspection
+9097,2,283,LOCKED
+9119,1,284,284. Crash Injection Framework
+9121,2,284,LOCKED
+9144,1,285,285. Recovery Property Tests
+9146,2,285,LOCKED
+9163,1,286,286. MVCC Visibility Tests
+9165,2,286,LOCKED
+9187,1,287,287. Isolation Tests
+9189,2,287,LOCKED
+9206,1,288,288. Locking Tests
+9208,2,288,LOCKED
+9229,1,289,289. Group Commit Benchmarks
+9231,2,289,LOCKED
+9258,1,290,290. Checkpoint/Recovery Benchmarks
+9260,2,290,LOCKED
+9283,1,291,291. Vacuum Benchmarks
+9285,2,291,LOCKED
+9310,1,292,292. Deliberately Deferred Transaction Features
+9312,2,292,LOCKED
+9340,1,293,293. High-Reward Future Transaction Experiments
+9342,2,293,LOCKED recommendation
+9365,1,294,294. Transaction/Durability Invariants
+9367,2,294,LOCKED
+9406,1,295,295. Modules Added by This Architecture
+9408,2,295,LOCKED recommended project structure extension
+9459,1,296,296. Implementation Order for the Transaction/Durability Core
+9461,2,296,LOCKED
+9465,3,296,Phase T1 — Transaction identity and visibility
+9475,3,296,Phase T2 — Logical conflict control
+9484,3,296,Phase T3 — WAL foundations
+9494,3,296,Phase T4 — Commit durability
+9503,3,296,Phase T5 — B+ tree durability
+9511,3,296,Phase T6 — Checkpoint and recovery
+9523,3,296,Phase T7 — Vacuum
+9540,1,297,297. Transaction/Durability Milestone 1
+9542,2,297,LOCKED target
+9562,1,298,298. Transaction/Durability Milestone 2
+9564,2,298,LOCKED target
+9581,1,299,299. Transaction/Durability Milestone 3
+9583,2,299,LOCKED target
+9601,1,300,300. Architecture Status After This Section
+9603,2,300,LOCKED v1
+9654,1,301,"301. Catalog, SQL Front End, Binder, Expression, and Logical Plan Contract"
+9656,2,301,LOCKED
+9696,1,302,302. Upper-Layer Dependency Direction
+9698,2,302,LOCKED
+9738,1,303,303. Catalog Philosophy
+9740,2,303,LOCKED
+9775,1,304,304. Database Namespace Model
+9777,2,304,LOCKED for v1
+9804,1,305,305. Catalog Object Identifiers
+9806,2,305,LOCKED
+9825,1,306,306. Catalog System Tables
+9827,2,306,LOCKED
+9844,3,306,`sys_tables`
+9856,3,306,`sys_columns`
+9871,3,306,`sys_indexes`
+9884,3,306,`sys_index_columns`
+9892,3,306,`sys_constraints`
+9902,3,306,`sys_statistics`
+9921,1,307,307. Catalog Bootstrap
+9923,2,307,LOCKED
+9946,1,308,308. Catalog Cache
+9948,2,308,LOCKED
+9966,1,309,309. Catalog Descriptor Lifetime
+9968,2,309,LOCKED
+9987,1,310,310. Schema Versioning
+9989,2,310,LOCKED
+10011,1,311,311. Column Identity vs Position
+10013,2,311,LOCKED
+10044,1,312,312. SQL Type System
+10046,2,312,LOCKED initial scalar types
+10073,1,313,313. LogicalType Representation
+10075,2,313,LOCKED
+10105,1,314,314. NULL Is Not an Ordinary Runtime Type
+10107,2,314,LOCKED
+10132,1,315,315. Type Promotion
+10134,2,315,LOCKED
+10159,1,316,316. String Coercion Policy
+10161,2,316,LOCKED
+10179,1,317,317. Boolean Context
+10181,2,317,LOCKED
+10195,1,318,318. SQL Three-Valued Logic
+10197,2,318,LOCKED
+10225,1,319,319. Comparison and NULL
+10227,2,319,LOCKED
+10267,1,320,320. Initial Cast Model
+10269,2,320,LOCKED
+10299,1,321,321. Type Resolution API
+10301,2,321,LOCKED
+10326,1,322,322. SQL Value Representation
+10328,2,322,LOCKED
+10355,1,323,323. Lexer
+10357,2,323,LOCKED: handwritten lexer
+10374,1,324,324. Lexer Token Classes
+10376,2,324,LOCKED
+10401,1,325,325. Identifier Case Rules
+10403,2,325,LOCKED
+10439,1,326,326. SQL String Literals
+10441,2,326,LOCKED
+10461,1,327,327. Numeric Literal Lexing
+10463,2,327,LOCKED
+10487,1,328,328. Comments
+10489,2,328,LOCKED
+10509,1,329,329. Source Locations
+10511,2,329,LOCKED
+10528,1,330,330. Parser Architecture
+10530,2,330,LOCKED: handwritten recursive descent + Pratt expressions
+10560,1,331,331. Initial SQL Statement Set
+10562,2,331,LOCKED
+10594,1,332,332. Initial SELECT Grammar Surface
+10596,2,332,LOCKED
+10634,1,333,333. Subqueries
+10636,2,333,LOCKED scope
+10655,1,334,334. AST Philosophy
+10657,2,334,LOCKED
+10687,1,335,335. AST Ownership
+10689,2,335,LOCKED
+10704,1,336,336. Expression Precedence
+10706,2,336,LOCKED
+10733,1,337,337. Binder Responsibilities
+10735,2,337,LOCKED
+10769,1,338,338. Binding Context / Scope
+10771,2,338,LOCKED
+10810,1,339,339. Bound Column Reference
+10812,2,339,LOCKED
+10835,1,340,340. Unqualified Column Resolution
+10837,2,340,LOCKED
+10861,1,341,341. Qualified Column Resolution
+10863,2,341,LOCKED
+10882,1,342,342. SELECT * Expansion
+10884,2,342,LOCKED
+10908,1,343,343. Output Names
+10910,2,343,LOCKED
+10931,1,344,344. Expression IR
+10933,2,344,LOCKED
+10966,1,345,345. Expression Immutability
+10968,2,345,LOCKED
+10985,1,346,346. Expression Ownership
+10987,2,346,LOCKED
+10997,1,347,347. Operator Registry
+10999,2,347,LOCKED
+11020,1,348,348. Function Registry
+11022,2,348,LOCKED
+11046,1,349,349. Function Volatility
+11048,2,349,LOCKED
+11072,1,350,350. Aggregate Expressions
+11074,2,350,LOCKED
+11102,1,351,351. Aggregate Query Semantics
+11104,2,351,LOCKED
+11128,1,352,352. HAVING
+11130,2,352,LOCKED
+11156,1,353,353. ORDER BY Resolution
+11158,2,353,LOCKED
+11187,1,354,354. LIMIT / OFFSET
+11189,2,354,LOCKED
+11212,1,355,355. DISTINCT
+11214,2,355,LOCKED
+11230,1,356,356. CASE
+11232,2,356,LOCKED
+11254,1,357,357. IN List
+11256,2,357,LOCKED
+11280,1,358,358. Parameters
+11282,2,358,"DEFERRED, architecture-compatible"
+11299,1,359,359. Logical Plan Node Contract
+11301,2,359,LOCKED
+11327,1,360,360. Logical Plan Slot Identity
+11329,2,360,LOCKED
+11357,1,361,361. Initial Logical Operators
+11359,2,361,LOCKED
+11387,1,362,362. LogicalGet
+11389,2,362,LOCKED
+11423,1,363,363. LogicalValues
+11425,2,363,LOCKED
+11451,1,364,364. LogicalFilter
+11453,2,364,LOCKED
+11475,1,365,365. LogicalProject
+11477,2,365,LOCKED
+11498,1,366,366. LogicalJoin
+11500,2,366,LOCKED
+11533,1,367,367. Join Predicate Decomposition
+11535,2,367,LOCKED
+11560,1,368,368. Outer Join Semantics
+11562,2,368,LOCKED
+11586,1,369,369. LogicalAggregate
+11588,2,369,LOCKED
+11609,1,370,370. LogicalSort
+11611,2,370,LOCKED
+11634,1,371,371. LogicalLimit
+11636,2,371,LOCKED
+11651,1,372,372. LogicalInsert
+11653,2,372,LOCKED
+11676,1,373,373. LogicalUpdate
+11678,2,373,LOCKED
+11702,1,374,374. LogicalDelete
+11704,2,374,LOCKED
+11720,1,375,375. Hidden System Slots
+11722,2,375,LOCKED
+11742,1,376,376. CREATE TABLE Binding
+11744,2,376,LOCKED
+11770,1,377,377. PRIMARY KEY Semantics
+11772,2,377,LOCKED
+11790,1,378,378. CREATE INDEX Binding
+11792,2,378,LOCKED
+11813,1,379,379. CREATE INDEX Execution Semantics
+11815,2,379,LOCKED
+11838,1,380,380. DROP Semantics
+11840,2,380,LOCKED
+11852,1,381,381. DDL Concurrency
+11854,2,381,LOCKED: conservative first
+11874,1,382,382. Catalog Transaction Visibility
+11876,2,382,LOCKED
+11891,1,383,383. Statement Binding Snapshot
+11893,2,383,LOCKED
+11911,1,384,384. INSERT Binding
+11913,2,384,LOCKED
+11936,1,385,385. Default Expressions
+11938,2,385,LOCKED initial scope
+11957,1,386,386. UPDATE Binding
+11959,2,386,LOCKED
+11983,1,387,387. DELETE Binding
+11985,2,387,LOCKED
+12005,1,388,388. RETURNING
+12007,2,388,LOCKED initial support recommendation
+12030,1,389,389. Constant Folding
+12032,2,389,LOCKED logical rewrite
+12056,1,390,390. Boolean Simplification
+12058,2,390,LOCKED
+12076,1,391,391. Predicate Pushdown
+12078,2,391,LOCKED architecture
+12098,1,392,392. Projection Pruning
+12100,2,392,LOCKED
+12121,1,393,393. Expression Canonicalization
+12123,2,393,LOCKED
+12141,1,394,394. Logical Join Graph
+12143,2,394,LOCKED
+12159,1,395,395. Logical Plan Construction for SELECT
+12161,2,395,LOCKED
+12191,1,396,396. SELECT Without FROM
+12193,2,396,LOCKED
+12213,1,397,397. INNER JOIN Binding
+12215,2,397,LOCKED
+12235,1,398,398. LEFT JOIN Binding
+12237,2,398,LOCKED
+12261,1,399,399. CROSS JOIN
+12263,2,399,LOCKED
+12277,1,400,400. NATURAL / USING JOIN
+12279,2,400,DEFERRED
+12294,1,401,401. Subquery Binding
+12296,2,401,LOCKED architecture
+12324,1,402,402. Scalar Subquery Semantics
+12326,2,402,LOCKED
+12346,1,403,403. EXISTS
+12348,2,403,LOCKED
+12363,1,404,404. IN Subquery
+12365,2,404,LOCKED architecture
+12389,1,405,405. Common Table Expressions
+12391,2,405,DEFERRED
+12401,1,406,406. Expression Evaluation Contract
+12403,2,406,LOCKED
+12420,1,407,407. Expression Nullability Metadata
+12422,2,407,LOCKED
+12444,1,408,408. Expression Lineage
+12446,2,408,LOCKED recommendation
+12466,1,409,409. Logical Properties
+12468,2,409,LOCKED architecture
+12487,1,410,410. Constraint-Derived Logical Properties
+12489,2,410,LOCKED
+12512,1,411,411. Logical Plan Validation
+12514,2,411,LOCKED
+12533,1,412,412. EXPLAIN Logical Output
+12535,2,412,LOCKED
+12564,1,413,413. Error Model
+12566,2,413,LOCKED
+12591,1,414,414. Parser Error Recovery
+12593,2,414,LOCKED scope
+12610,1,415,415. SQL Grammar Testing
+12612,2,415,LOCKED
+12616,3,415,Positive parser tests
+12620,3,415,Negative parser tests
+12624,3,415,Precedence tests
+12636,3,415,Round-trip debug tests
+12644,1,416,416. Binder Tests
+12646,2,416,LOCKED
+12678,1,417,417. Type-System Property Tests
+12680,2,417,LOCKED
+12703,1,418,418. Catalog Tests
+12705,2,418,LOCKED
+12725,1,419,419. Logical Planner Tests
+12727,2,419,LOCKED
+12767,1,420,420. Logical Rewrite Tests
+12769,2,420,LOCKED
+12797,1,421,421. Catalog / Front-End Benchmarks
+12799,2,421,LOCKED
+12819,1,422,422. Parser/AST Memory Benchmark
+12821,2,422,LOCKED recommendation
+12838,1,423,423. Front-End Fuzzing
+12840,2,423,LOCKED
+12862,1,424,424. Supported SQL v1 Target
+12864,2,424,LOCKED milestone target
+12914,1,425,425. Deliberately Deferred SQL Features
+12916,2,425,LOCKED
+12955,1,426,426. High-Reward Future Front-End Features
+12957,2,426,LOCKED recommendation
+12979,1,427,427. Front-End / Logical-Layer Invariants
+12981,2,427,LOCKED
+13013,1,428,428. Recommended Module Layout for the Upper Layer
+13015,2,428,LOCKED
+13089,1,429,429. Implementation Order for Catalog + SQL Front End
+13091,2,429,LOCKED
+13093,3,429,Phase U1 — Type system
+13103,3,429,Phase U2 — Catalog
+13113,3,429,Phase U3 — Lexer/parser
+13127,3,429,Phase U4 — Binder
+13140,3,429,Phase U5 — Logical planning
+13152,3,429,Phase U6 — Initial logical rewrites
+13165,1,430,430. Upper-Layer Milestone 1
+13167,2,430,LOCKED target
+13204,1,431,431. Upper-Layer Milestone 2
+13206,2,431,LOCKED target
+13230,1,432,432. Upper-Layer Milestone 3
+13232,2,432,LOCKED target
+13258,1,433,433. Architecture Status After Upper Semantic Layer
+13260,2,433,LOCKED v1
+13318,1,434,434. Vectorized Physical Execution Engine Contract
+13320,2,434,LOCKED
+13365,1,435,435. Physical Plan vs Runtime Operator State
+13367,2,435,LOCKED
+13390,1,436,436. Physical Plan Node Contract
+13392,2,436,LOCKED
+13410,1,437,437. Initial Physical Operators
+13412,2,437,LOCKED
+13454,1,438,438. DataChunk
+13456,2,438,LOCKED
+13494,1,439,439. Why 1024 Rows
+13496,2,439,LOCKED rationale
+13523,1,440,440. Vector Kinds
+13525,2,440,LOCKED initial set
+13535,3,440,FLAT
+13539,3,440,CONSTANT
+13549,3,440,DICTIONARY
+13572,1,441,441. Flat Numeric Vector Layout
+13574,2,441,LOCKED
+13611,1,442,442. Validity Mask
+13613,2,442,LOCKED
+13643,1,443,443. SelectionVector
+13645,2,443,LOCKED
+13678,1,444,444. Dictionary Composition
+13680,2,444,LOCKED
+13702,1,445,445. UnifiedVectorFormat
+13704,2,445,LOCKED
+13738,1,446,446. VARCHAR Execution Representation
+13740,2,446,LOCKED
+13767,1,447,447. String Lifetime Rules
+13769,2,447,LOCKED
+13793,1,448,448. DataChunk StringHeap
+13795,2,448,LOCKED
+13812,1,449,449. Borrowed Vectors Inside a Pipeline
+13814,2,449,LOCKED
+13833,1,450,450. Chunk Reuse
+13835,2,450,LOCKED
+13861,1,451,451. Execution Row Layout
+13863,2,451,LOCKED
+13907,1,452,452. RowCollection
+13909,2,452,LOCKED
+13936,1,453,453. Query Arena
+13938,2,453,LOCKED
+13962,1,454,454. QueryMemoryManager
+13964,2,454,LOCKED
+13994,1,455,455. Memory Reservations
+13996,2,455,LOCKED
+14026,1,456,456. Memory Pressure Protocol
+14028,2,456,LOCKED
+14044,1,457,457. SpillManager
+14046,2,457,LOCKED
+14078,1,458,458. Spill Block Format
+14080,2,458,LOCKED
+14102,1,459,459. Spill I/O Pattern
+14104,2,459,LOCKED
+14127,1,460,460. Expression Executor
+14129,2,460,LOCKED
+14144,1,461,461. Vectorized Arithmetic Kernels
+14146,2,461,LOCKED
+14173,1,462,462. Vectorized Comparison Kernels
+14175,2,462,LOCKED
+14194,1,463,463. AND / OR Short-Circuiting
+14196,2,463,LOCKED
+14224,1,464,464. Physical Pipeline Model
+14226,2,464,LOCKED
+14260,1,465,465. Pipeline Roles
+14262,2,465,LOCKED
+14264,3,465,Source
+14278,3,465,Streaming operator
+14291,3,465,Sink / pipeline breaker
+14307,1,466,466. Physical Plan to Pipeline Graph
+14309,2,466,LOCKED
+14336,1,467,467. Pipeline Runtime Interfaces
+14338,2,467,LOCKED conceptually
+14366,1,468,"468. Single-Thread First, Parallel-Ready"
+14368,2,468,LOCKED
+14385,1,469,469. Pipeline Cancellation
+14387,2,469,LOCKED
+14419,1,470,470. Sequential Scan
+14421,2,470,LOCKED
+14451,1,471,471. Scan Page Guard Lifetime
+14453,2,471,LOCKED
+14467,1,472,472. Scan Predicate Pushdown Boundary
+14469,2,472,LOCKED
+14487,1,473,473. Index Scan
+14489,2,473,LOCKED
+14522,1,474,474. RID Batching for Index Scan
+14524,2,474,LOCKED initial optimization
+14544,1,475,475. Index Order Property
+14546,2,475,LOCKED
+14567,1,476,476. PhysicalFilter
+14569,2,476,LOCKED
+14587,1,477,477. PhysicalProject
+14589,2,477,LOCKED
+14601,1,478,478. PhysicalLimit
+14603,2,478,LOCKED
+14628,1,479,479. Nested-Loop Join
+14630,2,479,LOCKED baseline
+14656,1,480,480. Index Nested-Loop Join
+14658,2,480,LOCKED
+14681,1,481,481. Hash Join Role
+14683,2,481,LOCKED
+14711,1,482,482. Hash Join Build Storage
+14713,2,482,LOCKED
+14736,1,483,483. Hash Join Hash Directory
+14738,2,483,LOCKED
+14771,1,484,484. Why Directory + Duplicate Chains
+14773,2,484,LOCKED rationale
+14799,1,485,485. Hash Function Contract
+14801,2,485,LOCKED
+14832,1,486,486. Hash Join NULL Semantics
+14834,2,486,LOCKED
+14856,1,487,487. Hash Join Build Pipeline
+14858,2,487,LOCKED
+14883,1,488,488. Hash Join Probe State
+14885,2,488,LOCKED
+14902,1,489,489. Hash Join Residual Predicate
+14904,2,489,LOCKED
+14939,1,490,490. LEFT Hash Join
+14941,2,490,LOCKED
+14958,1,491,491. Grace Hash Join Spilling
+14960,2,491,LOCKED
+14984,1,492,492. Recursive Hash Repartition
+14986,2,492,LOCKED
+15008,1,493,493. Hash Join Spill Ordering
+15010,2,493,LOCKED
+15022,1,494,494. Hash Aggregate
+15024,2,494,LOCKED
+15044,1,495,495. Aggregate Function State API
+15046,2,495,LOCKED
+15074,1,496,496. Initial Aggregate Semantics
+15076,2,496,LOCKED
+15078,3,496,COUNT(*)
+15088,3,496,COUNT(expr)
+15098,3,496,SUM
+15110,3,496,MIN / MAX
+15120,3,496,AVG
+15133,1,497,497. Group Hash Table
+15135,2,497,LOCKED
+15157,1,498,498. GROUP BY NULL Semantics
+15159,2,498,LOCKED
+15181,1,499,499. Global Aggregate Fast Path
+15183,2,499,LOCKED
+15199,1,500,500. Hash Aggregate Spill
+15201,2,500,LOCKED
+15221,1,501,501. DISTINCT
+15223,2,501,LOCKED
+15238,1,502,502. Sort Operator
+15240,2,502,LOCKED
+15258,1,503,503. Sort Record
+15260,2,503,LOCKED
+15289,1,504,504. Sort Comparison
+15291,2,504,LOCKED
+15315,1,505,505. In-Memory Sort Algorithm
+15317,2,505,LOCKED initial implementation
+15343,1,506,506. External Merge Sort
+15345,2,506,LOCKED
+15376,1,507,507. Sort Spill Run Format
+15378,2,507,LOCKED
+15400,1,508,508. PhysicalTopN
+15402,2,508,LOCKED
+15432,1,509,509. Merge Join
+15434,2,509,"LOCKED architecture, later implementation milestone"
+15452,1,510,510. DML Target Materialization
+15454,2,510,LOCKED
+15486,1,511,511. Halloween Problem Protection
+15488,2,511,LOCKED
+15502,1,512,512. DML Target Spool Memory and Spill
+15504,2,512,LOCKED
+15523,1,513,513. DML Revalidation
+15525,2,513,LOCKED
+15548,1,514,514. INSERT Execution
+15550,2,514,LOCKED
+15578,1,515,515. UPDATE Execution
+15580,2,515,LOCKED
+15598,1,516,516. DELETE Execution
+15600,2,516,LOCKED
+15617,1,517,517. RETURNING Buffer
+15619,2,517,LOCKED
+15641,1,518,518. Query Result Interface
+15643,2,518,LOCKED
+15659,1,519,519. Physical DDL Execution
+15661,2,519,LOCKED
+15679,1,520,520. Physical VACUUM
+15681,2,520,LOCKED
+15691,1,521,521. Physical Operator Properties
+15693,2,521,LOCKED
+15713,1,522,522. Ordering Property
+15715,2,522,LOCKED
+15746,1,523,523. Pipeline Breaker Memory Semantics
+15748,2,523,LOCKED
+15776,1,524,524. Pipeline Dependency DAG
+15778,2,524,LOCKED
+15795,1,525,525. Worker Model
+15797,2,525,LOCKED architecture
+15815,1,526,526. Pipeline Morsels
+15817,2,526,LOCKED for parallel-ready sources
+15827,3,526,Heap scan
+15841,3,526,Values
+15845,3,526,Spill partitions
+15853,1,527,527. Local Operator State
+15855,2,527,LOCKED
+15874,1,528,528. Parallel Sequential Scan
+15876,2,528,LOCKED later milestone
+15894,1,529,529. Parallel Hash Join Build
+15896,2,529,LOCKED architecture
+15912,1,530,530. Parallel Hash Join Probe
+15914,2,530,LOCKED architecture
+15932,1,531,531. Parallel Hash Aggregate
+15934,2,531,LOCKED architecture
+15952,1,532,532. Parallel Sort
+15954,2,532,LOCKED architecture
+15972,1,533,533. Task Scheduler
+15974,2,533,LOCKED staged implementation
+15998,1,534,534. Query Fairness
+16000,2,534,LOCKED architecture
+16017,1,535,535. NUMA
+16019,2,535,DEFERRED
+16036,1,536,536. SIMD Policy
+16038,2,536,LOCKED architecture-compatible
+16070,1,537,537. Branch Reduction
+16072,2,537,LOCKED guideline
+16095,1,538,538. Prefetch
+16097,2,538,LOCKED future optimization points
+16114,1,539,539. Query Profiling
+16116,2,539,LOCKED
+16132,3,539,SeqScan
+16141,3,539,IndexScan
+16149,3,539,HashJoin
+16161,3,539,Aggregate
+16170,3,539,Sort
+16182,1,540,540. EXPLAIN ANALYZE
+16184,2,540,LOCKED
+16213,1,541,541. Pipeline Profiling
+16215,2,541,LOCKED
+16248,1,542,542. Physical Plan Validator
+16250,2,542,LOCKED
+16270,1,543,543. Execution Error Model
+16272,2,543,LOCKED
+16296,1,544,544. Integer Arithmetic Errors
+16298,2,544,LOCKED
+16317,1,545,545. Division
+16319,2,545,LOCKED
+16333,1,546,546. Execution Testing Strategy
+16335,2,546,LOCKED
+16337,3,546,Operator unit tests
+16352,3,546,Pipeline tests
+16356,3,546,End-to-end tests
+16360,3,546,Differential tests
+16364,3,546,Spill tests
+16375,3,546,Cancellation tests
+16391,1,547,547. Vector Correctness Tests
+16393,2,547,LOCKED
+16421,1,548,548. String Lifetime Tests
+16423,2,548,LOCKED
+16437,1,549,549. Hash Join Tests
+16439,2,549,LOCKED
+16462,1,550,550. Aggregate Tests
+16464,2,550,LOCKED
+16486,1,551,551. Sort Tests
+16488,2,551,LOCKED
+16511,1,552,552. DML Execution Tests
+16513,2,552,LOCKED
+16539,1,553,553. Execution Microbenchmarks
+16541,2,553,LOCKED
+16571,1,554,554. Vector Size Benchmark
+16573,2,554,LOCKED
+16593,1,555,555. End-to-End Execution Benchmarks
+16595,2,555,LOCKED
+16628,1,556,556. Deliberately Deferred Execution Features
+16630,2,556,LOCKED
+16657,1,557,557. High-Reward Future Execution Experiments
+16659,2,557,LOCKED recommendation
+16682,1,558,558. Practical Performance Rules
+16684,2,558,LOCKED
+16706,1,559,559. Execution Invariants
+16708,2,559,LOCKED
+16745,1,560,560. Recommended Execution Module Layout
+16747,2,560,LOCKED
+16838,1,561,561. Execution Implementation Order
+16840,2,561,LOCKED
+16842,3,561,Phase E1 — Vector foundation
+16854,3,561,Phase E2 — Expression execution
+16864,3,561,Phase E3 — Pipeline skeleton
+16873,3,561,Phase E4 — Streaming operators
+16883,3,561,Phase E5 — Blocking memory infrastructure
+16892,3,561,Phase E6 — Joins
+16902,3,561,Phase E7 — Aggregation/distinct
+16911,3,561,Phase E8 — Sorting
+16920,3,561,Phase E9 — DML execution
+16930,3,561,Phase E10 — Parallel execution
+16944,1,562,562. Execution Milestone 1
+16946,2,562,LOCKED target
+16970,1,563,563. Execution Milestone 2
+16972,2,563,LOCKED target
+16992,1,564,564. Execution Milestone 3
+16994,2,564,LOCKED target
+17009,1,565,565. Execution Milestone 4
+17011,2,565,LOCKED target
+17028,1,566,566. Execution Milestone 5
+17030,2,566,LOCKED target
+17058,1,567,567. Architecture Status After Practical Execution Layer
+17060,2,567,LOCKED v1
+17113,1,568,568. Cost-Based Optimizer Contract
+17115,2,568,LOCKED
+17162,1,569,569. Optimizer Layering
+17164,2,569,LOCKED
+17202,1,570,570. Optimizer Inputs
+17204,2,570,LOCKED
+17230,1,571,571. Optimizer Output
+17232,2,571,LOCKED
+17260,1,572,572. Statistics Philosophy
+17262,2,572,LOCKED
+17289,1,573,573. ANALYZE
+17291,2,573,LOCKED
+17315,1,574,574. Table Statistics
+17317,2,574,LOCKED
+17341,1,575,575. Column Statistics
+17343,2,575,LOCKED
+17373,1,576,576. Statistics Collection Strategy
+17375,2,576,LOCKED
+17399,1,577,577. Small-Table Exact Statistics
+17401,2,577,LOCKED
+17424,1,578,578. NDV Estimation
+17426,2,578,LOCKED: HyperLogLog
+17460,1,579,579. Most-Common-Value Collection
+17462,2,579,LOCKED
+17493,1,580,580. Histogram Collection
+17495,2,580,LOCKED
+17520,1,581,581. Why Equi-Depth Histograms
+17522,2,581,LOCKED rationale
+17541,1,582,582. Histogram Value Semantics
+17543,2,582,LOCKED
+17560,1,583,583. Statistics Serialization
+17562,2,583,LOCKED
+17588,1,584,584. Statistics Snapshot During Planning
+17590,2,584,LOCKED
+17602,1,585,585. Statistics Freshness
+17604,2,585,LOCKED
+17630,1,586,586. CardinalityEstimate
+17632,2,586,LOCKED
+17656,1,587,587. Exact-Zero vs Estimated-Small
+17658,2,587,LOCKED
+17698,1,588,588. Row Width Estimate
+17700,2,588,LOCKED
+17728,1,589,589. Selectivity Range
+17730,2,589,LOCKED
+17748,1,590,590. Equality Selectivity: Constant
+17750,2,590,LOCKED
+17760,3,590,NULL constant
+17770,3,590,Constant found in MCV list
+17778,3,590,Outside known min/max
+17788,3,590,Otherwise
+17802,1,591,591. Equality Selectivity: Column to Column
+17804,2,591,LOCKED initial estimate
+17846,1,592,592. MCV-Aware Join Estimation
+17848,2,592,LOCKED
+17864,1,593,593. Unique-Key Join Estimation
+17866,2,593,LOCKED
+17892,1,594,594. Range Selectivity
+17894,2,594,LOCKED
+17920,1,595,595. IS NULL Selectivity
+17922,2,595,LOCKED
+17955,1,596,596. IN-List Selectivity
+17957,2,596,LOCKED
+17979,1,597,597. NOT Selectivity
+17981,2,597,LOCKED
+18014,1,598,598. PredicateTruthEstimate
+18016,2,598,LOCKED
+18051,1,599,599. AND Selectivity
+18053,2,599,LOCKED baseline
+18073,1,600,600. OR Selectivity
+18075,2,600,LOCKED baseline
+18091,1,601,601. Same-Column Constraint Set
+18093,2,601,LOCKED
+18120,1,602,602. Correlated Columns
+18122,2,602,LOCKED limitation
+18151,1,603,603. Cardinality Through Projection
+18153,2,603,LOCKED
+18167,1,604,604. Cardinality Through Filter
+18169,2,604,LOCKED
+18182,1,605,605. Cardinality Through Limit
+18184,2,605,LOCKED
+18201,1,606,606. Cardinality Through DISTINCT
+18203,2,606,LOCKED
+18223,1,607,607. GROUP BY Cardinality
+18225,2,607,LOCKED
+18249,1,608,608. Multi-Column NDV Damping
+18251,2,608,LOCKED initial heuristic
+18274,1,609,609. LEFT JOIN Cardinality
+18276,2,609,LOCKED
+18312,1,610,610. Cost Model Philosophy
+18314,2,610,LOCKED
+18339,1,611,611. Cost Structure
+18341,2,611,LOCKED
+18374,1,612,612. Default Cost Units
+18376,2,612,LOCKED initial calibration shape
+18398,1,613,613. Cost Calibration Tool
+18400,2,613,LOCKED
+18423,1,614,614. Buffer Cache Assumption
+18425,2,614,LOCKED initial model
+18443,1,615,615. Sequential Scan Cost
+18445,2,615,LOCKED
+18467,1,616,616. B+ Tree Point Lookup Cost
+18469,2,616,LOCKED
+18495,1,617,617. Index Range Scan Cost
+18497,2,617,LOCKED
+18516,1,618,618. Index-Heap Correlation
+18518,2,618,LOCKED initial statistic
+18550,1,619,619. Fallback Heap Fetch Cost
+18552,2,619,LOCKED
+18566,1,620,620. Access-Path Predicate Analysis
+18568,2,620,LOCKED
+18584,1,621,621. Sargable B+ Tree Conditions
+18586,2,621,LOCKED
+18625,1,622,622. Composite Index Bounds
+18627,2,622,LOCKED
+18652,1,623,623. Index Predicate Residuals
+18654,2,623,LOCKED
+18684,1,624,624. Base Access Paths
+18686,2,624,LOCKED
+18709,1,625,625. Multiple Indexes
+18711,2,625,LOCKED v1
+18729,1,626,626. Index Scan Break-Even
+18731,2,626,LOCKED
+18757,1,627,627. Required Columns and Access Cost
+18759,2,627,LOCKED
+18781,1,628,628. Physical Property Model
+18783,2,628,LOCKED initial properties
+18811,1,629,629. Ordering Satisfaction
+18813,2,629,LOCKED
+18844,1,630,630. Interesting Orders
+18846,2,630,LOCKED
+18866,1,631,631. Plan Alternative Key
+18868,2,631,LOCKED
+18892,1,632,632. RelationSet
+18894,2,632,LOCKED
+18916,1,633,633. Join Graph
+18918,2,633,LOCKED
+18937,1,634,634. Join Enumeration Scope
+18939,2,634,LOCKED
+18960,1,635,635. Bushy Dynamic Programming
+18962,2,635,LOCKED
+18990,1,636,636. Exhaustive Join Threshold
+18992,2,636,LOCKED initial default
+19010,1,637,637. Large-Join Heuristic
+19012,2,637,LOCKED
+19030,1,638,638. Cartesian Products
+19032,2,638,LOCKED
+19048,1,639,639. Join Algorithm Alternatives
+19050,2,639,LOCKED
+19067,1,640,640. Hash Join Cost
+19069,2,640,LOCKED
+19094,1,641,641. Hash Join Memory Estimate
+19096,2,641,LOCKED
+19126,1,642,642. Hash Join Spill Cost
+19128,2,642,LOCKED
+19151,1,643,643. Nested Loop Cost
+19153,2,643,LOCKED
+19171,1,644,644. Index Nested-Loop Cost
+19173,2,644,LOCKED
+19203,1,645,645. Repeated INLJ Key Locality
+19205,2,645,LOCKED initial refinement
+19220,1,646,646. Merge Join Cost
+19222,2,646,LOCKED when implemented
+19246,1,647,647. Sort Cost
+19248,2,647,LOCKED
+19278,1,648,648. TopN Cost
+19280,2,648,LOCKED
+19310,1,649,649. Hash Aggregate Cost
+19312,2,649,LOCKED
+19336,1,650,650. Sort Aggregate Cost
+19338,2,650,LOCKED when implemented
+19364,1,651,651. DISTINCT Cost
+19366,2,651,LOCKED
+19381,1,652,652. Sort Enforcement
+19383,2,652,LOCKED
+19405,1,653,653. Final ORDER BY Optimization
+19407,2,653,LOCKED
+19429,1,654,654. Limit-Aware Planning
+19431,2,654,LOCKED
+19460,1,655,655. Required Rows Objective
+19462,2,655,LOCKED
+19486,1,656,656. Predicate CPU Cost
+19488,2,656,LOCKED
+19514,1,657,657. Filter Predicate Ordering
+19516,2,657,LOCKED later optimization
+19543,1,658,658. Physical Plan Memo
+19545,2,658,LOCKED
+19565,1,659,659. Dominance Rule
+19567,2,659,LOCKED
+19591,1,660,660. Join DP Initialization
+19593,2,660,LOCKED
+19607,1,661,661. Join DP Transition
+19609,2,661,LOCKED
+19629,1,662,662. Join Cardinality Must Be Algorithm-Independent
+19631,2,662,LOCKED
+19653,1,663,663. Outer Join Search Constraints
+19655,2,663,LOCKED
+19671,1,664,664. Subquery Physical Planning
+19673,2,664,LOCKED initial scope
+19690,1,665,665. Parameter-Free Plans
+19692,2,665,LOCKED v1
+19713,1,666,666. Statistics Missing Fallbacks
+19715,2,666,LOCKED
+19736,1,667,667. Statistics Confidence
+19738,2,667,LOCKED recommendation
+19770,1,668,668. Estimation Provenance
+19772,2,668,LOCKED
+19790,1,669,669. Optimizer Trace
+19792,2,669,LOCKED
+19817,1,670,670. EXPLAIN Estimates
+19819,2,670,LOCKED
+19848,1,671,671. EXPLAIN ANALYZE Estimate Error
+19850,2,671,LOCKED
+19881,1,672,672. Cardinality Error Attribution
+19883,2,672,LOCKED recommendation
+19897,1,673,673. No Runtime Statistics Feedback in v1
+19899,2,673,LOCKED
+19919,1,674,674. Planner Time Budget
+19921,2,674,LOCKED
+19938,1,675,675. Planning Memory Budget
+19940,2,675,LOCKED
+19956,1,676,676. Deterministic Optimization
+19958,2,676,LOCKED
+19983,1,677,677. Cost Tie Tolerance
+19985,2,677,LOCKED
+19997,1,678,678. Plan Fingerprint
+19999,2,678,LOCKED
+20024,1,679,679. Logical Rewrite Before Costing
+20026,2,679,LOCKED
+20045,1,680,680. Join Predicate Equivalence Classes
+20047,2,680,LOCKED
+20079,1,681,681. Constant Propagation Through Equality
+20081,2,681,LOCKED
+20102,1,682,682. Contradiction Detection
+20104,2,682,LOCKED
+20126,1,683,683. Unique/Key Metadata in Optimization
+20128,2,683,LOCKED
+20145,1,684,684. Foreign-Key Metadata
+20147,2,684,DEFERRED
+20155,1,685,685. Join Elimination
+20157,2,685,DEFERRED
+20172,1,686,686. Index-Order Match
+20174,2,686,LOCKED
+20197,1,687,687. Reverse-Scan Limitation
+20199,2,687,LOCKED
+20215,1,688,688. Hash Join Build-Side Selection
+20217,2,688,LOCKED
+20243,1,689,689. Join Output Width
+20245,2,689,LOCKED
+20264,1,690,690. Hash Table Payload Pruning
+20266,2,690,LOCKED
+20281,1,691,691. Sort Payload Pruning
+20283,2,691,LOCKED
+20298,1,692,692. Aggregate State Width
+20300,2,692,LOCKED
+20315,1,693,693. Spill Probability
+20317,2,693,LOCKED
+20332,1,694,694. Query Memory Allocation During Planning
+20334,2,694,LOCKED
+20346,1,695,695. Pipeline-Aware Peak Memory
+20348,2,695,LOCKED recommendation
+20372,1,696,696. Materialization Cost
+20374,2,696,LOCKED
+20397,1,697,697. Startup vs Total Cost
+20399,2,697,LOCKED
+20410,3,697,SeqScan
+20414,3,697,IndexScan
+20418,3,697,HashJoin
+20422,3,697,Sort
+20426,3,697,TopN
+20434,1,698,698. Plan Search and LIMIT
+20436,2,698,LOCKED
+20460,1,699,699. Optimizer Correctness Boundary
+20462,2,699,LOCKED
+20480,1,700,700. Optimizer Validation
+20482,2,700,LOCKED
+20500,1,701,701. Statistics Tests
+20502,2,701,LOCKED
+20531,1,702,702. Selectivity Estimation Tests
+20533,2,702,LOCKED
+20570,1,703,703. Join Estimation Tests
+20572,2,703,LOCKED
+20592,1,704,704. Access Path Tests
+20594,2,704,LOCKED
+20612,1,705,705. Join-Order Tests
+20614,2,705,LOCKED
+20635,1,706,706. Interesting-Order Tests
+20637,2,706,LOCKED
+20655,1,707,707. Memory/Spill Plan Tests
+20657,2,707,LOCKED
+20678,1,708,708. Optimizer Differential Correctness Tests
+20680,2,708,LOCKED
+20696,1,709,709. Optimizer Fuzzing
+20698,2,709,LOCKED
+20721,1,710,710. Cost Model Benchmarks
+20723,2,710,LOCKED
+20752,1,711,711. Plan Regression Suite
+20754,2,711,LOCKED
+20782,1,712,712. Optimizer Performance Benchmarks
+20784,2,712,LOCKED
+20814,1,713,713. Star Schema Benchmark
+20816,2,713,LOCKED recommendation
+20833,1,714,714. No Benchmark Gaming
+20835,2,714,LOCKED
+20849,1,715,715. Deliberately Deferred Optimizer Features
+20851,2,715,LOCKED
+20878,1,716,716. High-Reward Future Optimizer Experiments
+20880,2,716,LOCKED recommendation
+20902,1,717,717. Cost-Based Optimizer Invariants
+20904,2,717,LOCKED
+20941,1,718,718. Recommended Optimizer Module Layout
+20943,2,718,LOCKED
+21026,1,719,719. Optimizer Implementation Order
+21028,2,719,LOCKED
+21030,3,719,Phase O1 — Statistics foundation
+21042,3,719,Phase O2 — Selectivity/cardinality
+21057,3,719,Phase O3 — Cost model
+21071,3,719,Phase O4 — Base access planning
+21081,3,719,Phase O5 — Join optimization
+21094,3,719,Phase O6 — Property enforcement
+21104,3,719,Phase O7 — Diagnostics
+21116,1,720,720. Optimizer Milestone 1
+21118,2,720,LOCKED target
+21147,1,721,721. Optimizer Milestone 2
+21149,2,721,LOCKED target
+21167,1,722,722. Optimizer Milestone 3
+21169,2,722,LOCKED target
+21185,1,723,723. Optimizer Milestone 4
+21187,2,723,LOCKED target
+21203,1,724,724. Optimizer Milestone 5
+21205,2,724,LOCKED target
+21218,1,725,725. Complete Core Architecture Status
+21220,2,725,LOCKED v1

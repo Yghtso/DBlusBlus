@@ -1,7 +1,8 @@
 # DBlusBlus Architecture
 
-**Status:** Authoritative v1 architecture contract  
-**Architecture version:** v1
+**Status:** Rewrite in progress  
+**Architecture version:** v1 contract under structural rewrite  
+**Active authority during rewrite:** the existing `ARCHITECTURE.md` remains authoritative until this document has completed semantic reconciliation and is explicitly adopted.
 
 ## Purpose
 
@@ -9,20 +10,18 @@ This document defines the technical architecture of DBlusBlus: a from-scratch, s
 
 It specifies architectural responsibilities, subsystem boundaries, persistent-format requirements, concurrency and lifetime rules, correctness invariants, and performance-relevant design constraints.
 
-`ARCHITECTURE.md` is the authority for intended system behavior. Project progress belongs in `PROJECT_STATE.md`; implementation sequencing and module-layout guidance belong in `DEVELOPMENT.md`; detailed test and benchmark procedures belong in `VERIFICATION.md`; historical implementation records belong in `devlog/`.
+Project progress belongs in `PROJECT_STATE.md`. Historical implementation records belong in `devlog/`. Development-agent instructions do not form part of this architecture contract.
 
 ## Contract language
 
-Requirements use ordinary normative language:
+The original architecture uses `LOCKED` to mark hard requirements. During this rewrite those requirements are expressed using ordinary normative language:
 
 - **MUST / MUST NOT** — required by the current architecture contract.
 - **SHOULD / SHOULD NOT** — the architectural default; deviation requires a concrete technical reason and must remain compatible with all MUST-level requirements.
 - **MAY** — explicitly permitted implementation freedom.
 - **Deferred** — intentionally outside the current baseline; it is not part of the required v1 implementation unless later promoted by an explicit architecture revision.
 
-Where a cross-layer summary restates a rule, the detailed format or protocol in the owning subsystem chapter is canonical. Summaries and registries are indexes and integration constraints; they do not create independent conflicting values.
-
-Changes to an accepted architectural requirement require an explicit architecture revision. Implementation behavior does not silently redefine this document.
+A rewrite pass may reorganize, consolidate, or clarify existing requirements, but it does not change their meaning. Deliberate architecture changes are handled separately from structural rewriting.
 
 ---
 
@@ -2203,7 +2202,7 @@ The mapping is monotonic.
 
 The mapping remains conservative even if a later insertion path can sometimes reuse a slot without paying the new 8-byte slot-entry cost. Persisted FSM metadata MUST NOT overstate guaranteed insertion capacity merely because slot reuse may become possible.
 
-### 6.3.1 Representative boundaries
+### 6.3.1 Locked representative boundaries
 
 The following values are part of the v1 mapping contract:
 
@@ -2435,7 +2434,7 @@ Once WAL/recovery is active, the global page-checksum and WAL policies apply.
 
 The relation-wide FSM subsystem MAY maintain an in-memory accelerator derived from persisted FSM information.
 
-The runtime FSM MAY use a bucketed representation conceptually shaped as:
+The source architecture permits a bucketed representation conceptually shaped as:
 
 ```text
 bucket[0]
@@ -2448,7 +2447,7 @@ Insertion asks the runtime FSM for a candidate category/page capable of satisfyi
 
 This in-memory accelerator is rebuildable runtime metadata and is **not** part of the persisted `FSM_DATA` format.
 
-The exact runtime data structure, tie-breaking policy, and candidate-search procedure are implementation choices, provided they preserve the persisted FSM semantics and the heap-page revalidation requirement.
+The exact runtime data structure, tie-breaking policy, and search procedure are not locked by legacy §§82–85 and are therefore not invented in this pass.
 
 ## 6.10 Advisory, stale, repairable, and rebuildable semantics
 
@@ -2674,7 +2673,7 @@ close raw files
 inspect file size
 ```
 
-WAL writing, durability scheduling, and `durable_lsn` advancement belong to the WAL writer/flusher. `DiskManager` provides lower-level file synchronization primitives but does not own transaction-level WAL durability coordination.
+The legacy conceptual interface included a `SyncWal()` operation. The later WAL architecture assigns WAL writing, durability scheduling, and `durable_lsn` advancement to the WAL writer/flusher. `DiskManager` therefore does not own transaction-level WAL durability coordination merely because the early conceptual API showed such a method.
 
 ### 7.3.1 File lifecycle boundary
 
@@ -2948,15 +2947,40 @@ Exact checksum finalization is §4.12.2.
 
 ## 7.11 WAL-before-data enforcement
 
-The canonical WAL-before-data ordering rule is §12.17.
+The BufferPool flush path is the centralized WAL-before-data enforcement point for pages routed through it.
 
-The BufferPool flush path is its centralized enforcement point for BufferPool-managed pages. Before explicit flush, eviction, or background writeback, BufferPool checks the page's `page_lsn` against `WalManager.durable_lsn` and requests `flush_through(page_lsn)` when §12.17 requires it.
+Before writing a WAL-protected dirty page whose page header contains:
 
-Storage objects MUST NOT each implement independent variants of this rule.
+```text
+page_lsn = X
+```
 
-The WAL subsystem owns WAL persistence and `durable_lsn`; BufferPool owns enforcing the dependency before data-page writeback.
+the flush path MUST establish:
 
-B+ mini-transactions additionally obey the stronger temporary no-flush condition defined in §12.10.2.
+```text
+WalManager.durable_lsn >= X
+```
+
+Conceptually:
+
+```text
+if WalManager.durable_lsn < page.page_lsn:
+    WalManager.flush_through(page.page_lsn)
+
+write page through raw page-file I/O
+```
+
+This ordering requirement applies to all BufferPool data-page write paths, including:
+
+- explicit flush,
+- eviction,
+- background writeback.
+
+Storage objects MUST NOT each implement independent variants of the WAL-before-data rule.
+
+The WAL subsystem owns WAL persistence and `durable_lsn`; the BufferPool owns checking/enforcing the dependency before data-page writeback.
+
+B+ mini-transactions use the stronger temporary no-flush condition defined in §12.10.2.
 
 ## 7.12 CLOCK replacement
 
@@ -3279,7 +3303,7 @@ A context-free RID decoder can validate these sentinel rules.
 
 When the index handle knows the expected heap `FileId`, tree/index-level validation MUST additionally reject a leaf RID whose `heap_file_id` does not belong to the indexed relation.
 
-This strict decoder rule is part of the persisted v1 architecture contract.
+This strict decoder rule is part of the architecture contract even though the Phase 1 implementation checkpoint recorded a decoder that still accepted nonzero reserved bytes.
 
 ## 8.5 Memcomparable user-key encoding
 
@@ -3603,7 +3627,7 @@ no previous leaf         = INVALID_PAGE_NO
 no next leaf             = INVALID_PAGE_NO
 ```
 
-Leaf-node flag/reserved validation follows the canonical B+ node rules in §8.7.
+A v1 decoder MUST reject nonzero node flags or reserved bytes.
 
 ## 8.10 Internal-node format and routing semantics
 
@@ -3650,7 +3674,7 @@ flags                 = 0
 reserved bytes 52..63 = 0
 ```
 
-Internal-node flag/reserved validation follows the canonical B+ node rules in §8.7.
+A v1 decoder MUST reject nonzero node flags or reserved bytes.
 
 ### 8.10.1 Routing lower bounds
 
@@ -4351,7 +4375,7 @@ RID participation makes this exact even among duplicate user keys.
 
 ### Aborted user DML
 
-The canonical v1 transaction/recovery architecture establishes: ordinary user-DML heap/index modifications are not physically undone on user abort.
+The later locked v1 transaction/recovery architecture refines the earlier B+ tree discussion: ordinary user-DML heap/index modifications are not physically undone on user abort.
 
 Consequently, an aborted INSERT/UPDATE may leave an index entry that references an invisible aborted heap version.
 
@@ -5226,17 +5250,49 @@ never `IN_PROGRESS` after the conflicting transaction's locks have been released
 
 ### 9.14.2 Commit
 
-The integrated COMMIT sequence is canonical in §15.5.
+For a transaction with persistent writes:
 
-This chapter owns the transaction-lifecycle requirement that terminal COMMITTED state is published through §9.14.1's linearization point only after the required durable commit WAL exists. The transaction-status page remains NO-FORCE; durable commit WAL is authoritative after crash.
+```text
+append TXN_COMMIT
+    ↓
+make WAL durable through commit LSN
+    ↓
+install/update COMMITTED in transaction-status page/cache
+    ↓
+runtime terminal publication linearization
+    ↓
+release transaction-lifetime logical locks
+    ↓
+unregister the transaction's own SQL snapshot(s)
+    ↓
+return commit success
+```
+
+The persistent status-page update itself remains NO-FORCE; durable commit WAL is authoritative after crash.
 
 ### 9.14.3 Abort
 
-The integrated ABORT sequence is canonical in §15.6.
+Abort publication is:
 
-This chapter owns the transaction-lifecycle requirement that ABORTED publication uses §9.14.1's terminal linearization point before transaction-lifetime locks are released.
+```text
+state -> ABORTING
+    ↓
+append TXN_ABORT when persistent WAL-visible state exists
+    ↓
+install/update ABORTED transaction status
+    ↓
+runtime terminal publication linearization
+    ↓
+release transaction-lifetime logical locks
+    ↓
+unregister SQL snapshot(s)
+    ↓
+finish ABORTED
+```
 
-An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort. If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again.
+An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort.
+
+If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again.
 
 Ordinary user abort does not physically restore heap/index bytes.
 
@@ -5970,7 +6026,7 @@ It is physically stored in fixed-size files under:
 wal/
 ```
 
-with the segment naming shape:
+with the legacy naming shape:
 
 ```text
 0000000000000000.wal
@@ -5994,7 +6050,7 @@ segment_index  = L / 67,108,864
 segment_offset = L % 67,108,864
 ```
 
-The exact filename-number radix/presentation beyond the specified example is not relied upon as a recovery semantic; segment order is determined by the logical segment index.
+The exact filename-number radix/presentation beyond the locked example is not relied upon as a recovery semantic; segment order is determined by the logical segment index.
 
 WAL segmentation provides bounded file units, recovery scan boundaries, and a natural recycling unit.
 
@@ -8237,7 +8293,7 @@ sys_constraints
 sys_statistics
 ```
 
-Their canonical semantic fields are:
+Their locked semantic fields are:
 
 ### 16.5.1 `sys_tables`
 
@@ -9455,7 +9511,7 @@ Thus `a < b < c` is rejected rather than assigned accidental host-language seman
 7. Nested block comments are not part of v1.
 8. Parser output contains textual syntax names, not resolved catalog IDs.
 9. AST nodes retain source spans through semantic binding.
-10. Pratt/precedence parsing uses the defined precedence hierarchy.
+10. Pratt/precedence parsing uses the locked precedence hierarchy.
 11. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
 12. Unsupported syntax fails explicitly rather than being half-interpreted.
 
@@ -10431,84 +10487,6 @@ local predicates                   -> vertex metadata
 
 Outer joins impose semantic ordering constraints and are not freely inserted into an ordinary inner-join graph.
 
-### 20.17.7 Inner-join equality equivalence classes
-
-Within semantics where ordinary equality and join type make transitivity safe, derive equality equivalence classes.
-
-For example:
-
-```text
-A.x = B.x
-B.x = C.x
-```
-
-creates one class containing:
-
-```text
-A.x
-B.x
-C.x
-```
-
-Uses include:
-
-```text
-transitive join-predicate derivation
-constant propagation
-join-graph connectivity
-interesting-order recognition
-```
-
-Equivalence derivation does not cross a LEFT JOIN null-extension boundary unless a separate proven rewrite first removes that outer-join constraint.
-
-### 20.17.8 Constant propagation and contradiction detection
-
-For an inner-join/filter-safe equivalence:
-
-```text
-A.x = B.x
-AND A.x = 5
-```
-
-the optimizer may derive:
-
-```text
-B.x = 5
-```
-
-which may create a new base-access alternative.
-
-Constraint analysis also detects provable contradictions such as:
-
-```text
-x = 1 AND x = 2
-x < 5 AND x >= 5
-NOT NULL column IS NULL
-```
-
-and marks the corresponding logical relation as provably empty before physical search.
-
-Derived predicates retain ordinary SQL NULL semantics.
-
-No predicate is propagated across nullable outer-join semantics without proof.
-
-### 20.17.9 Trusted key metadata
-
-Only constraints actually enforced by the engine may establish logical key properties.
-
-Trusted PRIMARY KEY / UNIQUE + NOT NULL metadata may support:
-
-```text
-candidate-key inference
-maximum join multiplicity
-DISTINCT redundancy reasoning
-GROUP BY key properties
-```
-
-Low estimated NDV is never treated as proof of uniqueness.
-
-Foreign-key-based rewrites and join elimination remain deferred until those constraints and semantic proofs exist.
-
 ## 20.18 Logical-plan validation
 
 Validation runs after initial logical planning and after major rewrite phases.
@@ -10859,23 +10837,13 @@ This retirement rule applies to table heap/FSM files and index B+ files.
 
 ## 21.10 Catalog cache publication
 
-The canonical catalog-cache visibility and descriptor-lifetime rules are §16.10.
+Catalog cache publication follows transaction terminal state.
 
-DDL execution integrates with those rules as follows:
+CREATE/ALTER-like descriptor versions remain transaction-local/catalog-MVCC-visible until terminal COMMITTED publication, after which current committed cache/name lookup may publish them.
 
-```text
-uncommitted CREATE/ALTER-like metadata:
-    transaction-local/catalog-MVCC-visible only
+After committed DROP, current-name lookup stops returning the object while old immutable descriptor objects may remain alive for older users.
 
-terminal COMMITTED:
-    publish/replace current committed cache/name entries
-
-terminal committed DROP:
-    remove the object from current-name lookup
-    while older immutable descriptors may remain alive
-```
-
-DDL MUST NOT mutate descriptors already retained by active plans.
+Cache invalidation/replacement does not mutate descriptors already held by active plans.
 
 ## 21.11 INSERT binding
 
@@ -11341,39 +11309,6 @@ PhysicalResultSink
 An operator is added when it represents a distinct physical execution algorithm or statement execution role.
 
 Detailed join/aggregate/sort/DML execution algorithms are specified in Chapters 28–31.
-
-### 22.4.1 Physical implementation availability
-
-The physical operator family is the architecture's algorithm vocabulary; runtime capability determines which algorithms are currently eligible for physical planning.
-
-The physical planner has an explicit capability/implementation registry.
-
-It enumerates an alternative only when the corresponding runtime implementation is available and validated.
-
-In particular:
-
-```text
-PhysicalHashJoin
-PhysicalNestedLoopJoin
-PhysicalIndexNestedLoopJoin
-PhysicalHashAggregate
-PhysicalSort
-PhysicalTopN
-```
-
-are baseline physical implementations.
-
-Algorithms described as later/conditional in their execution chapters, including:
-
-```text
-PhysicalMergeJoin
-PhysicalSortAggregate
-ordered/streaming DISTINCT
-```
-
-are costed/enumerated only after their runtime capability is enabled.
-
-An unavailable algorithm can never appear in the final PhysicalPlan merely because the cost model has a formula for it.
 
 ## 22.5 Query execution context
 
@@ -12187,7 +12122,7 @@ Result validity follows Chapter 17's expression semantics.
 
 The kernel uses the resolved physical type directly; it does not switch on SQL type once per row when the batch-level operation is already known.
 
-Detailed arithmetic-error and overflow behavior is defined by §39.3.1 and MUST remain consistent with these kernels.
+Detailed arithmetic-error/overflow behavior is completed with the later execution-error contract; Pass 12 does not invent a conflicting rule.
 
 ## 25.4 Comparison kernels
 
@@ -12495,7 +12430,7 @@ source state that can later be partitioned where valid
 no mutable query state embedded in immutable plan nodes
 ```
 
-Worker-pool scheduling, morsels, local-state combining, and concrete parallel operator algorithms are defined in Chapter 32.
+Worker-pool scheduling, morsels, local-state combining, and concrete parallel operator algorithms are completed in Pass 13.
 
 ## 26.10 Pipeline invariants
 
@@ -12751,7 +12686,7 @@ A result sink consumes final DataChunks synchronously or materializes/retains re
 
 It MUST NOT expose a borrowed producer chunk beyond the producer/owner lifetime.
 
-The detailed cursor/client result interface and DML RETURNING spool are defined in Chapter 31.
+The detailed cursor/client result interface and DML RETURNING spool are completed in Pass 13.
 
 ## 27.12 Scan/unary invariants
 
@@ -13385,28 +13320,6 @@ The physical optimizer must insert/use Sort when SQL requires an ordering not ot
 11. Spilled and in-memory aggregation produce semantically identical results.
 12. Hash aggregate/DISTINCT advertise no ordering.
 
-## 29.10 Ordered aggregation and streaming DISTINCT
-
-The architecture supports later ordered implementations when the physical capability registry enables them.
-
-`PhysicalSortAggregate` requires input ordered by its grouping keys.
-
-When that requirement is already satisfied, it may aggregate one key group at a time with memory approximately bounded by the current group plus aggregate state.
-
-Otherwise physical planning may enforce the required grouping order with `PhysicalSort` and compare:
-
-```text
-Sort + PhysicalSortAggregate
-```
-
-against `PhysicalHashAggregate`.
-
-An ordered/streaming DISTINCT similarly requires input ordered compatibly by every DISTINCT key and can emit one row per adjacent duplicate class.
-
-These implementations use the same grouping equality as §20.9/§29.7.
-
-Until the runtime capability exists, the planner does not enumerate them.
-
 ---
 
 # 30. Sorting and Top-N
@@ -13696,7 +13609,7 @@ revalidate tuple/version state
 apply Chapter-11 isolation conflict rules
 ```
 
-The Chapter-15 retry boundary remains authoritative.
+The already-locked Chapter-15 retry boundary remains authoritative.
 
 If READ COMMITTED discovers a retry-requiring conflict **before this statement attempt has produced any persistent WAL-visible write**:
 
@@ -13714,7 +13627,7 @@ same-TxnId whole-statement restart is forbidden
 transaction -> abort/conflict outcome
 ```
 
-This follows the Chapter-15 retry boundary and the no-physical-user-DML-undo architecture.
+This refines legacy §513 consistently with the no-physical-user-DML-undo architecture.
 
 ## 31.6 INSERT execution
 
@@ -15673,89 +15586,7 @@ number of left rows with at least one match
 
 A simple bounded probabilistic approximation for unmatched-left rows is acceptable in v1.
 
-## 35.25 Missing-statistics fallback
-
-Missing statistics are explicit optimizer inputs, not fabricated precision.
-
-One centralized `EstimatorFallbackConfig` supplies named fallback assumptions for at least:
-
-```text
-unknown equality selectivity
-unknown ordered-range selectivity
-unknown NULL fraction
-generic NDV
-```
-
-The values are optimizer configuration/tuning parameters rather than persistent-format constants.
-
-Every fallback result is:
-
-```text
-finite
-clamped to its legal domain
-marked LOW confidence
-tagged with MISSING_STATISTICS provenance
-```
-
-Fallback assumptions are shown in optimizer trace/verbose EXPLAIN diagnostics.
-
-A fallback never changes SQL semantics or proves a relation empty.
-
-## 35.26 Estimate confidence and provenance
-
-Cardinality/predicate estimates may carry:
-
-```text
-EstimateConfidence {
-    HIGH
-    MEDIUM
-    LOW
-}
-```
-
-plus one or more provenance tags.
-
-Canonical provenance categories include:
-
-```text
-PROVEN_CONSTRAINT
-MCV_HIT
-HISTOGRAM_RANGE
-NDV_ESTIMATE
-UNIQUE_KEY
-INDEPENDENCE_ASSUMPTION
-MULTICOLUMN_DAMPING
-MISSING_STATISTICS
-STALE_STATISTICS
-```
-
-Examples:
-
-```text
-provable contradiction / enforced key bound:
-    HIGH
-
-fresh exact/MCV evidence:
-    HIGH
-
-fresh approximate HLL/histogram evidence:
-    MEDIUM or HIGH according to estimator rule
-
-independence or multi-column damping:
-    LOW
-
-missing-stat fallback:
-    LOW
-```
-
-V1 plan selection is driven by cost, not by a separate confidence penalty.
-
-Confidence/provenance are retained for diagnostics and regression analysis.
-
-A composite estimate carries the least-confident material assumption that substantially determines the result and retains the relevant provenance chain.
-
-## 35.27 Estimation invariants
-
+## 35.25 Estimation invariants
 
 1. Estimated rows are nonnegative finite values.
 2. Provably-empty state is explicit and not inferred solely from a tiny estimate.
@@ -16275,1240 +16106,29 @@ IndexScan still fetches heap tuples for visibility in v1, but required output/pr
 
 # 37. Physical Properties and Join Enumeration
 
-## 37.1 Scope
+> **Rewrite status:** Pass 1 establishes the architectural baseline from legacy §34. Detailed physical properties and join search are migrated in Pass 15.
 
-This chapter defines the physical properties and join-search space used by the v1 cost optimizer.
+For small join sets, the optimizer uses dynamic-programming enumeration of useful join alternatives.
 
-The v1 property system intentionally remains small.
+For larger join graphs, planning time is bounded using heuristics or another controlled search strategy.
 
-It tracks:
+Join-order optimization is implemented as part of the database rather than outsourced.
 
-```text
-OrderingProperty
-RequiredSlotSet
-```
-
-and reserves future extension points for:
-
-```text
-partitioning
-rewindability
-materialization
-```
-
-without constructing a full property lattice before those properties are needed.
-
-`required_rows` for LIMIT-sensitive optimization is an optimization objective/requirement, not a physical data property; §38.16 defines how it participates in search identity when propagated.
-
-## 37.2 OrderingProperty
-
-An ordering is an ordered vector of:
-
-```text
-OrderKey {
-    LogicalSlotId slot
-    ASC | DESC
-    NULLS_FIRST | NULLS_LAST
-    collation
-}
-```
-
-Physical property reasoning is slot-based.
-
-If SQL ordering refers to a computed expression, logical/physical planning retains or introduces a hidden `LogicalSlotId` for that resolved expression before ordering-property comparison.
-
-V1 collation is the binary VARCHAR collation from Chapter 17.
-
-An empty key vector means:
-
-```text
-no required/provided ordering
-```
-
-Ordering properties are query-local and never persistent metadata.
-
-## 37.3 Ordering satisfaction
-
-An available ordering satisfies a required ordering exactly when the required keys are a prefix of the available keys and every corresponding key has identical:
-
-```text
-LogicalSlotId
-direction
-NULL order
-collation
-```
-
-Therefore:
-
-```text
-available: (a ASC NULLS FIRST, b ASC NULLS FIRST, c ASC NULLS FIRST)
-required:  (a ASC NULLS FIRST, b ASC NULLS FIRST)
-```
-
-is satisfied.
-
-Changing direction, NULL order, collation, or slot identity breaks satisfaction.
-
-A longer ordering is useful as a provider of its exact prefixes.
-
-The planner never infers descending B+ order from a forward-only index scan.
-
-## 37.4 RequiredSlotSet
-
-Each physical-planning subproblem has a required set of output `LogicalSlotId` values.
-
-The set contains every value still needed by an ancestor for:
-
-```text
-final output
-predicate evaluation
-join keys/residual predicates
-grouping/aggregate arguments
-sorting
-DML assignments / RETURNING
-hidden DML target RID/system state
-```
-
-Projection pruning may remove every other value.
-
-For a fixed optimizer invocation, the required slots of a join `RelationSet` are derived deterministically from final requirements and predicates that cross its boundary.
-
-This lets the common join-DP key use:
-
-```text
-RelationSet + OrderingProperty
-```
-
-while preserving the required-output contract.
-
-## 37.5 Provided-ordering rules
-
-A physical operator advertises only ordering that its runtime implementation actually guarantees.
-
-Baseline rules are:
-
-```text
-PhysicalSeqScan:
-    no ordering
-
-forward PhysicalIndexScan:
-    compatible ascending index-key ordering
-    (ASC / NULLS FIRST in the v1 key schema)
-
-PhysicalFilter:
-    preserves input ordering
-
-simple/reference PhysicalProject:
-    preserves ordering for retained slots
-    only while the corresponding ordered keys survive unchanged
-
-PhysicalLimit:
-    preserves input ordering
-
-PhysicalSort:
-    provides its exact sort ordering
-
-PhysicalTopN:
-    provides its exact final ordering
-
-PhysicalHashJoin:
-PhysicalHashAggregate:
-hash PhysicalDistinct:
-    no ordering
-```
-
-Nested-loop/index-nested-loop and later merge/ordered-aggregate implementations may advertise additional order only when their execution contract explicitly guarantees it.
-
-The capability registry from §22.4.1 gates such alternatives.
-
-## 37.6 Interesting orders
-
-The optimizer retains some non-cheapest alternatives because their ordering may reduce later work.
-
-Interesting orders originate from:
-
-```text
-final ORDER BY
-GROUP BY / ordered-aggregate opportunity
-merge-join key requirements
-usable index access order
-DISTINCT / ordered-distinct opportunity
-```
-
-Only normalized orderings that can satisfy a known current/downstream requirement are retained as interesting.
-
-Arbitrary orderings are not generated merely to enlarge the memo.
-
-If one available ordering satisfies another, dominance may treat the longer ordering as at least as useful when all other relevant requirements are equal.
-
-## 37.7 RelationSet
-
-A reorderable join region assigns one bit position to each participating relation occurrence.
-
-Identity is:
-
-```text
-BindingId
-```
-
-not `TableId`.
-
-A self-join therefore consumes two different relation bits.
-
-`RelationSet` is a value-like bitset abstraction supporting:
-
-```text
-union
-intersection
-difference
-subset
-cardinality
-deterministic iteration
-```
-
-The concrete bitset representation is implementation-specific and MUST support the configured large-join planning limit rather than silently truncating relation identities.
-
-## 37.8 Join graph
-
-For a maximal INNER/CROSS reorderable region, construct:
-
-```text
-vertices:
-    BindingId relation occurrences
-
-edges:
-    join predicates spanning relation sets
-
-vertex predicates:
-    local filters
-```
-
-Safe equality-equivalence predicates derived by §20.17.7 may add connectivity or access opportunities.
-
-Each edge/predicate retains the exact referenced `RelationSet` so a DP partition can determine whether that predicate crosses its two sides.
-
-LEFT JOIN and other non-reorderable semantic boundaries are represented as constrained/atomic inputs rather than silently flattened into this unrestricted graph.
-
-## 37.9 Reorderable regions and outer-join constraints
-
-The optimizer searches maximal regions in which INNER/CROSS associativity/commutativity is semantically legal.
-
-A LEFT JOIN boundary retains its logical nesting relative to dependent relations in v1.
-
-Within each side of that boundary the optimizer may still choose:
-
-```text
-base access paths
-inner-join order
-physical join algorithm
-```
-
-The optimizer does not reorder across the outer-join boundary unless an earlier, independently proven logical rewrite converts it to semantics where that reorder is valid.
-
-Advanced outer-join reordering is deferred.
-
-## 37.10 Bushy dynamic programming
-
-For a small reorderable `RelationSet S`, use bottom-up bushy subset DP.
-
-For every subset size from one upward:
-
-```text
-for each subset S:
-    for each legal non-empty partition:
-        S = A ∪ B
-        A ∩ B = ∅
-
-        combine retained useful-property plans
-        from A and B
-```
-
-Symmetric partitions are skipped by one deterministic rule, for example requiring the least BindingId bit in `S` to belong to `A`.
-
-Partitions connected by join predicates are enumerated before Cartesian alternatives.
-
-The search considers bushy trees such as:
-
-```text
-(A ⋈ B) ⋈ (C ⋈ D)
-```
-
-rather than restricting the optimizer to left-deep plans.
-
-## 37.11 Exhaustive threshold
-
-The initial configurable default is:
-
-```text
-exhaustive_join_limit = 10 relation bindings
-```
-
-within one reorderable region.
-
-Below/equal to the threshold, exhaustive bushy DP is the baseline unless the optimizer planning-memory budget forces an earlier bounded fallback.
-
-The threshold is a planning-tuning parameter, not a SQL semantic limit.
-
-Raising it requires planning-time/memory evidence.
-
-## 37.12 Cartesian products
-
-A partition with no crossing join predicate is a Cartesian alternative.
-
-While a connected predicate-join alternative is available for the same unresolved components, the optimizer prefers connected partitions and does not introduce an unnecessary Cartesian product.
-
-Cartesian products remain legal where required by the logical query graph.
-
-Their logical cardinality begins from:
-
-```text
-rows_A * rows_B
-```
-
-before later applicable filtering.
-
-They receive the corresponding materialization/CPU/memory cost rather than an arbitrary correctness-changing ban.
-
-## 37.13 Large-join heuristic
-
-Above the exhaustive threshold—or when exhaustive search reaches the planning-memory guard—the optimizer switches to a bounded deterministic heuristic.
-
-Baseline:
-
-1. construct a greedy connected initial tree using lowest estimated incremental objective cost,
-2. use a stable structural tie-break,
-3. apply a configurable bounded number of local-improvement passes,
-4. local moves may include:
-   ```text
-   adjacent swap
-   join rotation
-   limited subtree exchange
-   ```
-5. stop early when a complete pass finds no improving legal tree.
-
-Initial default:
-
-```text
-large_join_max_local_passes = 4
-```
-
-This is optimizer configuration, not persistent format.
-
-A small deterministic beam may be added later, but v1 does not require one for correctness.
-
-Disconnected query regions introduce Cartesian edges only when logically necessary.
-
-## 37.14 Join algorithm alternatives
-
-For every legal binary join pair, enumerate every **implemented** applicable algorithm:
-
-```text
-PhysicalHashJoin
-PhysicalNestedLoopJoin
-PhysicalIndexNestedLoopJoin
-PhysicalMergeJoin when capability-enabled and predicates/order permit
-```
-
-Join order and physical join algorithm are costed together.
-
-The optimizer does not first freeze a complete join tree and only afterward choose algorithms if doing so would discard a cheaper order/algorithm combination.
-
-## 37.15 Hash-join orientation
-
-For an INNER equijoin, consider both semantically equivalent orientations when the runtime supports them:
-
-```text
-build left  / probe right
-build right / probe left
-```
-
-Cost includes:
-
-```text
-build rows
-build payload width
-memory/spill
-probe rows
-downstream properties
-```
-
-For the baseline LEFT hash join, Chapter 28 fixes:
-
-```text
-logical right -> build
-logical left  -> preserved probe
-```
-
-and the optimizer enumerates only that supported orientation unless a separate semantic transformation changes the logical join.
-
-## 37.16 Logical join cardinality is algorithm-independent
-
-For the same logical:
-
-```text
-A ⋈ B ON predicate P
-```
-
-the estimated output cardinality is identical regardless of whether the physical algorithm is:
-
-```text
-HashJoin
-NestedLoopJoin
-IndexNestedLoopJoin
-MergeJoin
-```
-
-Algorithm choice changes:
-
-```text
-cost
-memory
-spill
-provided ordering
-startup behavior
-```
-
-not logical row semantics.
-
-Cardinality is cached by logical relation/predicate identity where practical so alternative physical algorithms do not repeatedly invoke different estimators for the same subproblem.
-
-## 37.17 Subquery physical planning
-
-Supported uncorrelated scalar/EXISTS/IN subqueries are optimized once as independent physical subplans.
-
-Their cost includes applicable:
-
-```text
-startup
-materialization
-hash-set / comparison work
-```
-
-and uses their ordinary output/cardinality contracts.
-
-Correlated execution remains deferred.
-
-A correlated form MUST NOT be costed as if it executes once when its semantics would require repeated execution.
-
-Without prepared-statement parameters, v1 optimization sees literal constants directly and may use MCV/histogram information for those literals.
-
-## 37.18 Join/property invariants
-
-1. V1 physical properties track ordering and required output slots without a premature full property lattice.
-2. Ordering satisfaction is exact prefix matching on slot, direction, NULL order, and collation.
-3. Only runtime-guaranteed ordering is advertised.
-4. Interesting orders retain useful non-cheapest alternatives but do not create unbounded arbitrary order classes.
-5. Join relation identity uses BindingId, not TableId.
-6. Exhaustive search enumerates bushy trees for small reorderable regions.
-7. The initial exhaustive threshold is configurable and defaults to 10 relation bindings.
-8. Large-join search is bounded and deterministic.
-9. Unnecessary Cartesian joins are avoided while connected alternatives exist.
-10. INNER join order and physical algorithm/orientation are optimized together.
-11. LEFT JOIN semantic boundaries and supported hash orientation are preserved.
-12. Logical join cardinality is independent of the physical join algorithm.
-13. Only capability-enabled physical algorithms enter the plan search.
-14. Correlated subqueries are never mis-costed as one-time uncorrelated execution.
+The exact exhaustive threshold, bushy-plan representation, legality constraints, interesting-order retention, join-algorithm enumeration, and deterministic tie-breaking are defined by the detailed optimizer contract.
 
 ---
 
-# 38. Memo, Costed Physical Search, and Memory-Aware Optimization
+# 38. Memo/Search and Memory-Aware Optimization
 
-## 38.1 Search requirements and memo identity
+Memo representation, dominance, physical-property enforcement, memory/spill costing, large-join heuristics, plan fingerprints, and search diagnostics are migrated in Pass 15.
 
-A physical search request is conceptually:
-
-```text
-SearchRequirement {
-    RequiredSlotSet
-    OrderingProperty required_order
-    RequiredRowsObjective required_rows
-}
-```
-
-`RequiredRowsObjective` is:
-
-```text
-ALL_ROWS
-or
-FIRST_K_ROWS(K)
-```
-
-and is not itself a physical property.
-
-When a finite required-rows objective is semantically propagated into a subproblem, it participates in memo/search identity because a low-startup plan may be preferable to the full-result cheapest plan.
-
-For join enumeration, the common memo identity is conceptually:
-
-```text
-RelationSet
-+
-required output-slot class
-+
-required/interesting OrderingProperty class
-+
-propagated RequiredRowsObjective class
-```
-
-When required slots are uniquely derived for the RelationSet and no finite row objective is propagated, this reduces to the traditional:
-
-```text
-RelationSet + OrderingProperty
-```
-
-System-R-style key.
-
-## 38.2 PlanAlternative
-
-Every retained physical alternative stores at least:
-
-```text
-logical subproblem identity
-physical plan prototype
-estimated rows
-estimated width
-Cost
-provided OrderingProperty
-required output slots
-estimated peak memory
-estimated spill bytes
-capability/feasibility state
-canonical structural tie key
-```
-
-Plan prototypes are optimizer/query-planning-arena objects.
-
-They contain no execution-time mutable operator state.
-
-## 38.3 Dominance
-
-For the same logical/search requirement, plan `A` dominates plan `B` only if:
-
-```text
-A is semantically valid
-A satisfies every requirement that B satisfies
-A's provided ordering is at least as useful for the active property class
-A is no worse under the active cost objective
-A has no relevant feasibility disadvantage
-```
-
-For full-result optimization, the main objective is total cost.
-
-For a propagated `FIRST_K_ROWS` objective, startup/partial-run cost participates in the comparison.
-
-A cheaper unordered plan therefore does **not** dominate a slightly more expensive interesting-order plan that can avoid a downstream sort.
-
-Likewise, a lower-total-cost high-startup plan does not automatically dominate a low-startup alternative when the memo key carries a finite required-rows objective.
-
-Dominated alternatives are discarded promptly.
-
-## 38.4 Cost ties and deterministic choice
-
-All optimizer costs must remain:
-
-```text
-finite
-nonnegative
-```
-
-A configurable relative tolerance defines an effective cost tie.
-
-Initial default:
-
-```text
-cost_tie_relative_epsilon = 1e-9
-```
-
-Two scalar objective costs `a` and `b` are tied when:
-
-```text
-abs(a - b)
-<=
-epsilon * max(1, abs(a), abs(b))
-```
-
-Tied alternatives use a deterministic canonical structural key.
-
-Hash-map iteration order, allocator addresses, worker timing, and pointer values MUST NOT choose a plan.
-
-## 38.5 Canonical structural key and plan fingerprint
-
-Every physical plan can produce a deterministic structural serialization for diagnostics/tie-breaking.
-
-It includes, as applicable:
-
-```text
-physical operator names
-stable TableId/IndexId identities
-join tree/orientation
-access path identity
-search-bound semantics
-ordering keys
-important operator parameters
-child structural keys
-```
-
-It excludes:
-
-```text
-memory addresses
-unordered-container iteration order
-runtime execution counters
-```
-
-The lexicographic structural key is the final collision-free tie-break inside one optimizer build/configuration.
-
-A debug:
-
-```text
-PlanFingerprint
-```
-
-may additionally hash this canonical serialization with FNV-1a-64 for compact display/regression tracking.
-
-The hash alone never decides correctness or tie order because collisions are possible.
-
-## 38.6 Join-DP initialization
-
-For every base relation occurrence:
-
-1. compute the logical base-filter cardinality once,
-2. enumerate `PhysicalSeqScan`,
-3. enumerate every semantically usable implemented `PhysicalIndexScan`,
-4. cost each access path,
-5. attach its provided ordering,
-6. retain non-dominated alternatives for relevant interesting-order/search requirements.
-
-The same logical base cardinality is shared by all physical access alternatives.
-
-A scan method never receives a different SQL row estimate merely to make its cost more attractive.
-
-## 38.7 Join-DP transition
-
-For subsets `S` in increasing cardinality:
-
-```text
-for each legal deterministic partition S = A ∪ B:
-    identify crossing join predicates
-    obtain logical join cardinality
-    enumerate applicable implemented join algorithms/orientations
-    obtain child alternatives satisfying algorithm requirements
-    add property enforcement where required
-    estimate width / memory / spill
-    cost the physical alternative
-    insert if non-dominated
-```
-
-Cardinality is cached by logical relation/predicate identity when possible.
-
-Physical costs/properties remain alternative-specific.
-
-The transition does not mutate the logical plan or statistics snapshot.
-
-## 38.8 Hash-join cost
-
-Estimate:
-
-```text
-build child objective cost
-probe child objective cost
-+
-build_rows * hash/build CPU
-+
-probe_rows * hash/probe CPU
-+
-expected matches * output/materialization CPU
-+
-residual predicate CPU
-+
-estimated memory/spill cost
-```
-
-Build payload width is the pruned width from §38.18 rather than the full base-row width.
-
-Hash-table setup has nonzero startup cost.
-
-For INNER joins, both supported build orientations are costed.
-
-For LEFT joins, only the supported preserved/probe orientation is enumerated.
-
-## 38.9 Hash-join memory and spill
-
-A conservative baseline build-memory estimate uses:
-
-```text
-build_rows
-*
-(
-    pruned build RowLayout width
-    +
-    hash-directory overhead
-    +
-    duplicate-chain metadata
-)
-/
-target load factor
-```
-
-including average varlen widths.
-
-When usable join-key NDV exists, implementations may refine directory-entry count separately from duplicate-row storage, but must not undercount the actual retained build payload.
-
-Compare estimated required memory with the planner-assigned operator memory target.
-
-If required memory exceeds the target:
-
-```text
-spill expected
-```
-
-and add:
-
-```text
-partition write(build + probe bytes)
-partition read(build + probe bytes)
-repartition hash CPU
-per-partition rebuild/probe CPU
-```
-
-If one partitioning pass cannot make the largest expected partition fit, estimate additional bounded recursive repartition passes using the execution partitioning/fanout configuration.
-
-## 38.10 Nested-loop cost
-
-For a materialized inner side:
-
-```text
-outer child cost
-+
-inner child/materialization cost
-+
-outer_rows * inner_rows * predicate CPU
-+
-output/materialization CPU
-```
-
-This can beat hash join for very small inner inputs because hash construction has real startup/memory cost.
-
-Materializing/copying the inner side is never free.
-
-## 38.11 Index nested-loop cost and repeated-key locality
-
-Estimate:
-
-```text
-outer child cost
-+
-outer_rows
-*
-(
-    inner index lookup/range cost
-    +
-    expected heap fetch/MVCC cost
-    +
-    residual predicate CPU
-)
-```
-
-When outer join-key NDV is substantially below `outer_rows`, repeated lookups may reuse:
-
-```text
-B+ upper paths
-leaf pages
-heap pages
-```
-
-The cost model may apply a calibrated, bounded locality reduction derived from:
-
-```text
-outer_rows
-outer_key_NDV
-index/heap correlation
-```
-
-but never assumes every lookup is fully cold or fully free.
-
-INLJ is attractive when the outer input is small and the indexed inner lookup is selective.
-
-## 38.12 Merge-join cost and properties
-
-MergeJoin is enumerated only when the runtime capability is enabled and the predicate/operator supports it.
-
-If both children already provide the required compatible join-key order:
-
-```text
-left child cost
-+
-right child cost
-+
-linear merge CPU
-+
-duplicate-group handling
-```
-
-If an input lacks the required ordering, add the applicable `PhysicalSort` enforcement cost.
-
-Merge join may win even with similar raw join cost when its provided order is interesting downstream.
-
-Its advertised output ordering is only the ordering guaranteed by the enabled runtime implementation.
-
-## 38.13 Sort and Top-N cost
-
-For full sort, approximate in-memory CPU as:
-
-```text
-N * log2(max(N, 2)) * comparison_cost
-```
-
-adjusted by key type/width.
-
-Memory includes:
-
-```text
-N * pruned sort-record width
-+
-owned payload / varlen storage
-```
-
-If the assigned memory target is insufficient, add:
-
-```text
-run-generation writes
-run reads
-merge-pass temporary I/O
-merge comparison CPU
-```
-
-For:
-
-```sql
-ORDER BY ... LIMIT N OFFSET O
-```
-
-the Top-N retention target is the checked:
-
-```text
-K = N + O
-```
-
-and approximate heap maintenance is:
-
-```text
-input_rows * log2(max(K, 2))
-```
-
-with memory roughly proportional to:
-
-```text
-K * retained row width
-```
-
-Top-N is selected by total objective cost when `K` is materially smaller than the full input; SQL syntax alone does not force it.
-
-## 38.14 Aggregate and DISTINCT cost
-
-### HashAggregate
-
-Estimate:
-
-```text
-child cost
-+
-input_rows * hash/update CPU
-+
-estimated_groups * allocation/finalize CPU
-+
-spill cost when group state exceeds assigned memory
-```
-
-Memory derives from:
-
-```text
-estimated_groups
-*
-(
-    grouping key RowLayout width
-    +
-    exact aggregate state size/alignment
-    +
-    hash overhead
-)
-```
-
-Aggregate descriptors provide their real state size/alignment.
-
-### SortAggregate
-
-Enumerate only when `PhysicalSortAggregate` capability is enabled.
-
-If child order already satisfies grouping keys:
-
-```text
-child cost + approximately linear streaming aggregate CPU
-```
-
-with low state memory.
-
-Otherwise compare:
-
-```text
-Sort enforcement
-+
-streaming aggregate
-```
-
-against hash aggregation.
-
-### DISTINCT
-
-When implementations exist, compare:
-
-```text
-hash PhysicalDistinct
-```
-
-with:
-
-```text
-ordered input / Sort
-+
-streaming ordered DISTINCT
-```
-
-and retain any useful resulting ordering.
-
-## 38.15 Ordering enforcement and final ORDER BY
-
-If an alternative does not naturally satisfy a required ordering:
-
-```text
-insert PhysicalSort
-```
-
-and include its startup, CPU, memory, and spill cost.
-
-When the root requirement is:
-
-```text
-ORDER BY + finite LIMIT/OFFSET
-```
-
-the planner also considers `PhysicalTopN` where semantically equivalent.
-
-For final ORDER BY compare:
-
-```text
-cheapest unordered plan + enforcement
-```
-
-against:
-
-```text
-possibly more expensive naturally ordered plan
-```
-
-such as an ordered IndexScan or capability-enabled MergeJoin/ordered aggregate.
-
-The lowest active objective cost wins.
-
-The optimizer never inserts Sort merely because an ORDER BY exists if an already-provided property satisfies it.
-
-## 38.16 RequiredRowsObjective and startup cost
-
-Every Cost retains:
-
-```text
-startup_cost
-run_cost
-total_cost
-```
-
-where:
-
-```text
-total_cost = startup_cost + run_cost
-```
-
-For full-result planning:
-
-```text
-objective = total_cost
-```
-
-For a semantically safe finite root requirement:
-
-```text
-required_rows = LIMIT + OFFSET
-```
-
-with checked arithmetic.
-
-A streaming/early-terminating plan may use a partial objective:
-
-```text
-startup_cost
-+
-fraction_of_run_cost_needed_for_required_rows
-```
-
-with the fraction clamped to `[0,1]`.
-
-Blocking operators such as full Sort, HashAggregate, DISTINCT build, and the build side of HashJoin require their necessary blocking input before producing rows and therefore cannot pretend their blocking work scales linearly with the final LIMIT.
-
-Propagation is conservative:
-
-```text
-Project:
-    may preserve FIRST_K_ROWS
-
-Filter/Scan:
-    may use selectivity-based partial-consumption costing
-
-Sort/Aggregate/Distinct:
-    stop propagation across the blocking semantic boundary
-
-Join:
-    no general required_rows propagation in the v1 baseline
-    unless a specific physical algorithm proves a safe rule
-```
-
-Finite `required_rows` affects cost/search only.
-
-It never changes result semantics or becomes an executor row cap in a location where SQL does not permit one.
-
-## 38.17 Predicate CPU ordering
-
-Bound/physical expressions carry an approximate evaluation-cost score.
-
-Examples include:
-
-```text
-integer comparison        cheap
-VARCHAR comparison        width-sensitive
-IMMUTABLE scalar function descriptor/default cost
-subquery                   separately costed
-```
-
-For a conjunction whose components are:
-
-```text
-IMMUTABLE
-safe to reorder
-not evaluation-order/error sensitive
-```
-
-the optimizer may rank predicates by a metric such as:
-
-```text
-evaluation_cost / rejection_probability
-```
-
-so cheap/selective predicates execute earlier.
-
-VOLATILE or semantically error-sensitive expressions retain their required evaluation behavior.
-
-## 38.18 Output-width and payload pruning
-
-Physical costs use the materialized values actually required by the chosen plan.
-
-Join output width is approximately:
-
-```text
-required left output width
-+
-required right output width
-```
-
-after projection pruning.
-
-A HashJoin build row stores only:
-
-```text
-join-key data required for equality validation
-build payload slots required by residual/downstream consumers
-duplicate/hash metadata
-```
-
-rather than the complete base row.
-
-Sort retains only:
-
-```text
-sort keys
-downstream-required payload
-```
-
-or a stable compact row handle where the execution lifetime contract permits it.
-
-HashAggregate uses exact aggregate state sizes/alignment.
-
-Projection pruning therefore directly changes physical memory/spill cost.
-
-## 38.19 Memory target assignment and pipeline-aware peak
-
-Planner memory is a query-level budget, not one independent full budget per blocking operator.
-
-Using the physical pipeline-dependency graph, identify blocking states that may coexist.
-
-For each simultaneously-live blocking phase, v1 assigns deterministic rough operator targets by:
-
-1. giving each active blocker at most its estimated required memory,
-2. distributing the query planning memory budget across active blockers,
-3. redistributing unused share to still-unsatisfied blockers in stable structural order.
-
-The sum of assigned targets for one modeled simultaneous phase does not exceed the configured planning query-memory budget.
-
-Peak query memory is estimated as the maximum modeled simultaneous phase, not the sum of all blocking operators in the plan.
-
-A conservative overestimate is permitted and is exposed in diagnostics.
-
-Runtime `QueryMemoryManager` remains authoritative for actual reservations; planner targets are estimates used for selection.
-
-## 38.20 Spill and materialization cost
-
-V1 spill expectation is deterministic:
-
-```text
-estimated_required_memory
->
-assigned_memory_target
-    -> spill expected
-```
-
-Estimate bytes/passes according to the relevant execution algorithm.
-
-Materialization costs include:
-
-```text
-RowCollection append/copy
-VARCHAR deep copy
-temporary serialization
-spill block formatting/checksum work
-```
-
-Comparison among NestedLoop materialization, HashJoin build, Sort, aggregate, and DML spool therefore never treats retained data as free.
-
-The cost model may be inaccurate; it may not bypass a runtime memory hard limit.
-
-## 38.21 Planning time and memory budget
-
-Optimization itself is resource-bounded.
-
-Track:
-
-```text
-optimization wall time
-logical subproblems explored
-partitions considered
-physical alternatives costed
-memo entries retained/pruned
-peak planning-arena bytes
-```
-
-The optimizer uses a dedicated planning arena with a configurable upper budget separate from execution memory.
-
-If exhaustive join DP approaches either:
-
-```text
-exhaustive_join_limit
-planning arena budget
-```
-
-the remaining join-region search switches to §37.13's bounded heuristic.
-
-If even bounded planning cannot fit within the configured planning resource limit, planning fails with a controlled `OptimizerResourceLimit` error rather than arbitrary process OOM.
-
-Optimizer resource fallback never changes SQL semantics.
-
-## 38.22 Missing/stale statistics in search
-
-Search consumes one immutable statistics snapshot for the entire optimization.
-
-Missing estimates use §35.25's centralized fallback configuration.
-
-Confidence/provenance from §35.26 is retained on estimates and exposed to diagnostics.
-
-Statistics staleness may reduce diagnostic confidence and influence explicitly configured cost heuristics, but v1 does not automatically reject a plan or rewrite statistics because one query later observes a different actual row count.
-
-One query's runtime cardinalities never directly rewrite persistent statistics in v1.
-
-## 38.23 Optimizer trace and diagnostics
-
-The optimizer can emit a debug trace containing at least:
-
-```text
-normalized predicates
-estimate confidence/provenance
-base cardinalities
-enumerated access paths
-cost components
-join subsets/partitions explored
-algorithms/orientations considered
-alternatives pruned by dominance
-interesting orders retained
-memory targets / expected spill
-property enforcement
-final selected plan
-canonical plan fingerprint
-planning time/memory counters
-```
-
-A SQL/debug surface may expose this as:
-
-```text
-EXPLAIN (OPTIMIZER TRACE)
-```
-
-or an equivalent internal hook.
-
-The exact textual presentation may evolve.
-
-The trace is diagnostic output, not a stable persistent format.
-
-## 38.24 Final physical-plan validation
-
-Before execution, optimizer validation proves at least:
-
-```text
-logical output semantics preserved
-all required LogicalSlotIds present
-required order satisfied or explicitly enforced
-join types/outer constraints preserved
-predicates assigned only where semantically legal
-DML hidden target slots preserved
-every selected physical algorithm is capability-enabled
-memory/spill annotations are finite/nonnegative
-```
-
-The result then passes to the execution-layer `PhysicalPlanValidator`.
-
-A cost mistake may choose a slow valid plan.
-
-A rewrite/legality mistake that changes results is a correctness failure.
-
-## 38.25 Memo/search invariants
-
-1. Memo alternatives are keyed by logical subproblem plus the requirements that can change the preferred physical plan.
-2. A finite required-rows objective participates in search identity wherever it is propagated.
-3. Dominance never discards a useful ordering or low-startup alternative required by the active search objective.
-4. Costs remain finite/nonnegative and near-ties use a deterministic stable rule.
-5. Hash-map iteration order and pointer addresses never determine the chosen plan.
-6. The structural tie key is collision-free for comparison; the compact PlanFingerprint is diagnostic only.
-7. Base alternatives share one logical cardinality estimate regardless of scan algorithm.
-8. Join output cardinality is independent of join algorithm.
-9. Physical algorithm availability is explicitly gated by runtime capability.
-10. Hash/spill costs use pruned payload widths and assigned memory targets.
-11. Sort/Top-N/aggregate/DISTINCT alternatives include required property-enforcement cost.
-12. Full-result and first-K optimization objectives are distinct when semantically applicable.
-13. Planning memory is bounded and can trigger heuristic search rather than unbounded growth.
-14. One optimization uses one stable statistics snapshot.
-15. Missing/stale statistics remain explicit low-confidence assumptions, not hidden precision.
-16. Optimizer diagnostics expose why estimates/alternatives were selected or pruned.
-17. The optimizer may choose a slow plan but may never change SQL meaning.
-18. Final plans pass optimizer semantic/property validation before execution.
 ---
 
 # Part VIII — Cross-Cutting Requirements
 
 # 39. Error and Corruption Model
+
+> **Rewrite status:** Pass 1 migrates the architectural baseline from legacy §44. Later subsystem passes add subsystem-specific error/corruption contracts.
 
 The system distinguishes at least:
 
@@ -17625,30 +16245,15 @@ finite nonzero / ±0.0 -> signed infinity
 infinity / infinity   -> NaN
 ```
 
-NaN/zero comparison/grouping/index semantics remain those defined in Chapters 8, 17, 20, and 29.
+NaN/zero comparison/grouping/index semantics remain those already locked in Chapters 8, 17, 20, and 29.
 
 Compiler modes that silently replace these semantics are not allowed.
-
-## 39.4 Optimizer errors
-
-Optimizer planning may fail with controlled internal/resource categories such as:
-
-```text
-OptimizerError
-OptimizerResourceLimit
-```
-
-`OptimizerResourceLimit` means the configured planning-time/memory bound prevented completion even after the bounded heuristic fallback.
-
-It is not an out-of-process arbitrary allocation crash.
-
-A cost-model mistake that merely selects a slower semantically valid plan is **not** an optimizer runtime error.
-
-A final-plan semantic/property-validation failure is an internal invariant failure and MUST NOT be executed.
 
 ---
 
 # 40. Observability and EXPLAIN
+
+> **Rewrite status:** Pass 1 migrates the baseline from legacy §§47–48. Detailed subsystem metrics and optimizer/executor diagnostics are migrated in later passes.
 
 ## 40.1 Internal metrics
 
@@ -17874,58 +16479,11 @@ missing index/heap correlation
 
 These diagnostics explain optimizer behavior; they do not change semantics.
 
-## 40.8 Optimizer trace, plan fingerprint, and estimate error
-
-Normal physical EXPLAIN shows at least:
-
-```text
-physical operator
-estimated rows
-estimated width
-startup cost
-total cost
-estimated peak/operator memory where relevant
-estimated spill where relevant
-provided/required ordering where useful
-```
-
-Verbose/debug optimizer trace additionally exposes the search/estimate information from §38.23.
-
-`EXPLAIN ANALYZE` reports for every physical node:
-
-```text
-estimated rows
-actual rows
-q-error
-```
-
-For positive estimate `E` and actual `A`:
-
-```text
-q_error = max(E / A, A / E)
-```
-
-Zero handling is exact:
-
-```text
-E = 0 and A = 0:
-    q_error = 1
-
-exactly one of E/A is 0:
-    q_error = infinity / explicit infinite marker
-```
-
-Estimate-attribution output should make the earliest material divergence visible together with confidence/provenance, because an upper join-order failure may originate in one lower predicate estimate.
-
-Runtime actual rows are diagnostic only.
-
-V1 does not automatically write persistent statistics from one query's actual cardinalities.
-
-The canonical plan fingerprint is the compact debug hash defined by §38.5 and is suitable for regression comparison, not as a collision-free semantic identity.
-
 ---
 
 # 41. Verification Requirements
+
+> **Rewrite status:** Pass 1 preserves the architecture-level requirements from legacy §45. Detailed test recipes remain preserved in the legacy source until a dedicated verification document is adopted.
 
 Every major subsystem requires focused verification appropriate to its invariants.
 
@@ -17967,9 +16525,9 @@ Storage verification MUST exercise the architectural properties that cannot be e
 - heap scans after reopen across many pages,
 - stale-FSM candidate repair.
 
-Physical slot reuse tests MUST follow the Chapter-14 grace protocol and persisted free-slot list; immediate DEAD-slot reuse is not a valid test expectation.
+Physical slot reuse tests must follow the Chapter-14 grace protocol and persisted free-slot list; the old milestone recipe's generic “reusable slots” item is not an authorization for immediate DEAD-slot reuse.
 
-Detailed test fixtures, exact test counts, and benchmark procedures are maintained in `VERIFICATION.md`; this chapter states the architecture-level verification obligations.
+Detailed test fixtures, exact test counts, and milestone checklists are verification documentation rather than canonical architecture and are not duplicated here.
 
 
 ## 41.2 B+ tree verification obligations
@@ -18204,88 +16762,11 @@ and assert that no fixed selectivity threshold controls the decision.
 
 Composite-bound tests compare B+ cursor results against the normalized SQL predicate for inclusive/exclusive, duplicate RID, NULL, and multi-column leftmost-prefix cases.
 
-## 41.7 Join-search, properties, memo, and optimizer verification obligations
-
-Optimizer verification includes controlled scenarios for:
-
-```text
-bushy join-order choice
-large-join bounded heuristic transition
-Cartesian-product legality
-LEFT JOIN search constraints
-both INNER hash-build orientations
-INLJ selective/small-outer cases
-interesting-order retention
-index-order ORDER BY avoidance
-Sort enforcement
-Top-N alternatives
-HashAggregate versus capability-enabled ordered aggregate
-hash versus ordered DISTINCT
-memory-budget-driven spill/plan changes
-required_rows / LIMIT startup objective
-missing-statistics fallback/confidence/provenance
-deterministic ties and plan fingerprints
-planning-memory fallback
-```
-
-Synthetic join-estimation suites include:
-
-```text
-unique-to-many
-many-to-many
-hot-key skew
-disjoint domains
-partial domain overlap
-NULL-heavy keys
-duplicate-heavy MCVs
-```
-
-and compare estimator q-error with known/reference results.
-
-For small generated schemas/data, differential optimizer correctness tests:
-
-1. generate a supported logical query,
-2. execute the optimizer-selected physical plan,
-3. execute a trusted simple reference plan using semantically equivalent scans/nested loops/straightforward operators,
-4. compare results.
-
-This separates rewrite/search correctness from cost quality.
-
-Optimizer fuzzing covers:
-
-```text
-logical expression trees
-predicate combinations
-legal statistics values
-join graphs
-ordering requirements
-memory budgets
-```
-
-and requires:
-
-```text
-no crash
-no NaN/negative cost escaping
-no invalid final physical plan
-bounded planning behavior above the exhaustive threshold
-```
-
-Plan regression scenarios record:
-
-```text
-schema
-statistics
-query
-important expected plan properties
-plan fingerprint where stable
-```
-
-without asserting arbitrary exact floating cost numbers unless the cost formula itself is under test.
-
 ---
 
 # 42. Performance Requirements
+
+> **Rewrite status:** Pass 1 preserves the architecture-level requirements from legacy §46. Detailed benchmark procedures remain preserved in the legacy source until a dedicated verification document is adopted.
 
 Performance claims require measurement.
 
@@ -18505,64 +16986,6 @@ The required demonstration is that the same query shape may select SeqScan or In
 
 Cardinality-estimation benchmark suites report error distributions, not only average error, and include skew/MCV/NULL/correlation-limitation workloads.
 
-## 42.6 Optimizer search and cost-model measurements
-
-Operator cost calibration compares predicted **relative ranking** against measured runtime/resource ranking for representative:
-
-```text
-SeqScan
-IndexScan
-HashJoin
-NestedLoopJoin
-IndexNestedLoopJoin
-HashAggregate
-Sort
-TopN
-spill paths
-```
-
-The architecture does not require predicted abstract cost to equal milliseconds.
-
-Join-planning benchmarks include relation counts such as:
-
-```text
-2, 4, 6, 8, 10, 12, 16, 20, 30
-```
-
-and record:
-
-```text
-planning wall time
-subsets explored
-partitions considered
-physical alternatives costed
-memo entries retained/pruned
-peak planning memory
-heuristic/local-improvement work
-```
-
-They must demonstrate the transition from exhaustive bushy search to bounded heuristic behavior.
-
-Interesting-order tests demonstrate cases where a locally more expensive ordered plan wins globally by avoiding Sort or enabling another capability-enabled ordered operator.
-
-Memory-aware tests hold logical statistics constant while changing the query planning/execution memory budget and verify that estimated spill and plan choice can change where appropriate.
-
-A synthetic star-schema workload is a recommended stress case for many joins, selective dimensions, a large fact relation, and aggregation.
-
-Benchmark-specific query text/table names MUST NOT be hard-coded into optimizer decisions.
-
-Optimizer improvements arise from general:
-
-```text
-statistics
-semantic rewrites
-properties
-costing
-search
-```
-
-rather than benchmark fingerprints.
-
 ---
 
 # Appendix A. Persistent Format Registry
@@ -18649,7 +17072,7 @@ Catalog, spill, and other persistent formats are added as their canonical chapte
 
 # Appendix B. Global Invariants
 
-The following global invariants apply across subsystem boundaries and MUST NOT be weakened without an explicit architecture revision.
+The following global invariants are migrated from the legacy architecture baseline. Later passes may add subsystem-specific invariants and cross-references, but MUST NOT weaken these requirements without an explicit architecture revision.
 
 1. Persistent structures use logical persistent identifiers such as page IDs, never process memory pointers.
 2. On-disk formats use explicit serialization.
@@ -18664,13 +17087,13 @@ The following global invariants apply across subsystem boundaries and MUST NOT b
 11. Recovery is verified with simulated crashes.
 12. Performance-sensitive changes require measurement.
 
-Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.27; base-access/cost invariants in §36.19; join/property invariants in §37.18; memo/search invariants in §38.25.
+Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.25; base-access/cost invariants in §36.19.
 
 ---
 
 # Appendix C. Deferred Features and Future Experiments
 
-This appendix records functionality and experiments intentionally outside the required v1 baseline.
+This appendix records broad deferred scope introduced by the legacy architecture overview. Later subsystem passes consolidate the complete deferred-feature lists.
 
 Initial deferred or non-v1 areas include:
 
@@ -18763,7 +17186,7 @@ Initial deferred or non-v1 areas include:
 - window functions,
 - set operations,
 - nested block comments,
-- prepared-statement parameters in the v1 parser/planner baseline,
+- prepared-statement parameters in the initial parser milestone,
 - locale-aware VARCHAR collations and a collation framework,
 - UTF-8 validity/character-count semantics and `VARCHAR(n)`,
 - timezone-aware SQL types/rules,
@@ -18809,69 +17232,110 @@ Initial deferred or non-v1 areas include:
 - multi-column/extended statistics such as dependencies, joint NDV, and multi-column MCVs,
 - bitmap index intersection/union and general index-merge access paths,
 - index-only scans until visibility/covering-index semantics are explicitly designed,
-- adaptive/runtime reoptimization based on observed cardinalities,
-- a full Cascades/Volcano transformation optimizer,
-- arbitrary memo transformation rules over expression groups,
-- runtime join switching,
-- learned cardinality estimation,
-- functional-dependency and other multi-column extended statistics,
-- DPccp / connected-subgraph join enumeration as a replacement experiment,
-- correlated-subquery decorrelation,
-- Bloom-filter/semi-join reduction planning,
-- materialized-view matching,
-- join elimination beyond simple explicitly proven rules,
-- partition pruning,
-- generic/custom parameter-sensitive prepared plans,
-- persistent cardinality feedback from query execution,
-- detailed probabilistic parallel-memory/cost modeling,
-- distributed/GPU optimizer cost models.
+- adaptive/runtime reoptimization based on observed cardinalities.
 
 Items listed here are future possibilities or staged functionality, not requirements to implement immediately.
 
 ---
 
-# Appendix D. Open Architecture Questions
+# Appendix D. Open Architecture Decisions
 
-## D.1 V1 architecture status
+The structural rewrite does not silently decide gaps that the legacy architecture leaves underspecified.
 
-No unresolved v1 core-architecture question remains in the current v1 contract.
+The pre-Pass-7 coherence resolution closed the previously open decisions for:
 
-Every identified architecture gap affecting v1 semantics or persistent formats is either:
+- ordinary-page whole-page checksum coverage,
+- BTREE FileSuperblock specialization and B+ persistent metadata,
+- exact FLOAT64 memcomparable bytes,
+- zero-only unassigned ordinary-page flags,
+- byte-exact tuple fixed-area derivation,
+- B+ root-metadata/page-latch concurrency.
 
-- resolved explicitly and integrated into its owning chapter, or
-- classified as intentionally deferred functionality in Appendix C.
+The remaining rewrite issue register contains implementation mismatches, historical refinement notes, later-pass synchronization items, and newly exposed transaction-format/semantic gaps.
 
-Deferred features are not unresolved v1 questions.
+The pre-Pass-8 transaction coherence resolution closed the Pass-7 gaps for:
 
-## D.2 Non-architecture implementation consistency
+- byte-exact `txn_status.dat` FileKind/PageType/status-bit/mapping semantics,
+- exclusive `reserved_txn_id_end` half-open reservation ranges,
+- owner-excluded snapshot active sets and exact `xmin` derivation.
 
-The current implementation checkpoint has one known architecture/implementation mismatch that does **not** change this contract:
+The issue register retains these items as resolved architecture decisions and continues to track implementation mismatches, later-pass synchronization work, and unresolved issues discovered by future passes.
+
+The pre-Pass-10 core resolution closed the already-owned transactional-storage decisions for:
+
+- byte-exact WAL record grammar and record-type registry,
+- byte-exact dual-slot `database.control`,
+- checkpoint BEGIN/DATA/END identity and analysis/redo scan bounds,
+- exact ReadEpochManager registration/retirement grace arithmetic,
+- sparse transaction-status physical reclamation without PageNo renumbering,
+- mandatory ordinary-page checksum finalization and stable flush-image semantics,
+- crash-safe page append publication and recovery tail reconciliation,
+- complete `DEAD -> UNUSED` / free-slot-list state machine and idempotent vacuum cleanup,
+- READ COMMITTED retry restrictions after persistent statement writes,
+- terminal outcome / active registry / lock-release linearization,
+- full-page-image retention through every clean-to-dirty interval.
+
+These items remain recorded as resolved decisions in `ARCHITECTURE_REWRITE_ISSUES.md`.
+
+Pass 11 resolves the DDL-owned catalog-object identity gap:
+
+- TableId/IndexId/ConstraintId use one durable non-reused uint64 catalog-object allocator in `database.control`,
+- ColumnId allocation is table-local and non-reused,
+- DDL performs identity/file allocation only during execution under DDL coordination.
+
+Pass 13 closes execution-semantic details that the legacy execution block leaves implicit while preserving its algorithms:
+
+- LEFT hash join fixes the logical right side as build and logical left side as preserved probe in the baseline,
+- query-local hashing uses explicit ordinary-join versus grouping equality modes,
+- aggregate result types/empty-input behavior are explicit for COUNT/SUM/MIN/MAX/AVG,
+- normalized sort prefixes are order-preserving aids and Top-N sorts retained output before emission,
+- DML target spools enforce one physical target RID at most once and obey the no-retry-after-persistent-write rule,
+- RETURNING/result chunks have an explicit safe publication/lifetime boundary,
+- FLOAT64 division uses the locked IEEE-754 arithmetic model while integer division by zero is an error.
+
+Pass 14 closes optimizer/statistics semantic ownership that the legacy block leaves distributed:
+
+- ANALYZE uses one stable SQL visibility snapshot and atomically publishes one immutable statistics descriptor version,
+- index-access costing has explicit `IndexStatistics` ownership for leaf occupancy and heap correlation,
+- grouping/DISTINCT cardinality includes the SQL NULL grouping class and uses the locked multi-column damping fallback,
+- B+ composite-bound MIN/MAX key/RID objects are explicitly transient search sentinels rather than persisted invalid RIDs,
+- `IS NULL` is an exact nullable-key search condition while ordinary `= NULL` remains non-sargable/UNKNOWN.
+
+The pre-Pass-15 upper-core resolution closes the remaining already-owned upper-layer gaps before join/memo optimization is migrated:
+
+- **R-036:** `catalog.dat` is now a byte-exact immutable two-page bootstrap file; `CATALOG_DATA` page 1 contains exactly six fixed bootstrap entries and is cross-validated against the self-hosted catalog.
+- **R-040:** v1 permitted defaults are closed IMMUTABLE expressions that are fully folded once at DDL time and persisted as one checksummed typed `DefaultValueBlob`; no runtime function/operator identity is persisted.
+- **R-044:** `sys_statistics` uses exact chunked TABLE/COLUMN/INDEX payload codecs built on the shared persisted-scalar format, with TABLE scope as the completeness manifest.
+- **R-046:** ANALYZE is integrated through parser/AST, binding, LogicalAnalyze, PhysicalAnalyze, transactional catalog writes, and commit-only global statistics publication.
+- **R-047:** index statistics/costing distinguish SQL-visible live entries from physical B+ entry/invisible-garbage pressure.
+- **R-048:** primitive selectivity rules return complete TRUE/FALSE/UNKNOWN triples and AND/OR independence formulas are exact under SQL 3VL.
+
+The RID reserved-byte rule itself is not open: the architecture requires zero-on-write and reject-nonzero-on-v1-decode. R-001 records an implementation/state mismatch, not an unresolved architecture choice.
+
+Other rewrite consistency/refinement notes remain in `ARCHITECTURE_REWRITE_ISSUES.md` until the final reconciliation pass.
+
+---
+
+## Rewrite progress
+
+Architecture content migrated so far:
 
 ```text
-Persisted RID bytes 14..15:
-    architecture encoder -> write zero
-    architecture v1 decoder -> reject nonzero
-
-current Phase-1 decoder checkpoint:
-    still accepts nonzero reserved bytes
+Pass 0    inventory and target structure
+Pass 1    legacy §§0–52
+Pass 2    legacy §§53–63
+Pass 3    legacy §§64–81
+Pass 4    legacy §§82–85
+Pass 5    legacy §§86–108
+Pass 6    legacy §§109–179
+Pass 7    legacy §§180–214
+Pass 8    legacy §§215–255
+Pass 9    legacy §§256–300
+Pass 10   legacy §§301–358
+Pass 11   legacy §§359–433
+Pass 12   legacy §§434–478
+Pass 13   legacy §§479–567
+Pass 14   legacy §§568–627
 ```
 
-`PROJECT_STATE.md` records that implementation mismatch. The architecture remains strict as specified in §8.4.1.
-
-No implementation change is made by this document.
-
-## D.3 Architecture revision rule
-
-A future implementation discovery may justify changing an accepted architectural decision, but the change requires an explicit architecture revision that identifies:
-
-```text
-current contract
-proposed replacement
-reason
-benefits and drawbacks
-persistent/migration consequences
-affected subsystems
-verification obligations
-```
-
-Until such a revision is accepted, this document remains authoritative.
+The existing `ARCHITECTURE.md` remains the active architecture authority until the full rewrite, reconciliation audit, and explicit cutover are complete.
