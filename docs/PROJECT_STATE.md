@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-15  
-Current checkpoint: Milestone `0020` — Phase 1 Raw-Storage Completion and Hardening Audit
+Current checkpoint: Milestone `0022` — HEAP_DATA/FSM_DATA Zero-Only Common Flags
 Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
 
 ---
@@ -85,9 +85,8 @@ RID layout:
 14..15   reserved
 ```
 
-The encoder writes the RID reserved bytes as zero.
-
-The current decoder still accepts nonzero reserved bytes. The authoritative architecture requires rejecting such encodings, so this is a known implementation mismatch.
+The encoder writes the RID reserved bytes as zero, and the decoder rejects any encoding where
+either reserved byte is nonzero.
 
 ### Common page header — `0004`
 
@@ -153,6 +152,9 @@ Page allocation remains page-type agnostic.
 ### Heap page structure — `0010`
 
 Implemented `HEAP_DATA` format version 1.
+
+`HeapPage` initialization always writes common-header flags as zero, and validation rejects any
+persisted HEAP_DATA page with nonzero common flags.
 
 Current physical geometry:
 
@@ -301,6 +303,9 @@ All current tuples remain inline and subject to the 8135-byte raw tuple limit.
 ### Persisted FSM page format — `0018`
 
 Implemented flat `FSM_DATA` format version 1.
+
+`FsmPage` initialization always writes common-header flags as zero, and validation rejects any
+persisted FSM_DATA page with nonzero common flags.
 
 Physical layout:
 
@@ -462,12 +467,12 @@ Its relation-wide page access and lifetime model depends on BufferPool integrati
 
 ## 10. Current test checkpoint
 
-Final Phase 1 audit results:
+Current verified results:
 
 ```text
-Clang Debug            184 / 184 passed
-Clang ASan + UBSan     184 / 184 passed
-GCC Debug              184 / 184 passed
+Clang Debug            189 / 189 passed
+Clang ASan + UBSan     189 / 189 passed
+GCC Debug              189 / 189 passed
 clang-tidy             clean
 clang-format           clean
 git diff --check       clean
@@ -482,34 +487,12 @@ No Phase 1 storage benchmark suite exists yet beyond the generic benchmark smoke
 
 ## 11. Architecture / implementation consistency items
 
-The currently verified mismatch set in implemented code contains four categories:
+The currently verified mismatch set in implemented code contains two categories:
 
-1. RID reserved-byte decoder,
-2. BTREE FileSuperblock codec,
-3. HEAP_DATA/FSM_DATA common flags,
-4. heap UNUSED/free-list validation.
+1. BTREE FileSuperblock codec,
+2. heap UNUSED/free-list validation.
 
 These are implementation mismatches against settled architecture contracts. Unimplemented later subsystems remain deferred work rather than mismatches.
-
-### Persisted RID reserved bytes
-
-The accepted v1 architecture is no longer ambiguous:
-
-```text
-EncodeRid:
-    bytes 14..15 = 0
-
-DecodeRid:
-    reject nonzero bytes 14..15
-```
-
-The current Phase 1 implementation checkpoint still has a permissive decoder that accepts nonzero reserved bytes.
-
-This is an **implementation mismatch**, not an open architecture question.
-
-No code change has yet reconciled this mismatch. Before normal implementation work resumes on code that depends on the RID codec, reconcile the decoder/tests with `ARCHITECTURE.md` §8.4.1.
-
-Existing database-produced RID encodings already use zero reserved bytes, so the mismatch concerns previously tolerated invalid inputs rather than bytes emitted by the current encoder.
 
 ### BTREE FileSuperblock codec
 
@@ -531,16 +514,6 @@ No code change has yet reconciled this mismatch. A later implementation fix must
 - reject `FileKind::BTREE` in the generic codec until that specialized support exists.
 
 The current BTREE implementation remains deferred; this consistency item does not start index or BufferPool implementation.
-
-### HEAP_DATA / FSM_DATA common flags
-
-The accepted v1 architecture requires ordinary HEAP_DATA and FSM_DATA initializers to write common-header `flags=0` and their validators to reject nonzero common flags, as specified by `ARCHITECTURE.md` §§4.8, 5.3.3, and 6.5.1.
-
-The current `HeapPage` and `FsmPage` initializers accept caller-supplied nonzero common flags, and their validators accept those values. Existing tests currently exercise and accept this behavior.
-
-This is an **implementation mismatch**, not an open architecture question. The persisted zero-only v1 common-flag contract remains settled.
-
-No code change has yet reconciled this mismatch. A later implementation task must make HEAP_DATA and FSM_DATA initialization write/force zero and make their validation reject nonzero common flags.
 
 ### Heap UNUSED/free-list validation
 
@@ -636,6 +609,8 @@ The first work in that phase will establish buffered page ownership and lifetime
 0018  Persisted FSM page format
 0019  In-memory FSM candidate index
 0020  Phase 1 raw-storage completion and hardening audit
+0021  Persistent RID reserved-byte decoder enforcement
+0022  HEAP_DATA/FSM_DATA zero-only common flags
 ```
 
 Detailed milestone history remains in `devlog/`.

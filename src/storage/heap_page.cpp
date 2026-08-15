@@ -165,11 +165,11 @@ HeapSlotEntryDecodeResult DecodeHeapSlotEntry(std::span<const std::byte> source)
 
 HeapPage::HeapPage(Page& page) noexcept : page_(&page) {}
 
-bool HeapPage::Initialize(std::uint32_t flags, Lsn page_lsn) noexcept {
+bool HeapPage::Initialize(Lsn page_lsn) noexcept {
     const CommonPageHeader common_header{
         .page_type = PageType::HEAP_DATA,
         .format_version = HEAP_PAGE_FORMAT_VERSION,
-        .flags = flags,
+        .flags = 0,
         .page_lsn = page_lsn,
         .checksum_crc32c = 0,
         .header_size = HEAP_PAGE_TOTAL_HEADER_SIZE,
@@ -208,6 +208,9 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
     if (common_header->format_version != HEAP_PAGE_FORMAT_VERSION) {
         return ValidationFailure(HeapPageValidationError::UNSUPPORTED_FORMAT_VERSION,
                                  common_header);
+    }
+    if (common_header->flags != 0) {
+        return ValidationFailure(HeapPageValidationError::NONZERO_COMMON_FLAGS, common_header);
     }
     if (common_header->reserved16 != 0) {
         return ValidationFailure(HeapPageValidationError::NONZERO_COMMON_RESERVED, common_header);

@@ -105,7 +105,6 @@ struct FsmPageInitializeResult {
 
 struct FsmPageInitialization {
     std::uint16_t entry_count{0};
-    std::uint32_t flags{0};
     Lsn page_lsn{INVALID_LSN};
 };
 
@@ -116,6 +115,7 @@ enum class FsmPageValidationError : std::uint8_t {
     WRONG_PAGE_NUMBER,
     WRONG_HEADER_SIZE,
     UNSUPPORTED_FORMAT_VERSION,
+    NONZERO_COMMON_FLAGS,
     NONZERO_COMMON_RESERVED,
     FSM_HEADER_DECODE_FAILED,
     INVALID_FSM_PAGE_NUMBER,
