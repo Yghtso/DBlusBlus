@@ -19,13 +19,13 @@ Prefer an implementation that exposes an important database or systems mechanism
 
 The project uses distinct documentation roles. Keep their purposes separate.
 
-### `ARCHITECTURE.md`
+### `docs/ARCHITECTURE.md`
 
-`ARCHITECTURE.md` is the authoritative architecture contract for this project.
+`docs/ARCHITECTURE.md` is the authoritative architecture contract for this project.
 
 It defines what the system is intended to be, including locked architectural decisions, persisted formats, subsystem responsibilities, invariants, and cross-subsystem constraints.
 
-Before implementing or materially changing a subsystem, read the relevant portions of `ARCHITECTURE.md`.
+Before implementing or materially changing a subsystem, read the relevant portions of `docs/ARCHITECTURE.md`.
 
 `MUST` / `MUST NOT` requirements, exact persistent-format values, and explicitly stated invariants are hard architectural constraints.
 
@@ -42,37 +42,37 @@ If implementation evidence suggests an accepted architecture decision should cha
 
 Do not implement the architectural change until it has been explicitly accepted.
 
-Do not modify `ARCHITECTURE.md` merely to make the implementation match a local choice. Architecture synchronization must reflect an explicitly accepted architectural decision.
+Do not modify `docs/ARCHITECTURE.md` merely to make the implementation match a local choice. Architecture synchronization must reflect an explicitly accepted architectural decision.
 
-### `DEVELOPMENT.md`
+### `docs/DEVELOPMENT.md`
 
-`DEVELOPMENT.md` preserves implementation sequencing, milestone targets, and recommended module-layout guidance.
+`docs/DEVELOPMENT.md` preserves implementation sequencing, milestone targets, and recommended module-layout guidance.
 
 It is planning guidance, not architecture authority and not current project state.
 
 It does not authorize crossing an explicit phase/subsystem gate.
 
-### `VERIFICATION.md`
+### `docs/VERIFICATION.md`
 
-`VERIFICATION.md` preserves detailed test, crash-injection, fuzzing, regression, and benchmark procedures.
+`docs/VERIFICATION.md` preserves detailed test, crash-injection, fuzzing, regression, and benchmark procedures.
 
-Architecture-level correctness/performance obligations remain authoritative in `ARCHITECTURE.md`.
+Architecture-level correctness/performance obligations remain authoritative in `docs/ARCHITECTURE.md`.
 
 Detailed procedures may evolve as tooling improves, provided they continue to verify the architecture contract.
 
-### `PROJECT_STATE.md`
+### `docs/PROJECT_STATE.md`
 
-`PROJECT_STATE.md` describes the current implementation state of the project.
+`docs/PROJECT_STATE.md` describes the current implementation state of the project.
 
 It records what has been implemented, what remains deferred, current phase/subsystem status, important current boundaries, open architecture follow-ups, and the latest validated project checkpoint.
 
 It is not an architecture authority.
 
-If `PROJECT_STATE.md` and `ARCHITECTURE.md` disagree about intended system behavior, `ARCHITECTURE.md` wins.
+If `docs/PROJECT_STATE.md` and `docs/ARCHITECTURE.md` disagree about intended system behavior, `docs/ARCHITECTURE.md` wins.
 
-Use `PROJECT_STATE.md` to understand where development currently stands before starting substantial work.
+Use `docs/PROJECT_STATE.md` to understand where development currently stands before starting substantial work.
 
-Update `PROJECT_STATE.md` when the completed work materially changes the current project state, for example when:
+Update `docs/PROJECT_STATE.md` when the completed work materially changes the current project state, for example when:
 
 - a milestone completes or materially changes a subsystem,
 - a phase or major implementation boundary changes,
@@ -83,7 +83,7 @@ Update `PROJECT_STATE.md` when the completed work materially changes the current
 
 Do not update it for trivial edits that do not change the meaningful current state.
 
-Keep `PROJECT_STATE.md` as a current-state document rather than an accumulating historical log. Historical detail belongs in `devlog/`.
+Keep `docs/PROJECT_STATE.md` as a current-state document rather than an accumulating historical log. Historical detail belongs in `devlog/`.
 
 When updating it:
 
@@ -117,17 +117,17 @@ A devlog entry records facts established by that completed task, such as:
 
 Do not use a devlog entry as architecture authority.
 
-Do not use devlogs as the primary source for current project status when `PROJECT_STATE.md` already summarizes it. Consult older devlogs when historical context, rationale, or milestone-specific detail is relevant.
+Do not use devlogs as the primary source for current project status when `docs/PROJECT_STATE.md` already summarizes it. Consult older devlogs when historical context, rationale, or milestone-specific detail is relevant.
 
 ### Reading workflow
 
 Before substantial implementation work:
 
 1. read this `AGENTS.md`,
-2. read `PROJECT_STATE.md` to understand current implementation status and phase boundaries,
-3. read the relevant sections of `ARCHITECTURE.md`,
-4. consult `DEVELOPMENT.md` when implementation sequencing/module guidance is relevant,
-5. consult `VERIFICATION.md` when test/benchmark procedures are relevant,
+2. read `docs/PROJECT_STATE.md` to understand current implementation status and phase boundaries,
+3. read the relevant sections of `docs/ARCHITECTURE.md`,
+4. consult `docs/DEVELOPMENT.md` when implementation sequencing/module guidance is relevant,
+5. consult `docs/VERIFICATION.md` when test/benchmark procedures are relevant,
 6. inspect the current task-relevant source code and tests,
 7. read task-relevant devlogs when historical context is useful.
 
@@ -135,9 +135,9 @@ Do not assume documentation is sufficient evidence for implementation behavior. 
 
 When a task reveals a discrepancy:
 
-- `ARCHITECTURE.md` determines intended architecture,
+- `docs/ARCHITECTURE.md` determines intended architecture,
 - current source/tests determine implementation reality,
-- `PROJECT_STATE.md` should be corrected if its current-state description is stale,
+- `docs/PROJECT_STATE.md` should be corrected if its current-state description is stale,
 - devlogs remain unchanged historical records.
 
 ## Development philosophy
@@ -376,7 +376,7 @@ When finishing non-trivial implementation work, report:
 - sanitizer results when applicable,
 - benchmarks run when applicable,
 - architecture questions discovered,
-- whether `PROJECT_STATE.md` was updated and why,
+- whether `docs/PROJECT_STATE.md` was updated and why,
 - the new devlog entry created.
 
 ## Milestone documentation workflow
@@ -386,11 +386,11 @@ For a completed non-trivial implementation milestone:
 1. create a new numbered Markdown entry under `devlog/`,
 2. keep all older devlogs unchanged,
 3. report any architecture questions rather than silently editing architectural contracts,
-4. update `PROJECT_STATE.md` when the milestone materially changes the current project state,
+4. update `docs/PROJECT_STATE.md` when the milestone materially changes the current project state,
 5. ensure documentation reflects the final implementation and verification results.
 
 A milestone devlog should be created as part of the completed task unless the task is explicitly too small/non-milestone in nature or the user explicitly requests otherwise.
 
-`PROJECT_STATE.md` may be updated directly when the need is clear from the completed work. Its update does not require a separate architectural decision because it records current implementation facts rather than defining architecture.
+`docs/PROJECT_STATE.md` may be updated directly when the need is clear from the completed work. Its update does not require a separate architectural decision because it records current implementation facts rather than defining architecture.
 
-Changes to `ARCHITECTURE.md` follow the architecture-authority rules above and must not be inferred merely from implementation choices.
+Changes to `docs/ARCHITECTURE.md` follow the architecture-authority rules above and must not be inferred merely from implementation choices.
