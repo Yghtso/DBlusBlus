@@ -1,7 +1,8 @@
 # DBlusBlus Architecture
 
-**Status:** Authoritative v1 architecture contract  
-**Architecture version:** v1
+**Status:** Rewrite in progress  
+**Architecture version:** v1 contract under structural rewrite  
+**Active authority during rewrite:** the existing `ARCHITECTURE.md` remains authoritative until this document has completed semantic reconciliation and is explicitly adopted.
 
 ## Purpose
 
@@ -9,20 +10,18 @@ This document defines the technical architecture of DBlusBlus: a from-scratch, s
 
 It specifies architectural responsibilities, subsystem boundaries, persistent-format requirements, concurrency and lifetime rules, correctness invariants, and performance-relevant design constraints.
 
-`ARCHITECTURE.md` is the authority for intended system behavior. Project progress belongs in `PROJECT_STATE.md`; implementation sequencing and module-layout guidance belong in `DEVELOPMENT.md`; detailed test and benchmark procedures belong in `VERIFICATION.md`; historical implementation records belong in `devlog/`.
+Project progress belongs in `PROJECT_STATE.md`. Historical implementation records belong in `devlog/`. Development-agent instructions do not form part of this architecture contract.
 
 ## Contract language
 
-Requirements use ordinary normative language:
+The original architecture uses `LOCKED` to mark hard requirements. During this rewrite those requirements are expressed using ordinary normative language:
 
 - **MUST / MUST NOT** — required by the current architecture contract.
 - **SHOULD / SHOULD NOT** — the architectural default; deviation requires a concrete technical reason and must remain compatible with all MUST-level requirements.
 - **MAY** — explicitly permitted implementation freedom.
 - **Deferred** — intentionally outside the current baseline; it is not part of the required v1 implementation unless later promoted by an explicit architecture revision.
 
-Where a cross-layer summary restates a rule, the detailed format or protocol in the owning subsystem chapter is canonical. Summaries and registries are indexes and integration constraints; they do not create independent conflicting values.
-
-Changes to an accepted architectural requirement require an explicit architecture revision. Implementation behavior does not silently redefine this document.
+A rewrite pass may reorganize, consolidate, or clarify existing requirements, but it does not change their meaning. Deliberate architecture changes are handled separately from structural rewriting.
 
 ---
 
@@ -2203,7 +2202,7 @@ The mapping is monotonic.
 
 The mapping remains conservative even if a later insertion path can sometimes reuse a slot without paying the new 8-byte slot-entry cost. Persisted FSM metadata MUST NOT overstate guaranteed insertion capacity merely because slot reuse may become possible.
 
-### 6.3.1 Representative boundaries
+### 6.3.1 Locked representative boundaries
 
 The following values are part of the v1 mapping contract:
 
@@ -2435,7 +2434,7 @@ Once WAL/recovery is active, the global page-checksum and WAL policies apply.
 
 The relation-wide FSM subsystem MAY maintain an in-memory accelerator derived from persisted FSM information.
 
-The runtime FSM MAY use a bucketed representation conceptually shaped as:
+The source architecture permits a bucketed representation conceptually shaped as:
 
 ```text
 bucket[0]
@@ -2448,7 +2447,7 @@ Insertion asks the runtime FSM for a candidate category/page capable of satisfyi
 
 This in-memory accelerator is rebuildable runtime metadata and is **not** part of the persisted `FSM_DATA` format.
 
-The exact runtime data structure, tie-breaking policy, and candidate-search procedure are implementation choices, provided they preserve the persisted FSM semantics and the heap-page revalidation requirement.
+The exact runtime data structure, tie-breaking policy, and search procedure are not locked by legacy §§82–85 and are therefore not invented in this pass.
 
 ## 6.10 Advisory, stale, repairable, and rebuildable semantics
 
@@ -2674,7 +2673,7 @@ close raw files
 inspect file size
 ```
 
-WAL writing, durability scheduling, and `durable_lsn` advancement belong to the WAL writer/flusher. `DiskManager` provides lower-level file synchronization primitives but does not own transaction-level WAL durability coordination.
+The legacy conceptual interface included a `SyncWal()` operation. The later WAL architecture assigns WAL writing, durability scheduling, and `durable_lsn` advancement to the WAL writer/flusher. `DiskManager` therefore does not own transaction-level WAL durability coordination merely because the early conceptual API showed such a method.
 
 ### 7.3.1 File lifecycle boundary
 
@@ -2948,15 +2947,40 @@ Exact checksum finalization is §4.12.2.
 
 ## 7.11 WAL-before-data enforcement
 
-The canonical WAL-before-data ordering rule is §12.17.
+The BufferPool flush path is the centralized WAL-before-data enforcement point for pages routed through it.
 
-The BufferPool flush path is its centralized enforcement point for BufferPool-managed pages. Before explicit flush, eviction, or background writeback, BufferPool checks the page's `page_lsn` against `WalManager.durable_lsn` and requests `flush_through(page_lsn)` when §12.17 requires it.
+Before writing a WAL-protected dirty page whose page header contains:
 
-Storage objects MUST NOT each implement independent variants of this rule.
+```text
+page_lsn = X
+```
 
-The WAL subsystem owns WAL persistence and `durable_lsn`; BufferPool owns enforcing the dependency before data-page writeback.
+the flush path MUST establish:
 
-B+ mini-transactions additionally obey the stronger temporary no-flush condition defined in §12.10.2.
+```text
+WalManager.durable_lsn >= X
+```
+
+Conceptually:
+
+```text
+if WalManager.durable_lsn < page.page_lsn:
+    WalManager.flush_through(page.page_lsn)
+
+write page through raw page-file I/O
+```
+
+This ordering requirement applies to all BufferPool data-page write paths, including:
+
+- explicit flush,
+- eviction,
+- background writeback.
+
+Storage objects MUST NOT each implement independent variants of the WAL-before-data rule.
+
+The WAL subsystem owns WAL persistence and `durable_lsn`; the BufferPool owns checking/enforcing the dependency before data-page writeback.
+
+B+ mini-transactions use the stronger temporary no-flush condition defined in §12.10.2.
 
 ## 7.12 CLOCK replacement
 
@@ -3279,7 +3303,7 @@ A context-free RID decoder can validate these sentinel rules.
 
 When the index handle knows the expected heap `FileId`, tree/index-level validation MUST additionally reject a leaf RID whose `heap_file_id` does not belong to the indexed relation.
 
-This strict decoder rule is part of the persisted v1 architecture contract.
+This strict decoder rule is part of the architecture contract even though the Phase 1 implementation checkpoint recorded a decoder that still accepted nonzero reserved bytes.
 
 ## 8.5 Memcomparable user-key encoding
 
@@ -3603,7 +3627,7 @@ no previous leaf         = INVALID_PAGE_NO
 no next leaf             = INVALID_PAGE_NO
 ```
 
-Leaf-node flag/reserved validation follows the canonical B+ node rules in §8.7.
+A v1 decoder MUST reject nonzero node flags or reserved bytes.
 
 ## 8.10 Internal-node format and routing semantics
 
@@ -3650,7 +3674,7 @@ flags                 = 0
 reserved bytes 52..63 = 0
 ```
 
-Internal-node flag/reserved validation follows the canonical B+ node rules in §8.7.
+A v1 decoder MUST reject nonzero node flags or reserved bytes.
 
 ### 8.10.1 Routing lower bounds
 
@@ -4351,7 +4375,7 @@ RID participation makes this exact even among duplicate user keys.
 
 ### Aborted user DML
 
-The canonical v1 transaction/recovery architecture establishes: ordinary user-DML heap/index modifications are not physically undone on user abort.
+The later locked v1 transaction/recovery architecture refines the earlier B+ tree discussion: ordinary user-DML heap/index modifications are not physically undone on user abort.
 
 Consequently, an aborted INSERT/UPDATE may leave an index entry that references an invisible aborted heap version.
 
@@ -5226,17 +5250,49 @@ never `IN_PROGRESS` after the conflicting transaction's locks have been released
 
 ### 9.14.2 Commit
 
-The integrated COMMIT sequence is canonical in §15.5.
+For a transaction with persistent writes:
 
-This chapter owns the transaction-lifecycle requirement that terminal COMMITTED state is published through §9.14.1's linearization point only after the required durable commit WAL exists. The transaction-status page remains NO-FORCE; durable commit WAL is authoritative after crash.
+```text
+append TXN_COMMIT
+    ↓
+make WAL durable through commit LSN
+    ↓
+install/update COMMITTED in transaction-status page/cache
+    ↓
+runtime terminal publication linearization
+    ↓
+release transaction-lifetime logical locks
+    ↓
+unregister the transaction's own SQL snapshot(s)
+    ↓
+return commit success
+```
+
+The persistent status-page update itself remains NO-FORCE; durable commit WAL is authoritative after crash.
 
 ### 9.14.3 Abort
 
-The integrated ABORT sequence is canonical in §15.6.
+Abort publication is:
 
-This chapter owns the transaction-lifecycle requirement that ABORTED publication uses §9.14.1's terminal linearization point before transaction-lifetime locks are released.
+```text
+state -> ABORTING
+    ↓
+append TXN_ABORT when persistent WAL-visible state exists
+    ↓
+install/update ABORTED transaction status
+    ↓
+runtime terminal publication linearization
+    ↓
+release transaction-lifetime logical locks
+    ↓
+unregister SQL snapshot(s)
+    ↓
+finish ABORTED
+```
 
-An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort. If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again.
+An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort.
+
+If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again.
 
 Ordinary user abort does not physically restore heap/index bytes.
 
@@ -5970,7 +6026,7 @@ It is physically stored in fixed-size files under:
 wal/
 ```
 
-with the segment naming shape:
+with the legacy naming shape:
 
 ```text
 0000000000000000.wal
@@ -5994,7 +6050,7 @@ segment_index  = L / 67,108,864
 segment_offset = L % 67,108,864
 ```
 
-The exact filename-number radix/presentation beyond the specified example is not relied upon as a recovery semantic; segment order is determined by the logical segment index.
+The exact filename-number radix/presentation beyond the locked example is not relied upon as a recovery semantic; segment order is determined by the logical segment index.
 
 WAL segmentation provides bounded file units, recovery scan boundaries, and a natural recycling unit.
 
@@ -8237,7 +8293,7 @@ sys_constraints
 sys_statistics
 ```
 
-Their canonical semantic fields are:
+Their locked semantic fields are:
 
 ### 16.5.1 `sys_tables`
 
@@ -9455,7 +9511,7 @@ Thus `a < b < c` is rejected rather than assigned accidental host-language seman
 7. Nested block comments are not part of v1.
 8. Parser output contains textual syntax names, not resolved catalog IDs.
 9. AST nodes retain source spans through semantic binding.
-10. Pratt/precedence parsing uses the defined precedence hierarchy.
+10. Pratt/precedence parsing uses the locked precedence hierarchy.
 11. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
 12. Unsupported syntax fails explicitly rather than being half-interpreted.
 
@@ -10859,23 +10915,13 @@ This retirement rule applies to table heap/FSM files and index B+ files.
 
 ## 21.10 Catalog cache publication
 
-The canonical catalog-cache visibility and descriptor-lifetime rules are §16.10.
+Catalog cache publication follows transaction terminal state.
 
-DDL execution integrates with those rules as follows:
+CREATE/ALTER-like descriptor versions remain transaction-local/catalog-MVCC-visible until terminal COMMITTED publication, after which current committed cache/name lookup may publish them.
 
-```text
-uncommitted CREATE/ALTER-like metadata:
-    transaction-local/catalog-MVCC-visible only
+After committed DROP, current-name lookup stops returning the object while old immutable descriptor objects may remain alive for older users.
 
-terminal COMMITTED:
-    publish/replace current committed cache/name entries
-
-terminal committed DROP:
-    remove the object from current-name lookup
-    while older immutable descriptors may remain alive
-```
-
-DDL MUST NOT mutate descriptors already retained by active plans.
+Cache invalidation/replacement does not mutate descriptors already held by active plans.
 
 ## 21.11 INSERT binding
 
@@ -11344,7 +11390,7 @@ Detailed join/aggregate/sort/DML execution algorithms are specified in Chapters 
 
 ### 22.4.1 Physical implementation availability
 
-The physical operator family is the architecture's algorithm vocabulary; runtime capability determines which algorithms are currently eligible for physical planning.
+The physical operator family is the architecture's algorithm vocabulary, not a promise that every algorithm is enabled in the first executable milestone.
 
 The physical planner has an explicit capability/implementation registry.
 
@@ -12187,7 +12233,7 @@ Result validity follows Chapter 17's expression semantics.
 
 The kernel uses the resolved physical type directly; it does not switch on SQL type once per row when the batch-level operation is already known.
 
-Detailed arithmetic-error and overflow behavior is defined by §39.3.1 and MUST remain consistent with these kernels.
+Detailed arithmetic-error/overflow behavior is completed with the later execution-error contract; Pass 12 does not invent a conflicting rule.
 
 ## 25.4 Comparison kernels
 
@@ -12495,7 +12541,7 @@ source state that can later be partitioned where valid
 no mutable query state embedded in immutable plan nodes
 ```
 
-Worker-pool scheduling, morsels, local-state combining, and concrete parallel operator algorithms are defined in Chapter 32.
+Worker-pool scheduling, morsels, local-state combining, and concrete parallel operator algorithms are completed in Pass 13.
 
 ## 26.10 Pipeline invariants
 
@@ -12751,7 +12797,7 @@ A result sink consumes final DataChunks synchronously or materializes/retains re
 
 It MUST NOT expose a borrowed producer chunk beyond the producer/owner lifetime.
 
-The detailed cursor/client result interface and DML RETURNING spool are defined in Chapter 31.
+The detailed cursor/client result interface and DML RETURNING spool are completed in Pass 13.
 
 ## 27.12 Scan/unary invariants
 
@@ -13696,7 +13742,7 @@ revalidate tuple/version state
 apply Chapter-11 isolation conflict rules
 ```
 
-The Chapter-15 retry boundary remains authoritative.
+The already-locked Chapter-15 retry boundary remains authoritative.
 
 If READ COMMITTED discovers a retry-requiring conflict **before this statement attempt has produced any persistent WAL-visible write**:
 
@@ -13714,7 +13760,7 @@ same-TxnId whole-statement restart is forbidden
 transaction -> abort/conflict outcome
 ```
 
-This follows the Chapter-15 retry boundary and the no-physical-user-DML-undo architecture.
+This refines legacy §513 consistently with the no-physical-user-DML-undo architecture.
 
 ## 31.6 INSERT execution
 
@@ -17510,6 +17556,8 @@ A rewrite/legality mistake that changes results is a correctness failure.
 
 # 39. Error and Corruption Model
 
+> **Rewrite status:** Pass 1 migrates the architectural baseline from legacy §44. Later subsystem passes add subsystem-specific error/corruption contracts.
+
 The system distinguishes at least:
 
 - SQL/user errors,
@@ -17594,6 +17642,23 @@ Execution failure does not independently release transaction-owned logical locks
 
 No partially active pipeline/task graph remains runnable after a terminal query execution failure.
 
+## 39.4 Optimizer errors
+
+Optimizer planning may fail with controlled internal/resource categories such as:
+
+```text
+OptimizerError
+OptimizerResourceLimit
+```
+
+`OptimizerResourceLimit` means the configured planning-time/memory bound prevented completion even after the bounded heuristic fallback.
+
+It is not an out-of-process arbitrary allocation crash.
+
+A cost-model mistake that merely selects a slower semantically valid plan is **not** an optimizer runtime error.
+
+A final-plan semantic/property-validation failure is an internal invariant failure and MUST NOT be executed.
+
 ### 39.3.1 Checked integer arithmetic
 
 Integer kernels MUST NOT rely on C++ signed-overflow undefined behavior.
@@ -17625,30 +17690,15 @@ finite nonzero / ±0.0 -> signed infinity
 infinity / infinity   -> NaN
 ```
 
-NaN/zero comparison/grouping/index semantics remain those defined in Chapters 8, 17, 20, and 29.
+NaN/zero comparison/grouping/index semantics remain those already locked in Chapters 8, 17, 20, and 29.
 
 Compiler modes that silently replace these semantics are not allowed.
-
-## 39.4 Optimizer errors
-
-Optimizer planning may fail with controlled internal/resource categories such as:
-
-```text
-OptimizerError
-OptimizerResourceLimit
-```
-
-`OptimizerResourceLimit` means the configured planning-time/memory bound prevented completion even after the bounded heuristic fallback.
-
-It is not an out-of-process arbitrary allocation crash.
-
-A cost-model mistake that merely selects a slower semantically valid plan is **not** an optimizer runtime error.
-
-A final-plan semantic/property-validation failure is an internal invariant failure and MUST NOT be executed.
 
 ---
 
 # 40. Observability and EXPLAIN
+
+> **Rewrite status:** Pass 1 migrates the baseline from legacy §§47–48. Detailed subsystem metrics and optimizer/executor diagnostics are migrated in later passes.
 
 ## 40.1 Internal metrics
 
@@ -17927,6 +17977,8 @@ The canonical plan fingerprint is the compact debug hash defined by §38.5 and i
 
 # 41. Verification Requirements
 
+> **Rewrite status:** Pass 1 preserves the architecture-level requirements from legacy §45. Detailed test recipes remain preserved in the legacy source until a dedicated verification document is adopted.
+
 Every major subsystem requires focused verification appropriate to its invariants.
 
 The verification strategy includes:
@@ -17967,9 +18019,9 @@ Storage verification MUST exercise the architectural properties that cannot be e
 - heap scans after reopen across many pages,
 - stale-FSM candidate repair.
 
-Physical slot reuse tests MUST follow the Chapter-14 grace protocol and persisted free-slot list; immediate DEAD-slot reuse is not a valid test expectation.
+Physical slot reuse tests must follow the Chapter-14 grace protocol and persisted free-slot list; the old milestone recipe's generic “reusable slots” item is not an authorization for immediate DEAD-slot reuse.
 
-Detailed test fixtures, exact test counts, and benchmark procedures are maintained in `VERIFICATION.md`; this chapter states the architecture-level verification obligations.
+Detailed test fixtures, exact test counts, and milestone checklists are verification documentation rather than canonical architecture and are not duplicated here.
 
 
 ## 41.2 B+ tree verification obligations
@@ -18286,6 +18338,8 @@ without asserting arbitrary exact floating cost numbers unless the cost formula 
 ---
 
 # 42. Performance Requirements
+
+> **Rewrite status:** Pass 1 preserves the architecture-level requirements from legacy §46. Detailed benchmark procedures remain preserved in the legacy source until a dedicated verification document is adopted.
 
 Performance claims require measurement.
 
@@ -18649,7 +18703,7 @@ Catalog, spill, and other persistent formats are added as their canonical chapte
 
 # Appendix B. Global Invariants
 
-The following global invariants apply across subsystem boundaries and MUST NOT be weakened without an explicit architecture revision.
+The following global invariants are migrated from the legacy architecture baseline. Later passes may add subsystem-specific invariants and cross-references, but MUST NOT weaken these requirements without an explicit architecture revision.
 
 1. Persistent structures use logical persistent identifiers such as page IDs, never process memory pointers.
 2. On-disk formats use explicit serialization.
@@ -18670,7 +18724,7 @@ Subsystem invariant sets are canonical in their owning chapters. Heap/tuple inva
 
 # Appendix C. Deferred Features and Future Experiments
 
-This appendix records functionality and experiments intentionally outside the required v1 baseline.
+This appendix records broad deferred scope introduced by the legacy architecture overview. Later subsystem passes consolidate the complete deferred-feature lists.
 
 Initial deferred or non-v1 areas include:
 
@@ -18763,7 +18817,7 @@ Initial deferred or non-v1 areas include:
 - window functions,
 - set operations,
 - nested block comments,
-- prepared-statement parameters in the v1 parser/planner baseline,
+- prepared-statement parameters in the initial parser milestone,
 - locale-aware VARCHAR collations and a collation framework,
 - UTF-8 validity/character-count semantics and `VARCHAR(n)`,
 - timezone-aware SQL types/rules,
@@ -18830,48 +18884,118 @@ Items listed here are future possibilities or staged functionality, not requirem
 
 ---
 
-# Appendix D. Open Architecture Questions
+# Appendix D. Open Architecture Decisions
 
-## D.1 V1 architecture status
+The structural rewrite does not silently decide gaps that the legacy architecture leaves underspecified.
 
-No unresolved v1 core-architecture question remains in the current v1 contract.
+The pre-Pass-7 coherence resolution closed the previously open decisions for:
 
-Every identified architecture gap affecting v1 semantics or persistent formats is either:
+- ordinary-page whole-page checksum coverage,
+- BTREE FileSuperblock specialization and B+ persistent metadata,
+- exact FLOAT64 memcomparable bytes,
+- zero-only unassigned ordinary-page flags,
+- byte-exact tuple fixed-area derivation,
+- B+ root-metadata/page-latch concurrency.
 
-- resolved explicitly and integrated into its owning chapter, or
-- classified as intentionally deferred functionality in Appendix C.
+The remaining rewrite issue register contains implementation mismatches, historical refinement notes, later-pass synchronization items, and newly exposed transaction-format/semantic gaps.
 
-Deferred features are not unresolved v1 questions.
+The pre-Pass-8 transaction coherence resolution closed the Pass-7 gaps for:
 
-## D.2 Non-architecture implementation consistency
+- byte-exact `txn_status.dat` FileKind/PageType/status-bit/mapping semantics,
+- exclusive `reserved_txn_id_end` half-open reservation ranges,
+- owner-excluded snapshot active sets and exact `xmin` derivation.
 
-The current implementation checkpoint has one known architecture/implementation mismatch that does **not** change this contract:
+The issue register retains these items as resolved architecture decisions and continues to track implementation mismatches, later-pass synchronization work, and unresolved issues discovered by future passes.
+
+The pre-Pass-10 core resolution closed the already-owned transactional-storage decisions for:
+
+- byte-exact WAL record grammar and record-type registry,
+- byte-exact dual-slot `database.control`,
+- checkpoint BEGIN/DATA/END identity and analysis/redo scan bounds,
+- exact ReadEpochManager registration/retirement grace arithmetic,
+- sparse transaction-status physical reclamation without PageNo renumbering,
+- mandatory ordinary-page checksum finalization and stable flush-image semantics,
+- crash-safe page append publication and recovery tail reconciliation,
+- complete `DEAD -> UNUSED` / free-slot-list state machine and idempotent vacuum cleanup,
+- READ COMMITTED retry restrictions after persistent statement writes,
+- terminal outcome / active registry / lock-release linearization,
+- full-page-image retention through every clean-to-dirty interval.
+
+These items remain recorded as resolved decisions in `ARCHITECTURE_REWRITE_ISSUES.md`.
+
+Pass 11 resolves the DDL-owned catalog-object identity gap:
+
+- TableId/IndexId/ConstraintId use one durable non-reused uint64 catalog-object allocator in `database.control`,
+- ColumnId allocation is table-local and non-reused,
+- DDL performs identity/file allocation only during execution under DDL coordination.
+
+Pass 13 closes execution-semantic details that the legacy execution block leaves implicit while preserving its algorithms:
+
+- LEFT hash join fixes the logical right side as build and logical left side as preserved probe in the baseline,
+- query-local hashing uses explicit ordinary-join versus grouping equality modes,
+- aggregate result types/empty-input behavior are explicit for COUNT/SUM/MIN/MAX/AVG,
+- normalized sort prefixes are order-preserving aids and Top-N sorts retained output before emission,
+- DML target spools enforce one physical target RID at most once and obey the no-retry-after-persistent-write rule,
+- RETURNING/result chunks have an explicit safe publication/lifetime boundary,
+- FLOAT64 division uses the locked IEEE-754 arithmetic model while integer division by zero is an error.
+
+Pass 14 closes optimizer/statistics semantic ownership that the legacy block leaves distributed:
+
+- ANALYZE uses one stable SQL visibility snapshot and atomically publishes one immutable statistics descriptor version,
+- index-access costing has explicit `IndexStatistics` ownership for leaf occupancy and heap correlation,
+- grouping/DISTINCT cardinality includes the SQL NULL grouping class and uses the locked multi-column damping fallback,
+- B+ composite-bound MIN/MAX key/RID objects are explicitly transient search sentinels rather than persisted invalid RIDs,
+- `IS NULL` is an exact nullable-key search condition while ordinary `= NULL` remains non-sargable/UNKNOWN.
+
+The pre-Pass-15 upper-core resolution closes the remaining already-owned upper-layer gaps before join/memo optimization is migrated:
+
+- **R-036:** `catalog.dat` is now a byte-exact immutable two-page bootstrap file; `CATALOG_DATA` page 1 contains exactly six fixed bootstrap entries and is cross-validated against the self-hosted catalog.
+- **R-040:** v1 permitted defaults are closed IMMUTABLE expressions that are fully folded once at DDL time and persisted as one checksummed typed `DefaultValueBlob`; no runtime function/operator identity is persisted.
+- **R-044:** `sys_statistics` uses exact chunked TABLE/COLUMN/INDEX payload codecs built on the shared persisted-scalar format, with TABLE scope as the completeness manifest.
+- **R-046:** ANALYZE is integrated through parser/AST, binding, LogicalAnalyze, PhysicalAnalyze, transactional catalog writes, and commit-only global statistics publication.
+- **R-047:** index statistics/costing distinguish SQL-visible live entries from physical B+ entry/invisible-garbage pressure.
+- **R-048:** primitive selectivity rules return complete TRUE/FALSE/UNKNOWN triples and AND/OR independence formulas are exact under SQL 3VL.
+
+Pass 15 closes the remaining optimizer search/property architecture from legacy §§628–717:
+
+- physical ordering is an exact `LogicalSlotId` prefix property with direction/NULL/collation matching,
+- useful interesting orders are retained without constructing an unbounded property lattice,
+- join regions use BindingId-based RelationSets, bushy DP through the configurable default threshold of 10, and deterministic bounded local search above the threshold,
+- join algorithm/orientation choice is integrated with join-order search and gated by actual runtime capability,
+- memory/spill/operator payload width are part of cost,
+- `RequiredRowsObjective` is separate from physical properties and participates in memo/search identity wherever propagated,
+- memo dominance preserves interesting-order and low-startup alternatives,
+- deterministic near-cost ties use a canonical structural key while PlanFingerprint remains diagnostic,
+- missing-statistics fallbacks carry explicit confidence/provenance,
+- optimizer tracing, q-error, validation, bounded planning resources, and benchmark-driven calibration are canonical.
+
+The RID reserved-byte rule itself is not open: the architecture requires zero-on-write and reject-nonzero-on-v1-decode. R-001 records an implementation/state mismatch, not an unresolved architecture choice.
+
+Other rewrite consistency/refinement notes remain in `ARCHITECTURE_REWRITE_ISSUES.md` until the final reconciliation pass.
+
+---
+
+## Rewrite progress
+
+Architecture content migrated so far:
 
 ```text
-Persisted RID bytes 14..15:
-    architecture encoder -> write zero
-    architecture v1 decoder -> reject nonzero
-
-current Phase-1 decoder checkpoint:
-    still accepts nonzero reserved bytes
+Pass 0    inventory and target structure
+Pass 1    legacy §§0–52
+Pass 2    legacy §§53–63
+Pass 3    legacy §§64–81
+Pass 4    legacy §§82–85
+Pass 5    legacy §§86–108
+Pass 6    legacy §§109–179
+Pass 7    legacy §§180–214
+Pass 8    legacy §§215–255
+Pass 9    legacy §§256–300
+Pass 10   legacy §§301–358
+Pass 11   legacy §§359–433
+Pass 12   legacy §§434–478
+Pass 13   legacy §§479–567
+Pass 14   legacy §§568–627
+Pass 15   legacy §§628–725
 ```
 
-`PROJECT_STATE.md` records that implementation mismatch. The architecture remains strict as specified in §8.4.1.
-
-No implementation change is made by this document.
-
-## D.3 Architecture revision rule
-
-A future implementation discovery may justify changing an accepted architectural decision, but the change requires an explicit architecture revision that identifies:
-
-```text
-current contract
-proposed replacement
-reason
-benefits and drawbacks
-persistent/migration consequences
-affected subsystems
-verification obligations
-```
-
-Until such a revision is accepted, this document remains authoritative.
+The existing `ARCHITECTURE.md` remains the active architecture authority until the full rewrite, reconciliation audit, and explicit cutover are complete.

@@ -1,0 +1,693 @@
+# DBlusBlus — Project State
+
+**Purpose:** Fast, current implementation-state context for Codex/AI agents and contributors.  
+**Last state checkpoint:** Milestone `0020` — Phase 1 Raw-Storage Completion and Hardening Audit.  
+**Checkpoint date:** 2026-08-14.  
+**Current classification:** **PHASE 1 COMPLETE AT BUFFERPOOL BOUNDARY**.
+
+---
+
+## 1. Authority and reading order
+
+This file describes **where the implementation currently is**.
+
+It does **not** define architecture and must not silently override architectural contracts.
+
+When working in this repository, use this precedence:
+
+1. `AGENTS.md` — how the coding agent must work in this repository.
+2. `ARCHITECTURE.md` — authoritative system design and persisted-format contract.
+3. Current source code + current tests — implementation reality to inspect before editing.
+4. `PROJECT_STATE.md` — current milestone, implemented/deferred subsystems, known boundaries, and open follow-ups.
+5. `devlog/*.md` — append-only historical implementation records.
+
+If `PROJECT_STATE.md` conflicts with `ARCHITECTURE.md`, **`ARCHITECTURE.md` wins** and the state file must be corrected.
+
+Historical devlogs are evidence of how the project evolved; they are not a replacement for inspecting current source/tests.
+
+---
+
+## 2. Current phase gate
+
+### Phase 1 — Raw storage
+
+**Status: COMPLETE AT BUFFERPOOL BOUNDARY.**
+
+The Phase 1 hardening audit found all currently required BufferPool-independent raw-storage primitives present. After one tuple-validation correctness fix, no unresolved correctness issue prevents advancing to the next architectural dependency.
+
+### Phase 2 — Buffer management
+
+**Status: NOT STARTED.**
+
+No `BufferPool`, `BufferFrame`, page guard, CLOCK implementation, dirty-frame manager, or page-latch subsystem currently exists.
+
+**Do not begin Phase 2 without explicit project-owner approval.**
+
+Do not work around this gate by implementing relation-wide page access directly through `DiskManager` or `PageFile`.
+
+---
+
+## 3. Why `HeapFile` is intentionally not implemented yet
+
+`HeapFile` is still absent by design.
+
+The architecture requires relation-wide page access, pin/lifetime ownership, and page mutation to flow through the future BufferPool boundary.
+
+Therefore:
+
+```text
+WRONG:
+HeapFile -> DiskManager/PageFile directly for normal page access
+
+INTENDED:
+HeapFile -> BufferPool -> lower storage/I/O layers
+```
+
+Implementing `HeapFile` before BufferPool would create the wrong ownership/lifetime model and would have to be replaced.
+
+The Phase 1 audit found **no missing BufferPool-independent primitive required before `HeapFile`**.
+
+---
+
+## 4. Implemented Phase 1 subsystems
+
+### 4.1 Fundamental identifiers and sentinels — `0001`
+
+Implemented fixed-width logical aliases:
+
+```text
+FileId      uint32
+PageNo      uint64
+SlotId      uint16
+TxnId       uint64
+CommandId   uint32
+Lsn         uint64
+TableId     uint64
+IndexId     uint64
+SchemaVer   uint32
+```
+
+Implemented the architecture-defined invalid sentinels, `PageId`, and `Rid`.
+
+Important current semantics:
+
+- `Rid` identifies a physical heap tuple version.
+- `CommandId{0}` is valid.
+- `TxnId{0}` is `INVALID_TXN_ID`.
+- `PageId` and `Rid` are independent from buffer-frame identity.
+
+### 4.2 Explicit little-endian encoding — `0002`
+
+Implemented fixed-width little-endian integer helpers for signed/unsigned 8/16/32/64-bit integers.
+
+Properties:
+
+- unaligned-safe byte access,
+- no raw struct persistence,
+- no pointer reinterpretation,
+- undersized encode does not mutate destination,
+- undersized decode fails cleanly.
+
+### 4.3 Persisted PageId/RID codecs — `0003`
+
+Implemented:
+
+```text
+PageId = 12 persisted bytes
+Rid    = 16 persisted bytes
+```
+
+RID layout:
+
+```text
+0..3    page.file_id
+4..11   page.page_no
+12..13  slot
+14..15  reserved
+```
+
+Encoder writes RID reserved bytes as zero.
+
+**Open architecture follow-up:** current decoder still accepts nonzero RID reserved bytes; see §8.
+
+### 4.4 Common page header — `0004`
+
+Implemented explicit 32-byte common page-header codec and persisted page-type codes.
+
+No ABI layout participates in persistence.
+
+### 4.5 CRC32C — `0005`
+
+Implemented portable CRC-32C/Castagnoli primitive.
+
+This remains a low-level checksum primitive; ordinary data-page checksum policy is still staged until WAL/recovery integration.
+
+### 4.6 File superblock — `0006`
+
+Implemented deterministic 8192-byte file superblock with:
+
+- common page header,
+- `DBLUSBLS` magic,
+- explicit file-kind codes,
+- page size,
+- FileId/object identity,
+- creation epoch,
+- reserved-zero validation,
+- full-page CRC32C with checksum field treated as zero.
+
+### 4.7 DiskManager — `0007`
+
+Implemented Linux/POSIX random-access page-file I/O with:
+
+- create/open/close registration,
+- `pread` / `pwrite`,
+- aligned page counts,
+- exact-page reads/writes,
+- append extension,
+- `fdatasync`,
+- checked file offsets,
+- EINTR handling where appropriate.
+
+Important boundary:
+
+`DiskManager` remains storage-agnostic. It does not parse superblocks, heap pages, FSM pages, tuples, or BufferPool state.
+
+### 4.8 Raw Page abstraction — `0008`
+
+Implemented `Page` as:
+
+```text
+PageId + one owned 8192-byte byte array
+```
+
+`HeapPage` and `FsmPage` later act as non-owning controllers over this byte storage.
+
+No frame metadata lives in `Page`.
+
+### 4.9 PageFile lifecycle/allocation — `0009`
+
+Implemented move-only page-file lifecycle above `DiskManager`:
+
+- create/open,
+- page-0 superblock initialization/validation,
+- append-first page allocation,
+- identity checks,
+- RAII registration cleanup.
+
+Ordinary page allocation returns `PageId`; it does not interpret or initialize page-type-specific bytes.
+
+### 4.10 Heap page structure — `0010`
+
+Implemented `HEAP_DATA` format v1:
+
+```text
+common header     32 bytes
+heap header       16 bytes
+total header      48 bytes
+slot entry         8 bytes
+```
+
+Implemented explicit slot-state codes and structural validation.
+
+### 4.11 Heap raw insertion — `0011`
+
+Implemented append-only raw tuple insertion into one heap page.
+
+Current raw tuple maximum:
+
+```text
+8135 bytes
+```
+
+Insertion:
+
+- treats tuple bytes as opaque,
+- allocates a new slot,
+- does not reuse DEAD/UNUSED slots,
+- returns stable physical `Rid`,
+- provides non-owning lookup of NORMAL tuple bytes.
+
+### 4.12 Heap `NORMAL -> DEAD` transition — `0012`
+
+Implemented page-local physical state transition only.
+
+No MVCC/global-death decision is made by `HeapPage`.
+
+No physical tuple-byte reclamation occurs during `MarkDead`.
+
+### 4.13 Heap compaction — `0013`
+
+Implemented page-local compaction:
+
+- retained NORMAL payloads repacked deterministically,
+- DEAD payload bytes reclaimed,
+- SlotIds/RIDs remain stable,
+- compacted DEAD slots remain DEAD and non-reusable,
+- reclaimed DEAD coordinates canonicalize to `(0,0)`,
+- overlap/corruption checks occur before mutation.
+
+### 4.14 TupleHeader codec — `0014`
+
+Implemented exact 48-byte physical tuple header.
+
+Current persisted tuple flags:
+
+```text
+HAS_NULLS  = 0x0001
+HAS_VARLEN = 0x0002
+known mask = 0x0003
+```
+
+Implemented strict structural header validation and previous-version sentinel-pair consistency.
+
+### 4.15 Tuple physical layout — `0015`
+
+Implemented:
+
+- physical scalar-width metadata,
+- one LSB-first null bit per physical schema column,
+- tightly packed fixed-area offsets,
+- 8-byte VARCHAR descriptor slots,
+- schema-version-carrying physical layout,
+- checked tuple-size planning.
+
+No persisted numeric `PhysicalType` codes were introduced; `PhysicalType` is schema-lifetime in-memory metadata.
+
+### 4.16 Fixed-width tuple codec — `0016`
+
+Implemented physical encode/decode for:
+
+- BOOLEAN,
+- INT32,
+- INT64,
+- FLOAT64,
+- DATE,
+- TIMESTAMP,
+- NULL.
+
+Current storage rules include:
+
+- BOOLEAN `0x00` / `0x01`,
+- signed two's-complement integer storage,
+- exact IEEE-754 binary64 bit preservation,
+- raw signed DATE/TIMESTAMP physical scalars,
+- canonical `HAS_NULLS`,
+- unused bitmap bits zero,
+- writer-zeroed fixed bytes beneath NULL values.
+
+### 4.17 General VARCHAR/varlen tuple codec — `0017`
+
+Implemented complete current inline tuple construction/validation/decoding for mixtures of fixed-width values, VARCHAR, and NULL.
+
+Current VARCHAR format:
+
+```text
+descriptor:
+    uint32 tuple-relative payload offset
+    uint32 payload length
+```
+
+Current canonical rules:
+
+- NULL VARCHAR descriptor = `(0,0)`,
+- present VARCHAR payloads packed with no gaps in physical schema order,
+- empty non-NULL VARCHAR remains distinct from NULL,
+- `HAS_VARLEN` iff the physical layout contains at least one VARCHAR column,
+- exact physical tuple length,
+- trailing unreferenced bytes rejected,
+- VARCHAR decode returns a non-owning view into tuple bytes.
+
+Every tuple remains inline and must satisfy the 8135-byte heap raw-tuple limit.
+
+### 4.18 Persisted FSM page format — `0018`
+
+Implemented flat `FSM_DATA` format v1.
+
+Current format:
+
+```text
+common header            32 bytes
+FSM-specific header      16 bytes
+total header             48 bytes
+category entries       8144 bytes
+```
+
+Each heap data page maps to one persisted one-byte category.
+
+Current category semantics conservatively represent tuple insertion capacity after accounting for the current 8-byte append-slot cost.
+
+FSM remains advisory; actual heap-page free space must always be verified before insertion.
+
+### 4.19 In-memory FSM candidate index — `0019`
+
+Implemented rebuildable, relation-local runtime candidate metadata.
+
+Current implementation uses:
+
+```text
+256 ordered category buckets
++
+reverse PageNo -> category membership
+```
+
+Candidate policy:
+
+- determine minimum sufficient category,
+- search categories upward,
+- choose the first nonempty category,
+- choose the smallest PageNo within that category.
+
+This object performs no I/O and is currently unsynchronized/not thread-safe.
+
+### 4.20 Phase 1 audit/hardening — `0020`
+
+Final classification:
+
+```text
+A. COMPLETE AT BUFFERPOOL BOUNDARY
+```
+
+The audit inspected architecture, all Phase 1 source/tests/devlogs, serialization, arithmetic, corruption handling, lifetime boundaries, and dependency direction.
+
+One production correctness bug was found and fixed:
+
+- whole-tuple validation previously accepted malformed present BOOLEAN bytes such as `0x02`;
+- `ValidateTuple` now rejects them with `INVALID_BOOLEAN`.
+
+One portability hardening was added:
+
+- compile-time IEEE-754 capability assertion for persisted FLOAT64.
+
+A deterministic 2,000-iteration full tuple encode/validate/decode/re-encode property test was added.
+
+Final audited test state:
+
+```text
+Clang Debug             184/184 passed
+Clang ASan + UBSan      184/184 passed
+GCC Debug               184/184 passed
+clang-tidy              clean
+clang-format            clean
+git diff --check         clean
+project compiler warnings none
+```
+
+LeakSanitizer remains disabled in the ptrace test environment; AddressSanitizer and UndefinedBehaviorSanitizer remain enabled.
+
+---
+
+## 5. Current persisted-format summary
+
+This section is a navigation aid only. `ARCHITECTURE.md` remains authoritative for exact contracts.
+
+```text
+PAGE_SIZE                         8192
+
+CommonPageHeader                    32 bytes
+FileSuperblock header               72 bytes
+
+Heap page total header              48 bytes
+Heap slot entry                       8 bytes
+Heap raw tuple maximum             8135 bytes
+
+TupleHeader                          48 bytes
+VARCHAR descriptor                    8 bytes
+
+FSM_DATA total header                48 bytes
+FSM categories/page                8144
+FSM category width                    1 byte
+
+PageId persisted size                12 bytes
+Rid persisted size                   16 bytes
+```
+
+Do not copy this summary into code as a substitute for the canonical constants and architecture sections.
+
+---
+
+## 6. Current subsystem boundaries
+
+### `DiskManager`
+
+Owns process-local file descriptors and positional page I/O.
+
+Does not understand persisted object/page formats.
+
+### `PageFile`
+
+Owns page-file lifecycle, superblock identity validation, and append-first physical page allocation.
+
+Does not own buffer frames or normal buffered page lifetime.
+
+### `Page`
+
+Owns exactly one in-memory 8192-byte page buffer plus `PageId`.
+
+Does not contain BufferPool metadata.
+
+### `HeapPage`
+
+Non-owning page-local controller.
+
+Owns physical heap-page validation and mutations only.
+
+Treats tuple payload as opaque bytes.
+
+Does not decide SQL/MVCC visibility or global reclamation eligibility.
+
+### `TuplePhysicalLayout` / `TupleCodec`
+
+Own schema-directed physical tuple layout and serialization.
+
+Do not perform storage I/O and do not depend on BufferPool/HeapFile.
+
+### `FsmPage`
+
+Non-owning controller for one persisted `FSM_DATA` page.
+
+Performs no file/page I/O itself.
+
+### `FsmCandidateIndex`
+
+Rebuildable runtime advisory candidate index.
+
+Performs no storage I/O and does not inspect live heap pages.
+
+### Future `HeapFile`
+
+Not implemented.
+
+Must coordinate relation-wide page access through BufferPool rather than bypassing it with direct `DiskManager` access.
+
+---
+
+## 7. Explicitly deferred work
+
+### Phase 2 / immediate next architectural dependency
+
+Not started:
+
+- `BufferFrame`,
+- pin/unpin ownership,
+- page guards,
+- page latching ownership,
+- `BufferPool`,
+- CLOCK replacement,
+- dirty-page flushing,
+- BufferPool benchmarks.
+
+**Requires explicit owner approval before implementation starts.**
+
+### Blocked until/after BufferPool
+
+- relation-wide `HeapFile`,
+- relation-wide persistent/runtime `FreeSpaceMap` owner,
+- automatic FSM loading/updating/repair around live heap-page insertion,
+- guarded lifetime for borrowed tuple/VARCHAR views.
+
+### Later phases
+
+Not implemented:
+
+- B+ tree,
+- transactions,
+- MVCC visibility,
+- logical write-conflict control,
+- WAL,
+- recovery,
+- vacuum eligibility and delayed RID slot reuse,
+- catalog,
+- SQL parser/binder/type system,
+- execution engine,
+- optimizer,
+- statistics,
+- parallel execution.
+
+---
+
+## 8. Open architecture follow-up
+
+### RID reserved bytes, persisted bytes 14..15
+
+Current implementation:
+
+```text
+EncodeRid:
+    writes bytes 14..15 as zero
+
+DecodeRid:
+    currently ignores bytes 14..15
+```
+
+The Phase 1 audit identified this as the only unresolved architecture question.
+
+Proposed future synchronization:
+
+```text
+RID v1 reserved bytes:
+    encoder MUST write zero
+    decoder MUST reject nonzero
+```
+
+This is **not yet treated as newly locked by this state file**.
+
+Until `ARCHITECTURE.md` is explicitly updated, do not silently change the decoder solely because this proposal appears here.
+
+Compatibility note:
+
+Database-produced encoded RIDs already contain zero reserved bytes. Tightening decoding would only reject previously tolerated/external 16-byte inputs containing nonzero reserved bytes.
+
+---
+
+## 9. Current quality checkpoint
+
+As of milestone `0020`:
+
+- persisted formats were audited against `ARCHITECTURE.md`,
+- no raw-struct persistence was found,
+- no host-endian persisted path was found,
+- no persistence pointer/bitfield/ABI-layout dependency was found,
+- checked arithmetic was audited across disk/page/heap/tuple/FSM paths,
+- documented expected-failure atomicity was audited,
+- current corruption validation was audited,
+- no upward dependency violation was found,
+- no hidden/partial Phase 2 implementation was found.
+
+Do not interpret this checkpoint as proof that future integration cannot expose new bugs.
+
+---
+
+## 10. Rules for the next Codex task
+
+Every new task prompt should instruct Codex to read, in this order:
+
+```text
+1. AGENTS.md
+2. ARCHITECTURE.md
+3. PROJECT_STATE.md
+4. task-relevant current source/tests
+5. task-relevant devlogs when historical context is useful
+```
+
+Codex should use:
+
+```text
+ARCHITECTURE.md
+```
+
+for what must be true, and:
+
+```text
+PROJECT_STATE.md
+```
+
+for what is already implemented, what is intentionally missing, and where the current phase boundary is.
+
+Do not ask Codex to infer current phase progress by reading all historical devlogs unless the task is specifically an audit/history investigation.
+
+At the end of future implementation milestones:
+
+1. write the append-only numbered devlog,
+2. report architecture questions separately,
+3. update `PROJECT_STATE.md` only after the milestone has been reviewed/accepted,
+4. update `ARCHITECTURE.md` separately when a new architectural contract is explicitly accepted.
+
+This prevents implementation reports from silently becoming architecture.
+
+---
+
+## 11. Phase transition rule
+
+Current transition state:
+
+```text
+Phase 1:
+    COMPLETE
+
+Next canonical dependency:
+    Phase 2 — Buffer Management
+
+Approval:
+    NOT YET GRANTED
+```
+
+Until explicit approval is given:
+
+- do not create BufferPool types,
+- do not create BufferFrame types,
+- do not create PageGuard types,
+- do not implement CLOCK,
+- do not approximate buffered ownership under another name,
+- do not implement HeapFile by directly using DiskManager/PageFile for normal page access.
+
+If a task appears to require Phase 2, stop that part and report the dependency rather than bypassing the boundary.
+
+---
+
+## 12. Historical milestone index
+
+```text
+0001  Identifiers and sentinels
+0002  Fixed-width little-endian encoding
+0003  PageId / RID persisted codecs
+0004  Common page header
+0005  CRC32C primitive
+0006  File superblock
+0007  DiskManager POSIX I/O
+0008  Raw Page abstraction
+0009  PageFile lifecycle and allocation
+0010  Heap page structure
+0011  Heap page raw insertion
+0012  Heap page NORMAL -> DEAD transition
+0013  Heap page compaction
+0014  TupleHeader codec
+0015  Tuple physical layout / null bitmap / size planning
+0016  Fixed-width tuple codec
+0017  General VARCHAR / varlen tuple codec
+0018  Persisted FSM page format
+0019  In-memory FSM candidate index
+0020  Phase 1 raw-storage completion and hardening audit
+```
+
+For detailed historical implementation decisions, consult the corresponding
+`devlog/<milestone>-*.md` entry.
+
+---
+
+## 13. Maintenance policy for this file
+
+`PROJECT_STATE.md` is intentionally mutable.
+
+Unlike the append-only devlogs, it should be updated as the project advances.
+
+Keep it:
+
+- current,
+- concise enough for agent context,
+- explicit about phase boundaries,
+- explicit about implemented vs deferred work,
+- free of architectural decisions that have not been accepted into `ARCHITECTURE.md`.
+
+Do not turn this file into a second architecture document.
+
+When a phase or major subsystem is completed, prefer replacing stale state with the new current state rather than accumulating a second historical narrative here; history belongs in `devlog/`.

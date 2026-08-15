@@ -17,7 +17,7 @@ Prefer an implementation that exposes an important database or systems mechanism
 
 ## Repository documentation and authority
 
-The project uses distinct documentation roles. Keep their purposes separate.
+The project uses three different kinds of documentation. Keep their purposes distinct.
 
 ### `ARCHITECTURE.md`
 
@@ -27,11 +27,11 @@ It defines what the system is intended to be, including locked architectural dec
 
 Before implementing or materially changing a subsystem, read the relevant portions of `ARCHITECTURE.md`.
 
-`MUST` / `MUST NOT` requirements, exact persistent-format values, and explicitly stated invariants are hard architectural constraints.
+Decisions marked `LOCKED` are hard architectural constraints.
 
-Do not silently replace an architectural mechanism with an easier alternative.
+Do not silently replace a locked mechanism with an easier alternative.
 
-If implementation evidence suggests an accepted architecture decision should change, stop and clearly propose an architecture revision containing:
+If implementation evidence suggests a locked decision should change, stop and clearly propose an architecture revision containing:
 
 - the current decision,
 - the proposed replacement,
@@ -43,22 +43,6 @@ If implementation evidence suggests an accepted architecture decision should cha
 Do not implement the architectural change until it has been explicitly accepted.
 
 Do not modify `ARCHITECTURE.md` merely to make the implementation match a local choice. Architecture synchronization must reflect an explicitly accepted architectural decision.
-
-### `DEVELOPMENT.md`
-
-`DEVELOPMENT.md` preserves implementation sequencing, milestone targets, and recommended module-layout guidance.
-
-It is planning guidance, not architecture authority and not current project state.
-
-It does not authorize crossing an explicit phase/subsystem gate.
-
-### `VERIFICATION.md`
-
-`VERIFICATION.md` preserves detailed test, crash-injection, fuzzing, regression, and benchmark procedures.
-
-Architecture-level correctness/performance obligations remain authoritative in `ARCHITECTURE.md`.
-
-Detailed procedures may evolve as tooling improves, provided they continue to verify the architecture contract.
 
 ### `PROJECT_STATE.md`
 
@@ -126,10 +110,8 @@ Before substantial implementation work:
 1. read this `AGENTS.md`,
 2. read `PROJECT_STATE.md` to understand current implementation status and phase boundaries,
 3. read the relevant sections of `ARCHITECTURE.md`,
-4. consult `DEVELOPMENT.md` when implementation sequencing/module guidance is relevant,
-5. consult `VERIFICATION.md` when test/benchmark procedures are relevant,
-6. inspect the current task-relevant source code and tests,
-7. read task-relevant devlogs when historical context is useful.
+4. inspect the current task-relevant source code and tests,
+5. read task-relevant devlogs when historical context is useful.
 
 Do not assume documentation is sufficient evidence for implementation behavior. Inspect current source and tests before editing existing subsystems.
 
