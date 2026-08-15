@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -248,10 +249,8 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
         return ValidationFailure(
             HeapPageValidationError::SLOT_COUNT_LOWER_MISMATCH, common_header, heap_header);
     }
-    if (heap_header->slot_count == 0 && heap_header->free_slot_head != INVALID_SLOT_ID) {
-        return ValidationFailure(
-            HeapPageValidationError::INVALID_EMPTY_FREE_SLOT_HEAD, common_header, heap_header);
-    }
+    std::array<HeapSlotEntry, MAX_HEAP_PAGE_SLOT_COUNT> slots{};
+    std::bitset<MAX_HEAP_PAGE_SLOT_COUNT> unused_slots;
 
     for (std::uint32_t index = 0; index < heap_header->slot_count; ++index) {
         const std::size_t slot_offset =
@@ -271,7 +270,16 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
         }
 
         const HeapSlotEntry& slot = *decoded_slot.entry;
-        if (slot.state == HeapSlotState::NORMAL) {
+        slots[index] = slot;
+        if (slot.state == HeapSlotState::UNUSED) {
+            if (slot.tuple_offset != 0 || slot.tuple_length != 0) {
+                return ValidationFailure(HeapPageValidationError::NONCANONICAL_UNUSED_SLOT,
+                                         common_header,
+                                         heap_header,
+                                         slot_id);
+            }
+            unused_slots.set(index);
+        } else if (slot.state == HeapSlotState::NORMAL) {
             const std::size_t tuple_offset = slot.tuple_offset;
             const std::size_t tuple_length = slot.tuple_length;
             if (tuple_offset < heap_header->upper || tuple_offset > PAGE_SIZE ||
@@ -280,6 +288,53 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
                                          common_header,
                                          heap_header,
                                          slot_id);
+            }
+        }
+    }
+
+    for (std::uint32_t index = 0; index < heap_header->slot_count; ++index) {
+        if (!unused_slots[index]) {
+            continue;
+        }
+        const SlotId next_slot_id = slots[index].aux;
+        if (next_slot_id != INVALID_SLOT_ID &&
+            (next_slot_id >= heap_header->slot_count || !unused_slots[next_slot_id])) {
+            return ValidationFailure(HeapPageValidationError::INVALID_FREE_SLOT_LINK,
+                                     common_header,
+                                     heap_header,
+                                     static_cast<SlotId>(index));
+        }
+    }
+
+    if (heap_header->free_slot_head != INVALID_SLOT_ID &&
+        (heap_header->free_slot_head >= heap_header->slot_count ||
+         !unused_slots[heap_header->free_slot_head])) {
+        return ValidationFailure(HeapPageValidationError::INVALID_FREE_SLOT_HEAD,
+                                 common_header,
+                                 heap_header,
+                                 heap_header->free_slot_head);
+    }
+
+    std::bitset<MAX_HEAP_PAGE_SLOT_COUNT> visited_free_slots;
+    SlotId current_slot_id = heap_header->free_slot_head;
+    while (current_slot_id != INVALID_SLOT_ID) {
+        if (visited_free_slots[current_slot_id]) {
+            return ValidationFailure(HeapPageValidationError::FREE_SLOT_CYCLE,
+                                     common_header,
+                                     heap_header,
+                                     current_slot_id);
+        }
+        visited_free_slots.set(current_slot_id);
+        current_slot_id = slots[current_slot_id].aux;
+    }
+
+    if (visited_free_slots != unused_slots) {
+        for (std::uint32_t index = 0; index < heap_header->slot_count; ++index) {
+            if (unused_slots[index] && !visited_free_slots[index]) {
+                return ValidationFailure(HeapPageValidationError::FREE_SLOT_MEMBERSHIP_MISMATCH,
+                                         common_header,
+                                         heap_header,
+                                         static_cast<SlotId>(index));
             }
         }
     }

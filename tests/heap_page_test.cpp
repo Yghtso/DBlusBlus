@@ -118,6 +118,56 @@ void ConfigureOneNormalSlot(Page& page,
                                     }));
 }
 
+[[nodiscard]] constexpr HeapSlotEntry
+CanonicalUnusedSlot(SlotId next_slot_id = INVALID_SLOT_ID) noexcept {
+    return HeapSlotEntry{
+        .tuple_offset = 0,
+        .tuple_length = 0,
+        .state = HeapSlotState::UNUSED,
+        .aux = next_slot_id,
+    };
+}
+
+[[nodiscard]] constexpr HeapSlotEntry ZeroLengthNormalSlot() noexcept {
+    return HeapSlotEntry{
+        .tuple_offset = static_cast<std::uint16_t>(PAGE_SIZE),
+        .tuple_length = 0,
+        .state = HeapSlotState::NORMAL,
+        .aux = 0,
+    };
+}
+
+[[nodiscard]] constexpr HeapSlotEntry CanonicalDeadSlot() noexcept {
+    return HeapSlotEntry{
+        .tuple_offset = 0,
+        .tuple_length = 0,
+        .state = HeapSlotState::DEAD,
+        .aux = 0,
+    };
+}
+
+void ConfigureSlotsForValidation(Page& page,
+                                 std::span<const HeapSlotEntry> slots,
+                                 SlotId free_slot_head = INVALID_SLOT_ID) {
+    constexpr std::size_t maximum_slot_count =
+        (PAGE_SIZE - HEAP_PAGE_SLOT_DIRECTORY_OFFSET) / HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE;
+    ASSERT_LE(slots.size(), maximum_slot_count);
+
+    const auto slot_count = static_cast<std::uint16_t>(slots.size());
+    const auto lower = static_cast<std::uint16_t>(
+        HEAP_PAGE_SLOT_DIRECTORY_OFFSET + (slots.size() * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
+    WriteHeapHeader(page,
+                    HeapPageHeader{
+                        .slot_count = slot_count,
+                        .free_slot_head = free_slot_head,
+                        .lower = lower,
+                        .upper = PAGE_SIZE,
+                    });
+    for (std::size_t index = 0; index < slots.size(); ++index) {
+        ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(page, static_cast<SlotId>(index)), slots[index]));
+    }
+}
+
 TEST(HeapPageHeaderCodecTest, EmitsExactSixteenByteLittleEndianLayout) {
     const HeapPageHeader header{
         .slot_count = 0x0201,
@@ -386,7 +436,7 @@ TEST(HeapPageTest, InitializationWritesZeroFlagsAndPreservesExplicitPageLsn) {
     EXPECT_EQ(common_header->checksum_crc32c, std::uint32_t{0});
 }
 
-TEST(HeapPageValidationTest, AcceptsStructurallyValidNormalSlotRange) {
+TEST(HeapPageValidationTest, AcceptsCanonicalPageWithoutUnusedSlots) {
     Page page = InitializedHeapPage();
     ConfigureOneNormalSlot(page);
 
@@ -480,8 +530,7 @@ TEST(HeapPageValidationTest, RejectsInvalidHeapHeaderGeometryAndReservedField) {
     header = HeapPageHeader{};
     header.free_slot_head = 0;
     WriteHeapHeader(page, header);
-    EXPECT_EQ(HeapPage{page}.Validate().error,
-              HeapPageValidationError::INVALID_EMPTY_FREE_SLOT_HEAD);
+    EXPECT_EQ(HeapPage{page}.Validate().error, HeapPageValidationError::INVALID_FREE_SLOT_HEAD);
 
     header = HeapPageHeader{};
     header.reserved = 1;
@@ -518,30 +567,158 @@ TEST(HeapPageValidationTest, RejectsNormalTupleRangesOutsideTupleRegionOrPage) {
     EXPECT_EQ(result.error, HeapPageValidationError::NORMAL_TUPLE_OUT_OF_BOUNDS);
 }
 
-TEST(HeapPageValidationTest, DoesNotInventTupleRangeSemanticsForReservedStates) {
+TEST(HeapPageValidationTest, AcceptsCanonicalSingleElementFreeListWithSentinelTermination) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot()};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    EXPECT_TRUE(HeapPage{page}.Validate());
+}
+
+TEST(HeapPageValidationTest, AcceptsCanonicalMultiElementFreeList) {
+    Page page = InitializedHeapPage();
+    const std::array slots{
+        CanonicalUnusedSlot(2),
+        CanonicalUnusedSlot(),
+        CanonicalUnusedSlot(1),
+    };
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    EXPECT_TRUE(HeapPage{page}.Validate());
+}
+
+TEST(HeapPageValidationTest, RejectsUnusedSlotWithNoncanonicalTupleOffset) {
+    Page page = InitializedHeapPage();
+    auto unused_slot = CanonicalUnusedSlot();
+    unused_slot.tuple_offset = 1;
+    const std::array slots{unused_slot};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::NONCANONICAL_UNUSED_SLOT);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsUnusedSlotWithNoncanonicalTupleLength) {
+    Page page = InitializedHeapPage();
+    auto unused_slot = CanonicalUnusedSlot();
+    unused_slot.tuple_length = 1;
+    const std::array slots{unused_slot};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::NONCANONICAL_UNUSED_SLOT);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsOutOfRangeFreeSlotHead) {
+    Page page = InitializedHeapPage();
+    const std::array slots{ZeroLengthNormalSlot()};
+    ConfigureSlotsForValidation(page, slots, 1);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::INVALID_FREE_SLOT_HEAD);
+    EXPECT_EQ(result.slot_id, SlotId{1});
+}
+
+TEST(HeapPageValidationTest, RejectsFreeSlotHeadPointingToNormalSlot) {
+    Page page = InitializedHeapPage();
+    const std::array slots{ZeroLengthNormalSlot()};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::INVALID_FREE_SLOT_HEAD);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsFreeSlotHeadPointingToDeadSlot) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalDeadSlot()};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::INVALID_FREE_SLOT_HEAD);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsOutOfRangeUnusedNextLink) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot(1)};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::INVALID_FREE_SLOT_LINK);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsUnusedNextLinkPointingToNormalSlot) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot(1), ZeroLengthNormalSlot()};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::INVALID_FREE_SLOT_LINK);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsUnusedNextLinkPointingToDeadSlot) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot(1), CanonicalDeadSlot()};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::INVALID_FREE_SLOT_LINK);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsSelfCycleInFreeSlotList) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot(0)};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::FREE_SLOT_CYCLE);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsMultiSlotCycleInFreeSlotList) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot(1), CanonicalUnusedSlot(0)};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::FREE_SLOT_CYCLE);
+    EXPECT_EQ(result.slot_id, SlotId{0});
+}
+
+TEST(HeapPageValidationTest, RejectsUnusedSlotOmittedFromFreeSlotList) {
+    Page page = InitializedHeapPage();
+    const std::array slots{CanonicalUnusedSlot(), CanonicalUnusedSlot()};
+    ConfigureSlotsForValidation(page, slots, 0);
+
+    const auto result = HeapPage{page}.Validate();
+    EXPECT_EQ(result.error, HeapPageValidationError::FREE_SLOT_MEMBERSHIP_MISMATCH);
+    EXPECT_EQ(result.slot_id, SlotId{1});
+}
+
+TEST(HeapPageValidationTest, DoesNotInventTupleRangeSemanticsForDeadAndRedirectReservedStates) {
     Page page = InitializedHeapPage();
     WriteHeapHeader(
         page,
         HeapPageHeader{
-            .slot_count = 3,
+            .slot_count = 2,
             .free_slot_head = INVALID_SLOT_ID,
-            .lower = HEAP_PAGE_TOTAL_HEADER_SIZE + (3 * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE),
+            .lower = HEAP_PAGE_TOTAL_HEADER_SIZE + (2 * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE),
             .upper = PAGE_SIZE,
         });
     ASSERT_TRUE(
         EncodeHeapSlotEntry(SlotBytes(page, 0),
                             HeapSlotEntry{.tuple_offset = std::numeric_limits<std::uint16_t>::max(),
                                           .tuple_length = std::numeric_limits<std::uint16_t>::max(),
-                                          .state = HeapSlotState::UNUSED,
-                                          .aux = std::numeric_limits<std::uint16_t>::max()}));
-    ASSERT_TRUE(
-        EncodeHeapSlotEntry(SlotBytes(page, 1),
-                            HeapSlotEntry{.tuple_offset = std::numeric_limits<std::uint16_t>::max(),
-                                          .tuple_length = std::numeric_limits<std::uint16_t>::max(),
                                           .state = HeapSlotState::DEAD,
                                           .aux = std::numeric_limits<std::uint16_t>::max()}));
     ASSERT_TRUE(
-        EncodeHeapSlotEntry(SlotBytes(page, 2),
+        EncodeHeapSlotEntry(SlotBytes(page, 1),
                             HeapSlotEntry{.tuple_offset = std::numeric_limits<std::uint16_t>::max(),
                                           .tuple_length = std::numeric_limits<std::uint16_t>::max(),
                                           .state = HeapSlotState::REDIRECT_RESERVED,
@@ -938,14 +1115,12 @@ TEST(HeapPageDeadTransitionTest, RejectsDisallowedTransitionsWithoutMutation) {
 
     for (const auto state : {HeapSlotState::UNUSED, HeapSlotState::REDIRECT_RESERVED}) {
         Page disallowed = InitializedHeapPage();
-        ConfigureOneNormalSlot(disallowed);
-        auto slot = DecodeHeapSlotEntry(SlotBytes(disallowed, 0));
-        if (!slot.entry.has_value()) {
-            ADD_FAILURE() << "configured slot did not decode";
-            continue;
-        }
-        slot.entry->state = state;
-        ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(disallowed, 0), *slot.entry));
+        const HeapSlotEntry slot = state == HeapSlotState::UNUSED
+                                       ? CanonicalUnusedSlot()
+                                       : HeapSlotEntry{.state = HeapSlotState::REDIRECT_RESERVED};
+        const std::array slots{slot};
+        ConfigureSlotsForValidation(
+            disallowed, slots, state == HeapSlotState::UNUSED ? SlotId{0} : INVALID_SLOT_ID);
         ASSERT_TRUE(HeapPage{disallowed}.Validate());
         expect_unchanged(disallowed, 0, HeapPageMarkDeadError::INVALID_SLOT_STATE);
     }
@@ -1347,14 +1522,12 @@ TEST(HeapPageCompactionTest, RejectsUnsafeLayoutsWithoutMutation) {
 
     for (const auto state : {HeapSlotState::UNUSED, HeapSlotState::REDIRECT_RESERVED}) {
         Page unsupported = InitializedHeapPage();
-        ConfigureOneNormalSlot(unsupported);
-        auto slot = DecodeHeapSlotEntry(SlotBytes(unsupported, 0));
-        if (!slot.entry.has_value()) {
-            ADD_FAILURE() << "unsupported-state slot did not decode";
-            continue;
-        }
-        slot.entry->state = state;
-        ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(unsupported, 0), *slot.entry));
+        const HeapSlotEntry slot = state == HeapSlotState::UNUSED
+                                       ? CanonicalUnusedSlot()
+                                       : HeapSlotEntry{.state = HeapSlotState::REDIRECT_RESERVED};
+        const std::array slots{slot};
+        ConfigureSlotsForValidation(
+            unsupported, slots, state == HeapSlotState::UNUSED ? SlotId{0} : INVALID_SLOT_ID);
         ASSERT_TRUE(HeapPage{unsupported}.Validate());
         expect_unchanged(unsupported, HeapPageCompactError::UNSUPPORTED_SLOT_STATE);
     }
