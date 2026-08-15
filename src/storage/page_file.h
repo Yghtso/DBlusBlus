@@ -51,6 +51,17 @@ class PageFile;
 struct PageFileResult;
 struct PageAllocationResult;
 
+// Move-only RAII controller for one FileId registration held by a caller-owned DiskManager.
+//
+// PageFile does not own the DiskManager. The DiskManager passed to Create or Open must outlive the
+// returned PageFile. While that PageFile is alive, external code must not close, unregister, or
+// rebind its FileId; PageFile retains responsibility for that registration until destruction or a
+// move.
+//
+// Destruction closes the managed FileId through DiskManager::CloseFile; it does not delete the
+// underlying file. Moving transfers this cleanup responsibility. Move assignment first releases
+// the destination's current registration, and the moved-from PageFile owns no registration, does
+// nothing on destruction, and reports NOT_OPEN from AllocatePage.
 class PageFile {
   public:
     ~PageFile();
@@ -78,6 +89,7 @@ class PageFile {
     PageFile(DiskManager& disk_manager, FileSuperblock superblock) noexcept;
     void Release() noexcept;
 
+    // Non-owning; null only after move/release. See the class lifetime contract above.
     DiskManager* disk_manager_{nullptr};
     FileSuperblock superblock_{};
 };
