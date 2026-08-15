@@ -55,6 +55,7 @@ enum class FileSuperblockDecodeError : std::uint8_t {
     WRONG_PAGE_NUMBER,
     MAGIC_MISMATCH,
     INVALID_FILE_KIND,
+    UNSUPPORTED_FILE_KIND,
     WRONG_PAGE_SIZE,
     NONZERO_RESERVED_BYTES,
 };
@@ -64,6 +65,8 @@ struct FileSuperblockDecodeResult {
     FileSuperblockDecodeError error;
 };
 
+// This common-prefix codec supports the generic 72-byte HEAP, FSM, and CATALOG superblocks.
+// BTREE requires its architecture-defined 128-byte specialized codec and is rejected here.
 [[nodiscard]] bool EncodeFileSuperblock(std::span<std::byte> destination,
                                         const FileSuperblock& superblock) noexcept;
 
