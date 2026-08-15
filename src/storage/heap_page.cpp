@@ -36,6 +36,10 @@ constexpr std::size_t MAX_HEAP_PAGE_SLOT_COUNT =
     return false;
 }
 
+[[nodiscard]] constexpr bool IsValidHeapPageNumber(PageNo page_no) noexcept {
+    return page_no != 0 && page_no != INVALID_PAGE_NO;
+}
+
 [[nodiscard]] HeapPageValidationResult
 ValidationFailure(HeapPageValidationError error,
                   std::optional<CommonPageHeader> common_header,
@@ -167,6 +171,10 @@ HeapSlotEntryDecodeResult DecodeHeapSlotEntry(std::span<const std::byte> source)
 HeapPage::HeapPage(Page& page) noexcept : page_(&page) {}
 
 bool HeapPage::Initialize(Lsn page_lsn) noexcept {
+    if (!IsValidHeapPageNumber(page_->Id().page_no)) {
+        return false;
+    }
+
     const CommonPageHeader common_header{
         .page_type = PageType::HEAP_DATA,
         .format_version = HEAP_PAGE_FORMAT_VERSION,
@@ -202,6 +210,9 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
     }
     if (common_header->page_no != page_->Id().page_no) {
         return ValidationFailure(HeapPageValidationError::WRONG_PAGE_NUMBER, common_header);
+    }
+    if (!IsValidHeapPageNumber(page_->Id().page_no)) {
+        return ValidationFailure(HeapPageValidationError::INVALID_PAGE_NUMBER, common_header);
     }
     if (common_header->header_size != HEAP_PAGE_TOTAL_HEADER_SIZE) {
         return ValidationFailure(HeapPageValidationError::WRONG_HEADER_SIZE, common_header);

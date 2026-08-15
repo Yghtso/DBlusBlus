@@ -421,6 +421,33 @@ TEST(HeapPageTest, InitializesDeterministicBlankHeapDataPage) {
                                     [](std::byte value) { return value == std::byte{0}; }));
 }
 
+TEST(HeapPageTest, InitializesLowestOrdinaryPageNumber) {
+    Page page{PageId{.file_id = 18, .page_no = 1}};
+    HeapPage heap_page{page};
+
+    ASSERT_TRUE(heap_page.Initialize());
+    const auto validation = heap_page.Validate();
+    ASSERT_TRUE(validation);
+    if (!validation.common_header.has_value()) {
+        ADD_FAILURE() << "validated page did not return its common header";
+        return;
+    }
+    EXPECT_EQ(validation.common_header->page_no, PageNo{1});
+}
+
+TEST(HeapPageTest, InitializationRejectsNonOrdinaryPageNumbersWithoutMutation) {
+    constexpr std::array invalid_page_numbers{PageNo{0}, INVALID_PAGE_NO};
+
+    for (const PageNo page_no : invalid_page_numbers) {
+        Page page{PageId{.file_id = 19, .page_no = page_no}};
+        std::ranges::fill(page.Bytes(), std::byte{0xA5});
+        const auto original = CopyPageBytes(page);
+
+        EXPECT_FALSE(HeapPage{page}.Initialize());
+        EXPECT_TRUE(std::ranges::equal(page.Bytes(), original));
+    }
+}
+
 TEST(HeapPageTest, InitializationWritesZeroFlagsAndPreservesExplicitPageLsn) {
     Page page{PageId{.file_id = 18, .page_no = 24}};
     HeapPage heap_page{page};
@@ -477,6 +504,26 @@ TEST(HeapPageValidationTest, RejectsWrongCommonHeaderIdentityAndFormat) {
     common_header.reserved16 = 1;
     WriteCommonHeader(page, common_header);
     EXPECT_EQ(HeapPage{page}.Validate().error, HeapPageValidationError::NONZERO_COMMON_RESERVED);
+}
+
+TEST(HeapPageValidationTest, RejectsNonOrdinaryOwningPageNumbers) {
+    const Page canonical = InitializedHeapPage({.file_id = 20, .page_no = 1});
+    constexpr std::array invalid_page_numbers{PageNo{0}, INVALID_PAGE_NO};
+
+    for (const PageNo page_no : invalid_page_numbers) {
+        Page page{PageId{.file_id = 20, .page_no = page_no}};
+        std::ranges::copy(canonical.Bytes(), page.Bytes().begin());
+        auto common_header = page.DecodeHeader();
+        if (!common_header.has_value()) {
+            ADD_FAILURE() << "canonical common header did not decode";
+            return;
+        }
+        CommonPageHeader updated_header = *common_header;
+        updated_header.page_no = page_no;
+        WriteCommonHeader(page, updated_header);
+
+        EXPECT_EQ(HeapPage{page}.Validate().error, HeapPageValidationError::INVALID_PAGE_NUMBER);
+    }
 }
 
 TEST(HeapPageValidationTest, RejectsNonzeroCommonFlags) {
