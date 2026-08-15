@@ -261,7 +261,7 @@ Critical dependency rules:
 - Transaction visibility MAY inspect tuple headers but MUST NOT be embedded in the physical heap-page parser.
 - Buffer management MUST remain independent of heap tuple and B+ tree key semantics.
 
-Concrete source-directory and filename organization is not an architectural requirement.
+Concrete source-code directory and filename organization is not an architectural requirement. Persistent database namespace layout is the separate compatibility/recovery contract in §4.7.1–§4.7.8.
 
 ---
 
@@ -313,6 +313,7 @@ This chapter defines the common physical contract shared by persistent random-ac
 It fixes:
 
 - logical identifier widths and invalid sentinels,
+- the database-root namespace and durable create/rename/unlink lifecycle,
 - persistent page identity,
 - physical tuple-version identity,
 - index-to-heap addressing semantics,
@@ -541,6 +542,255 @@ Ordinary object/data pages begin at:
 ```text
 page 1
 ```
+
+### 4.7.1 Database namespace root
+
+One opened database owns one caller-selected final directory path:
+
+```text
+database_root
+```
+
+That directory is the database's persistent namespace root. V1 uses this exact managed layout:
+
+```text
+database_root/
+    database.control
+    catalog.dat
+    txn_status.dat
+    pending/
+    wal/
+    table_<table_id>.heap
+    table_<table_id>.fsm
+    index_<index_id>.btree
+```
+
+`<table_id>` and `<index_id>` are the canonical unsigned decimal identifier spelling with no leading zeroes. The singleton and object-file meanings remain owned by their format/catalog chapters.
+
+Uncommitted DDL files use only:
+
+```text
+pending/txn_<txn_id>_file_<file_id>.heap
+pending/txn_<txn_id>_file_<file_id>.fsm
+pending/txn_<txn_id>_file_<file_id>.btree
+```
+
+using the same canonical unsigned decimal spelling. The exact private basename identifies its creating normal TxnId, allocated FileId, and file kind; the validated superblock supplies the object identity.
+
+WAL segment basenames are exact in §12.2. Temporary query/spill files are not persistent database objects and remain under Chapter 24's separately managed temporary namespace.
+
+While a database is open, the storage namespace owner keeps open directory descriptors for:
+
+```text
+database_root
+database_root/pending
+database_root/wal
+```
+
+and resolves managed entries relative to those descriptors. The external parent directory descriptor is required only while creating and durably publishing the database root itself.
+
+Opening an existing database uses no-follow directory-relative lookup for managed names. `database_root`, `pending/`, and `wal/` must be directories; control/object/segment names must be regular files. A managed-name symlink or wrong filesystem object type is an open/corruption error, not an alternate path to follow.
+
+All three managed directories and the database root's external parent/destination are on one filesystem for operations that use rename. V1 does not support cross-filesystem publication fallback.
+
+### 4.7.2 Required Linux/POSIX durability semantics
+
+V1 requires a Linux filesystem/configuration with all of these semantics:
+
+- `openat`/equivalent create with exclusive, no-follow behavior creates one direct managed directory entry without following a symlink,
+- successful complete `pwrite` changes regular-file bytes but does not itself make them durable,
+- successful `fdatasync(regular_file)` makes prior file data and retrieval-critical metadata such as file length durable,
+- successful `fsync(directory_fd)` makes prior completed create, rename, and unlink namespace mutations in that directory durable,
+- same-filesystem rename is atomic for runtime name lookup but is not crash-durable until every affected directory has been synchronized,
+- unlink removes a runtime name but is not crash-durable until its parent directory has been synchronized,
+- `close` releases a descriptor and is not a durability primitive,
+- synchronizing a regular file does not substitute for synchronizing its parent directory.
+
+If the selected filesystem does not support reliable directory `fsync` with these semantics, it is not a supported v1 durable database filesystem. The engine MUST propagate directory-open/sync and regular-file sync failures rather than assuming persistence.
+
+`fsync`/`fdatasync` retry `EINTR` according to Linux semantics. A namespace-mutating syscall that returns an error with an outcome not safely known MUST be reconciled by inspecting the exact source/destination entries under the same namespace synchronization; it is never assumed successful for durability acknowledgement.
+
+Engine namespace mutations are serialized per managed directory, or use equivalent ordering, so each publication can identify a successful directory sync ordered after its own mutation. One directory sync MAY durably cover several preceding mutations, but none is considered published before that successful sync.
+
+### 4.7.3 Persistent object-file state machine
+
+An ordinary DDL-created heap/FSM/B+ file moves only through:
+
+```text
+ABSENT
+    -> PRIVATE_DURABLE
+        -> FINAL_DURABLE_UNCOMMITTED
+            -> CATALOG_COMMITTED
+                -> RETIRED_LINKED
+                    -> UNLINK_PENDING
+                        -> ABSENT_DURABLE
+            -> ORPHAN_LINKED
+                -> UNLINK_PENDING
+                    -> ABSENT_DURABLE
+        -> ORPHAN_LINKED
+            -> UNLINK_PENDING
+                -> ABSENT_DURABLE
+```
+
+Meanings are:
+
+- `PRIVATE_DURABLE`: initialized file contents and the `pending/` entry are durable, but no committed catalog object may reference it,
+- `FINAL_DURABLE_UNCOMMITTED`: the no-replace rename and both affected directory mutations are durable, but transaction commit has not established catalog ownership,
+- `CATALOG_COMMITTED`: durable terminal commit and catalog visibility reference the already-durable final name,
+- `ORPHAN_LINKED`: a private or final-uncommitted managed entry survived but no committed catalog ownership can require it,
+- `RETIRED_LINKED`: committed catalog state no longer publishes the object, but lifetime/reclamation gates still require or may leave the final physical name,
+- `UNLINK_PENDING`: unlink has completed in the running process but the owning directory has not yet successfully synchronized, so post-crash presence remains uncertain,
+- `ABSENT_DURABLE`: unlink and parent-directory synchronization have durably removed the name.
+
+File existence alone never establishes catalog commitment. Catalog commitment MUST NOT refer to a private basename.
+
+### 4.7.4 Private creation and durable final-name publication
+
+Creating a new private object file uses:
+
+```text
+1. allocate its nonreusable object/File identities
+2. create the exact pending basename with exclusive no-follow semantics
+3. establish the required initial file length and complete canonical
+   superblock/initial pages
+4. pwrite every required initialized byte
+5. fdatasync the private regular file
+6. fsync database_root/pending
+7. only then classify the file PRIVATE_DURABLE and hand it to
+   ordinary page/build ownership
+```
+
+Expected failure before step 7 never creates a published object. Any surviving managed private entry is cleanup input.
+
+Before DDL may append catalog state that can become committed for the new object, every file in that object's physical file set follows one publication barrier:
+
+```text
+1. complete the private heap/FSM/B+ initialization or offline build
+2. flush every required private-file page through ordinary WAL-before-data
+3. fdatasync each private regular file after its final prepublication length/data
+4. rename each private basename to its deterministic final basename using
+   same-filesystem no-replace semantics
+5. fsync database_root
+6. fsync database_root/pending
+7. only after all required file renames and both directory syncs succeed,
+   classify the physical file set FINAL_DURABLE_UNCOMMITTED
+```
+
+V1 uses Linux `renameat2(..., RENAME_NOREPLACE)` or an equivalent same-filesystem no-clobber primitive. It MUST NOT overwrite an existing managed final name. An unexpected destination collision is an I/O/invariant/corruption error, not permission to replace another file.
+
+The runtime rename is the atomic name switch for one file. The **durable physical namespace-publication point** is successful completion of both directory syncs ordered after that rename. A multi-file object has no filesystem-atomic group rename; its publication barrier completes only after every required file is at its final name and the root/pending directory mutations for the entire set have been synchronized.
+
+A crash or error during a multi-file barrier may leave a mixture of pending and final names. Because terminal commit is forbidden before the whole barrier succeeds, none of those names can be required by committed catalog state; they remain orphan candidates.
+
+The open file descriptor continues to identify the same inode across rename. The namespace/file-registration owner updates its process-local basename state before exposing the file as final; no other transaction discovers the object through the filesystem rather than catalog visibility.
+
+### 4.7.5 DDL commit prerequisite and namespace failures
+
+For CREATE TABLE/INDEX and their physical dependent files:
+
+```text
+all required files FINAL_DURABLE_UNCOMMITTED
+    before
+transaction-owned catalog rows become commit-eligible
+    before
+TXN_COMMIT durability
+    before
+runtime committed catalog publication
+```
+
+The DDL coordinator MUST NOT append/acknowledge a successful terminal commit while any referenced physical file lacks successful regular-file and required directory synchronization.
+
+If file-content synchronization succeeds but a required directory sync fails, the namespace outcome is uncertain and durable publication has **not** succeeded. The transaction cannot be acknowledged committed; any private or final name that survives is an orphan candidate.
+
+If the final directory entry is durable but catalog WAL construction, transaction commit, or precommit processing later fails, that file remains `FINAL_DURABLE_UNCOMMITTED` and is an orphan candidate. This is intentional physical residue, not a visible half-created object.
+
+A namespace-durability failure is an I/O/durability failure and MUST NOT be reported as successful publication. Its diagnostic retains the affected directory/path, namespace operation, and underlying error. Its statement/transaction surface behavior follows §39's separate general error-state rules; this section requires that every CREATE namespace prerequisite completes before durable terminal commit. The separate general handling of an unrelated error discovered after commit is outside this protocol and is not changed by it.
+
+Ordinary object-file creation has these canonical crash interpretations:
+
+1. Before private create: no physical object exists.
+2. After private create but before initialization: any surviving exact pending entry is an incomplete orphan; no catalog commit may reference it.
+3. After initialization but before regular-file sync: the pending contents may be incomplete after restart and the entry is an orphan.
+4. After regular-file sync but before pending-directory sync: the entry may survive or disappear, but no committed state depends on it; a survivor is an orphan.
+5. After rename but before both final/source directory syncs: private, final, or conservatively both names may be observed after restart; terminal commit was forbidden, and every survivor is an orphan candidate.
+6. After durable final-name publication but before catalog WAL: the final file is a durable orphan candidate.
+7. After catalog WAL but before durable `TXN_COMMIT`: recovery classifies the DDL transaction as noncommitted/aborted and the final file as an orphan.
+8. After durable `TXN_COMMIT` but before runtime descriptor publication: recovery reconstructs committed catalog ownership and finds the required already-durable final file; runtime publication resumes only after recovery.
+9. After successful CREATE/COMMIT acknowledgement: both committed metadata and every required final namespace entry satisfy their durability prerequisites.
+
+### 4.7.6 Orphan classification and recovery
+
+After process restart there are no live owners of a `pending/` entry. Because §4.7.5 forbids committed catalog references to private basenames, every exact managed private entry is an orphan and its FileId is an unpublished target for recovery purposes.
+
+Managed final object files are classified only after WAL recovery has established terminal outcomes and the committed catalog has been reconstructed:
+
+```text
+required:
+    named by the immutable bootstrap set or visible committed catalog ownership
+
+orphan:
+    exact managed final basename/superblock identity with no required owner
+```
+
+Recovery may defer or skip page redo for a missing/private FileId only after proving that no bootstrap or committed catalog object owns it. A file required by bootstrap or committed catalog state that is absent, has the wrong final basename, or fails its required identity/superblock checks is corruption/open failure; recovery does not invent or silently recreate such a committed object file.
+
+Orphan cleanup removes only entries matching the exact engine-managed private/final grammar and proven unowned by committed state. Unknown unrelated names are not guessed to be garbage. Each cleanup unlink follows §4.7.7 and is complete only after the owning directory is synchronized.
+
+### 4.7.7 Durable unlink and retirement
+
+An object final name is not unlinked merely because DROP committed. Chapter 21's snapshot/descriptor/BufferPool retirement gates first establish that no live owner can use the file.
+
+After that safe point, durable retirement is:
+
+```text
+1. prevent new opens/pins and drain/close all managed file ownership
+2. unlinkat the exact managed basename from its owning directory
+3. fsync that owning directory
+4. only then classify the namespace state ABSENT_DURABLE
+```
+
+If unlink fails, or succeeds but directory sync fails, physical retirement remains incomplete and is retried. The semantic DROP is not reversed: a surviving/reappearing final name has no committed catalog owner and is an orphan.
+
+Crash outcomes are canonical:
+
+- before unlink: the retired file remains linked and cleanup retries,
+- after unlink but before directory sync: the name may be present or absent after restart; committed catalog state does not own it, so recovery accepts either and unlinks/synchronizes it if present,
+- after directory sync: absence is durable.
+
+The same mutation-plus-parent-`fsync` rule governs deletion of orphan private files and recyclable WAL segments, using `pending/` and `wal/` respectively.
+
+### 4.7.8 Database-root bootstrap publication
+
+Engine-managed database creation requires an existing, durably provisioned external parent directory and an absent requested final `database_root` path. Recursive creation/durability of ancestors above that parent belongs to the caller/provisioning environment. Given final basename `D`, creation uses a same-parent, same-filesystem staging directory named exactly:
+
+```text
+D.dblusblus-creating
+```
+
+The bootstrap protocol is:
+
+```text
+1. open the external parent directory and create the staging directory
+   with exclusive no-follow semantics
+2. open the staging root and create its pending/ and wal/ directories
+3. create/initialize database.control, catalog.dat, txn_status.dat,
+   all six system-relation heap/FSM files, any other required built-in
+   object files, and initial WAL segment 0
+4. fdatasync every startup-critical regular file after its complete
+   initialized contents/length are written
+5. fsync staging/pending, staging/wal, and the staging root directory
+6. validate the complete bootstrap using the normal open-time identity,
+   checksum, and cross-reference rules
+7. rename the staging directory to final basename D using no-replace semantics
+8. fsync the external parent directory
+9. only then report database creation success
+```
+
+The staging root as a whole is private; startup-critical files inside it use their final basenames and are not ordinary transaction-owned DDL files. The initial WAL segment follows §12.2.1 before step 5.
+
+A crash before step 7 leaves no final database root and may leave only a recognized staging-root orphan. A crash after rename but before parent sync is an unacknowledged creation: after restart the final or staging name may survive; a surviving final root is usable only if complete bootstrap validation succeeds, while a staging root is never opened as a database. A crash after step 8 leaves a durably named, fully initialized database. Stale staging roots are removed only by explicit engine create/maintenance logic after proving that no live creator owns them, and their removal is synchronized in the external parent directory.
+
+Opening an existing database never treats `D.dblusblus-creating` as an alias for `D`.
 
 ## 4.8 Common page header
 
@@ -992,6 +1242,9 @@ Torn-page repair requires a retained complete WAL page image as defined by Chapt
 17. Recovery may remove only the contiguous unpublished append suffix after reconstructing every durable page publication.
 18. `page_lsn` is the newest WAL-protected modification reflected in the page once WAL is active.
 19. Page checksums detect torn/corrupt writes; retained full-image WAL supplies repair.
+20. Regular-file synchronization does not durably publish create/rename/unlink directory entries; the required owning directories are synchronized explicitly.
+21. Committed catalog ownership never names a private DDL basename and never precedes durable final-name publication of every required physical file.
+22. A required committed object file is never reconstructed from filename guesswork when its durable final entry is missing.
 
 ---
 
@@ -2644,6 +2897,7 @@ Direct I/O, `io_uring`, asynchronous prefetch, and similar alternatives remain d
 It owns raw operating-system/file concerns including:
 
 - database file paths,
+- the open database-root/pending directory handles and managed namespace operations from §4.7,
 - mapping database `FileId` values to open process-local handles,
 - fixed-size page reads and writes,
 - raw file creation/open/close,
@@ -2689,6 +2943,8 @@ The raw disk layer MAY create/register an empty file, but it does not:
 
 A higher page-file/storage layer allocates and writes the superblock and performs persistent-format/identity validation.
 
+The raw disk layer's create/rename/unlink calls do not themselves publish higher-level objects. The storage namespace owner composes regular-file synchronization and parent-directory synchronization through the canonical §4.7 lifecycle before reporting durable namespace publication.
+
 `FileId` remains a database-level logical identifier.
 
 POSIX file descriptors are private process-local resources of the raw I/O layer and MUST NOT escape as persistent identity.
@@ -2731,6 +2987,7 @@ pwrite
 fstat
 ftruncate
 fdatasync
+fsync
 ```
 
 `close` MUST NOT be blindly retried after `EINTR`, because the descriptor may already have been released and reused.
@@ -2780,15 +3037,13 @@ when those concepts apply to the failed operation.
 
 ### 7.4.8 Page-file durability primitive
 
-The v1 page-file synchronization primitive is:
+The v1 regular page-file content synchronization primitive is:
 
 ```text
 fdatasync
 ```
 
-with `EINTR` handling as above.
-
-A later architecture revision MAY require stronger metadata durability from `fsync`, but the raw page-file baseline does not require it.
+with `EINTR` handling as above. It makes file bytes and retrieval-critical metadata such as length durable under §4.7.2, but it does not make create/rename/unlink namespace entries durable. `fsync` on each affected parent directory is separately mandatory at §4.7 publication/retirement boundaries.
 
 ## 7.5 BufferPool ownership
 
@@ -2996,7 +3251,7 @@ Deferred replacement experiments include:
 1. Page I/O is positional and does not rely on a shared file offset.
 2. A normal page read/write transfers exactly `PAGE_SIZE` bytes or reports an error.
 3. A failed read never exposes a partial destination as a valid page.
-4. `pread`, `pwrite`, `fstat`, `ftruncate`, and `fdatasync` handle `EINTR`; `close` is not blindly retried.
+4. `pread`, `pwrite`, `fstat`, `ftruncate`, `fdatasync`, and `fsync` handle `EINTR`; `close` is not blindly retried.
 5. Ordinary page writes never allocate or sparsely extend files.
 6. Page-file sizes are exact multiples of `PAGE_SIZE`.
 7. Physical page-offset arithmetic is checked before I/O.
@@ -3015,6 +3270,8 @@ Deferred replacement experiments include:
 20. MTR no-flush state overrides ordinary flush eligibility.
 21. CLOCK considers only unpinned frames for eviction and gives referenced frames a second chance.
 22. Dirty CLOCK victims are safely flushed before frame reuse.
+23. Regular-file `fdatasync` and parent-directory `fsync` have distinct content and namespace durability responsibilities.
+24. A file create/rename/unlink is not durably published until the owning §4.7 directory synchronization succeeds.
 
 ---
 
@@ -5125,7 +5382,7 @@ A v1 TXN_STATUS decoder MUST reject:
 - mismatched embedded `page_no`,
 - checksum failure when ordinary-page checksum verification is active.
 
-The page's common `page_lsn` records the newest terminal-status WAL modification reflected in the page.
+The page's common `page_lsn` records the newest WAL record physically reflected in the page. After a successful terminal update this is that update's `TXN_COMMIT`/`TXN_ABORT` LSN. During recovery it may temporarily be a system `PAGE_INIT`/`PAGE_IMAGE` LSN before the later semantic terminal record is applied, as defined by §12.10.5.
 
 An in-memory hash table MUST NOT define the persistent status format.
 
@@ -5230,6 +5487,8 @@ The integrated COMMIT sequence is canonical in §15.5.
 
 This chapter owns the transaction-lifecycle requirement that terminal COMMITTED state is published through §9.14.1's linearization point only after the required durable commit WAL exists. The transaction-status page remains NO-FORCE; durable commit WAL is authoritative after crash.
 
+The physical transaction-status page mutation follows the full-image/terminal-record protocol in §12.10.5. Installing the status bits in a resident page is not the runtime terminal-publication linearization point.
+
 ### 9.14.3 Abort
 
 The integrated ABORT sequence is canonical in §15.6.
@@ -5237,6 +5496,8 @@ The integrated ABORT sequence is canonical in §15.6.
 This chapter owns the transaction-lifecycle requirement that ABORTED publication uses §9.14.1's terminal linearization point before transaction-lifetime locks are released.
 
 An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort. If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again.
+
+The physical transaction-status page mutation follows §12.10.5 even when the terminal record is a recovery-generated `TXN_ABORT`.
 
 Ordinary user abort does not physically restore heap/index bytes.
 
@@ -5958,6 +6219,8 @@ The central ordering rule is:
 
 > A WAL-protected persistent page MUST NOT become durable with a modification whose required recovery WAL is not already durable.
 
+Durability of that WAL and of newly created database objects also includes the filesystem namespace prerequisites in §4.7 and §12.2.1. Regular-file synchronization alone cannot satisfy an acknowledgement whose required filename may disappear after crash.
+
 Ordinary user-DML heap/index changes use redo plus transaction-status visibility; they do not require physical user-DML undo.
 
 ## 12.2 Logical WAL stream and physical segments
@@ -5978,6 +6241,8 @@ with the segment naming shape:
 ...
 ```
 
+The basename is exactly the unsigned segment index encoded as 16 lowercase hexadecimal digits followed by `.wal`. Shorter, uppercase, signed, decimal, or alternate spellings are not v1 segment names.
+
 The initial segment size is exactly:
 
 ```text
@@ -5994,9 +6259,52 @@ segment_index  = L / 67,108,864
 segment_offset = L % 67,108,864
 ```
 
-The exact filename-number radix/presentation beyond the specified example is not relied upon as a recovery semantic; segment order is determined by the logical segment index.
-
 WAL segmentation provides bounded file units, recovery scan boundaries, and a natural recycling unit.
+
+### 12.2.1 WAL segment namespace and creation
+
+WAL segments use direct final names under the already-durable `database_root/wal/` directory. They do not use DDL `pending/` names because their publication authority is the WAL writer's logical stream and `durable_lsn`, not catalog visibility.
+
+V1 segments have no separate segment header. A fresh segment's logical contents begin as all zero bytes, which are valid unwritten/tail bytes under §12.3.
+
+Creation of segment index `S` is serialized by the WAL segment/append owner and uses:
+
+```text
+1. require S to be the next contiguous segment index
+2. create its exact final basename with exclusive no-follow semantics
+3. ftruncate the fresh file to exactly 67,108,864 bytes
+4. fdatasync the segment so its zero initial contents and length are durable
+5. fsync database_root/wal
+6. only after step 5 mark the segment namespace-durable and permit WAL
+   bytes in S to participate in any durability request
+```
+
+Directory synchronization is therefore immediate for each newly created WAL segment, not deferred until an arbitrary later commit. It occurs once per creation; ordinary later WAL flushes do not resynchronize the directory unless another namespace mutation occurred.
+
+Writing/acknowledging records in that segment then uses:
+
+```text
+7. pwrite complete contiguous WAL bytes
+8. fdatasync the segment through the requested record/span
+9. only after step 8 advance durable_lsn into S and wake durability waiters
+```
+
+No record in `S`, including `TXN_COMMIT`, is durable by architecture definition before both the segment's step-5 namespace publication and the step-8 content synchronization covering that record have succeeded.
+
+Segment-creation failure or `fsync(wal_directory)` failure prevents `durable_lsn` from entering the segment and is propagated as WAL I/O failure. A possibly surviving empty/partial segment is not evidence of durable WAL beyond the prior segment.
+
+After recovery, an exact-size next-contiguous all-zero segment may be adopted for future append only after validating its zero state, `fdatasync`ing it, and `fsync`ing `wal/` again. This reestablishes both content and namespace durability without assuming whether its precrash creation sync completed.
+
+Crash outcomes are:
+
+- before create: the prior segment prefix is the complete available WAL namespace,
+- after create but before directory sync: the unacknowledged segment may be absent or present after restart; no durable outcome depended on it,
+- after directory sync but before WAL write: the durable all-zero segment is an empty trailing segment,
+- after WAL write but before segment `fdatasync`: recovery accepts only the complete valid prefix that actually survived; no waiter was acknowledged for the unsynchronized suffix,
+- after segment `fdatasync` but before in-memory `durable_lsn` publication: the segment name and synchronized valid WAL prefix are durable and recovery uses them, although no waiter was yet acknowledged,
+- after `durable_lsn` publication/acknowledgement: both the segment name and acknowledged WAL bytes survive under the required filesystem contract.
+
+WAL-segment unlink/recycling follows §4.7.7 and §13.10.
 
 ## 12.3 Record alignment, physical span, and segment boundary
 
@@ -6159,6 +6467,8 @@ prev_txn_lsn = that transaction's previous WAL record, or 0
 
 A recovery-generated TXN_ABORT uses the loser TxnId and the last transaction WAL LSN reconstructed by analysis as `prev_txn_lsn`.
 
+These zero-payload records are the semantic evidence for terminal transaction outcome. They are not physical full-page images. When reflecting either outcome into a `TXN_STATUS` page requires a full image, the separate system `PAGE_IMAGE`/`PAGE_INIT` protocol in §12.10.5 supplies the physical reconstruction base.
+
 ### 12.7.3 Page-record transaction ownership
 
 `PAGE_INIT`, `PAGE_DELTA`, and `PAGE_IMAGE` use:
@@ -6176,6 +6486,8 @@ Pure system/maintenance page changes use:
 txn_id = 0
 prev_txn_lsn = 0
 ```
+
+The `PAGE_INIT` or `PAGE_IMAGE` that supplies a `TXN_STATUS` recovery base under §12.10.5 is such a system record. It does not become part of the terminating user's per-transaction WAL chain.
 
 The structural existence of a newly initialized page may survive a user abort even when the PAGE_INIT record participates in that user's WAL chain; no physical user-DML undo follows from the header ownership.
 
@@ -6381,6 +6693,123 @@ User abort leaves valid B+ structural shape in place.
 
 Heap/index versions belonging to the aborted transaction remain logically invisible/vacuumable; split/merge/root/free-list system actions are not physically undone.
 
+### 12.10.5 TXN_STATUS full-image and terminal mutation protocol
+
+`TXN_STATUS` pages are ordinary WAL-protected pages for full-image, checksum, dirty-page, checkpoint, and WAL-retention purposes. They are not exempt from §12.10.
+
+The two WAL roles are deliberately separate:
+
+```text
+PAGE_INIT/PAGE_IMAGE   = physical page reconstruction base
+TXN_COMMIT/TXN_ABORT   = semantic terminal-outcome evidence
+```
+
+A status-page full image may preserve terminal bits whose semantic terminal records were established earlier and have since become recyclable. It MUST NOT establish the **new** terminal outcome for the update that caused the image: that pending outcome appears only in the later `TXN_COMMIT`/`TXN_ABORT` record and its subsequent page mutation.
+
+#### 12.10.5.1 Canonical mutation order
+
+Terminal updates to one resident status page are serialized by that page's write latch. The latch covers WAL record ordering and installation of the corresponding status bits so that status-page `page_lsn` advances in the same order as mutations reflected in the page.
+
+For one terminal update at terminal-record LSN `T`:
+
+```text
+1. locate/pin the target status page; acquire its write latch and the
+   frame/DPT-transition synchronization used by checkpoint capture
+2. determine whether §12.10 condition A or B requires a full image
+3. if a full image is required:
+       reserve image LSN F
+       construct a complete image of the current pre-terminal page contents
+       set the image's embedded page_lsn = F
+       finalize the image checksum
+       append a complete system PAGE_IMAGE record at F
+4. append the semantic TXN_COMMIT or TXN_ABORT record at T
+5. only after the complete terminal record exists in WAL:
+       install the target two-bit terminal state
+       set the resident status-page page_lsn = T
+       update dirty/frame metadata as §12.10.5.2 requires
+6. release the frame/DPT-transition synchronization and page write latch/pin
+```
+
+When step 3 occurs:
+
+```text
+F < T
+PAGE_IMAGE.txn_id       = 0
+PAGE_IMAGE.prev_txn_lsn = 0
+```
+
+The terminal record remains on the user transaction's WAL chain and its `prev_txn_lsn` names the prior **user** WAL record, not `F`.
+
+The full image contains every status already reflected in the page before this terminal update, but it contains neither this update's terminal bits nor any other semantic evidence for this terminal outcome. Its changed embedded `page_lsn=F` makes it the canonical physical after-image of the reconstruction-base installation.
+
+If appending the terminal record fails after the system image was appended, the status bits, resident `page_lsn`, dirty state, `rec_lsn`, and FPI-epoch state remain unmodified by this attempt. The standalone pre-terminal image is redo-safe and semantically inert; a later attempt reevaluates the full-image conditions normally.
+
+The frame/DPT-transition synchronization is held from before step 2 through the dirty/`rec_lsn`/FPI-epoch publication in step 5. Checkpoint DPT capture uses the same synchronization. Therefore a checkpoint either:
+
+- captures before this transition begins, in which case `F`/`T` are ordered after that checkpoint's BEGIN and remain inside its retained WAL range, or
+- captures after the completed transition and includes the dirty page with its existing `rec_lsn`.
+
+It cannot omit a status page whose dirty-interval image precedes the checkpoint retention floor merely because the image was appended while the frame still appeared clean.
+
+A newly allocated status page uses a system `PAGE_INIT` at LSN `I` as its complete reconstruction base before any terminal record for that page. The first terminal record has `I < T`; `rec_lsn=I`, and installing that terminal update advances `page_lsn` to `T` while preserving `rec_lsn`. While that initialized frame remains dirty, `PAGE_INIT` satisfies the checkpoint FPI epoch in which it was emitted; an immediately following terminal update does not require a redundant `PAGE_IMAGE` unless §12.10 condition B has independently become true.
+
+#### 12.10.5.2 Frame metadata, repeat updates, and durability
+
+If the page was clean and step 3 emitted image LSN `F`, successful installation at step 5 performs:
+
+```text
+dirty    = true
+rec_lsn  = F
+page_lsn = T
+```
+
+and records that the current checkpoint FPI epoch has been satisfied for the page.
+
+If the page was already dirty:
+
+- a later terminal update normally appends only its terminal record and preserves the existing `rec_lsn`,
+- if the first post-checkpoint-epoch modification requires a new image, that image captures all status updates currently reflected in the page, the existing dirty-interval `rec_lsn` is still preserved, and the new epoch is marked satisfied only after step 5 succeeds,
+- every successful terminal update sets `page_lsn` to its terminal-record LSN and increments the frame's persistent modification generation.
+
+After a stable-image page write successfully makes the frame clean under §4.12.2/§7.10, `rec_lsn` becomes `INVALID_LSN`. The next terminal update begins a new dirty interval with a new system full image and a new `rec_lsn`.
+
+COMMIT MUST establish durable WAL through `T` before §9.14.1 runtime COMMITTED publication and success return. Ordinary ABORT need not synchronously flush `T`, but the status page cannot be written before WAL is durable through its current `page_lsn`. Thus §12.17 WAL-before-data applies without exception.
+
+Until §9.14.1 terminal publication, the transaction remains nonterminal in the active registry and that runtime state dominates persistent-page lookup under §9.13. Resident status-bit installation before COMMIT's durability wait therefore does not publish COMMITTED to concurrent transactions.
+
+#### 12.10.5.3 Checkpoint, redo, and retention consequences
+
+Checkpoint FPI epochs apply to status pages exactly as to other ordinary pages. The first protected status mutation after the latest completed epoch emits a system full image even if the page is already dirty; the frame keeps its older dirty-interval `rec_lsn`.
+
+Recovery processes the records in WAL LSN order:
+
+- a trusted intact status page skips a page image or terminal update only when its `page_lsn` proves that record and all earlier serialized status-page mutations are already reflected,
+- an older trusted page applies the retained `PAGE_INIT`/`PAGE_IMAGE`, then later terminal records,
+- a torn/corrupt status page does not contribute a trusted `page_lsn`; recovery restores the retained complete image and then applies later terminal records,
+- applying an image without a following terminal record leaves the target transaction nonterminal in that image; analysis/loser resolution establishes ABORTED when required,
+- after an image has been applied but a later terminal record has not, terminal redo applies the two-bit outcome and sets `page_lsn` to the terminal-record LSN.
+
+Redo of a terminal record maps its TxnId to the canonical §9.12 status page/bit field, writes exactly the semantic terminal code, and sets that page's `page_lsn` to the terminal-record LSN. It does not reinterpret the preceding full image as terminal evidence.
+
+The DPT `rec_lsn` for a dirty status page therefore always identifies a retained complete image (`PAGE_INIT` or `PAGE_IMAGE`). WAL recycling MUST retain that image and every later required terminal record until a checkpoint/data-page state makes them unnecessary under §13.10. Once a status page is durably clean with a valid checksum and an installed checkpoint permits older WAL recycling, its disk image is the complete recovery base; any later dirty interval emits a new image containing all retained status bits. Ancient terminal records are therefore not required solely to reconstruct a later dirty interval.
+
+Status pages wholly below the durable transaction-status reclamation cutoff retain the skip/retirement semantics of §13.12–§14.14; this protocol does not recreate retired sparse status history.
+
+#### 12.10.5.4 Canonical crash outcomes
+
+For one terminal update that requires image `F` followed by terminal record `T`, recovery outcomes are:
+
+1. Crash before `F` is appended: no status-page mutation exists; the transaction remains nonterminal and loser resolution establishes ABORTED if needed.
+2. Crash after `F` is appended but before `T`: replaying `F` restores only the pre-terminal page; it cannot publish a terminal outcome, and loser resolution establishes ABORTED.
+3. Crash after `T` is appended but before an explicit WAL flush: the resident page cannot have reached its data file unless WAL-before-data first made `T` durable. If `T` is absent from the valid durable WAL tail, the transaction is a loser; if `T` survived as a complete valid record, recovery applies its semantic outcome.
+4. Crash after `T` is durable but before the status bits are installed: redo applies `T` to the image/base page and establishes the terminal outcome.
+5. Crash after status-bit installation but before page flush: redo applies `F`/the earlier retained base and then `T` as necessary.
+6. Crash during a torn status-page write: checksum failure makes the stored `page_lsn` untrusted; redo restores the retained image and applies later terminal records.
+7. Crash after a successful status-page flush: WAL-before-data guarantees durability through the flushed `page_lsn`; a trusted page skips already-reflected image/terminal records.
+8. Crash after checkpoint installation and permitted WAL recycling: a still-dirty page retains its image through its DPT `rec_lsn`; a clean page's valid data-file image is the base, and its next dirty interval cannot begin without a new image.
+
+These outcomes apply equally to ordinary `TXN_ABORT` and recovery-generated `TXN_ABORT`; only COMMIT additionally requires durable `T` before runtime terminal publication and success return.
+
 ## 12.11 Heap redo before index MTR
 
 When a DML operation creates a new physical heap tuple version and B+ entries that reference its RID:
@@ -6444,6 +6873,10 @@ A dedicated WAL writer/flusher:
 
 `durable_lsn >= X` means the complete valid WAL record whose LSN is `X`, and all preceding required WAL bytes, are durable.
 
+If `X` lies in a segment created during this process lifetime, this statement also proves that segment's final directory entry was synchronized under §12.2.1 before `durable_lsn` advanced into it.
+
+A durability request spanning a segment boundary synchronizes every segment containing previously unsynchronized bytes in the requested logical prefix. Synchronizing only the newest segment cannot advance `durable_lsn` past unsynchronized bytes in an older segment.
+
 Background WAL may be written periodically without an explicit commit request.
 
 The initial background flush interval is approximately:
@@ -6506,6 +6939,8 @@ For a transaction with persistent writes, successful COMMIT cannot return until:
 its TXN_COMMIT WAL record is durable
 ```
 
+If that terminal record resides in a newly created segment, “durable” includes successful prior synchronization of the segment's `wal/` directory entry under §12.2.1.
+
 The detailed transaction state/status/lock-release sequence is canonical in §9.14.1 and later end-to-end write-protocol material.
 
 Commit does not force the transaction's heap or B+ pages.
@@ -6528,6 +6963,8 @@ Because §12.10 requires a full image on every clean-to-dirty transition, `rec_l
 
 - the first WAL LSN of the current dirty interval,
 - an LSN from which the complete page can be reconstructed without trusting the current data-file image.
+
+For `TXN_STATUS`, the full-image LSN and later semantic terminal-record LSN are intentionally distinct as specified by §12.10.5: `rec_lsn` names the image while `page_lsn` advances to the latest terminal record reflected in the page.
 
 Transitions are:
 
@@ -6605,6 +7042,10 @@ Only after that barrier is removed does ordinary WAL-before-data writeback apply
 18. Successful v1 COMMIT with persistent writes waits for durable TXN_COMMIT WAL.
 19. WAL-protected data-page writeback requires durable WAL through the stable write image's page_lsn.
 20. Every persisted ordinary random-access page has a valid whole-page checksum.
+21. A `TXN_STATUS` dirty interval has a retained system full-image reconstruction base; `TXN_COMMIT`/`TXN_ABORT` remain separate semantic terminal evidence.
+22. Status-page WAL append and page mutation are serialized so a later status-page `page_lsn` implies that all earlier same-page terminal updates are reflected.
+23. A WAL segment is namespace-durable before any record inside it may advance `durable_lsn` or satisfy commit/WAL-before-data.
+24. Segment creation uses an exact final basename and immediate `fsync(database_root/wal)`; segment content durability still requires `fdatasync` through the requested record.
 
 ---
 
@@ -6981,17 +7422,33 @@ Because each dirty page's `rec_lsn` identifies a full image, retaining from `che
 
 WAL recycling is conservative: retaining too much is permitted; deleting required WAL is corruption.
 
+Once a segment is wholly older than every retention requirement, physical recycling is:
+
+```text
+unlinkat(database_root/wal, exact_segment_basename)
+fsync(database_root/wal)
+```
+
+Only the successful directory sync makes segment removal durable. A crash after unlink but before that sync may make the old segment reappear; startup ignores/re-unlinks such a segment only after proving it is wholly below the installed retention floor. Reappearance consumes space but cannot extend the valid logical WAL range or override a newer segment index.
+
 ## 13.11 Recovery startup and WAL-tail validation
 
 Startup:
 
-1. validates both control slots and chooses the highest valid generation,
-2. validates the referenced installed checkpoint sequence if nonzero,
-3. scans WAL forward to identify the last complete valid record,
-4. validates record length, alignment, segment containment, zero padding, embedded LSN, flags/reserved rules, and CRC,
-5. stops at the first invalid/incomplete/torn **tail** record,
-6. ignores/truncates bytes after the last valid WAL record,
-7. reconciles unpublished page-file append tails per §4.11.3 during recovery.
+1. opens/validates the final database root plus required `pending/` and `wal/` directories under §4.7,
+2. inventories exact managed pending/final object basenames without yet treating final-file existence as catalog ownership,
+3. validates required bootstrap singleton/system-relation names and both control slots, then chooses the highest usable control generation,
+4. validates the referenced installed checkpoint sequence if nonzero,
+5. validates the exact retained WAL segment-name sequence and scans WAL forward to identify the last complete valid record,
+6. validates record length, alignment, segment containment, zero padding, embedded LSN, flags/reserved rules, and CRC,
+7. stops at the first invalid/incomplete/torn **tail** record,
+8. logically discards/zeroes bytes after the last valid WAL record while preserving the fixed 64 MiB segment-file length,
+9. reconciles unpublished page-file append tails per §4.11.3 during recovery,
+10. completes final ownership/orphan reconciliation at the §13.19 recovery gate.
+
+Every segment needed from the installed recovery start through the valid WAL tail has its exact §12.2 basename and no missing interior segment index. An extra next-contiguous all-zero segment durably created under §12.2.1 is an empty tail, not corruption. Segments proven wholly older than the installed retention floor may be absent or may be re-unlinked if a precrash unlink was not directory-durable.
+
+A next-contiguous empty/short segment left by a failed creation attempt, containing no valid WAL record beyond the prior durable logical end, is an unacknowledged namespace artifact: recovery may unlink/synchronize and recreate it through §12.2.1. A malformed, short, or missing segment inside the required retained WAL range is corruption.
 
 Malformed required WAL before the valid-tail boundary is corruption, not ordinary crash-tail truncation.
 
@@ -7011,7 +7468,7 @@ Starting at BEGIN is required because transactions/pages can change while the fu
 
 During the forward analysis scan:
 
-- a redoable page record inserts/updates DPT information without replacing an earlier required `rec_lsn`,
+- a redoable page record, including a system status-page full image from §12.10.5, inserts/updates DPT information without replacing an earlier required `rec_lsn`,
 - each BTREE_MTR does the same for every affected page,
 - TXN_COMMIT marks its transaction terminal COMMITTED,
 - TXN_ABORT marks it terminal ABORTED,
@@ -7044,11 +7501,17 @@ A redo action targeting a TXN_STATUS page wholly below the durable reclaim cutof
 
 A trusted valid page whose `page_lsn >= record.lsn` skips that page's redo action.
 
+Recovery MUST NOT fail merely because WAL references a missing FileId that is later proven to belong only to uncommitted/private DDL. Redo for an unresolved non-bootstrap FileId may be deferred until catalog ownership is known. It is skipped only when §4.7.6 proves the target unpublished/orphaned; if committed catalog or bootstrap state requires the file, absence is corruption.
+
 ### 13.13.2 Terminal status redo
 
 `TXN_COMMIT` and `TXN_ABORT` are also redoable terminal-status evidence.
 
 When encountered anywhere in the redo scan, including before CHECKPOINT_BEGIN, recovery repairs the corresponding transaction-status entry if its page does not yet reflect that terminal record **and** the TxnId is not below `database.control.txn_status_reclaim_before`.
+
+The canonical physical base and ordering are §12.10.5. A retained system `PAGE_INIT`/`PAGE_IMAGE` reconstructs an older, missing, or untrusted status page before a later terminal record is applied. Terminal redo maps the record's TxnId through §9.12, installs exactly `COMMITTED` or `ABORTED`, and sets the status-page `page_lsn` to the terminal-record LSN.
+
+For an intact trusted status page, the same-page serialization rule permits `page_lsn >= terminal_record.lsn` to skip that terminal update. A torn/corrupt page's stored LSN is never used for this decision.
 
 Terminal records below the durable reclaim cutoff are logically retired history and do not recreate punched status pages.
 
@@ -7080,6 +7543,8 @@ full-image portion of BTREE_MTR
 
 restore that page state, then apply later valid deltas/MTR changes.
 
+For a `TXN_STATUS` page, the applicable retained complete image is the system `PAGE_INIT`/`PAGE_IMAGE` required by §12.10.5; later `TXN_COMMIT`/`TXN_ABORT` records reestablish semantic outcomes. Recovery does not depend on retaining every ancient terminal record that preceded that complete image.
+
 If WAL-retention/checkpoint invariants say the required full image should exist but no valid recoverable image is available, recovery reports unrecoverable corruption.
 
 It MUST NOT guess page contents or trust a torn page's LSN.
@@ -7097,9 +7562,11 @@ No heap/index byte-by-byte undo is performed.
 Before normal SQL traffic begins, recovery:
 
 ```text
-1. appends recovery TXN_ABORT records for unresolved losers
+1. applies §12.10.5 for unresolved losers, appending any required
+   system status-page image before each page's later recovery TXN_ABORT records
 2. updates the relevant transaction-status entries to ABORTED
-3. assigns transaction-status page_lsn from terminal WAL where appropriate
+3. assigns each transaction-status page_lsn from the latest terminal WAL
+   record reflected in that page
 4. durably flushes the WAL required for those terminal outcomes
 5. completes and installs a recovery checkpoint
 ```
@@ -7118,7 +7585,7 @@ If a future subsystem introduces physical undo that itself must be crash-restart
 
 `TXN_COMMIT` and `TXN_ABORT` WAL records are authoritative terminal-outcome evidence.
 
-During recovery, terminal records may repair/update stale transaction-status pages even when their prior data-file image did not include the status change.
+During recovery, terminal records may repair/update stale transaction-status pages even when their prior data-file image did not include the status change. The physical reconstruction base, record ordering, and FPI/checkpoint behavior are canonical in §12.10.5.
 
 When a terminal status record at LSN `X` is reflected into a status page:
 
@@ -7163,7 +7630,11 @@ transaction status consistent
 B+ structural MTRs recovered
 control metadata valid
 recovery checkpoint installed
+every bootstrap/committed-catalog physical file present at its exact durable final name
+pending and unowned managed-final files classified for durable orphan cleanup
 ```
+
+Pending entries are never required for ONLINE state and may be unlinked before open completes. An unowned final orphan may be removed immediately or queued for the same durable unlink protocol, but it cannot be opened as a committed object. Unknown non-managed directory entries are not removed automatically.
 
 Only then may database state become:
 
@@ -7179,6 +7650,8 @@ For a transaction whose COMMIT returned success:
 after every later successful crash/restart,
 its durable logical changes remain committed
 ```
+
+For committed CREATE DDL this guarantee includes continued presence of every required final object-file directory entry. For a terminal record in a rotated WAL segment it includes continued presence of that segment entry. Sections §4.7 and §12.2.1 establish those namespace prerequisites before acknowledgement.
 
 If COMMIT had not become durable before the crash:
 
@@ -7218,7 +7691,11 @@ This separation between physical residue and logical visibility is central to th
 18. Unpublished append-tail pages are removed only after durable initialization publications are reconstructed.
 19. Rebuildable approximate metadata is not on the critical recovery path.
 20. SQL traffic begins only after recovery completion and a recovery checkpoint.
-21. A transaction acknowledged committed remains logically committed across every later successful crash/restart.
+21. A retained dirty `TXN_STATUS` page is reconstructible from its system full-image `rec_lsn` plus later semantic terminal records; terminal records are not substitutes for the image.
+22. A transaction acknowledged committed remains logically committed across every later successful crash/restart.
+23. Every physical file required by bootstrap or committed catalog state exists at its exact durably synchronized final name before ONLINE.
+24. Missing recovery targets are skipped only after proving that no bootstrap/committed catalog owner requires them.
+25. WAL-segment creation and recycling include the required `wal/` directory synchronization; reappearing recycled segments below the retention floor do not extend the logical WAL stream.
 
 ---
 
@@ -7933,19 +8410,23 @@ Vacuum removes tuple/index garbage only after Chapter 14's global reclamation ru
 
 For a transaction with persistent writes:
 
+A transaction that created DDL physical resources MUST first satisfy the §21.5 durable final-name prerequisite for every file referenced by its prospective committed catalog state.
+
 ```text
 1. state ACTIVE -> COMMITTING
-2. append TXN_COMMIT(txn_id, prev_txn_lsn)
+2. while the transaction remains nonterminal in the active registry,
+   execute the §12.10.5 status-page protocol under the page write latch:
+       append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
+       append TXN_COMMIT(txn_id, prev_txn_lsn) at commit_lsn
+       install COMMITTED and status-page page_lsn = commit_lsn
 3. submit commit_lsn to CommitCoordinator
 4. wait until durable_lsn >= commit_lsn
-5. install/update COMMITTED in the transaction-status page/cache
-6. set status-page page_lsn = commit_lsn
-7. execute the §9.14 runtime terminal-publication linearization
-8. release TUPLE_WRITE and UNIQUE_KEY locks
-9. release shared TableWriterGate holdings
-10. unregister the transaction's own active snapshot(s)
-11. finish transaction object cleanup
-12. return success
+5. execute the §9.14 runtime terminal-publication linearization
+6. release TUPLE_WRITE and UNIQUE_KEY locks
+7. release shared TableWriterGate holdings
+8. unregister the transaction's own active snapshot(s)
+9. finish transaction object cleanup
+10. return success
 ```
 
 Commit does **not** force dirty heap/index pages.
@@ -7959,16 +8440,16 @@ For an abortable transaction:
 ```text
 1. state ACTIVE/eligible transient state -> ABORTING
 2. if persistent WAL-visible state exists:
-       append TXN_ABORT
-3. install/update ABORTED transaction status
-4. if an abort record exists:
-       set status-page page_lsn = abort_lsn
-5. execute the §9.14 runtime terminal-publication linearization
-6. release logical locks
-7. release shared TableWriterGate holdings
-8. unregister the transaction's own snapshots
-9. finish transaction object cleanup
-10. return/raise abort
+       execute the §12.10.5 status-page protocol under the page write latch:
+           append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
+           append TXN_ABORT at abort_lsn
+           install ABORTED and status-page page_lsn = abort_lsn
+3. execute the §9.14 runtime terminal-publication linearization
+4. release logical locks
+5. release shared TableWriterGate holdings
+6. unregister the transaction's own snapshots
+7. finish transaction object cleanup
+8. return/raise abort
 ```
 
 Ordinary abort performs no write-set scan to restore old heap/index bytes.
@@ -7976,6 +8457,8 @@ Ordinary abort performs no write-set scan to restore old heap/index bytes.
 Aborted physical versions and index entries remain vacuum input.
 
 A transaction whose COMMIT is already durable is no longer eligible to transition to ABORTED.
+
+Ordinary ABORT does not wait for `abort_lsn` durability before runtime ABORTED publication, but §12.17 prevents its dirty status page from reaching disk before WAL is durable through that page's current `page_lsn`. If the abort record is lost in a crash, loser resolution repeats the canonical ABORT protocol.
 
 ## 15.7 READ COMMITTED retry boundary
 
@@ -8636,7 +9119,7 @@ A bootstrap identity/schema mismatch against the self-hosted catalog is corrupti
 
 ### 16.9.5 Creation and lifetime
 
-Database creation durably allocates the bootstrap TableIds/FileIds, initializes the six system relation files, and seeds the required self-describing catalog rows as bootstrap-frozen committed metadata:
+Database creation follows the canonical staging-root and parent-directory publication protocol in §4.7.8. Within that private staging root it durably allocates the bootstrap TableIds/FileIds, initializes the six system relation files, and seeds the required self-describing catalog rows as bootstrap-frozen committed metadata:
 
 ```text
 xmin = FROZEN_TXN_ID
@@ -8645,7 +9128,7 @@ xmax = INVALID_TXN_ID
 cmax = 0
 ```
 
-It then writes the complete checksummed `catalog.dat` and synchronizes the startup-critical files before the database is reported as successfully created.
+It then writes the complete checksummed `catalog.dat`, creates/synchronizes every startup-critical regular file and managed subdirectory, validates the bootstrap, renames the staging root without replacement, and synchronizes the external parent directory. Database creation MUST NOT report success before §4.7.8's final parent-directory `fsync` succeeds.
 
 A failed incomplete creation is not a valid database open target.
 
@@ -8698,6 +9181,7 @@ Uncommitted DDL may be visible to its own transaction through normal MVCC/self-v
 15. `catalog.dat` contains only the immutable v1 bootstrap locator; ordinary catalog rows live in the self-hosted catalog relations.
 16. The six bootstrap identities are cross-validated against the self-hosted catalog during open.
 17. Bootstrap metadata remains minimal and cannot become a permanently divergent second catalog.
+18. Database creation is not durable until the complete staging root has been renamed to its final name and the external parent directory has been synchronized.
 
 ---
 
@@ -10684,7 +11168,9 @@ ColumnIds follow the table-local rule in §16.3.
 
 ## 21.5 DDL private physical resources
 
-A physical heap/FSM/B+ file created by uncommitted DDL is **private/unpublished**.
+A physical heap/FSM/B+ file created by uncommitted DDL follows the exact private/final namespace lifecycle in §4.7.1–§4.7.7.
+
+Before durable final-name publication it is **private/unpublished** under its exact `pending/` basename. After durable no-replace rename but before transaction commit it is `FINAL_DURABLE_UNCOMMITTED`; filesystem visibility still does not make it a committed catalog object.
 
 Other transactions cannot discover it through committed catalog metadata.
 
@@ -10693,16 +11179,14 @@ If CREATE DDL aborts:
 ```text
 catalog rows become ABORTED/invisible
 allocated object IDs/FileIds remain consumed
-private physical files become orphan-retirement candidates
+private or final-uncommitted physical files become orphan-retirement candidates
 ```
 
-V1 need not physically undo their bytes.
-
-A private file may be unlinked after no live in-process owner can reference it.
-
-After crash recovery, startup/catalog maintenance may reconcile managed object files against committed catalog ownership and remove files that are provably unpublished/orphaned.
+V1 need not physically undo their bytes. Orphan classification and durable unlink use §4.7.6–§4.7.7 only after no live in-process owner can reference the file.
 
 An object file is never considered committed merely because it exists on disk.
+
+Before a DDL transaction may enter its terminal COMMIT sequence, every physical file referenced by that transaction's new catalog state MUST have completed the §4.7.4 final-name publication barrier. A namespace-sync failure therefore occurs before durable terminal commit and cannot be reported as successful CREATE publication.
 
 ## 21.6 CREATE TABLE
 
@@ -10736,14 +11220,20 @@ Under SchemaLock:
 3. allocate heap FileId and FSM FileId
 4. create/initialize private heap/FSM files
 5. assign initial ColumnIds 1..N
-6. install transaction-owned MVCC catalog rows/descriptors
-7. build any required primary/unique index objects through their DDL protocol
-8. finish the DDL statement while retaining DDL exclusivity until the owning transaction is terminal
-9. if/when the owning transaction reaches terminal COMMITTED publication:
+6. build any required primary/unique index objects as private files through
+   their DDL protocol
+7. complete §4.7.4 durable final-name publication for the entire required
+   heap/FSM/index physical file set
+8. only then install transaction-owned MVCC catalog rows/descriptors that
+   name those final physical files
+9. finish the DDL statement while retaining DDL exclusivity until the owning transaction is terminal
+10. before COMMIT, reverify that the transaction's required file set remains
+    durably final-name-published
+11. if/when the owning transaction reaches terminal COMMITTED publication:
        publish new committed descriptor-cache/name entries
-10. on ABORT:
-       keep catalog rows invisible and retire private files later
-11. release DDL exclusivity only at that terminal boundary
+12. on ABORT:
+       keep catalog rows invisible and retire private/final-uncommitted files later
+13. release DDL exclusivity only at that terminal boundary
 ```
 
 Initial tuple schema version is `1`.
@@ -10806,13 +11296,17 @@ V1 builds indexes offline with conservative writer exclusion:
 8. encode keys using the table/index descriptors
 9. insert every physical (key,RID) through ordinary B+ MTRs
 10. validate uniqueness when requested
-11. install transaction-owned catalog index rows/constraint links
-12. finish the DDL statement while retaining target-writer/DDL exclusivity
-13. if/when the owning transaction reaches terminal COMMITTED publication:
+11. flush/synchronize and durably rename the private B+ file to its exact
+    final name through §4.7.4
+12. only then install transaction-owned catalog index rows/constraint links
+13. finish the DDL statement while retaining target-writer/DDL exclusivity
+14. before COMMIT, reverify that the required B+ file remains durably
+    final-name-published
+15. if/when the owning transaction reaches terminal COMMITTED publication:
         publish the index descriptor/name entry
-14. on ABORT:
-        keep catalog rows invisible and retire the private index file later
-15. release target writer gate and SchemaLock only at the terminal boundary
+16. on ABORT:
+        keep catalog rows invisible and retire the private/final-uncommitted index file later
+17. release target writer gate and SchemaLock only at the terminal boundary
 ```
 
 Step 7 is a DDL maintenance/current-state scan after target writers have drained; it is not allowed to omit rows merely because the DDL transaction has an older REPEATABLE READ snapshot.
@@ -10823,7 +11317,7 @@ New target-table writers are blocked until the index commit/abort boundary, prev
 
 A half-built index is never visible to planning.
 
-If build/transaction aborts, the private index file becomes an orphan-retirement candidate.
+If build/transaction aborts, the private or final-uncommitted index file becomes an orphan-retirement candidate.
 
 ## 21.9 DROP and physical object retirement
 
@@ -10851,7 +11345,7 @@ AND
 no BufferPool/page/file owner still requires it
 ```
 
-Only then may the managed file be unlinked.
+Only then may the managed file be unlinked through §4.7.7. Physical retirement is durable only after `fsync(database_root)` succeeds. If unlink or directory synchronization fails, semantic DROP remains committed and cleanup remains pending/retryable.
 
 This retirement rule applies to table heap/FSM files and index B+ files.
 
@@ -11201,13 +11695,14 @@ These are future architecture-compatible features, not hidden requirements of th
 15. Schema-changing DDL is conservatively serialized in v1.
 16. Offline CREATE INDEX blocks target-table writers so the published index is complete.
 17. CREATE abort may leave physical garbage but never a visible half-created object.
-18. DROP file unlink waits until old catalog snapshots/descriptors can no longer reference the object.
+18. DROP file unlink waits until old catalog snapshots/descriptors can no longer reference the object and is not durably complete until its parent directory is synchronized.
 19. Catalog-object IDs/FileIds that may have entered persistent state are never reused.
 20. V1 defaults persist the fully folded typed scalar result; runtime function/operator identities are not persisted as default authority.
 21. ANALYZE uses normal catalog/MVCC visibility and publishes a committed statistics descriptor only at transaction terminal COMMITTED.
 22. Rewrites preserve NULL, volatility, outer-join, grouping, and hidden-slot semantics.
 23. Logical-plan validation detects broken slot/schema references before execution.
 24. Unsupported SQL fails explicitly rather than being partially reinterpreted.
+25. CREATE catalog commitment is forbidden until every required physical file has completed durable final-name publication under §4.7.
 ---
 
 # Part VI — Physical Execution
@@ -18665,6 +19160,7 @@ The following global invariants apply across subsystem boundaries and MUST NOT b
 10. Verification can force constrained resource configurations, including tiny buffer pools, to exercise eviction.
 11. Recovery is verified with simulated crashes.
 12. Performance-sensitive changes require measurement.
+13. Acknowledged durable state never depends on a file or WAL-segment namespace entry whose required parent-directory synchronization has not succeeded.
 
 Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.27; base-access/cost invariants in §36.19; join/property invariants in §37.18; memo/search invariants in §38.25.
 
