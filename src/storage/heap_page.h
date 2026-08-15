@@ -90,6 +90,7 @@ enum class HeapPageValidationError : std::uint8_t {
     WRONG_PAGE_NUMBER,
     WRONG_HEADER_SIZE,
     UNSUPPORTED_FORMAT_VERSION,
+    NONZERO_COMMON_FLAGS,
     NONZERO_COMMON_RESERVED,
     HEAP_HEADER_DECODE_FAILED,
     NONZERO_HEAP_RESERVED,
@@ -172,7 +173,7 @@ class HeapPage {
   public:
     explicit HeapPage(Page& page) noexcept;
 
-    [[nodiscard]] bool Initialize(std::uint32_t flags = 0, Lsn page_lsn = INVALID_LSN) noexcept;
+    [[nodiscard]] bool Initialize(Lsn page_lsn = INVALID_LSN) noexcept;
     [[nodiscard]] std::optional<HeapPageHeader> Header() const noexcept;
     [[nodiscard]] HeapPageValidationResult Validate() const noexcept;
     [[nodiscard]] HeapPageInsertResult Insert(std::span<const std::byte> tuple) noexcept;

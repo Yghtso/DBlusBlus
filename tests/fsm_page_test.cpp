@@ -274,7 +274,6 @@ TEST(FsmPageTest, InitializesDeterministicBlankPageAndDerivesRangeMetadata) {
 
     ASSERT_TRUE(fsm_page.Initialize({
         .entry_count = 3,
-        .flags = std::uint32_t{0x1234U},
         .page_lsn = Lsn{27},
     }));
     const auto common_header = page.DecodeHeader();
@@ -284,7 +283,7 @@ TEST(FsmPageTest, InitializesDeterministicBlankPageAndDerivesRangeMetadata) {
     }
     EXPECT_EQ(common->page_type, PageType::FSM_DATA);
     EXPECT_EQ(common->format_version, FSM_PAGE_FORMAT_VERSION);
-    EXPECT_EQ(common->flags, std::uint32_t{0x1234U});
+    EXPECT_EQ(common->flags, std::uint32_t{0});
     EXPECT_EQ(common->page_lsn, Lsn{27});
     EXPECT_EQ(common->checksum_crc32c, std::uint32_t{0});
     EXPECT_EQ(common->header_size, FSM_PAGE_TOTAL_HEADER_SIZE);
@@ -418,6 +417,19 @@ TEST(FsmPageValidationTest, RejectsCommonAndSpecificHeaderCorruption) {
         header.reserved32 = 1;
         WriteFsmHeader(page, header);
         EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::NONZERO_FSM_RESERVED);
+    }
+}
+
+TEST(FsmPageValidationTest, RejectsNonzeroCommonFlags) {
+    constexpr std::array invalid_flags{std::uint32_t{0x00000001U}, std::uint32_t{0xFFFFFFFFU}};
+
+    for (const auto flags : invalid_flags) {
+        Page page = InitializedFsmPage();
+        auto header = RequireCommonHeader(page);
+        header.flags = flags;
+        WriteCommonHeader(page, header);
+
+        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::NONZERO_COMMON_FLAGS);
     }
 }
 

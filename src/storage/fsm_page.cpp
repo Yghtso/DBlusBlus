@@ -184,7 +184,7 @@ FsmPageInitializeResult FsmPage::Initialize(const FsmPageInitialization& initial
     const CommonPageHeader common_header{
         .page_type = PageType::FSM_DATA,
         .format_version = FSM_PAGE_FORMAT_VERSION,
-        .flags = initialization.flags,
+        .flags = 0,
         .page_lsn = initialization.page_lsn,
         .checksum_crc32c = 0,
         .header_size = FSM_PAGE_TOTAL_HEADER_SIZE,
@@ -236,6 +236,9 @@ FsmPageValidationResult FsmPage::Validate() const noexcept {
     }
     if (common_header->format_version != FSM_PAGE_FORMAT_VERSION) {
         return ValidationFailure(FsmPageValidationError::UNSUPPORTED_FORMAT_VERSION, common_header);
+    }
+    if (common_header->flags != 0) {
+        return ValidationFailure(FsmPageValidationError::NONZERO_COMMON_FLAGS, common_header);
     }
     if (common_header->reserved16 != 0) {
         return ValidationFailure(FsmPageValidationError::NONZERO_COMMON_RESERVED, common_header);

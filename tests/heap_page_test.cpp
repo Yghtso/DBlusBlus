@@ -371,17 +371,17 @@ TEST(HeapPageTest, InitializesDeterministicBlankHeapDataPage) {
                                     [](std::byte value) { return value == std::byte{0}; }));
 }
 
-TEST(HeapPageTest, InitializationPreservesExplicitFlagsAndPageLsn) {
+TEST(HeapPageTest, InitializationWritesZeroFlagsAndPreservesExplicitPageLsn) {
     Page page{PageId{.file_id = 18, .page_no = 24}};
     HeapPage heap_page{page};
-    ASSERT_TRUE(heap_page.Initialize(0xA5F00F5AU, Lsn{77}));
+    ASSERT_TRUE(heap_page.Initialize(Lsn{77}));
 
     const auto common_header = page.DecodeHeader();
     if (!common_header.has_value()) {
         ADD_FAILURE() << "initialized common header decode unexpectedly failed";
         return;
     }
-    EXPECT_EQ(common_header->flags, std::uint32_t{0xA5F00F5AU});
+    EXPECT_EQ(common_header->flags, std::uint32_t{0});
     EXPECT_EQ(common_header->page_lsn, Lsn{77});
     EXPECT_EQ(common_header->checksum_crc32c, std::uint32_t{0});
 }
@@ -427,6 +427,24 @@ TEST(HeapPageValidationTest, RejectsWrongCommonHeaderIdentityAndFormat) {
     common_header.reserved16 = 1;
     WriteCommonHeader(page, common_header);
     EXPECT_EQ(HeapPage{page}.Validate().error, HeapPageValidationError::NONZERO_COMMON_RESERVED);
+}
+
+TEST(HeapPageValidationTest, RejectsNonzeroCommonFlags) {
+    constexpr std::array invalid_flags{std::uint32_t{0x00000001U}, std::uint32_t{0xFFFFFFFFU}};
+
+    for (const auto flags : invalid_flags) {
+        Page page = InitializedHeapPage();
+        const auto decoded_header = page.DecodeHeader();
+        if (!decoded_header.has_value()) {
+            ADD_FAILURE() << "initialized common header decode unexpectedly failed";
+            return;
+        }
+        auto common_header = *decoded_header;
+        common_header.flags = flags;
+        WriteCommonHeader(page, common_header);
+
+        EXPECT_EQ(HeapPage{page}.Validate().error, HeapPageValidationError::NONZERO_COMMON_FLAGS);
+    }
 }
 
 TEST(HeapPageValidationTest, RejectsInvalidHeapHeaderGeometryAndReservedField) {
