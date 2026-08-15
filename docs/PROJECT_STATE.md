@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-15  
-Current checkpoint: Milestone `0025` — HEAP_DATA Ordinary Page-Number Validation
+Current checkpoint: Milestone `0026` — Concurrent DiskManager File-Extension Verification
 Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
 
 ---
@@ -128,6 +128,10 @@ Implemented Linux/POSIX random-access page I/O with:
 - append extension,
 - checked offsets,
 - `fdatasync`.
+
+The serialized count-plus-extend path is directly covered under concurrent same-file contention:
+512 calls from eight workers produce one unique contiguous PageNo range and the exact aligned final
+file size.
 
 `DiskManager` remains independent of page-type and tuple semantics.
 
@@ -482,9 +486,9 @@ Its relation-wide page access and lifetime model depends on BufferPool integrati
 Current verified results:
 
 ```text
-Clang Debug            208 / 208 passed
-Clang ASan + UBSan     208 / 208 passed
-GCC Debug              208 / 208 passed
+Clang Debug            209 / 209 passed
+Clang ASan + UBSan     209 / 209 passed
+GCC Debug              209 / 209 passed
 clang-tidy             clean
 clang-format           clean
 git diff --check       clean
@@ -597,6 +601,7 @@ The first work in that phase will establish buffered page ownership and lifetime
 0023  Heap UNUSED/free-list structural validation
 0024  Generic BTREE superblock codec guard
 0025  HEAP_DATA ordinary page-number validation
+0026  Concurrent DiskManager file-extension verification
 ```
 
 Detailed milestone history remains in `devlog/`.

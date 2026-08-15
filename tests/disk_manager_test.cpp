@@ -1,6 +1,8 @@
 #include "storage/disk_manager.h"
 
+#include <algorithm>
 #include <array>
+#include <barrier>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +14,7 @@
 #include <span>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 
 namespace dblusblus {
@@ -114,6 +117,64 @@ TEST(DiskManagerTest, ExtendsByExactlyOnePageAndReturnsMonotonicPageNumbers) {
         EXPECT_EQ(size.value, (expected + 1U) * PAGE_SIZE);
         EXPECT_EQ(std::filesystem::file_size(path), (expected + 1U) * PAGE_SIZE);
     }
+}
+
+TEST(DiskManagerTest, ConcurrentExtensionsAllocateUniqueContiguousPageNumbers) {
+    constexpr std::size_t WORKER_COUNT = 8;
+    constexpr std::size_t EXTENSIONS_PER_WORKER = 64;
+    constexpr std::size_t EXTENSION_COUNT = WORKER_COUNT * EXTENSIONS_PER_WORKER;
+
+    TemporaryDirectory temporary_directory;
+    ASSERT_TRUE(temporary_directory.valid());
+    const auto path = temporary_directory.File("concurrent-extend.pages");
+    DiskManager manager;
+    ASSERT_TRUE(manager.CreateFile(FileId{8}, path));
+
+    const auto initial_page_count = manager.PageCount(FileId{8});
+    ASSERT_TRUE(initial_page_count);
+
+    std::barrier start_barrier{static_cast<std::ptrdiff_t>(WORKER_COUNT + 1U)};
+    std::array<std::uint8_t, EXTENSION_COUNT> successes{};
+    std::array<PageNo, EXTENSION_COUNT> allocated_page_numbers{};
+    std::array<std::thread, WORKER_COUNT> workers;
+
+    for (std::size_t worker_index = 0; worker_index < WORKER_COUNT; ++worker_index) {
+        workers[worker_index] = std::thread{[&, worker_index] {
+            start_barrier.arrive_and_wait();
+            for (std::size_t call_index = 0; call_index < EXTENSIONS_PER_WORKER; ++call_index) {
+                const std::size_t result_index =
+                    (worker_index * EXTENSIONS_PER_WORKER) + call_index;
+                const auto allocated = manager.ExtendFile(FileId{8});
+                successes[result_index] = static_cast<std::uint8_t>(allocated.success);
+                if (allocated) {
+                    allocated_page_numbers[result_index] = allocated.value;
+                }
+            }
+        }};
+    }
+
+    start_barrier.arrive_and_wait();
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    const auto successful_extensions =
+        std::ranges::count(successes, static_cast<std::uint8_t>(true));
+    ASSERT_EQ(successful_extensions, EXTENSION_COUNT);
+
+    std::ranges::sort(allocated_page_numbers);
+    EXPECT_EQ(std::ranges::adjacent_find(allocated_page_numbers), allocated_page_numbers.end());
+    for (std::size_t index = 0; index < EXTENSION_COUNT; ++index) {
+        EXPECT_EQ(allocated_page_numbers[index], initial_page_count.value + index);
+    }
+
+    const PageNo expected_page_count = initial_page_count.value + EXTENSION_COUNT;
+    const std::uint64_t expected_file_size = expected_page_count * PAGE_SIZE;
+    const auto final_size = manager.FileSize(FileId{8});
+    ASSERT_TRUE(final_size);
+    EXPECT_EQ(final_size.value, expected_file_size);
+    EXPECT_EQ(std::filesystem::file_size(path), expected_file_size);
+    EXPECT_EQ(final_size.value % PAGE_SIZE, std::uint64_t{0});
 }
 
 TEST(DiskManagerTest, MapsFileIdsAndReadsWritesPagesPositionally) {
