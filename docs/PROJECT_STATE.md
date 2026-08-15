@@ -390,7 +390,8 @@ This is a convenience summary. `ARCHITECTURE.md` remains the detailed format spe
 PAGE_SIZE                         8192
 
 CommonPageHeader                    32 bytes
-FileSuperblock header               72 bytes
+FileSuperblock common prefix        72 bytes
+BTREE FileSuperblock header        128 bytes required by architecture; current codec mismatch (§11)
 
 Heap page total header              48 bytes
 Heap slot entry                       8 bytes
@@ -479,7 +480,16 @@ No Phase 1 storage benchmark suite exists yet beyond the generic benchmark smoke
 
 ---
 
-## 11. Architecture / implementation consistency item
+## 11. Architecture / implementation consistency items
+
+The currently verified mismatch set in implemented code contains four categories:
+
+1. RID reserved-byte decoder,
+2. BTREE FileSuperblock codec,
+3. HEAP_DATA/FSM_DATA common flags,
+4. heap UNUSED/free-list validation.
+
+These are implementation mismatches against settled architecture contracts. Unimplemented later subsystems remain deferred work rather than mismatches.
 
 ### Persisted RID reserved bytes
 
@@ -500,6 +510,47 @@ This is an **implementation mismatch**, not an open architecture question.
 No code change has yet reconciled this mismatch. Before normal implementation work resumes on code that depends on the RID codec, reconcile the decoder/tests with `ARCHITECTURE.md` §8.4.1.
 
 Existing database-produced RID encodings already use zero reserved bytes, so the mismatch concerns previously tolerated invalid inputs rather than bytes emitted by the current encoder.
+
+### BTREE FileSuperblock codec
+
+The accepted v1 architecture requires:
+
+```text
+BTREE FileSuperblock:
+    header_size = 128
+    bytes 72..127 = canonical fixed BTREE extension
+```
+
+The current generic `FileSuperblock` codec recognizes `FileKind::BTREE`, but emits and accepts only the generic 72-byte header and requires bytes after byte 71 to be zero.
+
+This is an **implementation mismatch**, not an open architecture question. The persisted BTREE superblock format remains settled by `ARCHITECTURE.md` §§4.10 and 8.2.1.
+
+No code change has yet reconciled this mismatch. A later implementation fix must either:
+
+- dispatch `FileKind::BTREE` to a codec for the canonical specialized 128-byte superblock, or
+- reject `FileKind::BTREE` in the generic codec until that specialized support exists.
+
+The current BTREE implementation remains deferred; this consistency item does not start index or BufferPool implementation.
+
+### HEAP_DATA / FSM_DATA common flags
+
+The accepted v1 architecture requires ordinary HEAP_DATA and FSM_DATA initializers to write common-header `flags=0` and their validators to reject nonzero common flags, as specified by `ARCHITECTURE.md` §§4.8, 5.3.3, and 6.5.1.
+
+The current `HeapPage` and `FsmPage` initializers accept caller-supplied nonzero common flags, and their validators accept those values. Existing tests currently exercise and accept this behavior.
+
+This is an **implementation mismatch**, not an open architecture question. The persisted zero-only v1 common-flag contract remains settled.
+
+No code change has yet reconciled this mismatch. A later implementation task must make HEAP_DATA and FSM_DATA initialization write/force zero and make their validation reject nonzero common flags.
+
+### Heap UNUSED/free-list validation
+
+The accepted v1 architecture requires canonical zero tuple coordinates for `UNUSED` slots, `aux` next-free links, a valid-or-sentinel `free_slot_head`, an in-range acyclic list containing every reusable `UNUSED` slot exactly once, and no `NORMAL` or `DEAD` list members, as specified by `ARCHITECTURE.md` §§5.3.2, 5.4.2, and 5.21.
+
+The current `HeapPage::Validate` checks `free_slot_head` only in limited cases and primarily applies tuple coordinate/range checks to `NORMAL` slots. It can accept an `UNUSED` slot with nonzero tuple coordinates that is not represented correctly in the free list.
+
+This is an **implementation mismatch**, not an open architecture question and not evidence against the Chapter-14 reclamation contract. Immediate DEAD-slot reuse remains forbidden; delayed `DEAD -> UNUSED` reuse remains governed by Chapter 14.
+
+No code strategy is selected here. A later implementation task must either fully validate the canonical `UNUSED`/free-list invariants or reject persisted `UNUSED`/free-list states that the implementation cannot yet validate safely.
 
 ---
 

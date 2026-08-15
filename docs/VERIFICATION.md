@@ -87,11 +87,12 @@ At minimum:
 ### Slotted-page tests
 
 - insert until full,
-- reusable slots,
+- DEAD slots are not immediately reusable at this milestone,
+- NORMAL -> DEAD transitions and compaction preserve SlotIds,
+- DEAD -> UNUSED transition and reusable-slot tests are deferred until the Chapter 14 vacuum/reclamation protocol is implemented,
 - compaction,
 - invalid slot access,
-- tuple bytes survive compaction,
-- slot IDs remain stable.
+- tuple bytes survive compaction.
 
 ### Tuple codec tests
 

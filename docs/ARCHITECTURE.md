@@ -14820,6 +14820,8 @@ For `scope_kind = TABLE`, bytes `40..103` are:
 | `88` | 8 | average_logical_row_width as binary64 |
 | `96` | 8 | average_stored_tuple_width as binary64 |
 
+Both width fields MUST decode to finite binary64 values numerically greater than or equal to zero. Zero is valid, including for an empty relation. A NaN, positive or negative infinity, or value numerically less than zero in either field is corruption and invalidates the persisted statistics payload.
+
 Starting at byte `104`, the manifest contains:
 
 ```text
@@ -18843,24 +18845,7 @@ Every identified architecture gap affecting v1 semantics or persistent formats i
 
 Deferred features are not unresolved v1 questions.
 
-## D.2 Non-architecture implementation consistency
-
-The current implementation checkpoint has one known architecture/implementation mismatch that does **not** change this contract:
-
-```text
-Persisted RID bytes 14..15:
-    architecture encoder -> write zero
-    architecture v1 decoder -> reject nonzero
-
-current Phase-1 decoder checkpoint:
-    still accepts nonzero reserved bytes
-```
-
-`PROJECT_STATE.md` records that implementation mismatch. The architecture remains strict as specified in §8.4.1.
-
-No implementation change is made by this document.
-
-## D.3 Architecture revision rule
+## D.2 Architecture revision rule
 
 A future implementation discovery may justify changing an accepted architectural decision, but the change requires an explicit architecture revision that identifies:
 

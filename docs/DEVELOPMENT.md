@@ -19,12 +19,12 @@ This order intentionally follows dependency direction and maximizes learning.
 ## Phase 1 — Raw storage
 
 1. byte serialization utilities,
-2. file manager,
+2. DiskManager and PageFile primitives,
 3. page abstraction,
-4. page allocator,
+4. append-first page allocation primitives,
 5. slotted heap page,
 6. tuple encoding,
-7. heap file.
+7. persisted FSM page and in-memory candidate-index foundations.
 
 ## Phase 2 — Buffer management
 
@@ -32,73 +32,74 @@ This order intentionally follows dependency direction and maximizes learning.
 9. page guards,
 10. CLOCK replacement,
 11. dirty-page flushing,
-12. buffer-pool benchmarks.
+12. HeapFile and relation-wide FreeSpaceMap integration through BufferPool-managed page lifetimes,
+13. buffer-pool and buffered-storage benchmarks.
 
 ## Phase 3 — Indexes
 
-13. B+ tree page formats,
-14. lookup,
-15. insert/split,
-16. range scans,
-17. delete/rebalance,
-18. latch coupling,
-19. randomized B+ tree tests.
+14. B+ tree page formats,
+15. lookup,
+16. insert/split,
+17. range scans,
+18. delete/rebalance,
+19. latch coupling,
+20. randomized B+ tree tests.
 
 ## Phase 4 — Transactions and durability
 
-20. transaction manager,
-21. selected MVCC representation,
-22. visibility rules,
-23. write conflicts,
-24. WAL format,
-25. group commit,
-26. STEAL/NO-FORCE integration,
-27. crash recovery,
-28. vacuum/GC.
+21. transaction manager,
+22. selected MVCC representation,
+23. visibility rules,
+24. write conflicts,
+25. WAL format,
+26. group commit,
+27. STEAL/NO-FORCE integration,
+28. crash recovery,
+29. vacuum/GC.
 
 ## Phase 5 — Catalog and SQL
 
-29. bootstrap catalog,
-30. system tables,
-31. lexer,
-32. parser,
-33. AST,
-34. binder,
-35. type system.
+30. bootstrap catalog,
+31. system tables,
+32. lexer,
+33. parser,
+34. AST,
+35. binder,
+36. type system.
 
 ## Phase 6 — Query execution
 
-36. logical plans,
-37. physical plans,
-38. vector/chunk representation,
-39. sequential scan,
-40. filter,
-41. projection,
-42. nested-loop join,
-43. hash join,
-44. aggregation,
-45. sort,
-46. index scan.
+37. logical plans,
+38. physical plans,
+39. vector/chunk representation,
+40. sequential scan,
+41. filter,
+42. projection,
+43. nested-loop join,
+44. hash join,
+45. aggregation,
+46. sort,
+47. index scan.
 
 ## Phase 7 — Optimization
 
-47. statistics,
-48. rule rewrites,
-49. selectivity estimation,
-50. cost model,
-51. access-path selection,
-52. join-order dynamic programming,
-53. `EXPLAIN`,
-54. `EXPLAIN ANALYZE`.
+48. statistics,
+49. rule rewrites,
+50. selectivity estimation,
+51. cost model,
+52. access-path selection,
+53. join-order dynamic programming,
+54. `EXPLAIN`,
+55. `EXPLAIN ANALYZE`.
 
 ## Phase 8 — Performance work
 
-55. profiling,
-56. allocation reduction,
-57. cache/layout improvements,
-58. contention reduction,
-59. prefetch/asynchronous I/O experiments,
-60. parallel execution.
+56. profiling,
+57. allocation reduction,
+58. cache/layout improvements,
+59. contention reduction,
+60. prefetch/asynchronous I/O experiments,
+61. parallel execution.
 
 ---
 
@@ -177,6 +178,8 @@ The subsystem boundaries should not.
 
 ## Storage Milestone 1
 
+This end-to-end buffered-storage milestone follows implementation of BufferPool, page guards, and HeapFile. It is not part of the pre-BufferPool Phase 1 foundation and does not itself authorize crossing the current phase gate.
+
 Before implementing B+ trees or SQL, the storage layer should be able to pass the following end-to-end scenario:
 
 ```text
@@ -219,23 +222,20 @@ The purpose is to validate:
 
 Before implementing the B+ tree, read and follow the canonical B+ tree contract in `ARCHITECTURE.md` Chapter 8.
 
-That discussion should decide:
+Chapter 8 has already settled the persisted layouts, page formats, physical-key and RID identity, FLOAT64 key encoding, separator and duplicate ordering, free-page format, root publication protocol, cursor lifetime, and latch/publication semantics. Implementation must conform to those contracts rather than selecting alternatives.
 
-- internal/leaf page layouts,
-- key encoding,
-- variable-length vs fixed-width index keys,
-- fanout,
-- separator-key semantics,
-- split policy,
-- merge/rebalance policy,
-- sibling links,
-- duplicate-key ordering,
-- latch crabbing protocol,
-- root replacement,
-- free-page reuse,
-- range-scan iterator lifetime,
-- MVCC/index interaction,
-- WAL logging of structural modifications.
+Implement in dependency order:
+
+1. exact BTREE superblock, node-page, slot, and free-page codecs and validators,
+2. the canonical `IndexKeyCodec`, including RID suffixes and FLOAT64 canonicalization/ordering,
+3. page-local search and mutation over BufferPool-managed pages,
+4. lookup, insertion, split propagation, exact physical deletion, redistribution, merge, and free-page reuse,
+5. optimistic root publication and generation validation,
+6. forward range cursors with the specified guarded page lifetime,
+7. the canonical latch-crabbing and structural-publication protocols,
+8. MVCC, uniqueness, WAL, and recovery integration only at their later dependency milestones.
+
+This checklist controls implementation order only. Any proposed change to a settled Chapter 8 contract requires an explicit architecture revision before implementation.
 
 After the B+ tree implementation reaches its required milestone, the next major development dependency is:
 
