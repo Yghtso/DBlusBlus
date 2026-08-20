@@ -4947,6 +4947,8 @@ The physical B+ tree does not own:
 
 The tree receives opaque encoded user-key bytes plus RIDs.
 
+One exact physical `(encoded_user_key,RID)` has at most one stored entry. `Insert` encountering that exact entry is idempotent success only for the same in-process mutation owner that has continuously retained its operation context/logical ownership and recorded that exact insertion as already published. An ordinary executor insertion without that provenance reports an internal invariant/corruption error, not a SQL UNIQUE violation. Recovery applies/skips `BTREE_MTR` page actions by page LSN and does not invoke SQL uniqueness. Duplicate stored copies of one exact physical key are structural corruption.
+
 ## 8.22 Duplicate keys, uniqueness, and MVCC
 
 The physical tree always permits duplicate SQL user keys because physical keys differ by RID.
@@ -4985,7 +4987,7 @@ consult transaction/MVCC state
 reject or permit insertion
 ```
 
-The exact unique-key lock identity, acquisition order, duration, and conflict rules belong to the transaction/locking chapter.
+The exact unique-key domain, lock identity, acquisition/recheck order, duration, current-owner predicate, UPDATE self-exclusion, and physical-retry distinction are canonical in §§11.8–11.10.
 
 For v1 SQL UNIQUE semantics:
 
@@ -5023,6 +5025,8 @@ return or reject
 ```
 
 A physical B+ tree hit never proves that a SQL row is visible.
+
+Likewise, a physical hit never proves UNIQUE conflict ownership. Constraint enforcement applies §11.10's heap/status/current-command predicate under logical key serialization, while ordinary scans continue to apply Chapter-10 snapshot visibility.
 
 Because visibility remains heap-owned, arbitrary index-only scans are deferred until additional machinery such as all-visible metadata and covering payloads exists.
 
@@ -5217,25 +5221,26 @@ The verifier is a structural correctness facility, not merely a debugging conven
 7. Internal separators are valid lower routing bounds for their right children.
 8. `N` internal separators imply `N+1` children.
 9. Duplicate SQL user keys are legal at the physical-tree layer.
-10. A B+ tree hit never decides MVCC visibility.
-11. Forward scans use safe latch-coupled leaf handoff.
-12. Published child, sibling, and root pointers reference initialized pages.
-13. A detached page is not reused while a legal traversal can still reference it.
-14. Structural shape changes are separate from user-transaction visibility/abort semantics.
-15. Every persistent B+ tree mutation participates in page-LSN/WAL ordering.
-16. Variable-length split/rebalance decisions are byte based.
-17. Encoded user keys larger than 1024 bytes are rejected rather than truncated.
-18. B+ tree pages are accessed through BufferPool, never directly through DiskManager.
-19. Persistent B+ page parsing validates bounds before dereferencing offsets/lengths.
-20. The complete tree can be checked by the explicit verifier.
-21. V1 native range traversal is forward/ascending.
-22. Root acquisition never waits for a B+ page latch while holding the root-metadata latch; root identity is validated using the process-local `root_generation`.
-23. Structural metadata publication may acquire the root-metadata latch while holding the required page latch(es).
-24. Vertical page-latch acquisition is parent-before-child.
-25. Horizontal adjacent-leaf latch acquisition is left-to-right or the operation restarts.
-26. Tree-local page reuse occurs only after safe structural detachment.
-27. Physical UNIQUE-index duplicates remain representable because uniqueness is transactionally enforced above the tree.
-28. A failed pre-append MTR restores exact page/root/free-list runtime state; a new/reused page cannot escape as both reachable and free or as an unpublished child/root.
+10. Duplicate stored copies of one exact physical `(encoded_user_key,RID)` are corruption; only proven same-operation replay is idempotent.
+11. A B+ tree hit never decides MVCC visibility or SQL UNIQUE ownership.
+12. Forward scans use safe latch-coupled leaf handoff.
+13. Published child, sibling, and root pointers reference initialized pages.
+14. A detached page is not reused while a legal traversal can still reference it.
+15. Structural shape changes are separate from user-transaction visibility/abort semantics.
+16. Every persistent B+ tree mutation participates in page-LSN/WAL ordering.
+17. Variable-length split/rebalance decisions are byte based.
+18. Encoded user keys larger than 1024 bytes are rejected rather than truncated.
+19. B+ tree pages are accessed through BufferPool, never directly through DiskManager.
+20. Persistent B+ page parsing validates bounds before dereferencing offsets/lengths.
+21. The complete tree can be checked by the explicit verifier.
+22. V1 native range traversal is forward/ascending.
+23. Root acquisition never waits for a B+ page latch while holding the root-metadata latch; root identity is validated using the process-local `root_generation`.
+24. Structural metadata publication may acquire the root-metadata latch while holding the required page latch(es).
+25. Vertical page-latch acquisition is parent-before-child.
+26. Horizontal adjacent-leaf latch acquisition is left-to-right or the operation restarts.
+27. Tree-local page reuse occurs only after safe structural detachment.
+28. Physical UNIQUE-index user-key duplicates remain representable because uniqueness is transactionally enforced above the tree.
+29. A failed pre-append MTR restores exact page/root/free-list runtime state; a new/reused page cannot escape as both reachable and free or as an unpublished child/root.
 ---
 
 # Part IV — Transactions and Durability
@@ -6503,6 +6508,21 @@ Hash collisions MUST be resolved by comparison of the complete lock key.
 
 Uniqueness MUST NOT depend on a 64-bit hash alone.
 
+The user-key bytes exclude RID. They encode every key component in catalog order through the exact Chapter-8 `IndexKeyCodec`, so lock equality and index user-key equality are identical for:
+
+```text
+BOOLEAN
+INT32
+INT64
+FLOAT64, including canonical NaN and signed-zero handling
+VARCHAR under binary collation
+DATE
+TIMESTAMP
+composite keys
+```
+
+Two semantically equal fully non-NULL keys for one `IndexId` MUST therefore name the same logical lock even when their source expressions or physical tuple bytes differ. Composite lock identity is component-wise semantic equality after canonical encoding. A NULL-containing UNIQUE key does not enter the duplicate-conflict domain and has no duplicate-prevention lock identity; PRIMARY KEY rejects NULL before this point.
+
 ## 11.9 Unique-key lock protocol
 
 Any DML operation that may create or remove a **fully non-NULL** unique key acquires the corresponding exclusive:
@@ -6519,9 +6539,9 @@ UPDATE old K -> new K
 DELETE unique K
 ```
 
-Unique-key locks remain held until transaction end.
+Unique-key locks remain held through transaction terminal publication.
 
-When an UPDATE needs both old and new unique-key locks and both keys are known before waiting, acquire them in deterministic encoded-key order to reduce deadlock probability.
+When an UPDATE needs both old and new unique-key locks and both keys are known before waiting, acquire them in the deterministic total order below to reduce deadlock probability.
 
 The deadlock detector remains the correctness fallback.
 
@@ -6535,23 +6555,248 @@ and no duplicate-prevention unique-key lock is required for that NULL-containing
 
 The physical B+ entries still exist and remain ordered normally.
 
+The required check/publish order is:
+
+```text
+INSERT:
+    evaluate/type-check key values and enforce NOT NULL
+
+UPDATE/DELETE:
+    acquire TUPLE_WRITE for the target under §11.4
+    re-fetch/revalidate the target, derive old key values, and evaluate/type-check
+    any new key values needed by the row operation
+    release every physical latch retained for that derivation
+
+then for each operation:
+    encode complete user keys canonically
+    acquire/wait for required UNIQUE_KEY locks without physical latches
+    after all grants, re-fetch/revalidate the UPDATE/DELETE target again
+    scan/recheck the complete physical candidate range under §11.10
+    only after a NO_CONFLICT result publish the heap/index mutation
+```
+
+Probing before lock acquisition is only an advisory optimization. It never authorizes publication, and the complete candidate scan MUST be repeated after the lock is granted. This closes the check-then-insert race.
+
+When one operation knows a finite set of unique locks before waiting, it acquires them in the total order:
+
+```text
+(IndexId, lexicographic encoded user-key bytes)
+```
+
+An UPDATE includes both old and new fully non-NULL keys when they differ; DELETE includes the old key. Streaming multirow execution may discover additional keys incrementally. Any resulting cross-key cycle is handled by §11.13's wait-for graph and deterministic victim policy rather than by releasing an already-held transaction lock.
+
 ## 11.10 Unique-check semantics
 
-After obtaining the relevant unique-key lock:
+This section is the canonical v1 UNIQUE/PRIMARY KEY current-state conflict contract. V1 constraints are immediate and non-deferrable.
 
-1. scan every physical B+ entry with that encoded user key,
-2. fetch every referenced heap tuple version,
-3. inspect current transaction outcome/state rather than relying solely on the caller's historical snapshot,
-4. reject if another logically live row owns the key,
-5. ignore globally aborted/dead physical versions.
+### 11.10.1 Three distinct decisions
 
-Uniqueness is a constraint on the database's current transactional state, not merely on what one historical snapshot can see.
+The implementation keeps three questions separate:
 
-If an unexpected in-progress conflicting creator is encountered, the operation waits/retries through the logical lock protocol.
+```text
+ordinary MVCC visibility
+    whether a tuple contributes to a query under one Snapshot
 
-It MUST NOT wait while holding B+ or heap page latches.
+physical index candidacy
+    whether an encoded (user_key,RID) entry must be heap-rechecked
 
-The physical B+ tree itself continues to permit duplicate user-key bytes because physical keys include RID.
+UNIQUE conflict ownership
+    whether current transaction/version state constitutes another owner of K
+```
+
+`Visible(snapshot, tuple)` is not the UNIQUE predicate. It deliberately hides current-command inserts, may retain a row deleted by the current command, and may not see a transaction that committed after a READ COMMITTED statement snapshot. Using it would permit same-statement duplicates or two committed owners.
+
+The B+ tree is only a candidate source. Its physical key is `(user_key,RID)`, and one user-key range may legally contain current, aborted, superseded, and stale versions. Presence in that range is neither semantic proof of a conflict nor permission to ignore heap/current-status recheck.
+
+In an architecture-valid published index, every transaction operation that may become a logical owner installs its required physical entry before statement/transaction success. The heap-before-index interval in §15.2/§15.3 remains protected by the same UNIQUE_KEY lock and cannot be observed as permission for a competing owner. A missing required entry is index corruption/consistency failure, not a second authoritative source of “no conflict.”
+
+### 11.10.2 Key domain and NULL rule
+
+For ordinary UNIQUE, duplicate rejection applies only when **every** key component is non-NULL. If any component is NULL:
+
+```text
+UniqueConflicts(K, ...) = NO_CONFLICT
+no duplicate-prevention UNIQUE_KEY lock is acquired for K
+```
+
+The NULL-containing physical entry is still inserted normally. For fully non-NULL keys, equality is exact equality of the canonical Chapter-8 encoded user-key bytes and therefore follows §11.8 for every supported scalar/composite key.
+
+PRIMARY KEY first enforces NOT NULL on every component and then applies this identical fully non-NULL conflict predicate, current-command handling, self-exclusion, and lock protocol. It has no NULL shortcut.
+
+### 11.10.3 Predicate inputs and operation context
+
+Conceptually, after the checking transaction owns `UNIQUE_KEY(IndexId,K)`, every physical candidate is classified by:
+
+```text
+UniqueCandidateOutcome(
+    candidate_rid,
+    candidate_tuple { xmin, cmin, xmax, cmax },
+    current Status(xmin/xmax),
+    checking_txn_id,
+    checking_command_id,
+    operation_context)
+```
+
+`operation_context` is runtime-only and contains at most:
+
+```text
+optional exact excluded_old_rid
+optional exact operation_published_new_rid
+IndexId and encoded key being checked
+```
+
+`excluded_old_rid` is present only for the currently processed UPDATE after exact TUPLE_WRITE revalidation, and only when that old version's unique key is semantically equal to `K`. `operation_published_new_rid` is present only while the same in-process row-mutation owner has continuously retained its operation context and logical locks and recorded that exact `(IndexId,K,RID)` as published; it is not reconstructed from TxnId/CommandId after an error return. Neither field is persisted, inferred from TxnId alone, or shared across rows. No persistent logical-row identifier is introduced.
+
+The conceptual outcomes are:
+
+| Outcome | Meaning |
+|---|---|
+| `UNIQUE_CONFLICT` | another current logical owner exists; report UNIQUE/PRIMARY KEY violation |
+| `NO_CONFLICT` | the complete candidate range contains no owner after all classifications |
+| `WAIT_THEN_RECHECK` | another transaction's terminal outcome is required; publish nothing and restart the whole current-state range check afterward |
+| `IGNORE_ABORTED_OR_STALE` | this candidate's creator aborted or its delete/supersession is terminally effective |
+| `SELF_EXCLUDED` | this exact RID is the current UPDATE target/replacement authorized by operation context |
+| `CORRUPTION_OR_INTERNAL_ERROR` | persistent identity/index/heap/status facts are malformed or an impossible runtime invariant was observed |
+
+`SELF_EXCLUDED` applies to one exact physical RID, never to “any tuple from my TxnId,” any `prev`-chain relative, or any tuple with the same key.
+
+### 11.10.4 Canonical current-owner algorithm
+
+For each distinct physical candidate `(K,RID)`, in this order:
+
+1. Under a §14.6 `ReadEpochGuard`, fetch the referenced NORMAL heap version and validate relation/FileId/RID identity. Re-encoding its indexed values under the historical schema must produce `K`; a dangling entry, reused RID, non-NORMAL target, wrong relation, or key mismatch is corruption.
+2. If RID is the exact `excluded_old_rid`, return `SELF_EXCLUDED`. If RID is the exact proven `operation_published_new_rid`, return `SELF_EXCLUDED` for that internal continuation only.
+3. Classify the creator:
+   - `xmin == FROZEN_TXN_ID` or another transaction currently `COMMITTED`: creator is effective regardless of the checking statement snapshot;
+   - `xmin == checking_txn_id`: require `cmin <= checking_command_id`; both an earlier-command and current-command creator are effective;
+   - another transaction `ABORTED`: return `IGNORE_ABORTED_OR_STALE` without consulting `xmax`;
+   - another transaction nonterminal (`ACTIVE`, `MUST_ABORT`, `COMMITTING`, or `ABORTING` through status lookup): return `WAIT_THEN_RECHECK`;
+   - invalid, retired-but-still-referenced, unknown, or otherwise impossible creator state: return `CORRUPTION_OR_INTERNAL_ERROR`.
+4. For an effective creator, classify `xmax`:
+   - `INVALID_TXN_ID`: return `UNIQUE_CONFLICT`;
+   - if `xmin == checking_txn_id` and non-invalid `xmax != checking_txn_id`: return `CORRUPTION_OR_INTERNAL_ERROR`, because another transaction cannot legally delete an uncommitted self-created version;
+   - `xmax == checking_txn_id`: require `cmax <= checking_command_id`, and when `xmin == checking_txn_id` also require `cmin <= cmax`; `cmax < checking_command_id` returns `IGNORE_ABORTED_OR_STALE`, while `cmax == checking_command_id` returns `UNIQUE_CONFLICT` unless step 2 already returned `SELF_EXCLUDED` for this exact row operation;
+   - another transaction `ABORTED`: its delete is ineffective, so return `UNIQUE_CONFLICT`;
+   - another transaction `COMMITTED`: its delete/supersession is effective now, so return `IGNORE_ABORTED_OR_STALE` regardless of snapshot age;
+   - another transaction nonterminal: return `WAIT_THEN_RECHECK`; an uncommitted delete never frees the key;
+   - `FROZEN_TXN_ID` as `xmax`, a future self `cmin/cmax`, or invalid/unknown status evidence: return `CORRUPTION_OR_INTERNAL_ERROR`.
+
+Provisional M-003 bytes are not ordinary candidates. They are either unpublished/inaccessible or exactly restored; only §12.12-published tuple/header/index state participates.
+
+The complete physical range is enumerated even after finding a semantic owner so an exact duplicate physical key or dangling/mismatched RID cannot be hidden by early exit. Aggregate outcome precedence is:
+
+```text
+any CORRUPTION_OR_INTERNAL_ERROR -> that error
+else any UNIQUE_CONFLICT         -> UNIQUE_CONFLICT
+else any WAIT_THEN_RECHECK       -> WAIT_THEN_RECHECK
+else                              -> NO_CONFLICT
+```
+
+`SELF_EXCLUDED` and `IGNORE_ABORTED_OR_STALE` contribute no owner. A wait invalidates the entire scan result and no prior partial classification is reused after wakeup.
+
+### 11.10.5 INSERT/current-state truth table
+
+`C` is the checking CommandId. “Nonterminal other” includes every runtime state that status lookup exposes as in progress.
+
+| Candidate creator | Candidate deleter | Relation to checker | Candidate outcome |
+|---|---|---|---|
+| committed or frozen | none | other row | `UNIQUE_CONFLICT` |
+| committed or frozen | committed other | other row | `IGNORE_ABORTED_OR_STALE` |
+| committed or frozen | aborted other | other row | `UNIQUE_CONFLICT` |
+| committed or frozen | nonterminal other | other row | `WAIT_THEN_RECHECK`; commit -> ignore, abort -> conflict |
+| aborted other | any | other row | `IGNORE_ABORTED_OR_STALE` |
+| nonterminal other | any | other row | `WAIT_THEN_RECHECK`; commit -> reclassify, abort -> ignore |
+| checking TxnId, `cmin < C` | none/aborted other | earlier command | `UNIQUE_CONFLICT` |
+| checking TxnId, `cmin == C` | none/aborted other | current command, earlier row | `UNIQUE_CONFLICT` |
+| effective creator | checking TxnId, `cmax < C` | self-deleted earlier command | `IGNORE_ABORTED_OR_STALE` |
+| effective creator | checking TxnId, `cmax == C` | self-delete/supersession in current command, another row operation | `UNIQUE_CONFLICT` |
+| any impossible command/status/RID state | any | any | `CORRUPTION_OR_INTERNAL_ERROR` |
+
+Thus:
+
+```sql
+INSERT INTO t(k) VALUES (1), (1);
+```
+
+deterministically reports a duplicate on the second row even though the first has `cmin == C` and is hidden from ordinary current-command snapshot visibility. An INSERT in a later command of the same transaction also conflicts unless the prior owner was deleted/superseded by an earlier command. After `INSERT K; DELETE row;` in earlier commands, a later INSERT of K is permitted because `cmax < C`. A current-command self-delete does not free K for a different row operation in that same command; this prevents target-processing order from changing the constraint result.
+
+The baseline may check and publish rows sequentially. If vectorized/batch execution checks more than one row before publishing their heap/index entries, it MUST maintain an attempt-local set under the already-acquired logical locks and classify an earlier pending fully non-NULL K as `UNIQUE_CONFLICT`. It may not probe every row against only the pre-batch index state and then publish duplicate pending owners.
+
+### 11.10.6 UPDATE truth table and immediate behavior
+
+| Candidate relation | Exact condition | Candidate outcome |
+|---|---|---|
+| current UPDATE old target | RID equals revalidated `excluded_old_rid` and old key equals K | `SELF_EXCLUDED` |
+| current UPDATE replacement | RID equals exact proven `operation_published_new_rid` | `SELF_EXCLUDED` only for internal continuation |
+| same transaction, another row | effective creator, no effective self-delete | `UNIQUE_CONFLICT`, including `cmin == C` |
+| same transaction, another row | self-delete/supersession with `cmax < C` | `IGNORE_ABORTED_OR_STALE` |
+| same transaction, another row | self-delete/supersession with `cmax == C` | `UNIQUE_CONFLICT` |
+| another logical row | committed/frozen live owner | `UNIQUE_CONFLICT` |
+| old version of another committed UPDATE | committed effective `xmax` | `IGNORE_ABORTED_OR_STALE`; its replacement candidate decides ownership |
+| another transaction changing this key | creator or deleter nonterminal | `WAIT_THEN_RECHECK` |
+| candidate creator aborted | any | `IGNORE_ABORTED_OR_STALE` |
+| duplicate exact physical `(K,RID)` or invalid heap identity | any | `CORRUPTION_OR_INTERNAL_ERROR` |
+
+For an UPDATE that retains K, the checker acquires K, revalidates the old target, and excludes exactly that old RID during the pre-publication check. The old and replacement RIDs need no persistent logical-row identity.
+
+For `old K -> new J`, the operation acquires the fully non-NULL old/new locks in §11.9 order, checks J, then follows §15.3's existing new-version/old-`xmax`/index publication sequence. The old K entry cannot conflict with J unless K and J are semantically equal, in which case this is the retaining-key case. NULL transitions acquire/check only the fully non-NULL participating side, while the old non-NULL lock is still retained when a key is removed.
+
+Multirow UNIQUE enforcement is row-immediate, not an end-of-statement deferred constraint. A new owner published by an earlier row of the same UPDATE conflicts with a later row targeting the same key. An old owner superseded by another row in the current command also remains conflicting for that later row; only the exact currently checked row may self-exclude its old RID. Therefore results do not depend on target processing order. A key swap such as `R1: 1 -> 2, R2: 2 -> 1` fails when the first replacement key encounters the other row's current owner; v1 does not temporarily delete all old owners or accept a final permutation.
+
+### 11.10.7 Competing transactions, waiting, and recheck
+
+The logical key lock is the serialization point. For T1 inserting K and T2 attempting K:
+
+```text
+T1 owns UNIQUE_KEY(K) through terminal publication
+T2 waits without physical latches
+T1 COMMITTED -> T2 acquires, rescans current state, and conflicts
+T1 ABORTED   -> T2 acquires, rescans, ignores T1's aborted version, and may proceed
+```
+
+The same rule applies when T1 is deleting/updating the existing owner. T2 cannot treat T1's nonterminal `xmax` as freeing K. After T1 commits, the old owner is stale and K may be reused; after T1 aborts, the old owner still conflicts.
+
+After every wait, the checker discards prior candidate/status conclusions and restarts from `(K,MIN_RID)` under a fresh ReadEpochGuard. It must not reuse a historical statement-snapshot result, status lookup, RID dereference, or partial range position. The statement snapshot may select DML targets; it never decides current UNIQUE ownership.
+
+Conforming DML obtains the key lock before publication and retains it through terminal status publication, so another nonterminal owner should normally be encountered as the LockManager owner before candidate scanning. If a defensive scan nevertheless observes one, it returns `WAIT_THEN_RECHECK`, releases all physical latches/borrowed heap state, and waits through logical transaction coordination. If the checker and other transaction are both reported as exclusive owner of the same full lock key, that is an internal invariant failure rather than permission to continue.
+
+### 11.10.8 Physical candidate integrity, retry, recovery, and vacuum
+
+An ordered user-key scan must return each physical `(K,RID)` exactly once. Duplicate stored copies of the exact same physical key are B+ structural corruption, not two semantic owners and not a candidate to silently deduplicate. A dangling entry or one whose protected RID now denotes different heap bytes is likewise corruption; §14.6 read epochs prevent legal RID reuse during the check.
+
+SQL ownership and physical replay are separate:
+
+- a normal executor call that discovers its intended exact `(K,RID)` already present without proven same-operation continuation reports an internal invariant/corruption error, not `UniqueViolation`;
+- an explicitly proven retry by the same in-process mutation owner, before returning control and while continuously retaining its operation context/logical ownership, may treat that exact already-published physical insertion as idempotent success/no-op;
+- recovery never runs a fresh SQL UNIQUE predicate. It replays/skips the already-authorized heap redo and `BTREE_MTR` by page LSN, so replay of the same `(K,RID)` cannot become a new SQL violation.
+
+Vacuum may remove aborted or terminally stale candidates only under Chapter 14. Their physical presence before cleanup does not change this predicate, and their removal cannot change which logical versions own K. UNIQUE correctness never depends on prompt vacuum.
+
+### 11.10.9 CREATE UNIQUE INDEX
+
+The offline §21.8 build uses the same canonical encoded equality, any-NULL non-conflict rule, creator/deleter current-state classification, and corruption checks. Because SchemaLock plus exclusive TableWriterGate drains and excludes target-table writers, the private bulk build may detect duplicate fully non-NULL live owners by sorted/grouped encoded keys rather than acquiring one transaction UNIQUE_KEY lock per row. It must still reject more than one current logical owner and must not use the DDL statement's historical snapshot to omit a current committed owner.
+
+### 11.10.10 M-005 and autocommit boundary
+
+`UNIQUE_CONFLICT` determines only that the constraint reports `UniqueViolation`; it publishes no mutation for the rejected candidate. Section §39.1 then applies the unchanged M-005 boundary: before this statement's first published write an explicit transaction may remain `ACTIVE`, while an earlier write from this statement requires `MUST_ABORT` and automatic ABORT. Autocommit uses the same predicate/locks and aborts its implicit transaction on violation. A successful check is not a commit, and every acquired UNIQUE_KEY lock remains held through the implicit or explicit transaction's terminal publication.
+
+### 11.10.11 Forbidden UNIQUE implementations
+
+V1 specifically forbids:
+
+1. using ordinary snapshot visibility as the UNIQUE current-owner predicate,
+2. allowing same-statement duplicates because `cmin == checking_command_id`,
+3. rejecting a retaining-key UPDATE solely because its exact revalidated old RID appears,
+4. treating another transaction's uncommitted delete as freeing a key,
+5. treating an aborted creator as a permanent owner,
+6. treating an aborted deleter as freeing the old owner,
+7. treating physical user-key presence as conflict without heap/status recheck,
+8. releasing a UNIQUE_KEY lock at statement end or while `MUST_ABORT` is nonterminal,
+9. authorizing from a pre-lock probe without a complete post-grant recheck,
+10. running SQL UNIQUE enforcement during recovery redo or treating exact authorized replay as a new logical conflict,
+11. mapping semantically equal FLOAT64/composite/VARCHAR keys to different lock identities,
+12. dereferencing a candidate RID without read-epoch protection or reusing a pre-wait RID after wakeup,
+13. allowing two committed owners merely because their statement snapshots could not see one another.
 
 ## 11.11 Lock duration
 
@@ -6567,12 +6812,11 @@ UNIQUE_KEY
 locks are held until:
 
 ```text
-COMMIT
-or
-ABORT
+the §9.14 COMMITTED
+or ABORTED terminal-publication linearization point
 ```
 
-They are not released immediately after the corresponding page modification.
+They are not released immediately after the corresponding page modification or at statement end. `MUST_ABORT` retains them until ABORTED publication.
 
 This prevents another writer from acting as though a still-unresolved transaction outcome were final.
 
@@ -6675,14 +6919,18 @@ Logical-lock wait-for-graph edges are transaction-conflict edges, not page-latch
 8. REPEATABLE READ aborts on a post-snapshot competing committed write rather than following an invisible newer version.
 9. The write protocol prevents lost updates on one target version.
 10. Snapshot isolation may still permit cross-row write skew.
-11. A unique-key lock is `(IndexId, full encoded non-NULL user-key bytes)`.
+11. A unique-key lock is `(IndexId, full canonical encoded non-NULL user-key bytes)`; semantic equality and lock equality cannot diverge.
 12. Hashing a unique key may select a lock-table shard but cannot replace full-key equality.
 13. NULL-containing unique keys skip v1 duplicate rejection.
-14. Unique checks inspect current transactional state of all physical matches, not only caller-snapshot visibility.
-15. Tuple-write and unique-key locks are held until transaction end.
-16. Deadlock correctness uses a wait-for graph; the initial victim is the highest TxnId in the cycle.
-17. Page/B+ latches never become LockManager locks.
-18. Logical transaction locks never substitute for physical B+ page-structure protection.
+14. Unique checks use §11.10's current-owner predicate over every physical candidate and do not substitute caller-snapshot visibility.
+15. Current-command and earlier-command same-transaction owners conflict unless exactly self-excluded or deleted/superseded by an earlier CommandId.
+16. UPDATE self-exclusion is limited to the exact revalidated old/replacement RID in the current operation context.
+17. Tuple-write and unique-key locks are held through terminal outcome publication, including while `MUST_ABORT` cleanup is pending.
+18. A wait invalidates all prior UNIQUE candidate conclusions and requires a fresh range/status/heap recheck under RID protection.
+19. Exact physical replay is distinct from SQL uniqueness; unproven duplicate `(key,RID)` storage is an invariant/corruption error.
+20. Deadlock correctness uses a wait-for graph; the initial victim is the highest TxnId in the cycle.
+21. Page/B+ latches never become LockManager locks.
+22. Logical transaction locks never substitute for physical B+ page-structure protection.
 ---
 
 # 12. Write-Ahead Logging and Commit Durability
@@ -8206,6 +8454,8 @@ A torn/incomplete MTR record is not a record and is never partly replayed.
 
 Runtime provisional MTR bytes are irrelevant after crash. If the complete MTR belongs to the valid persisted WAL prefix, redo may reconstruct every affected page/new allocation and root/free-list effect; otherwise recovery retains the pre-MTR durable tree and removes any unpublished appended tail under §4.11.3.
 
+Recovery redo reproduces already-authorized physical heap/index mutations and MUST NOT acquire `UNIQUE_KEY` locks or invoke §11.10 as a fresh SQL constraint check. Page-LSN idempotence and complete `BTREE_MTR` replay handle an already-reflected `(user_key,RID)`. Aborted/loser-created physical entries may remain after redo and are semantically ignored by transaction status until vacuum; their presence is not a recovery-time uniqueness failure.
+
 ## 13.14 Torn/corrupt data pages during redo
 
 If a data-page checksum is invalid during recovery:
@@ -8385,6 +8635,7 @@ This separation between physical residue and logical visibility is central to th
 27. Volatile provisional page/MTR mutations disappear on crash and have no recovery meaning unless their complete publication record is in the valid persisted WAL prefix.
 28. Runtime ACTIVE/MUST_ABORT and pre-commit-record COMMITTING transactions are crash losers; a complete valid persisted `TXN_COMMIT` is recovered COMMITTED regardless of missing client acknowledgement.
 29. Durable COMMIT is never converted to ABORTED by loser handling or a later runtime/cache/transport failure.
+30. Recovery redo replays authorized physical index history without rerunning SQL UNIQUE checks; normal execution alone authorizes new logical owners through §11.10.
 
 ---
 
@@ -8545,6 +8796,8 @@ The returned `e` is held by an RAII read-epoch guard.
 Guard destruction decrements that exact epoch count under the same mutex and removes a zero count.
 
 A reader never changes epoch while one guard is alive.
+
+The §11.10 UNIQUE candidate scan is such a reader: it registers before consuming an index-derived RID and retains protection through that RID's heap/current-owner recheck. If it must wait for transaction outcome, it discards the candidate and guard first, then re-probes the entire key range under a fresh guard after wakeup.
 
 ### 14.6.2 RID retirement
 
@@ -9007,8 +9260,10 @@ For an INSERT:
        xmax = INVALID_TXN_ID
        cmin = current CommandId
 
-3. acquire every required non-NULL UNIQUE_KEY lock
-4. perform current-state uniqueness checks
+3. encode every unique/primary user key and acquire required fully non-NULL
+   UNIQUE_KEY locks in §11.9 order
+4. perform §11.10 current-state checks; current-command versions from earlier
+   input rows are owners and are not ordinary-snapshot-hidden for this purpose
 5. choose/validate a heap page using the advisory FSM
 6. construct/append the required heap PAGE_INIT/PAGE_IMAGE/PAGE_DELTA redo
 7. install the heap tuple version and corresponding page_lsn
@@ -9018,7 +9273,7 @@ For an INSERT:
        (encoded_user_key, RID)
 
 9. release short-lived heap/B+ page latches/pins
-10. retain transaction-lifetime UNIQUE_KEY locks until COMMIT/ABORT
+10. retain UNIQUE_KEY locks through terminal COMMITTED/ABORTED publication
 ```
 
 Heap redo describing the referenced RID is established before any B+ MTR that references that RID.
@@ -9042,23 +9297,27 @@ For each target row:
 3. acquire TUPLE_WRITE(TableId, old RID)
 4. re-fetch and revalidate the old version
 5. apply isolation-specific write-conflict rules
-6. acquire affected UNIQUE_KEY locks in deterministic encoded-key order
-7. validate current-state uniqueness for new unique key(s)
+6. evaluate/type-check and canonically encode affected old/new unique keys
+7. acquire affected old/new fully non-NULL UNIQUE_KEY locks in §11.9's
+   deterministic total order
+8. re-fetch/revalidate the old version after unique-lock acquisition/wait
+9. validate new unique key(s) through §11.10, passing only this exact
+   revalidated old RID as excluded_old_rid when the old/new key is equal
 
-8. create new tuple version:
+10. create new tuple version:
        xmin = current TxnId
        cmin = current CommandId
        prev = old RID
 
-9. WAL-log/install the new tuple version
+11. WAL-log/install the new tuple version
 
-10. WAL-log/install old-version header:
+12. WAL-log/install old-version header:
        xmax = current TxnId
        cmax = current CommandId
 
-11. install new physical B+ entries through MTRs
-12. retain old physical B+ entries
-13. hold logical tuple/unique locks until transaction end
+13. install new physical B+ entries through MTRs
+14. retain old physical B+ entries
+15. hold logical tuple/unique locks through terminal transaction publication
 ```
 
 If the transaction aborts:
@@ -9071,6 +9330,8 @@ new index entries -> vacuumable garbage
 
 No physical rollback is required.
 
+UNIQUE is immediate per target. A same-key UPDATE excludes only its exact old RID; another row updated earlier in this command remains an owner. A changed-key UPDATE checks the new key against all other current owners. Multirow key collisions and swaps therefore follow §11.10.6 rather than a deferred final-state permutation rule.
+
 ## 15.4 DELETE
 
 For each target row:
@@ -9081,17 +9342,20 @@ For each target row:
 3. acquire TUPLE_WRITE(TableId, RID)
 4. re-fetch and revalidate
 5. apply write-conflict rules
-6. acquire affected non-NULL UNIQUE_KEY locks
-7. WAL-log/install:
+6. acquire affected fully non-NULL UNIQUE_KEY locks before publishing xmax
+7. re-fetch/revalidate the target after unique-lock acquisition/wait
+8. WAL-log/install:
        xmax = current TxnId
        cmax = current CommandId
-8. retain existing physical index entries
-9. hold logical locks until transaction end
+9. retain existing physical index entries
+10. hold logical locks through terminal transaction publication
 ```
 
 Commit makes the version dead to sufficiently new snapshots.
 
 Abort makes the `xmax` ineffective.
+
+The retained old-key lock ensures another transaction cannot treat this delete as freeing the key before COMMITTED publication. If DELETE aborts, a waiter rechecks after ABORTED publication and observes the old owner through §11.10.
 
 Vacuum removes tuple/index garbage only after Chapter 14's global reclamation rules are satisfied.
 
@@ -9262,6 +9526,7 @@ This chapter is the boundary between the persistent transactional storage core a
 18. CommandIds are consumed by failed as well as successful statements and are never reused.
 19. COMMIT is uncancellable after its publication-authorizing record append and irreversible after durable commit.
 20. Successful COMMIT acknowledgement follows runtime terminal publication and required coherent cleanup.
+21. DML publishes a fully non-NULL UNIQUE/PRIMARY KEY owner only after §11.10 returns `NO_CONFLICT` under the canonical transaction-lifetime key lock.
 
 ---
 
@@ -12031,6 +12296,8 @@ V1 also creates a unique B+ index implementing key lookup/enforcement.
 
 The physical index and semantic primary-key constraint remain distinct catalog objects.
 
+Every PRIMARY KEY component is runtime-enforced NOT NULL before duplicate checking. Fully non-NULL PRIMARY KEY values then use exactly §11.10's UNIQUE current-owner predicate, key equality, current-command behavior, UPDATE self-exclusion, wait/recheck protocol, and terminal lock lifetime.
+
 ## 21.8 CREATE INDEX
 
 ### 21.8.1 Binding
@@ -12052,7 +12319,7 @@ and creates an immutable index specification.
 
 Persistent IndexId/FileId allocation occurs only during execution.
 
-A unique index uses Chapter 11's transactional uniqueness semantics.
+A unique index uses Chapter 11's transactional uniqueness semantics. Its key equality and NULL rule are §11.10.2; v1 UNIQUE constraints are immediate and non-deferrable.
 
 ### 21.8.2 Offline build protocol
 
@@ -12082,7 +12349,7 @@ V1 builds indexes offline with conservative writer exclusion:
 17. release target writer gate and SchemaLock only at the terminal boundary
 ```
 
-Step 7 is a DDL maintenance/current-state scan after target writers have drained; it is not allowed to omit rows merely because the DDL transaction has an older REPEATABLE READ snapshot.
+Step 7 is a DDL maintenance/current-state scan after target writers have drained; it is not allowed to omit rows merely because the DDL transaction has an older REPEATABLE READ snapshot. For a UNIQUE build, step 10 applies §11.10.9: fully non-NULL duplicate groups use the canonical encoded equality/current-owner rules, while any-NULL keys do not conflict. The exclusive writer gate permits a bulk sorted/grouped duplicate check instead of per-row UNIQUE_KEY locks.
 
 Readers may continue while the index is built because the private index is not visible to their catalog snapshots.
 
@@ -14998,8 +15265,9 @@ For each input batch it:
 ```text
 1. evaluates/converts target-column vectors
 2. enforces runtime NOT NULL constraints
-3. acquires required unique-key locks in deterministic order
-4. performs current-state uniqueness checks
+3. acquires required unique-key locks in §11.9's deterministic order
+4. performs §11.10 current-state uniqueness checks, including current-command
+   owners from earlier input rows
 5. encodes/installs heap tuple versions through Chapter 15
 6. installs required B+ entries through their MTR path
 7. appends requested RETURNING values to statement-owned result storage
@@ -15024,15 +15292,19 @@ After target-spool finalization:
 1. consume targets in batches where practical
 2. acquire/revalidate one target's logical write semantics
 3. vector-evaluate assignment expressions over safely grouped targets
-4. construct one complete new tuple version per target
-5. install the new version and old xmax/cmax through Chapter 15
-6. install new physical index entries
-7. buffer RETURNING new-row values
+4. derive affected unique keys, acquire §11.9 locks, revalidate, and run
+   §11.10 with only this exact old target RID excluded when applicable
+5. construct one complete new tuple version per target
+6. install the new version and old xmax/cmax through Chapter 15
+7. install new physical index entries
+8. buffer RETURNING new-row values
 ```
 
 Lock waits/conflicts may force the implementation to break otherwise-vectorized work around individual targets.
 
 Correctness of the write protocol wins over artificial vectorization of lock acquisition.
+
+For each target, the UNIQUE check receives only that target's exact revalidated old RID as `excluded_old_rid` when retaining a key. It does not exclude another target, another version with the same TxnId, or another current-command replacement. Immediate collision/key-swap behavior is §11.10.6.
 
 The v1 mutation/write phase is single-worker unless a later architecture explicitly defines parallel transaction-write coordination.
 
@@ -15197,6 +15469,7 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
 13. ANALYZE never globally publishes an uncommitted or partial StatsDescriptor.
 14. Any failed DML statement with a published transaction-owned write automatically aborts; a pre-write recoverable failure may leave an explicit transaction active.
 15. Autocommit DML does not expose RETURNING rows before implicit COMMIT C4–C5 complete; later transport failure cannot undo that commit.
+16. UNIQUE enforcement uses current-state ownership rather than ordinary snapshot visibility, detects earlier current-command owners, and self-excludes only the exact current UPDATE target/replacement RID.
 
 ---
 
@@ -19063,7 +19336,7 @@ AB = semantic ABORT requested/completed through §15.6
 | bind/name/type/catalog error | FA | MA | unsupported feature is the same |
 | planner/optimizer resource failure | FA | MA | final-plan invariant failure is NC, not a user/resource error |
 | expression evaluation, arithmetic, division, or cast error | FA | MA | includes errors in later rows/batches |
-| NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | this does not define M-004's conflict predicate |
+| NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | §11.10 decides UNIQUE/PRIMARY KEY conflict membership; this table decides its transaction effect |
 | READ COMMITTED write conflict or stale-target revalidation | retry/FA | MA | transparent retry is permitted only while the flag is false |
 | REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; deadlock resolution cannot retain victim locks |
 | cancellation/lock cancellation | FA | MA | unless deadlock/other transaction-fatal cause applies |
@@ -19106,7 +19379,7 @@ rows 1..4         = physically retained, logically aborted garbage
 
 Vacuum/recovery handles those versions under the existing no-physical-undo rules. The same result applies to UPDATE after any new version/old `xmax`/index effect publishes and to DELETE after any `xmax/cmax` publishes. UPDATE/DELETE target-spool, assignment, or spill failure before the first mutation is FA.
 
-Constraint checking may be ordered early for efficiency, but the transaction result depends only on where the reported violation falls relative to the boundary. This section does not define exact UNIQUE conflict membership.
+Constraint checking may be ordered early for efficiency, but the transaction result depends only on where the reported violation falls relative to the boundary. Exact UNIQUE/PRIMARY KEY conflict membership is §11.10 and does not alter this M-005 error policy.
 
 DML `RETURNING` remains buffered through successful statement completion. If any row/write/result-spool step fails, no prefix is emitted; after a crossed write boundary the transaction aborts. Returned rows are not durability or commit acknowledgements. After a successful statement in an explicit transaction, consuming its RETURNING spool remains legal even though a later explicit ROLLBACK may abort the transaction. In autocommit, the request-owned spool remains unexposed through implicit COMMIT C5 and is released only as part of the successful post-commit response; a pre-C3 commit failure therefore exposes no rows, while transport failure during/after post-C5 delivery means the transaction is COMMITTED and client observation may be incomplete/uncertain.
 
@@ -19716,6 +19989,8 @@ Erase(K,RID) removes only that physical entry
 tree invariants survive redistribution/merge
 ```
 
+It also injects/rejects duplicate stored copies of one exact `(encoded_user_key,RID)`, distinguishes an authorized idempotent physical retry from an unproven executor duplicate, and verifies that recovery redo does not invoke SQL UNIQUE enforcement.
+
 Randomized persistent testing MUST compare the tree against a sorted oracle of physical `(encoded_user_key,RID)` keys across operations such as insert, exact erase, point/range lookup, and close/reopen.
 
 Random seeds must be reproducible when failures occur.
@@ -19779,6 +20054,8 @@ Table-driven MVCC verification covers creator/deleter committed, active, too-new
 Isolation verification establishes READ COMMITTED stable-per-statement snapshots and retry re-evaluation, REPEATABLE READ fixed-snapshot behavior and serialization failure on conflicting post-snapshot writes, and the fact that snapshot-isolation write skew remains possible.
 
 Logical-lock verification establishes same-target serialization, disjoint-target concurrency, unique-key serialization, no physical-latch retention during logical waits, deterministic deadlock victim behavior, and safe waiter cleanup.
+
+Table-driven §11.10 verification covers ordinary UNIQUE and PRIMARY KEY across NULL/composite/FLOAT64 canonical keys; committed/frozen/aborted/nonterminal creators; absent/committed/aborted/nonterminal deleters; same-transaction earlier/current-command creators; earlier-command self-delete reuse versus current-command other-row conflict; same-statement INSERT duplicates; exact same-key UPDATE exclusion; order-independent another-row current-command UPDATE collision; immediate key-swap rejection; post-wait full recheck; stale physical entries; protected RID identity; M-005 before/after-write violation outcomes; and COMMIT/ABORT lock release only after terminal publication.
 
 Vacuum/reclamation verification includes exact index cleanup before retirement, persistent DEAD restart behavior, grace-delayed RID reuse, version-chain splicing, and long-running snapshot interaction.
 
@@ -20417,6 +20694,7 @@ The following global invariants apply across subsystem boundaries and MUST NOT b
 14. A failed statement that published any transaction-owned database mutation cannot leave that transaction commit-eligible in v1.
 15. Durable `TXN_COMMIT` is irreversible and cannot be reclassified ABORTED by any later runtime, cache, cleanup, or transport failure.
 16. Successful COMMIT acknowledgement follows required runtime terminal publication and coherent ownership/cache cleanup.
+17. UNIQUE/PRIMARY KEY ownership is decided by §11.10's serialized current-state predicate, not ordinary snapshot visibility or physical index presence alone.
 
 Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.27; base-access/cost invariants in §36.19; join/property invariants in §37.18; memo/search invariants in §38.25.
 
