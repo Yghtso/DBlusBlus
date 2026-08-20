@@ -577,7 +577,7 @@ until the later BufferPool quiesce in step 4. Exact shutdown ordering is:
 |---:|---|
 | 1 | Publish `DRAINING`; stop admission and prevent new maintenance/checkpoint work from starting. |
 | 2 | Request cancellation of admitted ordinary statements/maintenance at safe points and wait for their operation-local ownership to unwind. Drive every `ACTIVE` or `MUST_ABORT` transaction through §15.6 ABORT. Allow already-`COMMITTING` and already-`ABORTING` terminal protocols to complete under M-005; a commit past its publication-authorizing append remains uncancellable. Wait for terminal publication, snapshots, logical locks, writer gates, and statement resources to release. |
-| 3 | Stop/join vacuum, ANALYZE/statistics, scheduler/query workers, and ordinary checkpoint production after their admitted transaction work reaches step 2's terminal boundary. Keep BufferPool writeback and WAL writer/group-commit durability services alive. |
+| 3 | Stop/join vacuum, ANALYZE/statistics, status-reclamation/cleanup, scheduler/query workers, and ordinary checkpoint production under §14.17.1 after their admitted transaction work reaches step 2's terminal boundary. Keep BufferPool writeback and WAL writer/group-commit durability services alive. |
 | 4 | Quiesce BufferPool external Fetch/new-page admission, drain loads/evictions/writebacks and every guard/pin/latch owner, and stably flush every dirty non-retired page required for normal close under WAL-before-data. A frame belonging to a proven retired/orphan object may use §7.12.5's discard rule; no other dirty frame may be discarded. |
 | 5 | With no active writer and an empty DPT, append, durably flush, and install one final checkpoint through §13.5, including the alternating control-slot `fdatasync`. This checkpoint is mandatory for a successful controlled close but is an optimization, not a clean marker or a prerequisite for later recovery correctness. |
 | 6 | Complete every already-classified orphan/retirement cleanup task owned by this lifecycle and every namespace mutation initiated by shutdown, including each required parent-directory `fsync` under §4.7. WAL recycling remains optional, but any recycling begun must likewise become directory-durable. Unknown names remain untouched. No unacknowledged namespace mutation or queued owned cleanup is called complete. |
@@ -746,7 +746,9 @@ The v1 logical identifier widths are:
 | `CommandId` | 32 bits | `uint32_t` |
 | `Lsn` | 64 bits | `uint64_t` |
 | `TableId` | 64 bits | `uint64_t` |
+| `ColumnId` | 32 bits | `uint32_t` |
 | `IndexId` | 64 bits | `uint64_t` |
+| `ConstraintId` | 64 bits | `uint64_t` |
 | `SchemaVer` | 32 bits | `uint32_t` |
 
 The v1 invalid sentinels defined at this layer are:
@@ -761,7 +763,7 @@ The v1 invalid sentinels defined at this layer are:
 
 These values are part of the architecture wherever the corresponding sentinel is used.
 
-This chapter does not define an invalid sentinel for `CommandId`, `TableId`, `IndexId`, or `SchemaVer`.
+This chapter does not define an invalid sentinel for `CommandId`, `TableId`, `ColumnId`, `IndexId`, `ConstraintId`, or `SchemaVer`.
 
 ### 4.3.1 File identity versus operating-system handles
 
@@ -770,6 +772,335 @@ This chapter does not define an invalid sentinel for `CommandId`, `TableId`, `In
 An operating-system file descriptor is a process-local resource and MUST NOT be exposed or persisted as `FileId`.
 
 Persistent identity MUST remain valid independently of the descriptor number chosen by a particular process execution.
+
+### 4.3.2 Identifier, counter, position, and encoded-length exhaustion
+
+This section is the canonical v1 exhaustion contract. A finite persisted identity,
+monotonic counter, logical position, or encoded length is advanced only by a
+**checked-next** operation:
+
+```text
+1. decode the current value into its unsigned logical domain
+2. compute the complete candidate/result with checked add/multiply/align
+3. prove every resulting value is inside the field-specific legal domain and
+   is not a sentinel, reserved value, prior logical position, or reused identity
+4. acquire any required durable reservation/publication authority
+5. only then expose or persist the allocation/mutation
+```
+
+Failure at steps 1--4 publishes no candidate identity or mutation. Native signed
+overflow, unsigned wrap, truncation to a persisted field, and increment-then-test
+are forbidden. Reaching a legal maximum is not corruption; requesting its
+unrepresentable successor is a deterministic exhaustion error.
+
+The canonical advancing-domain inventory is:
+
+| Domain | Width / interpretation | Reserved or zero rule | First v1 value | Last value a v1 writer may allocate/emit | Reuse | Exhaustion scope |
+|---|---|---|---:|---:|---|---|
+| `FileId` | uint32 | `0` invalid | `1` | `UINT32_MAX-1 = 4,294,967,294` | never | `FILE_ID_EXHAUSTED`; fail the file/object creation before semantic publication |
+| `PageNo` identity | uint64 | `UINT64_MAX` invalid; page `0` is the superblock | `0`; ordinary pages begin `1` | representable ordinary domain ends at `UINT64_MAX-1`; the v1 physical-I/O cap below makes `1,125,899,906,842,622` the last allocatable ordinary page | unpublished serialized tail number may be retried; published reuse only through the owning free/reclamation protocol | `PAGE_NUMBER_EXHAUSTED` for that file |
+| `published_page_count` / physical page count | process-local uint64 exclusive bound reconstructed from aligned file length | `0` cannot describe an initialized managed file | `1` | `1,125,899,906,842,623` | may return from `N+1` to `N` only during proven unpublished M-003 tail rollback | same per-file `PAGE_NUMBER_EXHAUSTED`/I/O boundary |
+| `SlotId` | uint16 | `UINT16_MAX` invalid; `0` legal | `0` | representable `UINT16_MAX-1`; heap geometry currently limits an allocated slot to `1017` | only `DEAD -> UNUSED` after §14.6 grace | page-local `NO_SPACE`, not global ID exhaustion |
+| `TxnId` | uint64 | `0` invalid, `1` frozen | `2` | `18,446,744,073,708,503,041` under the exact fixed-block reservation rule below | never | `TXN_ID_EXHAUSTED`; reject new transaction admission |
+| `CommandId` | uint32 | no sentinel; `0` legal | `0` | `UINT32_MAX = 4,294,967,295` | never within a transaction | no later ordinary statement in that transaction; COMMIT/ROLLBACK remain legal |
+| `TableId` | uint64 shared catalog-object allocator | `0` invalid; `1..6` fixed built-ins | built-ins `1`; later allocations at least `7` | `UINT64_MAX-1 = 18,446,744,073,709,551,614` | never | `ID_EXHAUSTED`; fail DDL before semantic publication |
+| `ColumnId` | uint32 table-local | `0` invalid | `1` | `UINT32_MAX` subject to the much smaller complete-schema/tuple encoding bounds | not reused within a table's schema history | reject the schema construction before catalog publication |
+| `IndexId` | uint64 shared catalog-object allocator | `0` invalid; later allocations at least `7` | `7` | `UINT64_MAX-1` | never | `ID_EXHAUSTED`; fail DDL before semantic publication |
+| `ConstraintId` | uint64 shared catalog-object allocator | `0` invalid; later allocations at least `7` | `7` | `UINT64_MAX-1` | never | `ID_EXHAUSTED`; fail DDL before semantic publication |
+| `SchemaVer` | uint32 | `0` invalid | `1` | `UINT32_MAX` | never for one table | fail a schema-changing DDL before publication; v1 exposes no such ALTER and emits only `1` |
+| control-slot generation | uint64 | `0` invalid | `1` | `UINT64_MAX` | never | the next control update fails; operations requiring it cannot proceed |
+| WAL record-start `Lsn` | uint64 global unsigned byte address | `0` invalid; starts are 8-byte aligned | `8` | `2^64-48 = 18,446,744,073,709,551,568`, only for a minimum 48-byte record fitting the final segment | never | `WAL_POSITION_EXHAUSTED` before reservation/publication |
+| WAL segment index | mathematical unsigned index derived from LSN | none inside its admitted domain | `0` | `2^38-1 = 274,877,906,943` | never; retention may remove an old segment file but never reassign its index to a later position | `WAL_POSITION_EXHAUSTED` before creating another segment |
+| statistics `chunk_count` / `chunk_index` | catalog INT32 carriers, validated as nonnegative integers | count `0` invalid; index zero-based | count `1`, index `0` | count `1,048,576`, index `1,048,575`; total payload still at most `UINT32_MAX` | not within one generation | invalidate/fail that ANALYZE generation and use normal statistics fallback |
+| B+ `tree_height` / node `level` | uint16 | height `0` invalid; leaf level `0` legal | height `1`, level `0` | height `UINT16_MAX`; valid node level at most `UINT16_MAX-1` | contraction may lower height; no numeric wrap | fail root-growth MTR before provisional mutation/publication |
+
+`RID` has no independent allocator or counter. It is the exact composition of
+the owning heap `FileId`, `PageNo`, and `SlotId`; exhaustion and legal reuse are
+therefore exactly the component rules above plus §14.6 read-epoch protection.
+Built-in `TypeId` values are a fixed registry, not an advancing allocator.
+`creation_epoch` is a known opaque uint64 value, not a monotonic identity in v1,
+so every bit pattern is data rather than an exhaustion state.
+
+#### 4.3.2.1 Durable ID allocation and consumed gaps
+
+`next_file_id` and `next_catalog_object_id` are persisted next-value high-water
+marks. Their allocator must durably store `candidate + 1` before returning
+`candidate`; consequently the carrier maximum itself cannot be returned and the
+last values are the `MAX-1` values in the table. A dropped or aborted object does
+not return a FileId/TableId/IndexId/ConstraintId to its allocator. Once the
+durable next value passed it, the ID is consumed even if only a private/orphan
+A-003 artifact ever used it.
+
+TxnId reservation remains in exact blocks of `2^20 = 1,048,576`, starting at
+`2`. The greatest representable exclusive reservation end reachable by that
+sequence is:
+
+```text
+MAX_RESERVED_TXN_ID_END = 18,446,744,073,708,503,042
+MAX_ALLOCATABLE_TXN_ID   = MAX_RESERVED_TXN_ID_END - 1
+                         = 18,446,744,073,708,503,041
+```
+
+The remaining larger uint64 values are not a partial final block and are not
+legal normal v1 TxnIds. V1 does not shrink the block to consume them. If the
+next exact block cannot be added, transaction admission returns
+`TXN_ID_EXHAUSTED`. Status reclamation/freezing never permits reuse. A crash may
+permanently skip the unused suffix of an already durable block; restart advances
+from the durable/recovered high-water authority and never hands a possibly
+reserved ID to a different transaction.
+
+The first six shared catalog-object allocations are the fixed M-002 TableIds.
+Thereafter the common allocator hands out one globally increasing sequence to
+TableId, IndexId, and ConstraintId wrappers. `ColumnId` is separately table-local:
+v1 CREATE TABLE assigns `1..N` in declaration order and rejects an unencodable
+complete schema before any catalog row publishes. V1 has no schema-changing
+ALTER, so `SchemaVer` is `1`; any future increment must use this same checked-next
+rule and cannot wrap.
+
+#### 4.3.2.2 CommandId terminal boundary
+
+An admitted ordinary statement may use `CommandId{UINT32_MAX}` exactly once.
+When that statement ends, the transaction records that no next CommandId exists;
+it does not compute a wrapped value. A later ordinary statement is rejected with
+`COMMAND_ID_EXHAUSTED` before parsing/binding/execution-owned publication begins.
+The transaction remains semantically eligible to COMMIT its already successful
+work or to ROLLBACK; exhaustion alone does not force `MUST_ABORT`. Transaction
+control consumes no CommandId. All attempts of an already admitted automatic
+pre-write retry continue to use its one assigned CommandId as §39.1 requires.
+
+#### 4.3.2.3 Page number, page count, and physical file length
+
+V1's Linux/POSIX page-file contract uses a nonnegative signed 64-bit positional
+I/O/file-length domain. Define:
+
+```text
+MAX_FILE_BYTES      = INT64_MAX
+MAX_FILE_PAGE_COUNT = floor(INT64_MAX / 8192)
+                    = 1,125,899,906,842,623
+MAX_FILE_PAGE_NO    = MAX_FILE_PAGE_COUNT - 1
+                    = 1,125,899,906,842,622
+```
+
+The count includes page `0`. Before append-first extension, the owner computes
+the candidate PageNo, `new_page_count`, page byte offset, and
+`new_file_length = new_page_count * PAGE_SIZE` with checked arithmetic and
+requires all four to fit these exact domains. Failure occurs before `ftruncate`,
+`pwrite`, frame publication, or WAL reservation. A filesystem/quota limit below
+this architecture maximum is `RESOURCE_FULL`/I/O failure, not numeric exhaustion.
+
+V1 FileSuperblocks contain no independently advancing persisted page-count
+field. `published_page_count` is reconstructed from aligned physical length plus
+the M-003/WAL publication reconciliation, then maintained as the process-local
+exclusive bound. It cannot outrun either authority.
+
+An M-003 page number whose physical extension and publication never completed may
+be retried only after exact serialized tail restoration proves it was never
+published. A published PageNo is not implicitly reusable because a relation or
+transaction later disappears; only an already-defined heap/B+ reclamation rule
+may reuse it.
+
+#### 4.3.2.4 WAL positions, lengths, and terminal headroom
+
+The WAL address space is the mathematical half-open interval `[0, 2^64)`. LSN
+`0` is the invalid sentinel, so a fresh database has eight canonical zero prefix
+bytes and its initial valid append end/first possible record start is `8`.
+Record starts are nonzero uint64 multiples of eight. An **exclusive WAL end
+position** is a mathematical boundary in `8..2^64`; `2^64` is the legal terminal
+one-past address but is not encodable in any `Lsn` field. Reaching it sets an
+explicit runtime/recovery exhausted condition; it never wraps the append end to
+zero. `page_lsn`, `rec_lsn`, checkpoint LSNs, transaction-chain LSNs, and
+`durable_lsn` always store record starts, never exclusive ends. `durable_lsn >= X`
+retains §12.13's complete-record meaning.
+
+For every reservation, checked arithmetic simulates the exact header, payload,
+`align_up(...,8)`, current-segment tail/PAD, target segment, and exclusive end.
+The complete sequence must fit at or below mathematical `2^64` and its record
+start must fit uint64. The final segment index is `2^38-1` because the segment
+size is `2^26`; a greater index is forbidden even though the 16-hex-digit filename
+grammar could spell it. Formatting never truncates or wraps an index.
+
+The WAL header's uint32 `total_length` includes the 48-byte header and exact
+payload but excludes external zero alignment. Its field domain is
+`48..UINT32_MAX`; the stronger no-cross-segment rule makes the emitted v1 bound:
+
+```text
+MAX_WAL_TOTAL_LENGTH = 67,108,864
+MAX_WAL_PAYLOAD       = 67,108,816
+```
+
+`physical_span = align_up(total_length,8)` must also fit one segment. Every
+builder computes exact size before narrowing; it never truncates uint32. An
+oversized `BTREE_MTR` fails as one operation under M-003 before publication and
+restores any provisional state. V1 does not split one atomic MTR into independent
+WAL records to evade this bound.
+
+Numeric WAL capacity uses a **terminal headroom credit**, distinct from M-003 LSN
+reservation. Before a transaction may append its first user-chain/persistent-write
+WAL record, it must acquire and retain enough unconsumed numeric address space for
+the worst M-005 terminal closure. V1 reserves exactly `33,128` bytes per such
+nonterminal transaction. From an arbitrary aligned append end, one 8,264-byte
+status `PAGE_INIT`/`PAGE_IMAGE` can advance at most `16,520` bytes including a
+segment tail, and one 48-byte terminal record can advance at most `88` bytes.
+The credit is therefore `2 * 16,520 + 88`: two independently positioned images
+plus one `TXN_COMMIT`/`TXN_ABORT`. The second image covers a pre-authorizing
+COMMIT attempt that appended its preparatory image but then must transition to
+ABORT; the independent-position bound remains safe if unrelated WAL interleaves.
+A read-only transaction with no persistent WAL needs no credit and elides
+terminal WAL under §39.1.5.
+
+After a terminal attempt's preparatory image validly appends, an immediate retry
+under retained A-001/M-003 ownership reuses that image/record position as the
+physical base and retries the terminal append; it does not append an unbounded
+series of redundant images. The one allowed COMMIT-failure-to-ABORT transition
+may reevaluate and append the second accounted image. Inability to retain/reuse
+the base or complete that bounded closure is the existing noncontinuable abort/
+publication failure, not permission to consume further unreserved WAL.
+
+Headroom is aggregate capacity accounting only: it assigns no LSN, advances no
+valid end, and creates no hole. Every ordinary/user/system append admission must
+prove that its complete span leaves all outstanding credits satisfiable. Actual
+terminal/preparatory appends consume the owning credit; unused remainder is
+released only when the publication-authorizing terminal record has validly
+appended or a no-WAL read-only transaction terminates. Recovery reconstructs
+loser closure obligations from the valid WAL prefix; the unused address space
+guaranteed before crash remains available for their required status image and
+`TXN_ABORT` sequence.
+
+A credit acquired speculatively for a transaction's first persistent append may
+be released after a known no-append/M-003 exact rollback only if the transaction
+still has no valid user-chain/persistent WAL record. Once any such record validly
+appends, the credit remains through terminal closure. Append uncertainty follows
+the noncontinuable rule and never releases capacity on a guess.
+
+Consequently numeric inability to append COMMIT or ABORT for a transaction that
+already owns credit is an internal accounting invariant failure, not an expected
+boundary result, and enters the existing noncontinuable path. Near exhaustion:
+
+- a transaction whose credit is intact may COMMIT or ABORT normally;
+- a transaction without persistent WAL may still commit/abort without terminal WAL;
+- a first WAL-backed mutation that cannot acquire credit fails before publication;
+- later ordinary WAL-backed work may fail while the transaction retains its credit
+  and can still terminate;
+- a checkpoint or maintenance record may use only capacity not protecting terminal
+  closure and fails before its BEGIN/publication if it does not fit;
+- WAL recycling/disk-space cleanup cannot create a later numeric LSN.
+
+The credit guarantees numeric address space, not memory, disk blocks, segment
+namespace durability, or successful I/O. Those independent failures retain
+M-003/M-005 behavior. A final/recovery checkpoint can itself report
+`WAL_POSITION_EXHAUSTED`; it cannot cure numeric exhaustion. Controlled close
+therefore cannot report success if its required M-014 checkpoint cannot be
+encoded, while already durable transaction outcomes remain unchanged.
+
+#### 4.3.2.5 Other advancing counts, lengths, and runtime tokens
+
+Every persisted builder computes exact canonical size/count before narrowing:
+
+| Persisted producer field | Width / legal zero | First/last emitted v1 value | Exhaustion/capacity outcome |
+|---|---|---|---|
+| heap `slot_count` | uint16; zero legal | `0..1018` | page `NO_SPACE`; split work to another/new page, never truncate |
+| heap slot `tuple_length` | uint16; zero only for canonical reclaimed DEAD/UNUSED | schema-valid tuple through `8135` bytes | `ROW_TOO_LARGE` before tuple/page publication |
+| FSM `entry_count` | uint16; zero legal | `0..8144` | allocate the next representable FSM page or fail the owning PageNo/file boundary |
+| B+ node `slot_count` | uint16; zero legal | `0..1016` | split/rebalance or fail before page/MTR publication |
+| B+ `user_key_length` / `entry_length` | uint16; zero-length key invalid | key `1..1024`; leaf entry at most `1040`, internal entry at most `1048` | key-too-large/record construction failure; no overflow key in v1 |
+| WAL `total_length` / `payload_length` | uint32; total zero invalid, payload zero legal | total `48..67,108,864`; payload `0..67,108,816` | `WAL_RECORD_TOO_LARGE`/`ENCODED_LENGTH_EXCEEDED` before reservation |
+| default-blob `total_length` | uint32; zero invalid | canonical blob through `4096` bytes | reject unsupported oversized default before catalog publication |
+| `PersistedScalarV1.payload_length` | uint32; zero legal by type/NULL rules | exact `16 + payload_length`, then Align8, fitting the owning default/statistics envelope | enclosing builder fails; scalar length is never independently truncated |
+| statistics-scope `total_length` | uint32; zero invalid by every scope grammar | exact grammar length through `UINT32_MAX`; chunk count/index additionally obey the main domain table | invalidate/fail that generation; use statistics fallback |
+| statistics manifest/count fields | uint32 logical counts; zero field-specific | exact arrays/counts whose multiply/add and complete scope remain at most `UINT32_MAX` | invalidate/fail that generation before rows publish |
+| checkpoint DATA `chunk_index` and END `data_record_count` | uint32; zero legal | zero DATA records or at most `UINT32_MAX` DATA records indexed `0..UINT32_MAX-1` | checkpoint remains uninstalled; inert earlier checkpoint WAL may remain |
+| checkpoint DPT/writer counts and totals | uint32; zero legal | `0..UINT32_MAX`, with every DATA record also inside the WAL-record bound | checkpoint remains uninstalled; no count truncation |
+
+The BufferPool `modification_generation`, copied-writeback token, checkpoint/FPI
+epoch token, and B+ `root_generation` are process-local correctness identities,
+not persisted fields. Their concrete width is not fixed, but they MUST NOT repeat
+while a stale observer/completion could compare equal. A finite implementation
+either:
+
+```text
+quiesces the complete owning frame/tree/checkpoint domain,
+proves no old token or in-progress completion remains,
+and atomically reseeds every compared token
+```
+
+or rejects the mutation/root publication/checkpoint before changing bytes. It may
+not wrap. Frame identity plus generation remains nonrepeating across reassignment.
+Pin/reference counters likewise use checked increment and fail the acquisition
+without changing the count.
+
+`ReadEpochManager.current_epoch` retains its exact uint64 rule: value `0` is
+invalid and `UINT64_MAX` may be the current epoch, but no retirement is assigned
+at that value and no increment is performed from it. Further RID retirement/reuse is disabled until a process
+restart/quiescent manager reinitialization proves no old readers survive; normal
+operations not requiring physical RID reuse may continue. Recovered DEAD slots
+are re-enqueued under the new process epoch as §14.6.4 requires.
+
+#### 4.3.2.6 Failure, lifecycle, crash, and verification rules
+
+Numeric exhaustion is not corruption and is distinct from `RESOURCE_FULL`:
+
+```text
+NUMERIC_EXHAUSTED:
+    no representable legal successor exists; deleting ordinary data does not
+    help unless an owning protocol already permits reuse
+
+RESOURCE_FULL:
+    a representable operation exists but disk/quota/memory/platform allocation
+    failed; retry may become possible after operational remediation
+```
+
+The conceptual deterministic boundary errors are `ID_EXHAUSTED`,
+`TXN_ID_EXHAUSTED`, `COMMAND_ID_EXHAUSTED`, `PAGE_NUMBER_EXHAUSTED`,
+`WAL_POSITION_EXHAUSTED`, and `ENCODED_LENGTH_EXCEEDED`. Exact public enum names
+may differ, but diagnostics must preserve the exhausted domain and must not report
+these outcomes as `CORRUPT_*` or generic disk-full.
+
+M-005 applies after the lower layer returns exhaustion. Before a statement's first
+published persistent write, a local exhaustion may be a statement-only failure.
+After earlier statement writes, the transaction follows `MUST_ABORT`. TxnId
+exhaustion gates new transactions database-wide; CommandId exhaustion gates one
+transaction's later statements; PageNo exhaustion gates append in one file; WAL
+position exhaustion gates new WAL-backed mutation while preserving credited
+terminal closure. None alone changes an already durable COMMIT or makes existing
+maximum-valued bytes corrupt.
+
+An already-READY owner may continue operations that do not need the exhausted
+domain: for example reads after WAL/PageNo exhaustion and reuse from a legal page
+free list. WAL-position exhaustion alone still permits a newly admitted
+transaction to remain read-only and use the no-terminal-WAL path; its first
+WAL-backed mutation fails before publication if no closure credit is available.
+TxnId exhaustion still prevents a new transaction because v1 has no anonymous
+transaction identity. A fresh M-014 open performs normal validation and
+recovery; if mandatory recovery/checkpoint WAL cannot fit, it returns the
+exhaustion/open failure and does not claim READY. V1 adds no separate future-proof
+read-only open mode through this rule.
+
+For persisted allocators, crash before durable consumption/publication may leave
+an unused candidate only where the owning reservation protocol explicitly allows
+it. Crash after durable high-water advance or semantic publication never permits
+reuse. Recovery reconstructs FileId/catalog-object/TxnId high-water authority from
+control/checkpoint/WAL, PageNo publication from reconciled file/WAL ownership, and
+the WAL append end from the complete valid prefix. Consumed orphan/gap IDs remain
+consumed; reaching the last legal value and crashing makes the next request fail,
+not restart from an earlier value.
+
+Implementations and boundary verification MUST forbid at least:
+
+1. TxnId/CommandId/object-ID/PageNo/LSN wrap into zero, a sentinel, or prior value.
+2. TxnId reuse after status reclamation or reuse of a consumed aborted-DDL ID.
+3. extending a file before a known PageNo/page-count/file-offset overflow.
+4. truncating WAL or other uint32 lengths, or overflowing aligned WAL end arithmetic.
+5. formatting a wrapped/truncated WAL segment name.
+6. splitting an atomic BTREE_MTR only because its record was sized too late.
+7. consuming address space reserved for an existing writer's terminal closure.
+8. allowing a wrapped modification/root/FPI/read-epoch token to equal a stale token.
+9. truncating statistics chunk count/index or publishing an unrepresentable B+ level.
+
+Tests must be able to inject/synthesize each allocator or counter immediately below,
+at, and above its boundary without performing the corresponding number of real
+allocations. Required cases include crash/restart after the last durable allocation,
+consumed-gap behavior, exact maximum record/page construction, and rejection before
+publication. This is a verification obligation, not a prescribed allocator API.
 
 ## 4.4 Page identity
 
@@ -1436,6 +1767,10 @@ extend by exactly one page
 MUST be serialized against concurrent extensions of the same managed file so two allocators cannot receive the same `PageNo`.
 
 The existing raw append primitive is a lower-layer storage mechanism. Once WAL/recovery is active, a newly extended ordinary page is not database-visible merely because the file grew.
+
+Before any physical extension, allocation applies §4.3.2.3's exact PageNo,
+page-count, signed-64-bit offset, and file-length checks. M-003 tail rollback is
+not permission to begin an extension whose candidate is already exhausted.
 
 ### 4.11.1 WAL-mode page publication
 
@@ -3943,7 +4278,7 @@ The raw disk layer MUST NOT round, truncate, or silently repair a misaligned pag
 
 ### 7.4.6 Checked physical offsets
 
-Before page I/O, physical offset arithmetic MUST be checked so the complete `PAGE_SIZE` page extent is representable in the platform's positional-I/O offset type.
+Before page I/O, physical offset arithmetic MUST be checked so the complete `PAGE_SIZE` page extent is representable in v1's nonnegative signed-64-bit positional-I/O offset domain and satisfies §4.3.2.3's exact file bound.
 
 Arithmetic MUST NOT wrap.
 
@@ -4059,6 +4394,9 @@ Loading, writeback, victim, no-flush, and file-retirement reservations are inter
 It is not persisted.
 
 Its comparison token MUST NOT wrap/repeat while a writeback completion could compare against it. A finite implementation that cannot advance safely fails the next mutation before changing page bytes and may reseed only after quiescing the frame with no active writeback; silent wrap is forbidden.
+
+The complete runtime-token quiesce/reseed rule, including frame reassignment and
+checkpoint/FPI tokens, is §4.3.2.5.
 
 Together with page latching it lets BufferPool determine whether a page changed after a stable flush image was copied but before the I/O completed.
 
@@ -5440,6 +5778,11 @@ update root_page_no
 update tree_height
 ```
 
+Root growth applies §4.3.2's uint16 boundary: `tree_height` may be at most
+`UINT16_MAX` and every published node level is smaller than that height. If
+`old_root.level + 1` or the corresponding new height is not representable, the
+insert/MTR fails before provisional mutation or page-allocation publication.
+
 ### 8.15.2 Root contraction
 
 If an internal root reaches zero separator entries:
@@ -6181,6 +6524,9 @@ The 64-bit space makes numerical wraparound practically irrelevant for the inten
 
 The allocator MUST NOT wrap and reuse old normal transaction IDs.
 
+The last normal TxnId v1 can reserve/allocate is the exact fixed-block value in
+§4.3.2.1; larger uint64 values are not a partial final reservation block.
+
 Freezing exists to permit eventual transaction-status reclamation, not primarily to solve 32-bit-style wraparound.
 
 ## 9.3 Durable transaction-ID reservation
@@ -6250,7 +6596,9 @@ Then:
 
 If the durable reservation update fails, IDs from the not-yet-durable interval MUST NOT be handed out.
 
-If adding another reservation block would overflow the normal 64-bit TxnId space, beginning a new transaction MUST fail rather than wrap or reuse an old ID.
+If adding the next exact reservation block would exceed
+`MAX_RESERVED_TXN_ID_END` in §4.3.2.1, beginning a new transaction returns
+`TXN_ID_EXHAUSTED` rather than shrinking the block, wrapping, or reusing an old ID.
 
 After a crash, unused IDs from an already durable reservation MAY be skipped permanently.
 
@@ -6368,7 +6716,7 @@ The command layer assigns the current CommandId once when it admits one nontermi
 
 The assigned CommandId is consumed exactly once when the statement ends, whether it succeeds, fails while leaving the transaction `ACTIVE`, or makes the transaction `MUST_ABORT`. CommandIds are monotonically increasing and never reused. If the transaction remains `ACTIVE`, its next admitted statement receives the checked next CommandId. Transaction-control commands that terminate the transaction do not need a new MVCC command boundary.
 
-A parse/bind/planning failure inside an explicit transaction is still a failed admitted statement for this purpose. No tuple may exist for that CommandId, but reusing it is forbidden. If increment would overflow `CommandId`, no later ordinary statement may begin; existing transaction work may still be committed or aborted.
+A parse/bind/planning failure inside an explicit transaction is still a failed admitted statement for this purpose. No tuple may exist for that CommandId, but reusing it is forbidden. `CommandId{UINT32_MAX}` is usable by one admitted statement; afterward §4.3.2.2 rejects later ordinary statement admission with `COMMAND_ID_EXHAUSTED` while preserving COMMIT/ROLLBACK eligibility for existing work.
 
 Tuple versions store:
 
@@ -7861,6 +8209,10 @@ The initial segment size is exactly:
 
 An LSN is the byte position of a WAL record in the logical WAL stream.
 
+LSN/end-position exhaustion is exactly §4.3.2.4. Segment `0` bytes `0..7` are
+the canonical zero prefix because LSN `0` is invalid; a fresh stream's first
+record and initial append end are at LSN `8`.
+
 Consequently, for a logical byte position `L`:
 
 ```text
@@ -7949,6 +8301,10 @@ If the next record does not fit in the remaining segment bytes:
 Recovery recognizes an all-zero short segment tail as padding, not as a record header.
 
 A logical record whose aligned `physical_span` is greater than 64 MiB is rejected as `WAL_RECORD_TOO_LARGE` before LSN reservation. One logical `BTREE_MTR` therefore has the same hard limit.
+
+The exact emitted `total_length`/payload maxima and the no-split MTR exhaustion
+outcome are §4.3.2.4. A uint32 length that is representable but whose aligned
+span exceeds one segment is still too large.
 
 ## 12.4 WAL record header v1
 
@@ -8417,7 +8773,7 @@ The terminal record remains on the user transaction's WAL chain and its `prev_tx
 
 The full image contains every status already reflected in the page before this terminal update, but it contains neither this update's terminal bits nor any other semantic evidence for this terminal outcome. Its changed embedded `page_lsn=F` makes it the canonical physical after-image of the reconstruction-base installation.
 
-If appending the terminal record fails after the system image was appended, the status bits, resident `page_lsn`, dirty state, `rec_lsn`, and FPI-epoch state remain unmodified by this attempt. The standalone pre-terminal image is redo-safe and semantically inert; a later attempt reevaluates the full-image conditions normally.
+If appending the terminal record fails after the system image was appended, the status bits, resident `page_lsn`, dirty state, `rec_lsn`, and FPI-epoch state remain unmodified by this attempt. The standalone pre-terminal image is redo-safe and semantically inert. An immediate retained-ownership retry reuses it as §4.3.2.4 requires; the one COMMIT-failure-to-ABORT transition may reevaluate and emit the second image covered by terminal headroom, but no path appends an unbounded image series.
 
 Every reservation/append above obeys §12.12. A **known** terminal-record no-append failure therefore returns with the exact pre-terminal page/frame state, while an uncertain append outcome is noncontinuable. Once the terminal record validly appends, step 5 must complete under the retained latch/transition ownership or storage becomes noncontinuable; rolling the status page back and continuing would conflict with terminal evidence that may later become durable. A later WAL durability failure does not make the installed status-page bytes structurally illegal or roll them back; §§39.1.5–39.1.6 define the resulting COMMIT/ABORT runtime and client outcome.
 
@@ -8547,6 +8903,10 @@ An owning protocol may require more than one ordered record. It MUST identify wh
 - may prepare/create the next WAL segment through §12.2.1,
 - does **not** advance the valid append end or make an LSN usable by ordinary page/frame metadata,
 - does **not** create a legal logical hole if canceled.
+
+Before returning the candidate, reservation also proves §4.3.2.4's mathematical
+end/segment bounds and preserves every outstanding transaction terminal-headroom
+credit. Capacity credit is not an LSN reservation and cannot make a hole.
 
 The reservation includes any required preceding `WAL_PAD` or all-zero short segment tail. That padding and the target record become part of the valid logical prefix only when the target append publishes successfully; failure leaves the valid append end unchanged even if private buffer bytes or an empty next segment were prepared.
 
@@ -9034,7 +9394,8 @@ only then return candidate
 
 FileId allocation therefore tolerates crash gaps but never reuses a FileId that may have been published.
 
-If increment would overflow uint32 or produce `INVALID_FILE_ID`, allocation fails rather than wrapping.
+The exact last candidate is `UINT32_MAX-1` under §4.3.2.1. If increment would
+overflow uint32 or produce `INVALID_FILE_ID`, allocation fails rather than wrapping.
 
 ### 13.2.6 Catalog-object ID allocation
 
@@ -9067,6 +9428,9 @@ Crash gaps are acceptable.
 A catalog-object ID that may have appeared in persistent state is never reused, including after transaction abort.
 
 If increment would overflow uint64 or produce `0`, allocation fails rather than wrapping.
+
+The exact last candidate is `UINT64_MAX-1`; the carrier maximum remains the
+persisted exhausted `next_catalog_object_id` and is never returned as an object ID.
 
 `ColumnId` and built-in `TypeId` do not use this allocator.
 
@@ -9116,6 +9480,11 @@ The conceptual protocol is:
 7. fdatasync database.control
 8. only then mark the new checkpoint/FPI epoch complete in memory
 ```
+
+BEGIN/DATA/END record construction, DATA chunk/count totals, control generation,
+LSNs, and the process-local FPI epoch all apply §4.3.2 before any checkpoint
+record or control update is published. An oversized/exhausted checkpoint is not
+installed; earlier complete inert checkpoint records may remain in WAL.
 
 Checkpointing remains fuzzy and does not force all dirty pages.
 The recovery-completion checkpoint and controlled-close final checkpoint are
@@ -9267,6 +9636,11 @@ ownership. The complete manager/catalog/status/READY dependency order is
 8. logically discards/zeroes bytes after the last valid WAL record while preserving the fixed 64 MiB segment-file length,
 9. reconciles unpublished page-file append tails per §4.11.3 during recovery,
 10. completes final ownership/orphan reconciliation at the §13.19 recovery gate.
+
+The scanner requires segment `0` bytes `0..7` to be zero and begins record
+framing at LSN `8`; every later segment begins at offset `0`. An empty database
+therefore reconstructs append end `8`, not invalid LSN `0`. End arithmetic and
+the terminal one-past exhausted condition are §4.3.2.4.
 
 Every segment needed from the installed recovery start through the valid WAL tail has its exact §12.2 basename and no missing interior segment index. An extra next-contiguous all-zero segment durably created under §12.2.1 is an empty tail, not corruption. Segments proven wholly older than the installed retention floor may be absent or may be re-unlinked if a precrash unlink was not directory-durable.
 
@@ -9955,6 +10329,10 @@ Future visibility then treats the creator as committed without requiring the ori
 
 After sufficiently complete vacuum/freezing proves a cutoff `X` such that no persistent correctness object still requires transaction-outcome lookup for a normal TxnId below `X`, whole transaction-status pages below that cutoff may be retired.
 
+Concurrent vacuum lookup and cutoff advancement are ordered by the canonical
+`StatusHistoryGuard`/reclaimer protocol in §14.17.1; proof of a cutoff without
+that runtime coordination is insufficient.
+
 The proof concerns **status dependency**, not numerical occurrence. A heap/catalog
 tuple `xmin` or effective `xmax` normally remains status-dependent until the
 ordinary freezing/normalization rules make it independent. By contrast, a
@@ -10112,6 +10490,386 @@ Background scheduling may later react to measured dead-version ratio, aborted-ve
 
 The scheduling policy is operational, not part of tuple-reclamation correctness.
 
+### 14.17.1 Maintenance coordination
+
+This section is the canonical v1 coordination contract among `VACUUM`,
+`ANALYZE`, transaction-status reclamation, catalog DROP/object retirement,
+statistics publication/garbage collection, and physical cleanup. The gates in
+this section are conceptual runtime ownership domains; they add no persisted
+state or format field.
+
+#### Operation classes and ownership domains
+
+| Operation | Scope and persistent effect | User-work concurrency | Same-operation concurrency |
+|---|---|---|---|
+| `VACUUM(TableId)` | One table plus the exact `IndexId` set in its retained descriptor. It performs independently WAL-backed heap/index/FSM/freezing maintenance units; the pass is not an ordinary user transaction and is not all-or-nothing. | Online with SELECT/INSERT/UPDATE/DELETE under §§14.2–14.12. | At most one mutating pass per TableId. A second request waits, then rechecks object liveness and starts a new pass or fails if the object retired. |
+| `ANALYZE(TableId)` | One transaction-owned statement, one snapshot, one immutable table/schema/index manifest, and transactional `sys_statistics` rows. | Online with user work and VACUUM. | Concurrent ANALYZE statements are allowed, including on the same table; StatsVersion selection resolves publication order. |
+| `TXN_STATUS_RECLAIM` | Database-global proof/cutoff publication and sparse physical retirement under §14.14. | Concurrent with ordinary work and table vacuum only through the status-history protocol below. | Exactly one global reclaimer owns cutoff publication at a time. A second request waits and recomputes after the owner finishes. |
+| object/file retirement cleanup | One catalog-retired TableId or IndexId and its exact managed files. It drains runtime owners and performs A-003 unlink/directory durability. | Unrelated live objects continue. The retired object admits no new work. | Serialized per object; a duplicate request waits and then observes completed or still-pending cleanup. |
+| orphan cleanup | Database namespace, but only exact A-003 entries already proven unowned. | May coexist with READY work because classified entries are semantically inaccessible. | One database-global namespace-cleanup owner at a time; a second request waits. |
+
+Fuzzy checkpointing remains separately coordinated. VACUUM/status/retirement
+mutations use ordinary WAL, DPT, WAL-before-data, and checkpoint rules; a
+checkpoint neither grants maintenance ownership nor serializes these operations.
+Maintenance admission is legal only in database state `READY`.
+
+#### Object lifetime and publication gates
+
+Every maintenance operation resolves stable nonreused `TableId`/`IndexId`
+identities, never names, and uses the maintenance-facing object state:
+
+```text
+LIVE -> RETIRING -> RETIRED
+```
+
+These are runtime/catalog-lifecycle concepts, not persisted catalog flags.
+`DROP` owns the `LIVE -> RETIRING` transition; aborting that DROP restores LIVE,
+while terminal COMMITTED makes retirement semantic and permanent. The object
+gate provides two distinct claim kinds:
+
+```text
+OBJECT_USE(TableId/IndexId)
+    admitted only while LIVE
+    retains descriptors/files/pages against physical retirement
+    does not prevent DROP from marking RETIRING
+
+STATS_PUBLISH(TableId, schema_version, immutable manifest identities)
+    transaction-owned and admitted only while every named object is LIVE/current
+    shared with another compatible STATS_PUBLISH claim
+    incompatible with DROP's transition to RETIRING and with catalog publication
+    that changes the table/schema/index manifest
+    once it authorizes a statistics-row publication, retained through COMMITTED
+    or ABORTED terminal publication
+```
+
+`VACUUM` and the expensive scan phase of `ANALYZE` hold `OBJECT_USE` claims on
+the table and every required index. Index claims are acquired in increasing
+`IndexId` order. An open file descriptor or cached descriptor without this
+claim is not maintenance mutation authority. `DROP` may mark an object RETIRING
+while ordinary use claims exist, immediately blocks new claims, and requests
+maintenance cancellation; physical retirement and unlink still wait for every
+use claim, descriptor/query handle, BufferPool/file owner, guard, and frame to
+drain under §§7.12.5, 21.9, and 4.7.7.
+
+An admitted VACUUM that observes RETIRING finishes or exactly rolls back its
+current M-003 publication unit, begins no next mutation unit, releases its
+claims, and ends canceled. An admitted ANALYZE scan likewise releases its
+current page/read-epoch ownership and cancels collection unless it already owns
+the applicable `STATS_PUBLISH` claims. DROP may commit catalog deletion before
+ordinary use claims drain, but it may not physically unlink their files.
+
+#### Table VACUUM ownership, foreground work, and RID reuse
+
+One exclusive runtime `TableVacuumOwner(TableId)` covers an entire mutating
+vacuum pass. It serializes same-table passes but does not serialize different
+tables. It is distinct from `TableWriterGate`: VACUUM does not take that gate
+exclusive and remains online with foreground DML. A waiting second pass is
+cancellable and must reacquire/revalidate the current descriptor and object
+claims after it wins ownership.
+
+Foreground operations and ANALYZE are protected from physical reclamation by
+ordinary MVCC snapshot registration, page/B+ latches and guards, and
+`ReadEpochGuard` whenever an index-derived RID may be retained. VACUUM performs
+the §14.11 recheck before each mutation and never waits for transaction,
+maintenance, schema, or unique-key ownership while holding a page/B+ latch.
+It does not need every `UNIQUE_KEY` lock to erase a terminally stale exact
+`(key,RID)` entry: B+ mutation ownership plus the ReadEpoch protocol protect the
+physical operation, while M-004 current-owner recheck protects logical UNIQUE
+correctness.
+
+Concurrent workers MUST preserve this existing order for each RID:
+
+```text
+globally reclaimable logical version
+    -> every required exact index entry known absent
+    -> persistent NORMAL -> DEAD
+    -> ReadEpoch retirement/grace
+    -> version-chain reuse proof
+    -> DEAD -> UNUSED / RID reuse
+```
+
+All indexes in the retained descriptor participate. Different-table vacuum
+passes may run concurrently; their only global serialization is the narrow
+ReadEpoch mutex and status-history coordination defined here. FSM updates use
+ordinary FSM page synchronization and need no database-global maintenance
+lock; an FSM estimate may be stale while heap free space remains authoritative.
+
+#### ANALYZE snapshot, immutable identity, and publication revalidation
+
+One ANALYZE statement has one owning TxnId/current CommandId and one stable
+effective SQL snapshot under §34.3. The same snapshot governs all SQL-visible
+heap rows, columns, and index-derived logical observations for that invocation.
+Its bound identity and immutable candidate manifest contain at least:
+
+```text
+TableId
+schema_version
+exact ColumnIds
+exact IndexIds
+each required index's owning TableId and key-schema/fingerprint identity
+```
+
+The expensive scan runs with ordinary `OBJECT_USE` claims and without
+schema-changing exclusivity, so VACUUM and DML may proceed. Physical index/page
+statistics may change during collection and remain approximate under Chapter
+34; page/RID access still uses guards and read epochs. A retirement request may
+cancel the scan at a safe page-operation boundary.
+
+After constructing one complete immutable descriptor/manifest, but **before
+publishing the first `sys_statistics` row**, ANALYZE must:
+
+```text
+1. release scan page/B+ latches and transient RID ownership
+2. acquire STATS_PUBLISH for the TableId and then all manifest IndexIds in
+   increasing IndexId order
+3. under that gate consult current object-publication state, not merely the
+   possibly old ANALYZE statement/transaction snapshot
+4. prove the TableId is still current/live (or is a transaction-owned CREATE
+   that will publish atomically), schema_version is unchanged, every manifest
+   ColumnId still belongs to that table, every manifest IndexId is live and
+   belongs to that table, each required key schema/fingerprint still matches,
+   and the current applicable ColumnId/IndexId sets equal the candidate manifest
+5. prove that the immutable TABLE manifest still names exactly the candidate's
+   required TABLE/COLUMN/INDEX scopes
+6. publish all rows transactionally and retain every STATS_PUBLISH claim through
+   terminal COMMITTED or ABORTED publication
+```
+
+This final check is independent of ordinary old-snapshot catalog visibility. A
+check followed by releasing the gate before row publication/transaction terminal
+outcome is invalid because DROP could linearize in between.
+
+If claim acquisition/revalidation fails before any statistics row publishes,
+the attempt releases those claims immediately. Once the validated operation
+publishes its first row, its claims are transaction-lifetime locks. CREATE INDEX,
+DROP, or any future schema/index-manifest change that arrives after that point
+waits for terminal publication; one that published its manifest change first
+causes the ANALYZE revalidation to fail.
+
+Failure of any check discards the **entire** generation, including when only one
+manifest IndexId was dropped. V1 never edits/recomputes a generation manifest
+during publication and never publishes a table generation lacking a formerly
+required index member. Because revalidation precedes the first persistent stats
+row, a recoverable failure may leave an explicit transaction ACTIVE under M-005;
+autocommit aborts its implicit transaction. If a later failure occurs after any
+row publication, M-005 requires abort and completeness filtering keeps the
+generation globally unusable.
+
+The ANALYZE/DROP linearization is the object publication gate:
+
+```text
+ANALYZE obtains every STATS_PUBLISH claim first:
+    DROP waits; ANALYZE may reach terminal outcome for the still-live identities;
+    after claim release, DROP may mark RETIRING and commit
+
+DROP marks any required identity RETIRING first:
+    ANALYZE cannot acquire/revalidate its complete claim set and publishes no
+    generation
+```
+
+The same rule covers `DROP TABLE` and `DROP INDEX`. It does not use the object
+name, so DROP/recreate under the same name cannot capture stale statistics.
+Schema-changing ALTER is not added by this rule; any future operation that
+changes `schema_version` must participate in the same publication gate.
+
+#### Concurrent statistics publication, cache, and garbage collection
+
+Concurrent same-table ANALYZE operations may both commit complete generations.
+Among generations applicable to the same current TableId/schema identity, the
+greatest unsigned-lexicographic StatsVersion under §34.3.1 is selected. A cache
+install is conditional on both current object/schema applicability and a newer
+selected StatsVersion; reinstall of the same exact version is an idempotent
+no-op, and an older version is rejected. Thread/callback order MUST NOT regress
+the cache.
+
+Terminal committed DROP first makes the TableId/IndexId inapplicable to new
+planning and invalidates/bypasses its current statistics cache entry. Every
+delayed ANALYZE cache callback rechecks current object/schema applicability
+under the same cache/publication ordering before install. If DROP has won, the
+callback is discarded and cannot reinstall the entry. Nonreused IDs ensure a
+same-name replacement cannot inherit it. A commit-side cache failure still
+follows M-005: committed `sys_statistics` rows remain authoritative rebuildable
+metadata, and safe older/missing-statistics fallback is allowed.
+
+Older generations become statistics-GC candidates only after a newer committed
+complete applicable generation is authoritative, or all of an object's
+generations become candidates after that object is terminally dropped. Their
+deletion is ordinary catalog MVCC maintenance and must preserve active catalog
+snapshots; an in-flight newer ANALYZE is not sufficient. DROP makes table/index
+statistics semantically inapplicable at terminal catalog publication even if
+their rows are physically removed later. StatsVersion payload TxnIds create no
+status-retention claim under §34.3.1.
+
+#### Status-history guard and cutoff publication
+
+Transaction-status reclamation and status-dependent vacuum lookup share one
+runtime `StatusHistoryCoordinator`. Before a vacuum pass inspects any tuple
+metadata that may require status lookup, it atomically registers a conceptual:
+
+```text
+StatusHistoryGuard(G)
+G = currently published txn_status_reclaim_before
+protected lookup range = every normal TxnId >= G
+```
+
+The guard is held through every status-dependent scan/recheck in that pass.
+While it exists, a reclaimer may not publish a cutoff greater than `G`. With
+several guards, the greatest new cutoff is bounded by the minimum guard value.
+Vacuum never asks the guard to restore history below `G`: metadata below `G`
+must already be frozen/normalized/status-independent under §14.14.
+A pass that produced new freeze evidence releases its guard before requesting a
+cutoff advance; the one global reclaimer then recomputes the proof and does not
+special-case the former pass's own guard.
+
+Exactly one reclaimer computes and publishes a cutoff. Under the same
+coordinator serialization, before advancing to page-aligned `C` it must account
+for the existing persistent freeze proof, registered SQL snapshots and other
+explicitly registered status-correctness dependencies, every active
+StatusHistoryGuard, and any retained recovery/checkpoint correctness dependency.
+Transaction existence without such a dependency does not pin the cutoff, and a
+StatsVersion occurrence is not a dependency. The coordinator excludes new guard registration from the final
+proof through §14.14.2 steps 2–3 (durable control publication and matching
+runtime cutoff publication). BufferPool retirement and optional hole punching
+then proceed under §14.14.2 without holding the registration coordinator.
+
+The race is exact:
+
+```text
+guard registers first:
+    C is clamped to <= G until guard release
+
+reclaimer publishes C first:
+    a later guard observes G=C and may use only status at/above C; it must
+    re-evaluate/fail rather than assume older history exists
+```
+
+Status lookup absence/`RETIRED` is never interpreted as ABORTED or COMMITTED.
+A below-cutoff tuple field that is frozen or otherwise canonically
+status-independent is valid and needs no lookup. A below-cutoff `xmin`/effective
+`xmax` that still requires status is the §9.13 reclamation invariant violation:
+the pass fails without mutation or guesswork and the database becomes
+noncontinuable because required transaction outcome can no longer be proven.
+
+#### Compatibility matrix
+
+The terms below are semantic: `SERIALIZED` means one owner waits for the other;
+`WAIT/REVALIDATE` means the winner is determined at the named gate and the
+loser waits, cancels, or rechecks before publication; `INCOMPATIBLE` forbids new
+admission.
+
+| Operation A | Operation B / scope | Result | Required reason |
+|---|---|---|---|
+| VACUUM | VACUUM, same table | `SERIALIZED` | one `TableVacuumOwner`; second waits and revalidates |
+| VACUUM | VACUUM, different tables | `CONCURRENT` | independent table ownership; narrow shared epoch/status synchronization only |
+| VACUUM | ANALYZE, same or different table | `CONCURRENT` | MVCC snapshot + page/ReadEpoch protection; ANALYZE publication separately revalidates |
+| ANALYZE | ANALYZE, same or different table | `CONCURRENT` | immutable distinct StatsVersions; shared publication claims and monotonic cache install |
+| VACUUM | DROP TABLE or a required DROP INDEX | `WAIT/REVALIDATE` | DROP marks RETIRING and cancels at a vacuum unit boundary; unlink waits for claims/guards |
+| ANALYZE | DROP TABLE or manifest DROP INDEX | `WAIT/REVALIDATE` | `STATS_PUBLISH` versus RETIRING linearization; entire stale manifest is discarded |
+| ANALYZE | CREATE INDEX or another applicable schema/index-manifest publication | `WAIT/REVALIDATE` | the same publication gate makes either ANALYZE's immutable manifest or the DDL publish first |
+| TXN_STATUS_RECLAIM | VACUUM, any table | `WAIT/REVALIDATE` | guard/cutoff coordinator orders history use and cutoff publication |
+| TXN_STATUS_RECLAIM | TXN_STATUS_RECLAIM | `SERIALIZED` | one global monotonic cutoff owner |
+| TXN_STATUS_RECLAIM | foreground SQL | `CONCURRENT` | snapshot/correctness dependencies and status-page pins are included before cutoff/page retirement |
+| VACUUM | foreground SELECT/INSERT/UPDATE/DELETE | `CONCURRENT` | online reclamation predicate, revalidation, latches, and ReadEpoch protocol |
+| ANALYZE | foreground DML/SELECT | `CONCURRENT` | one fixed SQL snapshot; concurrent changes make statistics stale, not incorrect |
+| DROP TABLE/INDEX | target foreground DML | `SERIALIZED` | existing SchemaLock/TableWriterGate transaction protocol |
+| VACUUM/ANALYZE/status reclaim | fuzzy checkpoint | `CONCURRENT` | ordinary WAL/DPT/checkpoint rules serialize physical details |
+| any new maintenance | `RECOVERING`, `DRAINING`, `CLOSING`, or `NONCONTINUABLE` | `INCOMPATIBLE` | database lifecycle admission is not READY |
+
+#### Lifecycle, failure, and lock ordering
+
+On `READY -> DRAINING`, no new maintenance is admitted. VACUUM, status reclaim,
+statistics GC, and cleanup finish or restore their current publication unit and
+quiesce; an ACTIVE ANALYZE is canceled and follows ordinary M-005/M-014 abort
+handling, while already-COMMITTING or ABORTING ANALYZE transactions complete
+terminal publication. Namespace cleanup already initiated by shutdown completes
+under §3.3.6. During `RECOVERING` no normal maintenance exists. At
+`DATABASE_NONCONTINUABLE`, all new maintenance mutation and publication stops;
+workers only release safe volatile ownership for non-clean teardown, and no
+vacuum, ANALYZE row publication, status-cutoff advance, statistics GC, or new
+cleanup write continues.
+
+A VACUUM pass is a sequence of system-maintenance publication units. An exactly
+restored provisional unit may fail the pass safely; earlier successful WAL-backed
+units remain valid and idempotent. Storage uncertainty escalates under M-003.
+ANALYZE is transactional and follows M-005. A status cutoff durable at
+§14.14.2 step 2 never moves backward; failure before durable publication leaves
+the old cutoff, while inability to establish matching runtime state after it is
+durable is noncontinuable. Retirement unlink/sync failure leaves semantic DROP
+committed and cleanup pending under A-003.
+
+Conceptual acquisition/order rules are:
+
+```text
+database READY admission
+    -> resolve stable IDs/descriptors
+    -> OBJECT_USE claims (table, then IndexIds ascending)
+    -> TableVacuumOwner when VACUUM
+    -> StatusHistoryGuard before status-dependent vacuum scanning
+    -> BufferPool/read-epoch guards
+    -> short heap/B+ latches
+
+ANALYZE final publication:
+    no page/B+ latch
+    -> STATS_PUBLISH table claim
+    -> STATS_PUBLISH IndexId claims ascending
+    -> current-object revalidation
+    -> catalog row publication
+
+DROP:
+    existing SchemaLock
+    -> existing TableWriterGate exclusive where required
+    -> object RETIRING transition/publication ordering
+```
+
+`STATS_PUBLISH` waits are transaction-logical waits and participate in the
+existing wait-for graph/deadlock-victim rules. No operation waits for a long
+schema/object/maintenance/status/logical lock while holding a heap/B+ page latch,
+BufferPool frame transition, or read-epoch guard. Maintenance is best-effort:
+v1 promises no starvation-free scheduler. Delay may retain disk/status history
+or degrade plans, but correctness never depends on prompt VACUUM or ANALYZE.
+
+#### Required race outcomes
+
+1. ANALYZE scans, DROP marks/commits retirement, then ANALYZE seeks publication:
+   the claim/revalidation fails and no generation publishes.
+2. ANALYZE obtains all publication claims first: DROP waits; ANALYZE reaches
+   terminal commit/abort, releases claims, then DROP may retire.
+3. Two ANALYZE operations finish/cache-install in reverse wall-clock order: both
+   complete committed generations remain valid catalog history, but selection
+   and cache retain the greater applicable StatsVersion and never regress.
+4. ANALYZE commits, its cache callback is delayed, DROP commits, then the callback
+   runs: current-object recheck rejects the callback; statistics are not
+   reinstalled.
+5. Vacuum guard wins before a cutoff attempt: the cutoff cannot pass its `G`.
+6. Reclaimer publishes first: the vacuum guard starts at the new cutoff and may
+   not request retired history.
+7. Vacuum sees a frozen/status-independent tuple below cutoff: it proceeds without
+   lookup. Seeing a status-dependent one is a noncontinuable invariant failure.
+8. VACUUM owns an object when DROP marks RETIRING: the current atomic unit
+   completes/restores, VACUUM cancels and drains, and physical unlink waits.
+9. DROP marks RETIRING before VACUUM admission: the pass is not admitted.
+10. DROP commits while VACUUM still has pages/guards: logical DROP is effective,
+    but those physical files remain linked/owned until all claims and guards drain.
+
+#### Forbidden maintenance implementations
+
+V1 explicitly forbids:
+
+1. two uncoordinated mutating vacuum passes on one table;
+2. advancing status cutoff past an active vacuum history dependency;
+3. interpreting missing/reclaimed status as ABORTED or COMMITTED;
+4. publishing ANALYZE statistics after the stable TableId/schema/manifest object was dropped or replaced;
+5. using a table/index name or StatsVersion as object-liveness proof;
+6. allowing an older/delayed ANALYZE callback to replace a newer StatsVersion or reinstall after DROP;
+7. unlinking table/index files while maintenance claims, descriptors, guards, frames, or file owners remain;
+8. admitting new maintenance after an object is RETIRING or the database leaves READY;
+9. changing a statistics generation manifest during publication;
+10. relying on prompt VACUUM for UNIQUE correctness;
+11. reusing a RID before all stale index references and read epochs satisfy Chapter 14;
+12. running normal maintenance during recovery or continuing mutation after noncontinuable publication;
+13. waiting for maintenance/schema/status/logical ownership while retaining short page/B+ latches;
+14. physically deleting old statistics without ordinary catalog MVCC/snapshot safety.
+
 ## 14.18 Vacuum/reclamation invariants
 
 1. The global reclamation horizon is derived from registered SQL snapshots, not transaction existence.
@@ -10138,6 +10896,12 @@ The scheduling policy is operational, not part of tuple-reclamation correctness.
 22. FSM/statistical maintenance cannot weaken reclamation correctness.
 23. Status retention is pinned by fields that still require transaction-outcome
     lookup, not by opaque numeric occurrences such as a published StatsVersion.
+24. Exactly one mutating vacuum pass owns a TableId at a time; different tables may vacuum concurrently.
+25. Every maintenance mutation is authorized by a live stable-ID object claim, not merely an open file or cached descriptor.
+26. Status-cutoff publication cannot pass an active StatusHistoryGuard.
+27. ANALYZE publishes only after current table/schema/index-manifest revalidation under a terminal-lifetime publication claim.
+28. Statistics cache install is monotonic by applicable object identity and StatsVersion and cannot reinstall after DROP.
+29. DROP may become semantically committed before maintenance owners drain, but physical unlink waits for every claim/guard/owner.
 
 ---
 
@@ -10292,7 +11056,8 @@ A transaction that created DDL physical resources MUST first satisfy the §21.5 
 ```text
 C0. accept COMMIT only from ACTIVE; no ordinary statement may still be running
 C1. validate every commit prerequisite, including DDL final-name durability,
-    and reserve every fallible resource needed through runtime publication
+    and reserve every fallible resource needed through runtime publication;
+    a persistent transaction already owns its §4.3.2.4 terminal-WAL credit
 C2. state ACTIVE -> COMMITTING; while still nonterminal in the registry,
     execute the §12.10.5 status-page protocol under its write latch:
         append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
@@ -10324,6 +11089,7 @@ For an abortable transaction in `ACTIVE` or `MUST_ABORT`:
 ```text
 A0. state ACTIVE/MUST_ABORT -> ABORTING; reject ordinary statements/COMMIT
 A1. if persistent WAL-visible state exists:
+       consume only the owning §4.3.2.4 terminal-WAL credit for numeric capacity
        execute the §12.10.5 status-page protocol under the page write latch:
            append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
            append TXN_ABORT at abort_lsn
@@ -10642,7 +11408,7 @@ The ordinary stored scalar registry has signed SQL integer types but several cat
 | Boolean property | `BOOLEAN` (`1`) | Use the ordinary canonical BOOLEAN scalar encoding only. |
 | Name or opaque bounded byte sequence | `VARCHAR` (`7`) | Use ordinary binary VARCHAR. Names obey the canonical-name rule below; opaque blobs may contain any byte, including zero. |
 
-These are scalar carriers, not conversions between identifier domains. A TableId carrier cannot be accepted as an IndexId merely because both use INT64. Equality, allocation-order comparison, StatsVersion ordering, filename rendering, and range validation occur after decoding to the named unsigned logical domain; signed INT64 ordering/arithmetic over the carrier is not identifier authority. `TableId{0}`, `IndexId{0}`, `ConstraintId{0}`, `FileId{0}`, `ColumnId{0}`, and TypeId `0` are illegal wherever the corresponding object identity is required. A statistics TABLE `scope_id` is the only catalog identity field below that permits zero. `stats_txn_id` must be a normal TxnId (`>= FIRST_NORMAL_TXN_ID`), never `INVALID_TXN_ID` or `FROZEN_TXN_ID`; `stats_command_id` may be `0` and must be a valid CommandId of that transaction. No catalog column persists an LSN.
+These are scalar carriers, not conversions between identifier domains. A TableId carrier cannot be accepted as an IndexId merely because both use INT64. Equality, allocation-order comparison, StatsVersion ordering, filename rendering, and range validation occur after decoding to the named unsigned logical domain; signed INT64 ordering/arithmetic over the carrier is not identifier authority. `TableId{0}`, `IndexId{0}`, `ConstraintId{0}`, `FileId{0}`, `ColumnId{0}`, and TypeId `0` are illegal wherever the corresponding object identity is required. Allocator-produced FileId/TableId/IndexId/ConstraintId values and normal TxnIds additionally cannot exceed their exact v1 writer maxima in §4.3.2; a committed catalog row claiming an unreachable greater identity is corrupt rather than evidence of wrap/reuse. A statistics TABLE `scope_id` is the only catalog identity field below that permits zero. `stats_txn_id` must be a normal TxnId in §4.3.2's exact allocation domain, never `INVALID_TXN_ID` or `FROZEN_TXN_ID`; `stats_command_id` may be `0` and must be a valid CommandId of that transaction. No catalog column persists an LSN.
 
 Names are stored as the exact canonical identifier bytes produced by binding: unquoted identifiers have already been normalized to lowercase and quoted identifiers preserve exact bytes/case under §18.4. Name comparison is binary. Names must be nonempty and the resulting catalog tuple must satisfy the ordinary tuple-size contract; catalog schema v1 does not introduce a separate SQL identifier-length limit. The built-in relation and column names below are exact unquoted canonical spellings.
 
@@ -10789,7 +11555,7 @@ The exact semantic row identity is:
 
 and it is unique among visible rows. `(stats_txn_id, stats_command_id)` is exactly Chapter 34's `StatsVersion`; all rows with that version are created by that transaction/command and their payload headers repeat the same identity. At original insertion, each row's ordinary MVCC `xmin/cmin` equals its `stats_txn_id/stats_command_id`. Any later architecture-authorized tuple freezing changes only ordinary MVCC ownership metadata, never the immutable StatsVersion columns. The outer tuple `xmin/cmin` follows ordinary catalog MVCC/freezing and may require creator-status lookup until made independent; after committed publication, the payload `stats_txn_id/stats_command_id` follows §34.3.1's opaque generation-identity rule and never pins transaction-status history.
 
-For one `(table_id, scope_kind, scope_id, StatsVersion)`, `chunk_count` is in `1..1,048,576`, every row has the same value, and `chunk_index` is exactly the contiguous set `0..chunk_count-1`. Every nonfinal fragment has exactly 4096 bytes and the final fragment has `1..4096` bytes. Reconstruction sorts by `chunk_index`, concatenates, and then applies every §34.14 total-length, checksum, header, identity, manifest, and payload validation rule. A duplicate/missing/noncontiguous chunk or mismatched count makes that scope/version incomplete; rows from versions are never mixed.
+For one `(table_id, scope_kind, scope_id, StatsVersion)`, `chunk_count` is in `1..1,048,576`, every row has the same value, and `chunk_index` is exactly the contiguous set `0..chunk_count-1`. Every nonfinal fragment has exactly 4096 bytes and the final fragment has `1..4096` bytes. Construction uses §4.3.2.5's checked uint32 total/chunk arithmetic; excess invalidates/fails only that ANALYZE generation. Reconstruction sorts by `chunk_index`, concatenates, and then applies every §34.14 total-length, checksum, header, identity, manifest, and payload validation rule. A duplicate/missing/noncontiguous chunk or mismatched count makes that scope/version incomplete; rows from versions are never mixed.
 
 TABLE scope requires `scope_id=0`. COLUMN scope requires a nonzero ColumnId belonging to `table_id`. INDEX scope requires an IndexId belonging to `table_id`. Chapter 34 owns the existing TABLE/COLUMN/INDEX binary payload grammar and complete-generation selection; this schema does not alter it. Binary VARCHAR is valid for fragments because §17.4.6 defines VARCHAR as arbitrary byte strings without UTF-8/text validation.
 
@@ -11200,6 +11966,10 @@ Frequently used immutable descriptors may be cached in memory.
 
 The cache is an acceleration structure, **not** a catalog-visibility authority.
 
+Maintenance-specific current-object claims, ANALYZE statistics installation,
+and DROP invalidation use the canonical §14.17.1 publication ordering; a cached
+descriptor alone is never an object-lifetime or publication claim.
+
 Cache keys use stable object IDs/schema versions and names where name lookup is required.
 
 A cache hit may be used only when its descriptor is proven visible to the caller's catalog snapshot; otherwise lookup falls back to snapshot-aware catalog relations.
@@ -11257,19 +12027,25 @@ The SQL type layer MUST use semantics compatible with both.
 
 ## 17.2 Logical scalar types
 
-The initial logical scalar kinds are:
+The complete v1 stored scalar set is exactly the seven TypeIds in §16.4:
 
-```text
-BOOLEAN
-INT32
-INT64
-FLOAT64
-DATE
-TIMESTAMP
-VARCHAR
-NULL
-UNKNOWN
-```
+| TypeId | Type | Canonical non-NULL logical domain | SQL equality/order | Hashable | Direct literal |
+|---:|---|---|---|---|---|
+| `1` | `BOOLEAN` | `FALSE` or `TRUE` | `=`/`<>`; SQL ordering operators are unsupported | yes | keywords `TRUE`, `FALSE` |
+| `2` | `INT32` | signed integers `[-2^31, 2^31-1]` | equality and signed numerical order | yes | unsuffixed integer token when classified below |
+| `3` | `INT64` | signed integers `[-2^63, 2^63-1]` | equality and signed numerical order | yes | unsuffixed integer token when classified below |
+| `4` | `FLOAT64` | every IEEE-754 binary64 value, including signed zero, infinities, and NaNs | canonical v1 equality/total order in §17.4.3 | yes after canonical normalization | decimal/exponent floating token; no NaN/infinity literal keyword |
+| `5` | `DATE` | every signed int32 civil-day count from `1970-01-01` in the proleptic Gregorian calendar | equality and signed day-count order | yes | none; construct by explicit cast |
+| `6` | `TIMESTAMP` | every signed int64 microsecond count from `1970-01-01 00:00:00` | equality and signed microsecond order | yes | none; construct by explicit cast |
+| `7` | `VARCHAR` | arbitrary finite byte string representable by the owning row/execution resource limits | exact-byte equality and unsigned lexicographic byte order | yes | single-quoted byte string |
+
+No v1 scalar TypeId exists for NULL, UNKNOWN, DECIMAL, BLOB, UUID, INTERVAL,
+JSON, arrays, or timezone-aware timestamps. Anything outside this table is not
+a v1 scalar type.
+
+Every listed type may carry SQL NULL as a separate value/validity state. The
+ordinary tuple codec owns stored column bytes, §17.13 owns persisted metadata
+scalars, and Chapter 8 owns key bytes; none changes the logical registry.
 
 A compact value-like representation is used conceptually:
 
@@ -11281,7 +12057,8 @@ LogicalType {
 
 Type descriptors do not require an inheritance hierarchy or one heap allocation per type.
 
-Future type parameters may extend this representation.
+Future type parameters may extend this representation only through a later
+architecture/version; they are not open v1 registry entries.
 
 ## 17.3 Storable types versus semantic pseudo-types
 
@@ -11313,7 +12090,27 @@ target LogicalType
 is_null = true
 ```
 
-## 17.4 Scalar semantic baseline
+The SQL token `NULL` initially binds as an untyped NULL candidate. Contextual
+typing is exact:
+
+| Context | Result |
+|---|---|
+| `CAST(NULL AS T)` | typed NULL of concrete stored type `T` |
+| comparison/arithmetic with one concrete compatible operand | typed to the selected registered overload/common numeric type |
+| operator whose closed registry supplies exactly one signature for the untyped positions | typed from that signature; for example `NOT NULL` and `NULL AND NULL` use BOOLEAN |
+| INSERT/UPDATE/default target | typed to the destination type, then ordinary NULLability enforcement applies |
+| searched CASE, IN list, or one VALUES column with at least one concrete compatible value | typed to the exact common type |
+| `NULL IS NULL` / `NULL IS NOT NULL` | folded directly to non-NULL BOOLEAN TRUE/FALSE without persisting a pseudo-type |
+| standalone `SELECT NULL`, standalone `VALUES(NULL)`, `NULL = NULL`, `NULL + NULL`, all-NULL CASE results, or another context with no unique concrete type | bind-time `TYPE_ERROR` |
+
+No fallback VARCHAR/INT32 type is guessed for an underconstrained NULL.
+
+## 17.4 Closed v1 scalar semantic registry
+
+This section and §§17.5–17.10 are the one finite v1 scalar registry. A parser
+may construct syntax outside it, but binding MUST reject every type, literal,
+operator overload, comparison, cast, predicate, or scalar function not listed
+here. Empty table cells mean unsupported at bind time.
 
 ### 17.4.1 BOOLEAN
 
@@ -11321,9 +12118,17 @@ BOOLEAN has SQL TRUE/FALSE values plus nullable NULL state.
 
 No integer truthiness is implied.
 
+BOOLEAN has no implicit or explicit numeric conversion. Its only ordered
+physical key representation (`FALSE < TRUE`) exists so indexes can store and
+scan BOOLEAN; v1 SQL `<`, `<=`, `>`, and `>=` overloads for BOOLEAN do not exist.
+
 ### 17.4.2 INT32 and INT64
 
 Signed integer semantics correspond to the persisted two's-complement widths from Chapter 5.
+
+SQL arithmetic is checked mathematical arithmetic in those domains. Host signed
+overflow, overflowing negation, narrowing truncation, and host `INT_MIN / -1`
+behavior are never semantic implementations.
 
 ### 17.4.3 FLOAT64
 
@@ -11348,6 +12153,15 @@ For comparison/equality purposes in v1:
 
 Arithmetic uses IEEE-754 binary64 behavior; the execution-level checked/integer-versus-FLOAT64 division boundary is canonical in §39.3.2.
 
+Every scalar arithmetic operation is evaluated in binary64 round-to-nearest,
+ties-to-even mode and rounded to binary64 at that operator boundary. Extended-
+precision intermediates, altered process rounding modes, or contraction/FMA that
+changes the result of the bound expression tree are forbidden. Arithmetic NaN
+results are normalized to the canonical quiet NaN semantic value; signed zero
+is preserved. Overflow produces signed infinity and underflow produces the
+correctly rounded subnormal or signed zero. No floating exception trap is part
+of SQL semantics.
+
 Execution, constant folding, hashing/grouping support, and B+ ordering MUST NOT silently use incompatible equality/order rules.
 
 ### 17.4.4 DATE
@@ -11362,6 +12176,10 @@ using the proleptic Gregorian calendar.
 
 The persisted scalar is the signed day count.
 
+V1 textual DATE conversion accepts only civil years `0001..9999`; the wider
+signed day-count domain remains comparable/storable, but converting an out-of-
+text-range DATE to VARCHAR is `INVALID_CAST`.
+
 ### 17.4.5 TIMESTAMP
 
 TIMESTAMP is a signed 64-bit count of microseconds from:
@@ -11375,6 +12193,10 @@ Version 1 TIMESTAMP is timezone-naive.
 Timezone-aware types/conversion rules are deferred.
 
 Leap-second modeling is not part of the v1 scalar contract.
+
+V1 textual TIMESTAMP conversion likewise accepts civil years `0001..9999`.
+The wider signed microsecond domain remains comparable/storable, but conversion
+to the canonical v1 text form fails outside that civil range.
 
 ### 17.4.6 VARCHAR
 
@@ -11392,162 +12214,520 @@ The v1 type layer does not require UTF-8 validation, locale collation, character
 
 String length in the baseline representation is a byte length.
 
-## 17.5 Numeric promotion
+## 17.5 Literal and textual scalar grammar
 
-The implicit numeric widening hierarchy is:
+### 17.5.1 Integer literals
+
+An unsuffixed integer token is ASCII decimal `DIGIT+`; underscores, radix
+prefixes, and type suffixes are unsupported. Leading zeros are allowed and do
+not imply octal. The lexer retains a checked mathematical magnitude through
+`2^63` for the binder:
+
+| Positive token magnitude | Bound type/outcome |
+|---|---|
+| `0..2^31-1` | `INT32` |
+| `2^31..2^63-1` | `INT64` |
+| exactly `2^63` | legal only as the direct operand of syntactic unary `-`, producing the constant `INT64_MIN` |
+| greater than `2^63` | `INVALID_LITERAL` |
+
+For a syntactically direct unary `-` plus integer token, the binder classifies
+the resulting negative mathematical constant into the smallest signed type:
+magnitudes through `2^31` produce INT32 (including `-2147483648`), and larger
+magnitudes through `2^63` produce INT64 (including
+`-9223372036854775808`). This is literal construction, not evaluation of
+overflowing unary negation. Parentheses break the direct form:
+`-(2147483648)` is a valid INT64 negation, while positive or parenthesized
+`9223372036854775808` is invalid before unary evaluation. Direct unary `+` has
+no special range. No host parser overflow is consulted.
+
+### 17.5.2 FLOAT64 literals
+
+A floating token is exactly one of these ASCII forms, with `DIGIT=[0-9]`:
 
 ```text
-INT32
-  ↓
-INT64
-  ↓
-FLOAT64
+DIGIT+ '.' DIGIT+ ([eE] [+-]? DIGIT+)?
+DIGIT+ [eE] [+-]? DIGIT+
 ```
 
-Mixed numeric arithmetic/comparison chooses the smallest common promoted type.
+Thus `1.0`, `1e10`, and `1.2e-3` are legal; `.5`, `1.`, hexadecimal floats,
+underscores, suffixes, and NaN/infinity keywords are not. Leading sign is unary
+`+`/`-`. Decimal conversion is locale-independent, consumes the complete token,
+and returns the correctly rounded binary64 round-to-nearest-ties-to-even value.
+Finite decimal overflow is `INVALID_LITERAL`; underflow is the correctly rounded
+subnormal or signed zero and is not an error.
 
-Examples:
+### 17.5.3 VARCHAR and BOOLEAN literals
+
+Single quotes delimit VARCHAR. A quote byte is doubled (`'It''s'`); backslash has
+no escape meaning. SQL input is length-delimited: an embedded `0x00` inside the
+quotes is retained as an ordinary byte, while an unquoted source NUL is a lexical
+error. No Unicode decoding, validation, normalization, or locale conversion is
+performed.
+
+The only BOOLEAN literals are case-insensitive SQL keywords `TRUE` and `FALSE`.
+Numeric and string literals never acquire BOOLEAN type implicitly. `NULL` follows
+§17.3 and is not a BOOLEAN literal.
+
+### 17.5.4 DATE and TIMESTAMP text construction
+
+V1 has no `DATE '...'` or `TIMESTAMP '...'` typed-literal syntax. Construction
+uses explicit VARCHAR casts with full-string, ASCII, locale-independent parsing:
 
 ```text
-INT32 + INT64    -> INT64
-INT64 + FLOAT64  -> FLOAT64
+DATE:      YYYY-MM-DD
+TIMESTAMP: YYYY-MM-DD HH:MM:SS[.f{1,6}]
 ```
 
-Implicit narrowing is not allowed.
+Every fixed field is zero-padded; year is exactly `0001..9999`. TIMESTAMP uses
+one ASCII space, not `T`; seconds are mandatory. Missing fractional digits mean
+zero and 1–6 digits are right-padded to microseconds. More than six digits are
+rejected rather than rounded. Month/day validity uses the proleptic Gregorian
+calendar and the divisible-by-4, except divisible-by-100 unless divisible-by-400,
+leap-year rule. Time is `00:00:00` through `23:59:59`; second `60`, timezone
+suffixes/offsets, whitespace, and trailing bytes are invalid.
 
-## 17.6 String coercion
+## 17.6 Operator overload registry
 
-The binder does not silently convert arbitrary numeric/date values to VARCHAR merely to make a comparison type-check.
+Unless a rule below says otherwise, scalar operators evaluate child expressions
+left-to-right and are **strict**: after child evaluation, any NULL operand yields
+a typed NULL result without invoking the non-NULL value operation. Strictness
+does not suppress an error raised while evaluating a child. The result is
+nullable exactly when a strict input may be NULL.
 
-For example:
+### 17.6.1 Unary operators
+
+| Operator | Input | Result | NULL/error behavior |
+|---|---|---|---|
+| unary `+` | INT32 | INT32 | strict identity |
+| unary `+` | INT64 | INT64 | strict identity |
+| unary `+` | FLOAT64 | FLOAT64 | strict identity preserving signed zero |
+| unary `-` | INT32 | INT32 | strict; `INT32_MIN` raises `NUMERIC_OVERFLOW`, except §17.5.1's direct literal construction |
+| unary `-` | INT64 | INT64 | strict; `INT64_MIN` raises `NUMERIC_OVERFLOW`, except §17.5.1's direct literal construction |
+| unary `-` | FLOAT64 | FLOAT64 | strict IEEE sign negation; NaN normalizes canonically |
+| `NOT` | BOOLEAN | BOOLEAN | exact §17.7 3VL |
+
+No unary overload exists for VARCHAR, DATE, or TIMESTAMP.
+
+### 17.6.2 Binary arithmetic
+
+The complete arithmetic table is:
+
+| Left | Right | `+` | `-` | `*` | `/` | `%` |
+|---|---|---|---|---|---|---|
+| INT32 | INT32 | INT32 | INT32 | INT32 | INT32 | INT32 |
+| INT32 | INT64 | INT64 | INT64 | INT64 | INT64 | INT64 |
+| INT64 | INT32 | INT64 | INT64 | INT64 | INT64 | INT64 |
+| INT64 | INT64 | INT64 | INT64 | INT64 | INT64 | INT64 |
+| INT32 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | unsupported |
+| FLOAT64 | INT32 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | unsupported |
+| INT64 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | unsupported |
+| FLOAT64 | INT64 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | unsupported |
+| FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | FLOAT64 | unsupported |
+
+Mixed rows are resolved by inserting the minimum numeric promotions necessary
+for the displayed common result type. This is registered operator resolution,
+not permission to coerce strings, booleans, or temporal values. VARCHAR
+concatenation and DATE/TIMESTAMP arithmetic are unsupported in v1.
+
+INT32/INT64 `+`, `-`, and `*` use checked arithmetic and raise
+`NUMERIC_OVERFLOW` rather than wrap. Integer `/` truncates the mathematical
+quotient toward zero. Division by zero raises `DIVISION_BY_ZERO`; `MIN / -1`
+raises `NUMERIC_OVERFLOW`. Integer `%` is defined by:
+
+```text
+a = trunc_toward_zero(a / b) * b + (a % b)
+abs(a % b) < abs(b)
+nonzero remainder has the sign of a
+```
+
+Zero divisor raises `DIVISION_BY_ZERO`; `MIN % -1` raises `NUMERIC_OVERFLOW`
+because the corresponding quotient is unrepresentable. Normative examples are:
+
+| Expression | Result |
+|---|---:|
+| `5 / 2` | `2` |
+| `-5 / 2` | `-2` |
+| `5 / -2` | `-2` |
+| `-5 / -2` | `2` |
+| `5 % 2` | `1` |
+| `-5 % 2` | `-1` |
+| `5 % -2` | `1` |
+| `-5 % -2` | `-1` |
+
+FLOAT64 `+`, `-`, `*`, and `/` use §17.4.3 arithmetic. In particular:
+
+```text
+finite nonzero / ±0.0 -> signed infinity
+±0.0 / ±0.0          -> canonical NaN
+infinity / infinity   -> canonical NaN
+```
+
+FLOAT64 division by zero is not a SQL error. FLOAT64 remainder is unsupported.
+
+## 17.7 Comparisons, predicates, and three-valued logic
+
+### 17.7.1 Comparison overloads
+
+Every ordinary comparison is strict and returns BOOLEAN, nullable exactly when
+either bound operand may be NULL. Its complete non-NULL overload registry is:
+
+| Operand pair | `=` `<>` | `<` `<=` `>` `>=` | Coercion/semantics |
+|---|---|---|---|
+| BOOLEAN, BOOLEAN | yes | unsupported | exact FALSE/TRUE equality |
+| any INT32/INT64/FLOAT64 pair | yes | yes | promote both to the smallest common numeric type, then compare |
+| VARCHAR, VARCHAR | yes | yes | unsigned lexicographic exact-byte comparison; prefix sorts before longer equal-prefix value |
+| DATE, DATE | yes | yes | signed civil-day count |
+| TIMESTAMP, TIMESTAMP | yes | yes | signed microsecond count |
+| every other pair | unsupported | unsupported | bind-time TYPE_ERROR unless user writes an explicit cast |
+
+There is no implicit VARCHAR/numeric/temporal comparison, DATE/TIMESTAMP cross-
+comparison, or BOOLEAN ordering. For example, `1 = '1'` is a bind-time error.
+
+For FLOAT64 SQL comparison, the §17.4.3 total semantics are authoritative rather
+than IEEE unordered predicates:
+
+```text
+-0.0 = +0.0                     -> TRUE
+every NaN = every NaN            -> TRUE
+NaN <> NaN                       -> FALSE
+finite/infinite values order numerically
++infinity < NaN                  -> TRUE
+NaN > every non-NaN              -> TRUE
+```
+
+This is intentionally the same normalized non-NULL equality/order used by B+
+keys, UNIQUE, grouping, DISTINCT, sorting, and hash modes. IEEE arithmetic and
+SQL comparison are separate semantic layers.
+
+### 17.7.2 NULL predicates and 3VL
+
+For every ordinary `=`, `<>`, `<`, `<=`, `>`, or `>=`, either operand NULL
+produces UNKNOWN (nullable BOOLEAN NULL). `x = NULL` is never rewritten to
+`IS NULL`. `expr IS NULL` and `expr IS NOT NULL` accept any valid scalar
+expression and always return non-NULL BOOLEAN. `IS TRUE`, `IS FALSE`, and
+`IS UNKNOWN` are unsupported in v1.
+
+IS NULL/IS NOT NULL still evaluates their child expression and does not suppress
+an error raised by that child.
+
+WHERE, HAVING, and JOIN ON require BOOLEAN; integer/string truthiness is rejected.
+The only logical binary overloads are
+`AND(BOOLEAN,BOOLEAN)->BOOLEAN` and `OR(BOOLEAN,BOOLEAN)->BOOLEAN`; XOR is
+unsupported. Result nullability follows the tables. UNKNOWN is nullable BOOLEAN
+NULL. The full tables are:
+
+| `A AND B` | TRUE | FALSE | UNKNOWN |
+|---|---|---|---|
+| TRUE | TRUE | FALSE | UNKNOWN |
+| FALSE | FALSE | FALSE | FALSE |
+| UNKNOWN | UNKNOWN | FALSE | UNKNOWN |
+
+| `A OR B` | TRUE | FALSE | UNKNOWN |
+|---|---|---|---|
+| TRUE | TRUE | TRUE | TRUE |
+| FALSE | TRUE | FALSE | UNKNOWN |
+| UNKNOWN | TRUE | UNKNOWN | UNKNOWN |
+
+| A | `NOT A` |
+|---|---|
+| TRUE | FALSE |
+| FALSE | TRUE |
+| UNKNOWN | UNKNOWN |
+
+### 17.7.3 Evaluation order and short-circuit
+
+V1 guarantees per-row left-to-right short-circuit:
+
+```text
+FALSE AND rhs -> rhs is not evaluated
+TRUE  OR rhs  -> rhs is not evaluated
+otherwise AND/OR evaluates rhs and applies the tables above
+```
+
+Searched CASE evaluates WHEN predicates in source order, stops at the first
+TRUE, and evaluates only that result expression; it evaluates ELSE only when no
+WHEN is TRUE. IN-list evaluates the left expression once and list expressions
+left-to-right, stopping at the first TRUE comparison; without TRUE it must
+continue to determine whether UNKNOWN occurred. Optimizer rewrites may not
+reorder/force a skipped error or volatile expression. Therefore
+`FALSE AND (1 / 0 = 0)` is FALSE without error, and an unselected CASE arm does
+not raise its errors.
+
+## 17.8 Cast and coercion registry
+
+V1 explicit cast syntax is exactly `CAST(expr AS type)`. The matrix is closed:
+
+```text
+=  identity cast (implicit/no-op and explicit)
+I  registered widening cast; explicit CAST also legal
+E  explicit CAST only
+-- unsupported
+```
+
+| Source \ Target | BOOLEAN | INT32 | INT64 | FLOAT64 | VARCHAR | DATE | TIMESTAMP |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BOOLEAN | `=` | -- | -- | -- | E | -- | -- |
+| INT32 | -- | `=` | I | I | E | -- | -- |
+| INT64 | -- | E | `=` | I | E | -- | -- |
+| FLOAT64 | -- | E | E | `=` | E | -- | -- |
+| VARCHAR | E | E | E | E | `=` | E | E |
+| DATE | -- | -- | -- | -- | E | `=` | E |
+| TIMESTAMP | -- | -- | -- | -- | E | E | `=` |
+
+NULL input to any legal cast returns typed NULL without parsing/range error.
+
+### 17.8.1 Numeric casts
+
+- `INT32 -> INT64` is exact.
+- `INT32/INT64 -> FLOAT64` is IEEE round-to-nearest-ties-to-even and remains
+  legal when the integer is not exactly representable.
+- `INT64 -> INT32` checks the target range; failure is `NUMERIC_OVERFLOW`.
+- `FLOAT64 -> INT32/INT64` rejects NaN and infinities, truncates a finite value
+  toward zero, then checks the target range. Signed zero becomes integer zero.
+  Failure is `INVALID_CAST` for NaN/infinity and `NUMERIC_OVERFLOW` for range.
+
+No cast uses modulo truncation or a host unchecked narrowing conversion.
+
+### 17.8.2 VARCHAR parsing
+
+Every VARCHAR-to-scalar cast consumes the entire byte string, permits no leading
+or trailing whitespace, and recognizes ASCII only:
+
+| Target | Exact accepted text |
+|---|---|
+| BOOLEAN | case-insensitive ASCII `TRUE` or `FALSE` only |
+| INT32/INT64 | `[+-]?[0-9]+`; leading zeros allowed; range checked |
+| FLOAT64 | `[+-]?[0-9]+`, `[+-]?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?`, or `[+-]?[0-9]+[eE][+-]?[0-9]+`; additionally exact `NaN`, `Infinity`, `+Infinity`, `-Infinity` |
+| DATE | exact §17.5.4 DATE grammar |
+| TIMESTAMP | exact §17.5.4 TIMESTAMP grammar |
+
+Empty strings, Unicode digits/signs, embedded NUL, trailing junk, and malformed
+numeric grammar fail with `INVALID_CAST`. Syntactically valid integer/finite-
+FLOAT text outside the target numeric range raises `NUMERIC_OVERFLOW`; FLOAT
+underflow rounds to subnormal/signed zero, and a leading `-` is preserved when
+the rounded result is zero. Invalid temporal grammar/calendar
+values raise `INVALID_DATE`/`INVALID_TIMESTAMP`. Special NaN text produces the
+canonical NaN semantic value.
+
+### 17.8.3 Canonical VARCHAR formatting
+
+Explicit scalar-to-VARCHAR casts emit:
+
+| Source | Canonical output |
+|---|---|
+| BOOLEAN | `TRUE` or `FALSE` |
+| INT32/INT64 | shortest base-10 integer, no leading `+`/zeros; zero is `0` |
+| DATE | `YYYY-MM-DD`; out-of-`0001..9999` civil range is `INVALID_CAST` |
+| TIMESTAMP | `YYYY-MM-DD HH:MM:SS.ffffff`, always six fractional digits; out-of-`0001..9999` civil range is `INVALID_CAST` |
+| FLOAT64 NaN/infinities | `NaN`, `Infinity`, or `-Infinity` |
+| FLOAT64 signed zero | `0` or `-0` preserving sign |
+| other finite FLOAT64 | canonical shortest round-trippable decimal defined below |
+
+For finite nonzero FLOAT64, choose the minimum number of significant decimal
+digits whose exact §17.8.2 parse returns the same binary64 bits; among candidates
+choose the closest exact decimal to the binary value, ties by an even final
+significand digit. Render fixed or scientific notation whichever uses fewer
+bytes (fixed on a length tie), with no insignificant leading/trailing zeros.
+Fixed form uses one `0` before the decimal point when magnitude is below one.
+Scientific form has one digit before an optional decimal point, lowercase `e`,
+no `+` on a positive exponent, and no exponent leading zeros. This defines
+observable output independently of libc/iostream formatting.
+
+### 17.8.4 DATE/TIMESTAMP casts
+
+`DATE -> TIMESTAMP` sets time to `00:00:00.000000` and checked-converts the day
+count to microseconds; an unrepresentable int64 timestamp is
+`NUMERIC_OVERFLOW`. `TIMESTAMP -> DATE` selects the containing proleptic-
+Gregorian civil date (floor toward the prior midnight for pre-epoch values) and
+returns its checked int32 day count. No timezone conversion occurs.
+
+### 17.8.5 Implicit and assignment coercion
+
+Implicit coercion is contextual, not a general request to find any explicit cast:
+
+| Bound source | Automatic assignment/default targets |
+|---|---|
+| BOOLEAN | BOOLEAN only |
+| INT32 | INT32, INT64, FLOAT64 |
+| INT64 | INT64, FLOAT64 |
+| FLOAT64 | FLOAT64 only |
+| VARCHAR | VARCHAR only |
+| DATE | DATE only |
+| TIMESTAMP | TIMESTAMP only |
+| untyped NULL | any concrete destination type; later NULLability/constraint check may reject |
+
+| Context | Allowed automatic conversion |
+|---|---|
+| arithmetic/comparison operator | exact types plus minimum INT32→INT64→FLOAT64 promotions shown in the overload tables |
+| searched CASE / IN-list / VALUES-column common type | same type, or smallest common numeric promoted type; untyped NULL follows the selected concrete type |
+| INSERT/UPDATE assignment and folded default | identity, INT32→INT64, INT32→FLOAT64, INT64→FLOAT64, or contextual typed NULL |
+| scalar function arguments | none because the v1 scalar-function registry is empty |
+| aggregate arguments | only the exact Chapter-29 aggregate signatures; no invented cast |
+| arbitrary unlike expression | no implicit conversion |
+
+Assignment narrowing, VARCHAR parsing/stringification, temporal conversion, and
+BOOLEAN conversion therefore require explicit CAST. Destination NOT NULL and
+other constraints are checked after coercion. DDL folds a default, applies this
+same assignment coercion, and stores exactly one final destination-typed
+PersistedScalarV1; runtime default application performs no cast.
+
+## 17.9 CASE, IN, and scalar functions
+
+### 17.9.1 Searched CASE
+
+Only searched CASE is supported:
 
 ```sql
-1 = '1'
+CASE WHEN boolean_expr THEN result ... [ELSE result] END
 ```
 
-does not become true through hidden string conversion.
+Each WHEN must be BOOLEAN (an untyped NULL condition becomes typed BOOLEAN
+UNKNOWN). Result common type is exact same type or the smallest common numeric
+type; untyped NULL branches adopt that concrete type. No other cross-type common
+type exists. If every result is untyped NULL, binding fails. Missing ELSE is a
+typed NULL of the resolved result type. Simple `CASE value WHEN ...` is
+unsupported. Evaluation follows §17.7.3.
 
-Such conversions require an explicit cast unless another explicitly registered operator signature says otherwise.
+### 17.9.2 Scalar predicates
 
-## 17.7 BOOLEAN context and three-valued logic
-
-WHERE/HAVING/JOIN predicates require BOOLEAN.
-
-C-like truthiness such as:
-
-```sql
-WHERE 5
-```
-
-is rejected.
-
-SQL BOOLEAN semantics are:
+V1 supports expression-list `IN` and `NOT IN`, `IS NULL`, and `IS NOT NULL`.
+An IN list must be nonempty and obtain one comparison type using §17.8.5; the
+left value is compared under ordinary `=` semantics:
 
 ```text
-TRUE
-FALSE
-UNKNOWN
+any TRUE comparison                         -> TRUE
+no TRUE and left/list comparison is UNKNOWN -> UNKNOWN
+otherwise                                   -> FALSE
+NOT IN                                      -> 3VL NOT of IN
 ```
 
-where UNKNOWN is represented by nullable BOOLEAN with NULL state.
+Subquery IN/EXISTS/scalar forms remain owned by unresolved M-007 and are not
+decided here. `BETWEEN`, `LIKE`, `COALESCE`, `NULLIF`, `IS TRUE/FALSE/UNKNOWN`,
+and every other scalar predicate/convenience expression are unsupported in v1.
 
-The required truth cases include:
+### 17.9.3 Closed scalar-function registry
 
-```text
-TRUE  AND NULL -> NULL
-FALSE AND NULL -> FALSE
+The v1 **scalar-function registry is empty**. There is no v1 ABS, LOWER, LENGTH,
+NOW, CURRENT_TIMESTAMP, RANDOM, or other named scalar function, deterministic or
+nondeterministic. A parsed `AstFunctionCall` that is not one of the separate
+aggregate calls in §29.3 fails binding with unsupported-function TYPE_ERROR.
+BoundFunction descriptors and IMMUTABLE/STABLE/VOLATILE classes remain future-
+capable IR machinery, not open semantic entries. V1 defaults may use immutable
+registered operators/casts, but no named scalar function.
 
-TRUE  OR NULL  -> TRUE
-FALSE OR NULL  -> NULL
+| Name | Arity/signature | Result | NULL/error behavior | Volatility/folding |
+|---|---|---|---|---|
+| *(none)* | no v1 scalar-function signature exists | — | bind-time TYPE_ERROR for every scalar-function call | — |
 
-NOT NULL       -> NULL
-```
+## 17.10 Type resolution, folding, and cross-engine equality
 
-Binder-time folding and execution-time evaluation use the same truth tables.
+### 17.10.1 Central TypeResolver and error taxonomy
 
-## 17.8 Comparison and NULL
+One `TypeResolver` owns literal classification, common numeric type, every table
+in §§17.6–17.9, assignment coercion, and CASE/IN resolution. Parser, binder,
+optimizer, defaults, expression VM, and executor may not add overloads.
 
-Ordinary comparisons:
+| Conceptual error | Required use |
+|---|---|
+| `TYPE_ERROR` / unsupported overload | no registry entry, underconstrained NULL, unsupported function/predicate/type |
+| `INVALID_LITERAL` | malformed/out-of-domain source literal |
+| `INVALID_CAST` | supported cast pair but source value has no target value, including NaN/infinity to integer |
+| `NUMERIC_OVERFLOW` | checked integer arithmetic/narrowing, finite parse/range conversion, temporal-unit conversion overflow |
+| `DIVISION_BY_ZERO` | integer `/` or `%` zero divisor only |
+| `INVALID_DATE` | malformed/out-of-calendar-range DATE text |
+| `INVALID_TIMESTAMP` | malformed/out-of-calendar/time-range TIMESTAMP text |
 
-```text
-=
-<>
-<
-<=
->
->=
-```
+Absence of an overload, or a statically unsupported source/target cast pair, is
+a bind-time TYPE_ERROR. Literal and fully constant failures are detected during
+binding/folding when §17.10.2 permits; row-dependent parse, overflow, and
+division failures are runtime expression errors. `NUMERIC_OVERFLOW` and
+`DIVISION_BY_ZERO` are conceptual SQL-expression subcategories of the existing
+runtime `ArithmeticError`; this registry does not require new source enums.
+M-005 alone determines whether such a runtime error leaves the statement
+transaction ACTIVE or requires abort after published effects.
 
-with a NULL operand produce NULL.
+### 17.10.2 Constant folding and errors
 
-NULL testing uses:
+Every v1 scalar operator/cast is deterministic and IMMUTABLE. For a constant
+expression whose evaluated path is required, folding result **or error** must be
+identical to runtime evaluation: same concrete type, NULL, integer checks,
+binary64 rounding after every operator, canonical NaN, signed zero, parsing,
+formatting, comparison, and 3VL. Folding cannot use host arithmetic/parsers with
+different semantics.
 
-```sql
-IS NULL
-IS NOT NULL
-```
+Binder/planner folds every fully constant v1 scalar subtree to its value when
+doing so preserves §17.7.3. For a constant **error**, it reports the error at
+bind/plan time exactly when that subtree dominates every scalar-control-flow
+completion path of its containing expression after earlier constant conditions;
+the binder does not consult estimated or actual input row count for this timing
+rule. Otherwise it retains the subtree and the error occurs only if runtime
+control flow reaches it. An AND/OR RHS, CASE condition/result, or later IN item
+that an earlier value may skip therefore cannot raise eagerly merely because it
+is constant. Root `1/0` raises during binding/folding, while
+`FALSE AND (1/0=0)` and `CASE WHEN FALSE THEN 1/0 ELSE 1 END` do not. Folding is
+mandatory for v1 persisted defaults and for these ordinary fully constant
+subtrees; an unfolded nonconstant expression must behave identically when
+reached.
 
-The binder MUST NOT rewrite `x = NULL` into `x IS NULL`.
+FLOAT64 folding uses binary64 round-to-nearest-ties-to-even at each bound
+operator, forbids observable extended precision/contraction, preserves signed
+zero, and normalizes NaN results exactly as runtime. Process floating environment,
+compiler fast-math, locale, timezone, machine architecture, and libc formatting
+defaults cannot change SQL results.
 
-Non-NULL comparisons require compatible types after allowed implicit promotion/casts.
+### 17.10.3 Equality modes, keys, and semantic proof
 
-VARCHAR comparison is binary bytewise.
+For every hashable non-NULL type, equality implies equal hash. Mixed numeric
+hash/equality first applies the bound common-type cast. FLOAT64 hash/key
+normalization maps both zeros together and every NaN together; VARCHAR hashes
+exact bytes. The hash algorithm itself remains process-local.
 
-FLOAT64 comparison follows §17.4.3.
+Ordinary `=` and join predicates use §17.7 3VL: any NULL key is nonmatching, and
+non-NULL NaNs match because canonical FLOAT64 equality says TRUE. Hash join must
+reproduce that result. GROUP BY/DISTINCT use the same non-NULL equality but place
+all NULLs into one group/duplicate class; that grouping NULL rule never leaks
+into ordinary `=`.
 
-## 17.9 Cast model
+B+ uses a deterministic total order including NULL placement and BOOLEAN
+physical order. SQL FLOAT64 and every SQL-orderable non-NULL type use the same
+value order, but ordinary comparison with NULL remains UNKNOWN and BOOLEAN SQL
+ordering is unsupported. Index-bound construction must preserve those predicate
+rules and retain a residual recheck whenever a physical bound alone is broader.
+M-004 UNIQUE bypasses any NULL-containing key and uses exactly this normalized
+non-NULL equality for every component.
 
-Version 1 supports explicit:
+A-002/§35.2 may derive a semantic proof from a scalar fact only when all literals,
+overloads, casts, and predicates are entries in this closed registry and exact
+evaluation is error-safe. `1=2` is exact FALSE and `NULL=1` exact UNKNOWN;
+unsupported/implementation-defined operations and statistics/required_rows are
+never scalar semantic proof.
 
-```sql
-CAST(expr AS type)
-```
+This registry changes no TypeId, PersistedScalarV1 byte, heap scalar payload, or
+B+ key encoding. Those settled codecs remain the representation owners.
 
-Safe implicit casts are:
+### 17.10.4 Forbidden scalar implementations
 
-```text
-INT32 -> INT64
-INT32 -> FLOAT64
-INT64 -> FLOAT64
-UNKNOWN NULL -> contextual target type
-```
+V1 explicitly forbids:
 
-Other conversions require an explicit cast.
-
-Initial explicit conversions may include:
-
-```text
-INT32 <-> INT64 where range-valid
-numeric -> FLOAT64
-numeric -> VARCHAR
-BOOLEAN -> VARCHAR
-DATE/TIMESTAMP -> VARCHAR
-VARCHAR -> numeric/date/timestamp when parsing succeeds
-```
-
-A runtime conversion failure is a SQL error.
-
-An explicit narrowing integer cast performs a range check rather than wrapping silently.
-
-## 17.10 Central TypeResolver
-
-Type compatibility is centralized in a semantic component conceptually named `TypeResolver`.
-
-It owns:
-
-```text
-common numeric type
-implicit-cast legality
-explicit-cast legality
-comparison compatibility
-arithmetic result type
-operator signature matching
-function signature matching
-CASE branch common-type resolution
-IN-list common-type resolution
-```
-
-Binder, constant folding, and execution MUST NOT independently invent coercion rules.
+1. typing every integer literal as INT64 instead of applying §17.5.1;
+2. implementing SQL integer arithmetic with C++ signed overflow or unchecked negation;
+3. inheriting host `MIN / -1` or `MIN % -1` behavior;
+4. inheriting implementation-dependent negative quotient/remainder rules;
+5. silently converting VARCHAR to numeric/temporal/BOOLEAN for comparison or assignment;
+6. locale-sensitive numeric, BOOLEAN, DATE, or TIMESTAMP parsing;
+7. treating SQL NULL comparison like C++ pointer/optional equality;
+8. using raw IEEE unordered NaN predicates instead of the explicit SQL FLOAT64 comparator;
+9. hashing `-0.0` and `+0.0`, or canonical-equivalent NaNs, differently in an equality mode that equates them;
+10. folding a value/error/branch differently from runtime execution;
+11. treating `std::to_string`, iostreams, libc `%g`, or another library default as canonical FLOAT64 text;
+12. accepting leading/trailing whitespace or trailing junk in explicit string casts;
+13. truncating/wrapping a narrowing integer or FLOAT64-to-integer cast;
+14. using required_rows, estimates, statistics, or observed data as scalar semantic facts;
+15. inventing an implicit cast to make an absent overload bind;
+16. applying GROUP BY's NULL-equals-NULL rule to ordinary `=` or join equality;
+17. varying scalar results with process locale, timezone, floating environment, or machine architecture;
+18. binding a scalar function merely because a standard/runtime library provides it;
+19. serializing host scalar/struct representation instead of the existing explicit persisted codecs.
 
 ## 17.11 Generic scalar Value
 
@@ -11578,7 +12758,7 @@ The executor's vector representation is defined later.
 
 1. NULL is primarily a value state, not a storable column type.
 2. UNKNOWN is binder-only and never appears in persisted schemas.
-3. Numeric implicit conversion widens and never silently narrows.
+3. Numeric implicit conversion occurs only in §17.8.5's registered contexts, widens, and never silently narrows.
 4. Non-BOOLEAN predicates are rejected.
 5. SQL Boolean semantics are three-valued.
 6. Ordinary comparison with NULL returns NULL.
@@ -11589,6 +12769,13 @@ The executor's vector representation is defined later.
 11. DATE/TIMESTAMP logical units agree with their persisted signed scalar representations.
 12. TypeResolver is the single semantic owner of coercion/type compatibility.
 13. Generic Value is not the hot executor cell representation.
+14. The registry in §§17.2–17.10 is closed; parser acceptance or runtime-library capability adds no SQL semantic entry.
+15. Every integer operation/cast is checked before narrowing or publication and never relies on host signed overflow.
+16. FLOAT64 arithmetic and comparison deliberately use their separately specified IEEE-arithmetic and canonical-total-comparison modes.
+17. Scalar parsing/formatting is ASCII, locale-independent, timezone-independent, and full-consumption.
+18. The v1 named scalar-function registry is empty; aggregate functions remain separately registered in Chapter 29.
+19. Constant folding reproduces runtime value, error, and short-circuit semantics exactly.
+20. Assignment/default coercion stores or produces the final destination type and never leaves a deferred runtime default cast.
 
 ## 17.13 Persisted scalar value encoding
 
@@ -11786,9 +12973,12 @@ Vendor-specific backslash escape modes are not part of the baseline.
 
 An unterminated string is a source-positioned lexical error.
 
+The exact byte/NUL/no-backslash semantics are the closed §17.5.3 registry.
+
 ## 18.6 Numeric literals
 
-The lexer recognizes at least:
+The lexer recognizes exactly the integer and FLOAT64 token grammars in
+§§17.5.1–17.5.2. Representative legal forms are:
 
 ```text
 123
@@ -11797,9 +12987,11 @@ The lexer recognizes at least:
 1.2e-3
 ```
 
-Leading `-` is preferably tokenized as the unary operator rather than embedded in every numeric token.
+Leading `+`/`-` is tokenized as a unary operator rather than embedded in the
+numeric token.
 
-Thus `-2147483648` is parsed as unary minus applied to a positive numeric literal representation, keeping type/range resolution explicit.
+Thus `-2147483648` is parsed as unary minus applied to a positive numeric
+literal representation and has the exact INT32 result described by §17.5.1.
 
 Literal overflow/type selection is a semantic/type-resolution concern rather than unchecked host-language overflow in the lexer.
 
@@ -12002,6 +13194,7 @@ Thus `a < b < c` is rejected rather than assigned accidental host-language seman
 10. Pratt/precedence parsing uses the defined precedence hierarchy.
 11. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
 12. Unsupported syntax fails explicitly rather than being half-interpreted.
+13. Constructing a generic AST operator/function node does not imply semantic support; binding accepts only the closed Chapter-17 registry.
 
 ---
 
@@ -12181,23 +13374,19 @@ The design should avoid one independently reference-counted heap allocation per 
 
 ## 19.8 Operator registry
 
-Arithmetic/comparison resolution is centralized.
-
-Representative signatures include:
-
-```text
-+(INT32, INT32)     -> INT32
-+(INT64, INT64)     -> INT64
-+(FLOAT64, FLOAT64) -> FLOAT64
-=(T,T)              -> BOOLEAN
-<(T,T)              -> BOOLEAN
-```
+Arithmetic/comparison resolution is centralized and uses exactly the closed
+§§17.6–17.7 tables. No representative/polymorphic signature expands that
+registry.
 
 The Binder first applies TypeResolver coercion/promotion rules, inserts required implicit casts, then selects the final operator implementation/signature.
 
 Operator type rules are not scattered across AST classes.
 
 ## 19.9 Function registry and volatility
+
+The concrete v1 named scalar-function registry is empty under §17.9.3.
+The descriptor model below is retained for later versions and does not authorize
+binding any v1 scalar function call.
 
 Functions resolve through descriptors containing at least:
 
@@ -12222,7 +13411,7 @@ STABLE
 VOLATILE
 ```
 
-Only IMMUTABLE functions with constant arguments are eligible for ordinary compile/bind-time constant folding.
+When later registered, only IMMUTABLE functions with constant arguments are eligible for ordinary compile/bind-time constant folding.
 
 VOLATILE expressions are never constant-folded as though their result were stable.
 
@@ -12300,6 +13489,11 @@ An invalid ordinal is a semantic error.
 
 Physical sorting belongs to later planning/execution.
 
+V1 ORDER BY accepts exactly the Chapter-17 SQL-orderable types: INT32, INT64,
+FLOAT64, VARCHAR, DATE, and TIMESTAMP. BOOLEAN has physical key order but no v1
+SQL ordering semantics and is rejected as an ORDER BY key unless explicitly
+cast to another supported type.
+
 ## 19.14 LIMIT and OFFSET
 
 LIMIT/OFFSET expressions must bind to an integral type and be non-negative.
@@ -12320,39 +13514,21 @@ It is not merely an opaque projection flag that physical planning cannot reason 
 
 ## 19.16 Searched CASE
 
-Version 1 supports searched CASE.
-
-Every WHEN condition must bind to BOOLEAN.
-
-Evaluation selects the first WHEN whose predicate is TRUE.
-
-FALSE or NULL/UNKNOWN predicates do not select that branch.
-
-Binder finds one common result type for THEN/ELSE branches using TypeResolver coercion rules.
-
-A missing ELSE is semantically `ELSE NULL`.
+Version 1 supports exactly §17.9.1 searched CASE, including its closed common-
+type rule and §17.7.3 branch evaluation. Simple CASE is not a v1 semantic form.
 
 ## 19.17 IN-list semantics
 
-An IN list binds as its own semantic expression node.
-
-Binder resolves a common comparison type and inserts allowed casts.
-
-The exact three-valued result is:
-
-```text
-if any comparison is TRUE:
-    TRUE
-else if the left operand is NULL
-     or any list comparison is NULL:
-    NULL
-else:
-    FALSE
-```
+An expression IN list binds as its own semantic node and uses exactly §17.9.2's
+common-type, three-valued, and short-circuit rules. NOT IN is 3VL NOT of that
+result.
 
 The architecture does not require rewriting IN lists into OR chains.
 
 Later execution may choose linear comparison, hashing, or sorted lookup according to list size/type semantics.
+It may do so only after preserving §17.7.3's once-only left evaluation and
+left-to-right error/short-circuit boundary; a physical hash/sort strategy is not
+permission to evaluate dynamic/erroring list expressions in another order.
 
 ## 19.18 Subquery binding boundary
 
@@ -12390,7 +13566,8 @@ The type system/binder remains compatible with future parameter typing through `
 16. DISTINCT remains an explicit relational semantic requirement.
 17. CASE and IN preserve SQL NULL/three-valued behavior.
 18. Runtime function/operator implementation IDs are not persisted as v1 default metadata.
-19. Future parameter typing can reuse UNKNOWN/contextual inference.
+19. The closed §§17.2–17.10 registry alone determines literal types, overloads, casts, CASE/IN common types, and the empty scalar-function set.
+20. Future parameter typing can reuse UNKNOWN/contextual inference.
 ---
 
 # 20. Logical Plans, Properties, and Rewrites
@@ -12901,13 +14078,11 @@ Logical rewrites occur after binding and before cost-based physical selection.
 
 ### 20.17.1 Constant folding
 
-Fold a subtree only when it is composed entirely of constants and uses IMMUTABLE operators/functions whose semantics are known.
-
-NULL and three-valued logic are preserved.
-
-VOLATILE functions are never folded.
-
-STABLE functions are not treated as immutable compile-time constants.
+Fold a subtree only when it is composed entirely of constants and uses entries
+from the closed §17 scalar registry. Result, error, binary64 rounding, NULL/3VL,
+and skipped-branch behavior are exactly §17.10.2. Future VOLATILE functions are
+never folded, and future STABLE functions are not immutable compile-time
+constants.
 
 ### 20.17.2 Boolean simplification
 
@@ -13175,6 +14350,7 @@ The logical EXPLAIN representation does not depend on reparsing or pretty-printi
 14. `LogicalAnalyze` carries a resolved table/schema/index set and does not perform name lookup during execution.
 15. EXPLAIN consumes the bound/logical representation rather than AST syntax alone.
 16. Semantic emptiness is derived only from §35.2 exact facts and propagates by §20.17.10; estimated zero is not a rewrite proof.
+17. Literal/operator/cast/predicate/scalar-function binding uses only the closed §§17.2–17.10 registry.
 
 ---
 
@@ -13408,6 +14584,12 @@ index name
 
 and creates an immutable index specification.
 
+The eventual catalog publication changes the target table's applicable index
+manifest and therefore participates in §14.17.1's short object/statistics
+publication gate. An ANALYZE that has already authorized row publication makes
+CREATE INDEX wait through that ANALYZE transaction's terminal outcome; an index
+manifest published first makes ANALYZE's final revalidation fail.
+
 Persistent IndexId/FileId allocation occurs only during execution.
 
 A unique index uses Chapter 11's transactional uniqueness semantics. Its key equality and NULL rule are §11.10.2; v1 UNIQUE constraints are immediate and non-deferrable.
@@ -13455,6 +14637,10 @@ If build/transaction aborts, the private or final-uncommitted index file becomes
 ## 21.9 DROP and physical object retirement
 
 DROP TABLE / DROP INDEX is transactional at catalog visibility.
+
+The `LIVE -> RETIRING` admission transition, active-maintenance drain, and
+ANALYZE publication race are governed canonically by §14.17.1. This section owns
+the catalog/physical retirement sequence after that coordination point.
 
 Under DDL exclusivity:
 
@@ -13516,6 +14702,9 @@ INSERT INTO t(a,c) VALUES (...);
 
 Binder resolves the target table, verifies target columns are unique, maps omitted columns, binds input expressions, inserts allowed implicit casts, fills catalog defaults or typed NULL where legal, rejects statically impossible NOT NULL cases, and produces one canonical full target-column order.
 
+The only automatic target coercions are the closed §17.8.5 assignment matrix;
+an explicit-cast conversion is never borrowed implicitly for DML.
+
 Execution never resolves target column names again.
 
 `INSERT ... SELECT` uses the same canonical target-column contract after binding the source relation.
@@ -13527,7 +14716,7 @@ V1 column-default syntax may contain:
 ```text
 literal constants
 casts
-immutable scalar operators/functions
+registered immutable scalar operators
 ```
 
 but it must be a **closed expression**.
@@ -13538,14 +14727,14 @@ A v1 default MUST NOT contain:
 table-column references
 subqueries
 aggregates
-STABLE functions
-VOLATILE functions
+scalar functions (the v1 registry is empty)
 parameters
 ```
 
-Because every permitted v1 default is closed and IMMUTABLE, DDL binding evaluates/constant-folds the complete expression exactly once under the normal SQL type/arithmetic rules.
+Because every permitted v1 default is closed and IMMUTABLE, DDL binding evaluates/constant-folds the complete expression exactly once under §17.10.2.
 
-The result is then coerced to the target column type.
+The result is then coerced by §17.8.5's assignment matrix to the target column
+type before encoding.
 
 If folding, casting, or constraint validation fails, the DDL statement fails rather than storing a partially resolved expression.
 
@@ -13606,11 +14795,16 @@ Original SQL text MAY additionally be retained for display/debugging, but it is 
 
 A future architecture may define a new blob version containing a persistent expression tree with stable function/operator identities.
 
-V1 does not need such identities because only the fully folded typed result is persisted.
+V1 does not need such identities because only the fully folded, final
+destination-typed result is persisted.
 
 ## 21.13 UPDATE binding/planning
 
 Binder validates target table, assignment column names, no duplicate target assignments, assignment expression types, and a BOOLEAN WHERE predicate.
+
+Every assignment uses only §17.8.5's closed automatic assignment coercions;
+narrowing/string/temporal conversions require an explicit CAST in the SQL
+expression.
 
 Each assignment becomes:
 
@@ -13712,6 +14906,10 @@ current SchemaVer
 analyzed ColumnIds
 currently visible IndexIds
 ```
+
+These stable identities are scan inputs, not permanent publication authority.
+The final current-object/schema/index-manifest revalidation and transaction-
+lifetime statistics publication claim are mandatory under §14.17.1.
 
 ANALYZE is not schema-changing DDL and does not acquire `SchemaLock` or an exclusive `TableWriterGate` merely to obtain a stable row set.
 
@@ -13824,7 +15022,7 @@ These are future architecture-compatible features, not hidden requirements of th
 5. Self-joins use distinct BindingIds.
 6. All bound expressions have resolved type/nullability before logical planning.
 7. Non-BOOLEAN WHERE/HAVING/ON predicates are rejected.
-8. Numeric implicit casts widen and do not silently narrow.
+8. Numeric implicit casts occur only in §17.8.5's closed contexts, widen, and do not silently narrow.
 9. `SELECT *` is expanded before logical planning.
 10. Aggregate/grouping legality is validated before execution.
 11. LEFT JOIN right-side outputs are nullable.
@@ -14838,6 +16036,9 @@ FLOAT64 comparison remains compatible with Chapter 17/Chapter 8 semantics.
 
 For `A AND B`, evaluate `A` first.
 
+This is the physical realization of the mandatory per-row §17.7.3 evaluation
+order, including its error-suppression boundary.
+
 Per logical row:
 
 ```text
@@ -14854,6 +16055,9 @@ After B is evaluated for that subset, combine according to SQL three-valued logi
 ## 25.6 Vectorized OR short-circuit
 
 For `A OR B`, evaluate `A` first.
+
+This is the corresponding mandatory §17.7.3 OR rule, not an optional kernel
+optimization.
 
 Per logical row:
 
@@ -15460,6 +16664,9 @@ The architecture does not use `std::hash` as a semantic contract.
 
 Hashing/equality receives an explicit semantic mode.
 
+Both modes use §17.10.3's closed non-NULL scalar equality and hash-normalization
+contract; only their NULL treatment differs.
+
 For ordinary equi-join equality:
 
 ```text
@@ -15878,6 +17085,9 @@ NULL inputs are ignored.
 No non-NULL input yields NULL.
 
 For every initially registered orderable scalar type, result type equals input type and comparison uses the Chapter-17 semantic ordering, including binary VARCHAR and FLOAT64 edge semantics.
+
+BOOLEAN is equality/hashable but not SQL-orderable in v1, so MIN/MAX BOOLEAN has
+no registered signature.
 
 ### AVG
 
@@ -17085,6 +18295,9 @@ VACUUM and ANALYZE remain distinct operations even if a later maintenance comman
 
 One ANALYZE invocation uses one stable effective SQL snapshot under the transaction's normal isolation rules.
 
+Snapshot stability does not establish current object liveness for publication;
+§14.17.1 owns the short final publication gate against DROP/schema/index changes.
+
 Rows visible to that snapshot contribute to SQL-visible live-row/column statistics.
 
 Physical heap-page, dead-version, and B+ entry/leaf information may additionally be inspected as approximate maintenance metadata without changing SQL visibility semantics.
@@ -17210,8 +18423,8 @@ old complete generation remains structurally usable after its creator status is
 `RETIRED`; a missing/reclaimed status entry is neither ABORTED nor malformed
 StatsVersion evidence. Object/catalog applicability still decides whether a
 generation belongs to a currently usable table, and old-generation deletion is
-ordinary catalog MVCC/maintenance work. Those rules do not resolve M-011
-maintenance coordination.
+ordinary catalog MVCC/maintenance work under §14.17.1's resolved maintenance
+coordination protocol.
 
 Process-local statistics cache keys compare the stored numeric pair directly.
 They retain no transaction-status object pointer, status-page pin, reclamation
@@ -17756,6 +18969,10 @@ A transaction that has successfully completed ANALYZE may use its own complete t
 
 A concurrent committed ANALYZE publishes a new immutable descriptor atomically.
 
+Concurrent install, delayed callback, and DROP invalidation are ordered by
+§14.17.1; the cache may not regress to an older applicable StatsVersion or
+reinstall metadata for a retired identity.
+
 Existing planners may finish with the old descriptor.
 
 The catalog/statistics cache is an acceleration mechanism and preserves the caller's catalog visibility rules.
@@ -18173,7 +19390,7 @@ Trusted foreign-key refinements remain future-compatible because foreign keys ar
 For:
 
 ```text
-<  <=  >  >=  BETWEEN
+<  <=  >  >=
 ```
 
 combine:
@@ -18207,7 +19424,12 @@ false_fraction   = 1 - t - n
 
 with `0 <= t <= 1 - n`.
 
-For `<`, `<=`, `>`, `>=`, and BETWEEN/range conjunctions, boundary inclusion/exclusion controls the numerical estimate using the exact comparison semantics. A zero estimate caused by a min/max boundary, histogram gap, MCV absence, or clamping remains cost-only and MUST NOT set `is_provably_empty`. Exact contradictory literal bounds are handled separately by §§20.17.8 and 35.2.
+For `<`, `<=`, `>`, `>=`, and conjunctions of those registered comparisons,
+boundary inclusion/exclusion controls the numerical estimate using the exact
+comparison semantics. `BETWEEN` itself is not a v1 scalar-registry entry under
+§17.9.2. A zero estimate caused by a min/max boundary, histogram gap, MCV
+absence, or clamping remains cost-only and MUST NOT set `is_provably_empty`.
+Exact contradictory literal bounds are handled separately by §§20.17.8 and 35.2.
 
 ## 35.11 NULL predicates
 
@@ -20637,6 +21859,13 @@ The exact successful stages are §15.5 C0–C6. For persistent transactions, C3 
 
 Once the publication-authorizing commit record validly appends, COMMIT is uncancellable: client disconnect, timeout, or cancellation does not initiate ABORT. The server continues C2–C5 or enters the noncontinuable gate. A known commit append failure is not exposed as a retryable COMMIT on the same transaction; v1 aborts that transaction, and an application retry begins a new transaction.
 
+`WAL_POSITION_EXHAUSTED` cannot be the expected cause of a persistent
+transaction's C2/A1 terminal-record no-append because §4.3.2.4 retained its
+closure credit before the first persistent WAL record. If numeric capacity is
+nevertheless unavailable, terminal-headroom accounting is incoherent and the
+database follows the noncontinuable invariant-failure path; it does not restore
+COMMIT eligibility or strand an admitted writer deliberately.
+
 A group-commit flush failure applies this same rule to every waiting transaction whose commit record already validly appended. They remain COMMITTING while the exact shared WAL prefix is retried; none may be selectively converted to ABORTED because its individual waiter has not yet been acknowledged.
 
 Under A-001, resident status-page installation is a C2 prerequisite and may not be intentionally deferred until after durability. If C3 has nevertheless completed and a latent failure proves that required installation/runtime state was not completed, the transaction remains COMMITTED and the database is noncontinuable. Ordinary post-C3 runtime cache publication, logical-lock release bookkeeping, catalog/statistics cache publication, or client transport failure likewise cannot change the outcome. No error path may append/publish ABORTED for that TxnId. A nonrequired background status-page flush scheduling failure may leave the page dirty/retryable under M-001 and does not by itself fail an otherwise complete COMMIT.
@@ -20792,6 +22021,9 @@ No partially active pipeline/task graph remains runnable after a terminal query 
 
 ### 39.3.1 Checked integer arithmetic
 
+The exact unary/binary overloads, result types, quotient, remainder, and errors
+are canonical in §§17.6.1–17.6.2; this section states their runtime enforcement.
+
 Integer kernels MUST NOT rely on C++ signed-overflow undefined behavior.
 
 Operations that can overflow use checked arithmetic for:
@@ -20811,7 +22043,8 @@ Integer division or remainder by zero raises `ArithmeticError`.
 
 ### 39.3.2 FLOAT64 arithmetic/division
 
-FLOAT64 arithmetic follows the database's IEEE-754 binary64 semantics.
+FLOAT64 arithmetic follows the exact §17.4.3 binary64 rounding/NaN/signed-zero
+semantics and §17.6.2 overload registry.
 
 In particular, v1 FLOAT64 division by zero follows IEEE results rather than the integer division rule:
 
