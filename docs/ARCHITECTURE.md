@@ -1655,7 +1655,303 @@ A checksum detects corruption; it does not by itself repair a torn page.
 
 Torn-page repair requires a retained complete WAL page image as defined by Chapters 12–13.
 
-## 4.13 Storage-foundation invariants
+## 4.13 Persisted structural validation v1
+
+Checksums establish byte integrity, not structural meaning. A checksummed page is ordinary database state only after the validation contract in this section accepts it under the owning file/page descriptor. This section centralizes the minimum v1 structural checks; the byte layouts remain owned by their format chapters.
+
+### 4.13.1 Validation layers and required timing
+
+V1 uses four exact conceptual layers:
+
+| Layer | Required meaning |
+|---|---|
+| `L0_RAW_PHYSICAL` | Exact transfer/size, whole-page checksum where applicable, universal common-header decoding, embedded PageId identity, and expected FileKind/PageType compatibility. No page-specific offset is dereferenced here. |
+| `L1_PAGE_LOCAL` | Complete bounded validation of one page using its bytes, owning file metadata, and already-available immutable descriptor: header/count/offset geometry, canonical slot/entry encoding, local payload non-overlap, local key order, tuple/key codec validity, and every v1 required-zero/reserved rule. |
+| `L2_BOUNDED_REFERENCE` | Nonrecursive reference-domain checks plus checks made while following one actual reference: allocated/published PageNo domain, same-file/object identity, expected target type/level/state, sibling reciprocity/boundary order, RID target state, and bounded progress. |
+| `L3_GLOBAL_GRAPH` | Exhaustive graph/object checks: complete B+ reachability and acyclicity, unique parentage, all-leaf depth, global separator/sibling consistency, complete free-list cycle/duplicate/disjointness, orphan detection, exhaustive heap/version-chain checks, and M-002 catalog fixed-point validation. |
+
+The required timing is:
+
+| Consumer/event | Mandatory validation before ordinary use/publication |
+|---|---|
+| Existing-page BufferPool load | BufferPool completes L0, then invokes the registered owner for complete L1 and every nonfetching L2 domain check available from registered context before `LOADING -> RESIDENT`. |
+| Page-controller construction | Only over a pinned, guarded `RESIDENT` page that passed the preceding checks. Construction does not weaken them; a controller additionally applies operation-specific L2 checks before following a reference. |
+| Ordinary scan/search/update | L0/L1 are already established for each page; every followed RID/child/sibling/free-list reference receives the L2 checks below. |
+| New or mutated writer state | The final page-local after-image passes L1 and nonfetching L2 before M-003 WAL-backed publication and before exclusive mutation ownership is released. Dirty resident checksum bytes may be stale under §4.12.1, so this check excludes only recomputation of that checksum. |
+| Recovery | Untrusted/torn bytes remain recovery-private. Complete redo results pass normal L0/L1 and applicable L2 publication checks before ordinary use; an atomic B+ MTR is validated as its complete reconstructed result. |
+| Database open | Validates every control/bootstrap/superblock/root/catalog/status page it consumes. It does not run an implicit full user-heap/index L3 scan. Required startup objects that fail their required checks prevent READY. |
+| Explicit verifier | Performs L0/L1/L2 exhaustively over the selected object and all applicable L3 checks. |
+
+The registered owner validator is bounded by one 8192-byte page. It may use registered immutable file identity, published page count, B+ root/endpoint metadata, heap schema-history descriptors, index-key descriptor, and expected heap FileId. It MUST NOT recursively fetch, traverse a graph, query the catalog, consult MVCC status, or depend on the page becoming resident. If required static descriptor context is unavailable, the page cannot be ordinarily published under a less precise validator.
+
+### 4.13.2 Universal deterministic rules
+
+Every persisted count/offset/length calculation uses checked arithmetic before comparison or dereference. Overflow in calculations equivalent to:
+
+```text
+offset + length
+base + count * entry_size
+base + ordinal * width
+page_no * PAGE_SIZE
+```
+
+is corruption. Validation order and result are deterministic for identical bytes plus identical descriptors; validity cannot depend on C++ padding, pointer values, unordered-container iteration, filesystem scan order, statistics, or optimizer state.
+
+Every field/byte already specified as reserved-zero is required-zero. Every known code has only its defined v1 semantics. Unknown PageType/FileKind/slot codes are invalid. The one narrow recognized-but-unsupported heap state is §4.13.3's `REDIRECT_RESERVED`; broader unknown-version/flag compatibility remains M-012.
+
+The FileKind/PageType combinations are exact:
+
+```text
+HEAP        page 0 SUPERBLOCK; page 1..N HEAP_DATA
+FSM         page 0 SUPERBLOCK; page 1..N FSM_DATA
+BTREE       page 0 specialized BTREE SUPERBLOCK;
+            page 1..N BTREE_INTERNAL, BTREE_LEAF, or BTREE_FREE
+CATALOG     page 0 SUPERBLOCK; page 1 CATALOG_DATA only
+TXN_STATUS  page 0 SUPERBLOCK; page 1..N TXN_STATUS
+```
+
+Self-hosted catalog relation files are ordinary `HEAP` files and therefore contain `HEAP_DATA`, not `CATALOG_DATA`. A generic 72-byte non-BTREE PageFile superblock codec MUST reject/dispatch `FileKind::BTREE`; only the specialized B+ validator accepts its 128-byte header and extension. Common superblock `flags` retain §4.10.4's existing M-012 boundary; this task does not assign or reject previously unspecified bits. Every specifically assigned zero flag/reserved field in ordinary pages and the B+ extension remains strict.
+
+An all-zero or otherwise uninitialized ordinary page inside an owning file's published range is corruption even if physical extension produced those bytes or a checksum happens to match. Every published ordinary page has a PAGE_INIT/BTREE_MTR-derived recognized header and owning format. Only M-003's unpublished contiguous append tail may contain zero/uninitialized bytes, and it is inaccessible to ordinary Fetch and reconciled before READY.
+
+### 4.13.3 HEAP_DATA local validity
+
+HEAP L1 validates, with checked arithmetic:
+
+```text
+page_type/format/header/common zero fields/PageNo
+heap reserved = 0
+lower = 48 + slot_count * 8
+slot_count <= 1018
+48 <= lower <= upper <= 8192
+free_slot_head = INVALID_SLOT_ID or free_slot_head < slot_count
+all slot descriptors
+all retained tuple ranges and tuple encodings
+the complete page-local UNUSED chain
+```
+
+`prune_hint` is a non-authoritative hint; every uint32 bit pattern is locally valid until a later architecture assigns semantics. It cannot waive any structural check.
+
+For every retained NORMAL or DEAD range `[tuple_offset, tuple_offset + tuple_length)`:
+
+- addition does not overflow;
+- the range is nonempty and lies wholly in `[upper, PAGE_SIZE)`;
+- it does not intersect bytes `[0, lower)`, including headers/slot directory;
+- it does not overlap any other retained NORMAL or DEAD tuple range;
+- it contains one complete tuple that passes the exact §5.7–§5.13 header, flag, null-bitmap, schema-version, fixed-area, VARCHAR packing, scalar, and exact-length rules under the immutable historical SchemaDescriptor.
+
+Validation may sort retained ranges by `(start,end,SlotId)` and reject when a preceding end exceeds the next start; any equivalent deterministic pairwise check is valid. Two slots never own any common payload byte. Unowned holes between valid retained ranges are structurally legal until compaction; dense packing is canonical compactor output, not a reader-validity requirement. Bytes in holes have no semantic owner and are ignored.
+
+The exact slot-state table is:
+
+| Persisted state | Canonical fields/payload | Free-list membership | Ordinary disposition |
+|---|---|---|---|
+| `NORMAL=1` | Nonzero retained coordinates satisfying the range rule; complete tuple validates; `aux=0`. | Never. | Ordinary physical/MVCC readers may inspect it; normal tuple-return paths require NORMAL. |
+| `DEAD=2`, retained form | Nonzero retained coordinates satisfying the same range and tuple validation as NORMAL; `aux=0`. | Never. | Ordinary row-return paths skip it; vacuum/diagnostics may inspect the still-valid tuple. |
+| `DEAD=2`, reclaimed form | `tuple_offset=0`, `tuple_length=0`, `aux=0`; owns no bytes. Mixed zero/nonzero coordinates are invalid. | Never. | Remains a nonreusable retired SlotId until Chapter 14 authorizes transition. |
+| `UNUSED=0` | `tuple_offset=0`, `tuple_length=0`; `aux` is an in-range UNUSED SlotId or `INVALID_SLOT_ID`. | Exactly once. | Never dereferenced as a tuple; only grace-authorized reclamation emits it and insertion may pop it atomically. |
+| `REDIRECT_RESERVED=3` | No v1 field/payload interpretation exists. | Forbidden. | Recognized numeric reservation but unsupported in v1; writers MUST NOT emit it and L1 returns `UNSUPPORTED_RESERVED_STATE`. The page is not ordinarily published, scanned, or repaired by guessing forwarding semantics. |
+| Any other code | No interpretation. | Forbidden. | `CORRUPT_HEAP`. |
+
+Thus a retained DEAD payload is not weakly validated merely because MVCC no longer returns it. Before `DEAD -> UNUSED`, either its complete original tuple remains structurally valid or compaction has produced the exact reclaimed form. Vacuum promptness and transaction visibility are not L1 facts.
+
+Compaction may move a retained DEAD payload while atomically updating its slot coordinates, exactly as for retained NORMAL bytes, or may discard it and install the reclaimed DEAD form. It cannot leave stale coordinates or a partially decodable retained tuple.
+
+The free-slot chain is mandatory L1 validation on every ordinary heap-page publication. Starting from `free_slot_head`, validation visits at most `slot_count` links and requires:
+
+```text
+each link in range or terminal INVALID_SLOT_ID
+each visited slot canonical UNUSED
+no repeated SlotId/cycle
+canonical termination at INVALID_SLOT_ID
+every UNUSED slot visited exactly once
+no NORMAL/DEAD/REDIRECT slot visited
+```
+
+An INVALID head with any UNUSED slot, an unlisted UNUSED slot, duplicate membership, cycle, or noncanonical link is `CORRUPT_HEAP`; validation cannot loop indefinitely.
+
+Tuple-header transaction fields receive their existing structural domain checks without performing status lookup: `xmin` is `FROZEN_TXN_ID` or a normal TxnId, `xmax` is `INVALID_TXN_ID` or a normal TxnId, and `FROZEN_TXN_ID` is not a deleter. The previous-version sentinel pair must be both invalid or both present. A present previous PageNo is an ordinary published page `>=1` in the same heap file and its SlotId is non-sentinel; an obvious self-reference to the current RID is invalid. Same-page targets can be bounded-checked immediately. Cross-page target state/version-chain acyclicity is L2/L3 and is checked when traversed or by the verifier.
+
+RID dereference always occurs under the existing ReadEpochGuard/reuse protocol and checks expected heap FileId, published PageNo domain, embedded PageId, `slot < slot_count`, and caller-permitted state before exposing bytes. Query/index lookup requires NORMAL; vacuum/diagnostic operations may explicitly accept retained DEAD. UNUSED, reclaimed DEAD, REDIRECT_RESERVED, wrong-relation, or out-of-range targets return controlled stale/corruption classification according to the caller's settled protocol, never undefined access.
+
+### 4.13.4 B+ local, superblock, and free-page validity
+
+The specialized BTREE superblock validator first applies the §4.10 common-prefix rules and then requires:
+
+```text
+FileKind = BTREE
+header_size = 128
+object_id = expected IndexId
+table_id = expected TableId
+key_schema_version = 1
+key_schema_fingerprint = the fingerprint of the catalog IndexDescriptor
+tree_height >= 1
+index_flags = 0
+bytes 128..8191 = 0
+root_page_no, first_leaf_page_no, last_leaf_page_no
+    are distinct from INVALID_PAGE_NO and in [1, published_page_count)
+free_page_head
+    is INVALID_PAGE_NO or in [1, published_page_count)
+free_page_head is not root_page_no, first_leaf_page_no, or last_leaf_page_no
+```
+
+The FileId from the safely opened managed file and its deterministic A-003 name must agree with the catalog IndexId/FileId mapping and FileSuperblock identity. Before an IndexDescriptor becomes usable, bounded root/endpoint loads additionally establish that the root belongs to this file, has `level = tree_height - 1`, and that both endpoints are leaves. If `tree_height = 1`, root/first/last are the same leaf; if `tree_height > 1`, the root is internal and `first_leaf_page_no != last_leaf_page_no`. The root has no persisted parent field. A published internal root with zero separators is invalid because §8.15.2 requires contraction before publication; the initialized empty tree is exactly the one empty root leaf. Non-root low/zero occupancy remains governed by §8.16's soft occupancy rule and is not by itself corruption.
+
+Every BTREE_LEAF or BTREE_INTERNAL page receives the following complete L1 checks:
+
+```text
+format_version = 1
+header_size = 64
+common/node/slot flags and reserved fields = 0
+slot_count <= 1016
+lower = 64 + slot_count * 8
+64 <= lower <= upper <= 8192
+leaf level = 0; internal level > 0
+every node level < registered tree_height
+all slot descriptors and complete physical keys decode canonically
+all entry ranges are valid, disjoint, and strictly ordered by physical key
+```
+
+V1 node pages have no persisted parent pointer, parent hint, page generation, or separate free-state flag. Tree-local free state is represented only by PageType BTREE_FREE; the process-local `root_generation` in §8.19.3 is not page bytes and is outside persisted validation.
+
+For every slot, checked arithmetic establishes that `[entry_offset, entry_offset + entry_length)` is nonempty and wholly inside `[upper, PAGE_SIZE)`, does not intersect `[0, lower)`, and does not overlap another slot's independently owned entry range. Unowned holes are legal; packed/dense entry bytes are canonical compaction output, not a validity requirement. V1 has no shared-prefix or overlapping-entry encoding.
+
+Each `user_key_length` is in `1..1024` and the exact bytes decode as one complete canonical §8.5 key for the registered key schema. A leaf has `entry_length = user_key_length + 16` and a valid reserved-zero RID belonging to the indexed heap FileId. An internal entry has `entry_length = user_key_length + 24`, comprising that key, a valid reserved-zero separator RID belonging to the same indexed heap FileId, and one child PageNo. Trailing, truncated, noncanonical, wrong-schema, or overlong key bytes are corruption.
+
+The slot sequence MUST be strictly increasing under canonical `(encoded_user_key,RID)` order on every ordinary load, not only in debug/verifier builds. Equal user-key bytes with different RIDs are structurally legal in all indexes, including UNIQUE indexes whose logical ownership is resolved by M-004. Two exact physical `(user_key,RID)` entries in one page are corruption; the full L3 verifier also rejects the same physical key across pages. Recovery's proven replay of an already-present exact entry is an idempotent operation result, not authorization for duplicate stored copies.
+
+An internal page has exactly `slot_count + 1` child references: the leftmost child plus one right child per entry. Every local child reference is in `[1, published_page_count)`, is not this page, is not the current root, and is distinct from every other child reference in that same parent. These are local/domain checks; target type, identity, level, and route checks occur when the child is fetched under §4.13.5. Full child-graph acyclicity and unique parentage are L3.
+
+A leaf sibling field is either `INVALID_PAGE_NO` or lies in `[1, published_page_count)` in this B+ file. It cannot name the same leaf, the root when the root is not this leaf, or the current free-list head. Locally, `prev = INVALID_PAGE_NO` iff this is `first_leaf_page_no`, and `next = INVALID_PAGE_NO` iff this is `last_leaf_page_no`; the one-leaf tree therefore has neither sibling. Reciprocal and boundary checks require a bounded sibling fetch and are §4.13.5 L2 checks.
+
+A BTREE_FREE page requires:
+
+```text
+format_version = 1
+header_size = 40
+common flags/reserved = 0
+bytes 40..8191 = 0
+next_free_page_no = INVALID_PAGE_NO
+    or a PageNo in [1, published_page_count)
+```
+
+Its next link cannot name itself, the root, first leaf, or last leaf. The same exclusion applies to the superblock head. These checks do not by themselves prove the entire chain.
+
+The following are unconditional structural invariants: the free list is acyclic, each free page occurs exactly once, and no free page is reachable from the live root or installed sibling chain. V1 does not perform an O(file-size) free-list/tree graph traversal at every open or page load. The allocator instead serializes free-head access, validates the current head as BTREE_FREE and its next link before one atomic MTR pop/reinitialization, and revalidates the head before publication. A page already republished as a node cannot be popped as free. Any operation that walks more than one free link maintains a visited PageNo set and stops with `CORRUPT_INDEX` on repetition or after more than `published_page_count - 1` pages. The explicit verifier proves complete cycle/duplicate/free-live disjointness and orphan state. This lazy detection policy does not make cycles, duplicates, or free/live overlap valid.
+
+### 4.13.5 Mandatory B+ traversal checks
+
+Normal traversal supplies L2 information unavailable to an isolated owner validator. Parent-to-child handoff validates, before interpreting the target as a child:
+
+- the parent reference remains installed under the existing latch-coupling protocol;
+- target FileId/IndexId and embedded PageId identify the same index and requested PageNo;
+- target is a leaf/internal node, never BTREE_FREE;
+- `child.level + 1 = parent.level` without arithmetic overflow;
+- descent reaches level zero after exactly the superblock `tree_height - 1` internal transitions, never earlier or later;
+- the selected child is compatible with the immediate separator interval used for that routing decision.
+
+For the last check, the parent supplies the exact half-open interval selected by §8.11.1: `C0` has `(-infinity,K1)`, `Ci` has `[Ki,K(i+1))`, and `Cn` has `[Kn,+infinity)`. Every physical key stored directly in the fetched target page—leaf entries or internal separator keys—must lie in that interval. Equality with a lower bound is legal; equality with an upper bound is not. An empty target supplies no local key fact. This check remains compatible with stale-low internal separators, but cannot prove the unseen leftmost descendant or complete subtree; complete descendant range/separator correctness and unique parentage are L3. A traversal keeps a visited PageNo set, or an equivalent exact depth/progress guard, and fails rather than following a cycle or exceeding the declared height.
+
+Forward leaf handoff retains the current guard/latch while loading the next leaf and requires: same B+ owner, L0/L1 success, level zero, `next.prev = current`, and—when both pages are nonempty—`current.last_physical_key < next.first_physical_key`. The scan records visited leaf PageNos and may cross at most the number of published ordinary B+ pages; repetition, an impossible endpoint, wrong type/identity, or nonincreasing boundary is `CORRUPT_INDEX`. It must fail the scan rather than loop, duplicate rows, or silently omit rows. Reverse-link validation follows the same reciprocal/boundary rule when a maintenance/verifier path follows `prev`; native reverse query scans remain deferred.
+
+The L3 B+ verifier proves, over a stable verifier-owned view:
+
+- every live page is reachable exactly once from the root and the child graph is acyclic;
+- all leaves occur at the declared depth, all separators bound their complete subtrees, and global physical-key order is strict;
+- the sibling chain is reciprocal, acyclic, has exactly the root-reachable leaves in order, and agrees with first/last endpoints;
+- the free chain is bounded, acyclic, duplicate-free, and disjoint from root/children/siblings;
+- no allocated/published page is orphaned except an exact architecture-authorized recovery-private or unpublished-tail state.
+
+Normal operation's bounded checks are never permission to return a known-wrong answer after detecting a global violation.
+
+### 4.13.6 FSM, catalog, status, and superblock validity
+
+FSM_DATA L1 requires the exact §6.5 header/type/version/zero fields, `entry_count <= 8144`, and the checked deterministic relation:
+
+```text
+first_heap_page_no = 1 + (fsm_page_no - 1) * 8144
+represented initialized range =
+    [first_heap_page_no, first_heap_page_no + entry_count)
+```
+
+The initialized range cannot contain `INVALID_PAGE_NO` or extend beyond the paired heap file's published page range available to the registered FSM owner. Every category is an arbitrary valid uint8 estimate; it need not equal current heap free space. Bytes in `[48 + entry_count, 8192)` are zero. A short initialized prefix may be repaired/rebuilt under §6.10; it cannot be indexed outside its current bound. Ordinary insertion still validates authoritative heap free space, so stale but structurally valid categories cannot cause unsafe access.
+
+CATALOG_DATA page 1 receives the exact immutable §16.9 bootstrap-header and six-entry validation, including CRC/header/count/version/identity/reserved-zero rules. Self-hosted catalog relation pages receive ordinary HEAP L0/L1 validation under the canonical M-002 built-in/user SchemaDescriptors. M-002 scalar, cross-row, foreign-reference, fixed-point, and cache-reconstruction checks are catalog L3 and must complete during M-014 open before catalog authority is published; they are not recursively performed by a heap-page owner validator.
+
+TXN_STATUS pages require the exact §9.12 32-byte header, PageId/type/version/zero fields, checksum, and 8160-byte two-bit array. All four assigned two-bit patterns decode structurally: INVALID, COMMITTED, ABORTED, and recognized nonterminal RESERVED. RESERVED retains §9.11.1 semantics and is not an unsupported unknown state. Given the durable transaction-allocation high-water mark, every represented entry for an unallocated TxnId at or above `reserved_txn_id_end` must be INVALID; entries in the allocated range may structurally be any assigned pattern, with terminal/reference semantics resolved by recovery and transaction-status logic. A required status page is not exposed to ordinary lookup until A-001 recovery has repaired it and L0/L1 have succeeded.
+
+Every HEAP/FSM/CATALOG/TXN_STATUS FileSuperblock receives the exact §4.10 72-byte codec checks: singleton/object identity appropriate to FileKind, page size, format, header size, initialized FileId, checksum, required-zero reserved fields and trailing bytes, and file-kind/page-0 identity. The BTREE superblock receives the specialized checks in §4.13.4. File size, M-003 published-page boundary, deterministic A-003 name, catalog descriptor, and superblock FileId/object identity are bounded L2 cross-checks. A mismatch is corruption or missing-required-object failure, not filename-based inference.
+
+Control slots use §13.2's own framing/CRC/generation validation rather than the common page header. The immutable bootstrap page uses its §16.9 codec. Neither is exempt from deterministic checked arithmetic merely because it is not an ordinary page type.
+
+### 4.13.7 Minimum ordinary-read validation matrix
+
+| Persisted object/page kind | L0 before consumption | L1 before consumption | Additional mandatory bounded L2 | Full L3 required before this page's normal use? |
+|---|---|---|---|---|
+| HEAP_DATA | Yes | §4.13.3, including all slot ranges, tuple codecs, and complete local free-slot chain | RID/version-link target checks when followed | No; full heap/version graph is verifier work. |
+| FSM_DATA | Yes | §4.13.6 exact mapping/prefix/suffix | Paired heap FileId and published-range bound | No; category/heap comparison is repair/verifier work. |
+| BTREE superblock | Exact page-0/superblock physical checks | §4.13.4 extension/descriptor checks | Bounded root/first/last target checks before index use | No whole-tree walk. |
+| BTREE_INTERNAL | Yes | §4.13.4 ranges, codecs, strict order, children | §4.13.5 on each followed child | No. |
+| BTREE_LEAF | Yes | §4.13.4 ranges, codecs, strict order, sibling domains | §4.13.5 on sibling handoff; RID L2 on heap recheck | No. |
+| BTREE_FREE | Yes | §4.13.4 exact free format/link domain | Serialized head/pop recheck and bounded chain progress | No, but allocator never ignores a detected violation. |
+| CATALOG_DATA bootstrap | Exact bootstrap framing/checksum/identity | Exact §16.9 header and six entries | Bootstrap/superblock/system-root identity cross-check | Yes: M-002 fixed point before READY. |
+| Catalog relation HEAP_DATA | Yes | Ordinary HEAP under canonical catalog descriptor | M-002 scalar/reference checks during reconstruction | Yes for committed catalog authority before READY. |
+| TXN_STATUS | Yes | §4.13.6 two-bit/header/high-water rules | A-001 WAL/status reconciliation before lookup | No independent full status-file scan beyond recovery/open requirements. |
+| HEAP/FSM/CATALOG/TXN_STATUS superblock | Exact §4.10 page-0 codec | File-kind-specific local fields | File registry/name/catalog/published-length identity | Only where required by M-014 startup ownership. |
+| database.control | Its own exact dual-slot CRC/framing | §13.2 field/range/reserved rules | Selected checkpoint/WAL availability | Both slots are evaluated before recovery entry. |
+
+“No L3 before page use” never means an L3 invariant is optional. It means ordinary bounded operation detects violations it encounters and the explicit verifier provides exhaustive detection without imposing an O(database-size) fetch path or open scan.
+
+### 4.13.8 Writer, redo, and failure contract
+
+A writer holds the page's exclusive mutation/no-flush ownership while constructing its final bytes. Before M-003 publication, every affected after-image must pass its complete L1 and available nonfetching L2 checks under the same descriptor that future readers use. For a multi-page B+ MTR, all final pages and changed superblock/root/free-list metadata validate as one provisional set before WAL append/publication. A writer MUST NOT knowingly publish a page the canonical reader would reject; failure restores the exact prior runtime state under M-003 or escalates to DATABASE_NONCONTINUABLE if restoration/invariants cannot be established.
+
+Recovery may safely identify a target and install PAGE_IMAGE/PAGE_INIT/redo bytes under recovery-private ownership even when the old data page fails checksum. It does not perform ordinary field parsing on torn bytes before an applicable full image establishes trusted framing. Individual redo actions may have private intermediate forms, but a complete page result—and the complete result set of an atomic BTREE_MTR—passes normal L0/L1 and applicable L2 before ordinary BufferPool publication or M-014 READY. A valid WAL action whose complete result remains structurally invalid is `RECOVERY_FAILED`/persisted corruption; recovery never grants a permanent validation waiver.
+
+Validation failures have these conceptual classifications:
+
+| Condition | Classification and lifecycle effect |
+|---|---|
+| Checksum/header/PageId/type/range/local codec failure on one data page | `CORRUPT_PAGE`, refined to `CORRUPT_HEAP` or `CORRUPT_INDEX`; ordinary publication/access fails. |
+| `REDIRECT_RESERVED` in a heap page | `UNSUPPORTED_RESERVED_STATE`; no ordinary publication. It is not guessed as another slot form. |
+| B+ traversal/free-list/global structural failure | `CORRUPT_INDEX`; the operation/verifier fails and no known-malformed route is used. |
+| Required control/bootstrap/catalog/status/root object invalid during open or after recovery | `CORRUPT_DATABASE` or `RECOVERY_FAILED`; M-014 cannot publish READY. |
+| Failure to restore a provisional writer state or uncertainty about installed runtime ownership | M-003 `DATABASE_NONCONTINUABLE`. |
+
+A malformed non-required user heap/index page may be reported only when accessed; open need not pre-scan it. Once detected, there is no automatic repair except an already-defined WAL/FPI recovery action or authoritative FSM rebuild. Structurally valid stale MVCC/index entries, DEAD tuples, and safely retired pages are not corruption merely because vacuum has not removed them.
+
+### 4.13.9 Explicit verifier and bounded-progress requirements
+
+The explicit verifier performs deterministic stable-view checks beyond ordinary page loading:
+
+- HEAP: L0/L1 for every published page; exhaustive SlotId/RID and previous-version-link domain/acyclicity checks available under the selected verification scope; no overlapping retained payloads;
+- FSM: all local mappings/prefixes plus optional exact comparison of categories with authoritative heap free space, reporting stale estimates separately from malformed structure;
+- B+: the complete §4.13.5 root, child, leaf, free, and allocated-page graphs, including strict global order, all-leaf depth, separator bounds, sibling coherence, cycles, duplicate membership, free/live disjointness, and orphans;
+- CATALOG: the M-002 cross-row/self-description fixed point;
+- TXN_STATUS: all present local pages plus transaction-reference/status consistency available under the recovery horizon.
+
+Every persisted-chain traversal has a finite architecture-derived progress bound. Heap free slots visit at most `slot_count`; B+ root descent uses declared `tree_height` and rejects repeated pages; sibling and free-list walks visit at most `published_page_count - 1` ordinary pages and reject repeats; version/RID verification uses a visited RID set and cannot exceed the selected heap's finite published slot population. An implementation may use an equivalent lower bound, but it cannot omit duplicate/cycle detection or rely on eventual integer wraparound.
+
+### 4.13.10 Forbidden interpretations
+
+V1 specifically forbids:
+
+1. accepting overlapping retained NORMAL or DEAD tuple ranges;
+2. checking tuple/entry bounds without checking pairwise owned-range overlap;
+3. trusting B+ key order because a checksum passed or deferring local order checks to the verifier;
+4. accepting overlapping B+ entry payloads or exact duplicate stored physical keys;
+5. following an invalid/out-of-range/wrong-owner child, sibling, RID, or free-page reference;
+6. looping indefinitely on a corrupt heap chain, B+ traversal, sibling chain, free list, or version chain;
+7. allowing duplicate B+ free-list membership or a page that is both free and live-tree reachable;
+8. interpreting REDIRECT_RESERVED as NORMAL, DEAD, UNUSED, or an invented forwarding tuple;
+9. accepting unknown slot states or zero-filled published ordinary pages;
+10. allowing recovery to expose a structurally invalid completed result;
+11. using unchecked persisted offset/count/length arithmetic;
+12. treating valid stale MVCC/index/FSM garbage as structural corruption merely because maintenance is delayed;
+13. returning silent partial/duplicate/missing query results after detecting a malformed B+ sibling or route;
+14. making an expensive verifier the sole validator for any invariant needed to parse one page safely.
+
+## 4.14 Storage-foundation invariants
 
 1. `FileId` is a database identity, never an operating-system file descriptor.
 2. `PageId` is a persistent logical identity, never a frame index or memory address.
@@ -1680,6 +1976,7 @@ Torn-page repair requires a retained complete WAL page image as defined by Chapt
 21. Regular-file synchronization does not durably publish create/rename/unlink directory entries; the required owning directories are synchronized explicitly.
 22. Committed catalog ownership never names a private DDL basename and never precedes durable final-name publication of every required physical file.
 23. A required committed object file is never reconstructed from filename guesswork when its durable final entry is missing.
+24. A checksum-valid page is not ordinary state until §4.13's required structural layer accepts it; writers and recovery publish only locally valid completed results.
 
 ---
 
@@ -1897,9 +2194,7 @@ A `NORMAL` slot MUST reference tuple bytes wholly inside the tuple-data region a
 
 For v1 `UNUSED` slots, `aux` is the free-slot next pointer defined by §5.3.2 and tuple coordinates are exactly zero.
 
-For `REDIRECT_RESERVED`, heap-page v1 still assigns no tuple-range or `aux` semantics.
-
-`REDIRECT_RESERVED` remains reserved for possible HOT-like behavior and MUST NOT be emitted by the baseline heap/vacuum implementation.
+`REDIRECT_RESERVED` is the recognized numeric reservation defined by §4.13.3. V1 assigns it no tuple-range or `aux` semantics, writers MUST NOT emit it, and ordinary owner validation returns `UNSUPPORTED_RESERVED_STATE` rather than interpreting or skipping it.
 
 ### 5.4.3 DEAD slots and physical reclamation
 
@@ -1910,10 +2205,9 @@ Before compaction, a `DEAD` slot MAY retain its previous:
 ```text
 tuple_offset
 tuple_length
-aux
 ```
 
-while those tuple bytes remain physically present.
+while those tuple bytes remain physically present and continue to pass the complete retained-tuple validation in §4.13.3. Because the originating NORMAL form has `aux=0`, the DEAD form also has `aux=0`.
 
 After compaction has physically discarded the payload of a `DEAD` slot, the canonical persisted coordinates are:
 
@@ -1921,7 +2215,7 @@ After compaction has physically discarded the payload of a `DEAD` slot, the cano
 tuple_offset = 0
 tuple_length = 0
 state        = DEAD
-aux          = preserved until final reuse transition
+aux          = 0
 ```
 
 Clearing the coordinates prevents the reclaimed `DEAD` slot from pointing into newly free space or bytes moved for another tuple.
@@ -2761,27 +3055,29 @@ No long-lived naked pointer/span into a buffer frame may survive after the prote
 8. A new `NORMAL` slot has `aux=0`.
 9. Every `UNUSED` slot has zero tuple coordinates and uses `aux` as the next free SlotId/sentinel.
 10. `free_slot_head` is either `INVALID_SLOT_ID` or the head of an acyclic in-range chain containing every reusable UNUSED slot exactly once.
-11. Page compaction does not change `SlotId`.
-12. Physically reclaimed `DEAD` slots canonicalize tuple coordinates to `(0,0)` but remain `DEAD` until the grace-complete reuse transition.
-13. A `DEAD` slot is never linked into the reusable free-slot list.
-14. The maximum accepted raw tuple payload is `8135` bytes; `8136` is rejected.
-15. A tuple header is exactly 48 bytes; `header_bytes=48` and tuple reserved bytes `44..47` are zero.
-16. `CommandId{0}` is valid.
-17. The previous-version pointer is either two invalid sentinels or two non-sentinels, and always refers within the same heap file.
-18. The v1 tuple-flags known mask is `0x0003`; unknown bits are invalid.
-19. `HAS_VARLEN` exactly reflects whether the interpreting physical schema contains VARCHAR.
-20. Tuple physical length is exact; trailing unreferenced bytes are invalid.
-21. Every physical schema column owns one LSB-first null bit.
-22. Unused high null-bitmap bits are zero.
-23. `HAS_NULLS` exactly reflects whether any used null bit is set.
-24. Schema-directed validation rejects a NULL bit for a `NOT NULL` column.
-25. BOOLEAN accepts only `0x00` and `0x01`.
-26. FLOAT64 preserves exact IEEE-754 binary64 payload bits and does not canonicalize NaNs.
-27. A NULL VARCHAR descriptor is exactly `(0,0)`.
-28. Present VARCHAR payloads are packed consecutively in physical schema order with no gaps or overlaps.
-29. Present empty VARCHAR is distinct from NULL.
-30. `HeapPage` owns physical page mechanics, not SQL visibility.
-31. Physical heap scan order does not imply SQL result ordering.
+11. Every retained NORMAL/DEAD tuple range passes complete tuple validation and is disjoint from every other retained tuple range; §4.13.3 is the canonical page-local contract.
+12. `REDIRECT_RESERVED` is recognized but unsupported: v1 writers do not emit it and ordinary readers reject the containing page without guessing semantics.
+13. Page compaction does not change `SlotId`.
+14. Physically reclaimed `DEAD` slots canonicalize tuple coordinates to `(0,0)` and `aux=0` but remain `DEAD` until the grace-complete reuse transition.
+15. A `DEAD` slot is never linked into the reusable free-slot list.
+16. The maximum accepted raw tuple payload is `8135` bytes; `8136` is rejected.
+17. A tuple header is exactly 48 bytes; `header_bytes=48` and tuple reserved bytes `44..47` are zero.
+18. `CommandId{0}` is valid.
+19. The previous-version pointer is either two invalid sentinels or two non-sentinels, and always refers within the same heap file.
+20. The v1 tuple-flags known mask is `0x0003`; unknown bits are invalid.
+21. `HAS_VARLEN` exactly reflects whether the interpreting physical schema contains VARCHAR.
+22. Tuple physical length is exact; trailing unreferenced bytes are invalid.
+23. Every physical schema column owns one LSB-first null bit.
+24. Unused high null-bitmap bits are zero.
+25. `HAS_NULLS` exactly reflects whether any used null bit is set.
+26. Schema-directed validation rejects a NULL bit for a `NOT NULL` column.
+27. BOOLEAN accepts only `0x00` and `0x01`.
+28. FLOAT64 preserves exact IEEE-754 binary64 payload bits and does not canonicalize NaNs.
+29. A NULL VARCHAR descriptor is exactly `(0,0)`.
+30. Present VARCHAR payloads are packed consecutively in physical schema order with no gaps or overlaps.
+31. Present empty VARCHAR is distinct from NULL.
+32. `HeapPage` owns physical page mechanics, not SQL visibility.
+33. Physical heap scan order does not imply SQL result ordering.
 ---
 
 # 6. Free-Space Management and Physical Reclamation
@@ -3208,7 +3504,7 @@ After discarding a `DEAD` payload, compaction canonicalizes the slot to:
 tuple_offset = 0
 tuple_length = 0
 state        = DEAD
-aux          = preserved
+aux          = 0
 ```
 
 The following remain unchanged:
@@ -3221,9 +3517,7 @@ SlotId values
 
 Compaction increases contiguous free space but does not make a `DEAD` slot reusable.
 
-Retained `NORMAL` tuple ranges MUST be non-overlapping for compaction to proceed.
-
-V1 MAY enforce this non-overlap condition specifically as a compaction precondition rather than as a universal `HeapPage` structural-validation rule until broader validation semantics are specified.
+All retained NORMAL and DEAD ranges already satisfy §4.13.3's universal bounds, tuple-decoding, and pairwise non-overlap rules. Compaction revalidates the final local page state before publication.
 
 Compaction MUST NOT reclaim an MVCC-dead-looking tuple merely from local page evidence.
 
@@ -3278,6 +3572,7 @@ The same rule applies to whole-page recycling: an empty heap page may remain reu
 18. A compacted `DEAD` slot remains `DEAD` and non-reusable.
 19. Global vacuum/visibility logic, not HeapPage compaction, decides reclamation eligibility.
 20. Empty heap pages remain reusable database space; file shrinking is not required.
+21. FSM owner validation applies §4.13.6: deterministic mapping/prefix/suffix rules are structural, while category accuracy remains advisory.
 ---
 
 # 7. I/O and Buffer Management
@@ -3634,14 +3929,9 @@ A fetch that sees `EVICTING` cannot pin the old frame. It waits for that page-ta
 
 ### 7.6.4 Validation before resident publication
 
-Ordinary disk load has four validation layers:
+Ordinary load follows the canonical L0/L1/L2 model in §4.13.1. BufferPool owns exact 8192-byte positional I/O, checksum/common-header decoding, requested PageId identity, and registered-file identity. It remains format agnostic by invoking the registered storage owner's bounded nonmutating validator for complete page-local L1 and every nonfetching L2 domain check available from the immutable registered context before publication.
 
-1. exact 8192-byte positional I/O completes,
-2. the complete-page CRC32C and universal common-header encoding are valid before stored `page_lsn` is trusted,
-3. the page's embedded `page_no` equals the requested PageId's PageNo and the requested FileId still identifies the validated registered file,
-4. the storage owner's file-kind/page-type validation policy accepts the complete page-specific structure.
-
-The BufferPool owns layers 1–3. It remains format agnostic by invoking, rather than implementing, the registered storage owner's nonmutating layer-4 validator before publication. The validator dispatches from the already validated file kind/page type and MUST perform bounded validation without trusting corrupt counts or offsets. It validates physical page structure from the loaded bytes plus already registered immutable file-format context; it MUST NOT recursively fetch another page, perform query/MVCC interpretation, or require catalog I/O while the frame is `LOADING`. All fetches for one registered file use the same owning validation policy.
+The owner validator dispatches from the already validated file kind/page type, uses checked arithmetic, and enforces the exact page-kind rules in §4.13. It MUST NOT recursively fetch, traverse a graph, perform query/MVCC interpretation, or require catalog I/O while the frame is `LOADING`. All fetches for one registered file use the same owning validation policy; missing required descriptor context is a load/open failure, not permission to use a weaker parser.
 
 Failure at any layer is a load failure. Malformed bytes are never published as an ordinary `RESIDENT` page or exposed through a normal guard. Recovery may use a separate recovery-only read/reconstruction path for a torn page, but it MUST install and validate a reconstructed canonical page before publishing it for ordinary access.
 
@@ -5094,6 +5384,8 @@ A global extent allocator is not required solely for B+ tree v1.
 
 The tree-local free-list head and every terminal free-page link use `INVALID_PAGE_NO`.
 
+The complete in-range/exclusion, acyclic, unique-membership, free/live-disjointness, bounded-allocation, and verifier rules are canonical in §4.13.4–§4.13.5.
+
 ### 8.18.1 Reuse safety
 
 A retired page may be recycled only after:
@@ -5281,7 +5573,7 @@ At the end of leaf `L`, handoff is latch coupled:
 1. while holding `L` read latch, read `L.next`,
 2. if no next page exists, finish,
 3. pin and read-latch the next leaf,
-4. validate the next page type and leaf level,
+4. perform the complete §4.13.5 same-owner, type/level, reciprocal-link, key-boundary, and bounded-progress checks,
 5. release `L`,
 6. continue.
 
@@ -5553,34 +5845,13 @@ Crash atomicity is provided by the later WAL/recovery protocol.
 
 ## 8.27 Page validation and corruption handling
 
-Opening a B+ node validates at least:
+The complete mandatory B+ validation contract is §4.13.4–§4.13.5. Every ordinary node load validates checked geometry, nonoverlapping entry ownership, exact key/RID/child encoding, strict local physical-key order, pointer domains, and required-zero fields before RESIDENT publication. Sortedness and local overlap are production L1 checks, not debug/verifier options.
 
-```text
-page type
-format version
-self page_no
-header size
-level/type consistency
-64 <= lower <= upper <= PAGE_SIZE
-lower = 64 + slot_count * 8
-slot-directory bounds
-entry offsets/lengths
-leaf entry_length = user_key_length + 16
-internal entry_length = user_key_length + 24
-child PageNo validity where applicable
-```
-
-All size/offset arithmetic used by these checks MUST be overflow-checked before dereferencing entry bytes.
-
-Debug/verifier configurations SHOULD additionally validate sorted order.
-
-Invalid persistent bounds or malformed node metadata MUST produce a controlled corruption error rather than undefined behavior.
-
-V1 node parsing additionally enforces the exact format/header/zero-field rules in §§8.7–8.10 and the free-page rules in §8.18.
+Reference targets receive the bounded traversal checks when followed. Invalid bytes, ordering, bounds, identity, level, or chain progress produce controlled `CORRUPT_INDEX`; the tree never continues through a known-malformed page merely because its checksum passed.
 
 ## 8.28 Full-tree verifier
 
-The architecture requires an explicit full-tree verifier capable of checking at least:
+The architecture requires the §4.13.5/§4.13.9 explicit full-tree verifier capable of checking at least:
 
 1. every leaf is level `0`,
 2. every internal child is exactly one level below its parent,
@@ -5592,8 +5863,10 @@ The architecture requires an explicit full-tree verifier capable of checking at 
 8. superblock `first_leaf` and `last_leaf` are correct,
 9. every reachable child has the expected page type,
 10. no reachable tree page is simultaneously on the free list,
-11. internal child counts are consistent with separator counts,
-12. obvious orphaned allocated pages are reported where detectable.
+11. the free list is acyclic and duplicate-free and every link is in range,
+12. internal child counts are consistent with separator counts,
+13. child graph acyclicity and unique live-page reachability,
+14. all allocated/published pages are classified and unauthorized orphans are reported.
 
 The verifier is a structural correctness facility, not merely a debugging convenience.
 
@@ -5619,15 +5892,17 @@ The verifier is a structural correctness facility, not merely a debugging conven
 18. Encoded user keys larger than 1024 bytes are rejected rather than truncated.
 19. B+ tree pages are accessed through BufferPool, never directly through DiskManager.
 20. Persistent B+ page parsing validates bounds before dereferencing offsets/lengths.
-21. The complete tree can be checked by the explicit verifier.
-22. V1 native range traversal is forward/ascending.
-23. Root acquisition never waits for a B+ page latch while holding the root-metadata latch; root identity is validated using the process-local `root_generation`.
-24. Structural metadata publication may acquire the root-metadata latch while holding the required page latch(es).
-25. Vertical page-latch acquisition is parent-before-child.
-26. Horizontal adjacent-leaf latch acquisition is left-to-right or the operation restarts.
-27. Tree-local page reuse occurs only after safe structural detachment.
-28. Physical UNIQUE-index user-key duplicates remain representable because uniqueness is transactionally enforced above the tree.
-29. A failed pre-append MTR restores exact page/root/free-list runtime state; a new/reused page cannot escape as both reachable and free or as an unpublished child/root.
+21. Persistent B+ page parsing validates pairwise entry non-overlap and strict local key order before ordinary use.
+22. Every free-list PageNo is an in-range ordinary B+ page distinct from root/endpoints; the list is acyclic, duplicate-free, and disjoint from the live tree.
+23. Ordinary traversal and allocation use the bounded progress/recheck rules of §4.13.4–§4.13.5; the complete tree can be checked by the explicit verifier.
+24. V1 native range traversal is forward/ascending.
+25. Root acquisition never waits for a B+ page latch while holding the root-metadata latch; root identity is validated using the process-local `root_generation`.
+26. Structural metadata publication may acquire the root-metadata latch while holding the required page latch(es).
+27. Vertical page-latch acquisition is parent-before-child.
+28. Horizontal adjacent-leaf latch acquisition is left-to-right or the operation restarts.
+29. Tree-local page reuse occurs only after safe structural detachment.
+30. Physical UNIQUE-index user-key duplicates remain representable because uniqueness is transactionally enforced above the tree.
+31. A failed pre-append MTR restores exact page/root/free-list runtime state; a new/reused page cannot escape as both reachable and free or as an unpublished child/root.
 ---
 
 # Part IV — Transactions and Durability
@@ -6260,6 +6535,8 @@ A v1 TXN_STATUS decoder MUST reject:
 - nonzero common `reserved16`,
 - mismatched embedded `page_no`,
 - checksum failure when ordinary-page checksum verification is active.
+
+The complete status-page L1/high-water and recovery-publication requirements are §4.13.6. In particular, all assigned two-bit codes are structurally decodable, while A-001 and transaction-status semantics—not raw page decoding—decide whether a nonterminal code is valid for an authoritative transaction reference.
 
 The page's common `page_lsn` records the newest WAL record physically reflected in the page. After a successful terminal update this is that update's `TXN_COMMIT`/`TXN_ABORT` LSN. During recovery it may temporarily be a system `PAGE_INIT`/`PAGE_IMAGE` LSN before the later semantic terminal record is applied, as defined by §12.10.5.
 
@@ -8887,7 +9164,7 @@ If WAL-retention/checkpoint invariants say the required full image should exist 
 
 It MUST NOT guess page contents or trust a torn page's LSN.
 
-This reconstruction is the explicit recovery-only exception to ordinary BufferPool load publication in §7.6.4. Recovery may hold untrusted bytes privately while finding a full image, but the resulting page must pass universal and owning-format validation before it becomes an ordinary `RESIDENT` page.
+This reconstruction is the explicit recovery-only exception to ordinary BufferPool load publication in §7.6.4. Recovery may hold untrusted bytes privately while finding a full image, but the complete reconstructed page—or complete atomic B+ MTR result set—must pass §4.13 L0/L1 and applicable L2 validation before ordinary `RESIDENT` publication. Recovery cannot permanently waive a structural invariant.
 
 ## 13.15 Recovery phase 3: loser resolution
 
@@ -20522,6 +20799,9 @@ Tests MUST be able to use intentionally small resource limits, including tiny bu
 Storage verification MUST exercise the architectural properties that cannot be established by simple encode/decode happy paths, including:
 
 - heap-page fill/boundary behavior,
+- rejection of overlapping NORMAL/NORMAL, NORMAL/DEAD, and DEAD/DEAD retained tuple ranges,
+- complete retained-DEAD validation, canonical reclaimed-DEAD form, exact UNUSED-list membership/cycle rejection, and REDIRECT_RESERVED rejection,
+- checked-arithmetic failures for adversarial persisted counts, offsets, and lengths,
 - compaction with stable SlotIds and unchanged retained tuple bytes,
 - invalid slot/page access,
 - persisted tuple round-trips across scalar, NULL, fixed/varlen, empty-VARCHAR, and unaligned layouts,
@@ -20564,6 +20844,8 @@ Required deterministic coverage includes:
 - NULL-containing keys,
 - 1024-byte encoded-user-key boundary,
 - oversized-key rejection.
+
+Corruption coverage also injects overlapping entry ranges, unsorted local keys/separators, invalid child/sibling/free PageNos, malformed sibling reciprocity/boundaries, free-list cycles and duplicate membership, live/free overlap, wrong root/height/endpoints, zero-filled published pages, and traversal progress-limit violations. Local violations must fail ordinary access without relying on the full verifier; the verifier must exhaustively detect global reachability, orphan, free/live, separator, depth, and sibling-graph failures.
 
 Duplicate-heavy verification MUST place one SQL user key across multiple leaves and establish that:
 
