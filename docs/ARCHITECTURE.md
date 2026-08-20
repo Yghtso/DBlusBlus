@@ -1057,21 +1057,27 @@ For a new non-B+ ordinary page, publication is:
 
 ```text
 1. acquire the file's append-publication lock
-2. reserve page_no = physical file page count
-3. extend the file by exactly one 8192-byte page
-4. create the initialized logical page bytes except final page_lsn/checksum
-5. reserve the PAGE_INIT LSN
-6. finalize the canonical image with page_lsn = PAGE_INIT.lsn and valid checksum
-7. append the complete PAGE_INIT record
-8. install the canonical initialized image in its reserved, non-usable
-   BufferPool frame through §7.12.4
-9. as one publication event with respect to scans/fetches:
+2. require physical_file_page_count == published_page_count and reserve
+   page_no = that common count N
+3. install the sole private new-page intent, reserve/bind its LOADING frame,
+   and acquire the frame/DPT-transition ownership required by §7.12.4
+4. extend the file from N to N+1 pages
+5. create and validate the initialized logical page bytes except final
+   page_lsn/checksum
+6. obtain a candidate PAGE_INIT LSN reservation under §12.12.1
+7. finalize the private canonical image with page_lsn = PAGE_INIT.lsn and
+   valid checksum, construct/validate the complete record, and validly append
+   it under §12.12.2
+8. only after append success, install the canonical initialized image and
+   atomically publish its page_lsn, first modification generation, dirty=true,
+   rec_lsn=PAGE_INIT.lsn, DPT membership, and FPI-epoch state
+9. as the same publication event with respect to scans/fetches:
        advance published_page_count = page_no + 1
        publish that frame RESIDENT with the creator's pin
 10. release the append-publication lock
 ```
 
-The next append to that same file MUST NOT reserve a later PageNo before step 7 for the earlier page has completed.
+The next append to that same file MUST NOT reserve a later PageNo until the earlier publication has either completed step 9 or completed the failure cleanup below. A single B+ MTR may reserve/extend multiple consecutive trailing PageNos as one append-publication unit while holding the same lock; no competing allocator may interleave a later PageNo.
 
 The PAGE_INIT record does not need to be durable merely to release the append-publication lock. WAL append order is enough: if a later page's initialization WAL becomes durable, every earlier WAL byte in that logical prefix is durable as well.
 
@@ -1080,6 +1086,42 @@ A new page MUST NOT become reachable from persistent relation/index metadata bef
 For B+ pages allocated by file extension, the equivalent publication record is the complete `BTREE_MTR` that contains the new page as a full-image affected page. A newly appended B+ page is not tree-reachable before that MTR exists.
 
 A page reused from an already-published object-specific free list does not extend the file and follows the owning reuse/MTR rules instead.
+
+#### 4.11.1.1 Runtime failure before and after PAGE_INIT append
+
+Every failure before the complete PAGE_INIT becomes part of the valid WAL stream follows one rollback path while the append-publication lock and private frame ownership remain held:
+
+```text
+1. cancel the unpublished WAL reservation under §12.12.1
+2. leave published_page_count at N and publish no relation/FSM/index reference
+3. remove the private LOADING mapping and reset its frame without exposing it
+4. if extension began, ftruncate the file back to exactly N * PAGE_SIZE
+5. verify the resulting physical page count is exactly N
+6. only then release append-publication ownership and return the structured error
+```
+
+This applies to frame/resource reservation, physical extension, page initialization/validation, WAL construction/encoding, and a known append failure. If an extension syscall fails after possibly changing file length, the owner first inspects the aligned length and performs the same exact restoration. The failed PageNo `N` was never published and MAY be reused by the next successful append after cleanup.
+
+Immediate truncation is safe because the append-publication lock excludes every later same-file append reservation; therefore no published or in-progress page can exist above `N`. Runtime failure does not leave an adopted unpublished tail hole. If exact length restoration or its verification fails, or the WAL append outcome is uncertain, the owner enters the §12.12.4 noncontinuable storage state and MUST NOT release the page as ordinary resident state or allocate another page from that file.
+
+Once PAGE_INIT is validly appended, truncating/reusing the PageNo or returning an ordinary pre-publication failure is forbidden: the record may later become durable and recovery-visible. Steps 8–9 are designed as allocation-free/infallible publication under already-held ownership. A transient internal completion may be retried while ownership remains held; inability to establish the complete publication is noncontinuable under §12.12.4.
+
+#### 4.11.1.2 Ordinary-append crash and runtime-failure outcomes
+
+For a file initially containing/publishing `N` pages, the canonical outcomes are:
+
+| Point | Non-crash operation failure | Process crash / recovery |
+|---|---|---|
+| before extension | release unchanged private intent, if any; length/count remain `N` | unchanged file |
+| after extension, before provisional initialization | truncate/verify back to `N`, then PageNo `N` is reusable | the tail may survive or disappear; §4.11.3 removes any survivor without publication WAL |
+| after provisional bytes, before valid PAGE_INIT append | discard private frame and truncate/verify to `N` | provisional memory vanishes; recovery removes an unpublished surviving tail |
+| after valid append, before runtime publication | complete publication or enter noncontinuable state; do not truncate | if the complete record survived in the valid persisted WAL prefix, recovery reconstructs/publishes `N`; otherwise it removes the tail |
+| after publication, before WAL durability | retain the legal dirty page; a durability failure does not roll it back | surviving complete WAL reconstructs it; absent WAL implies no data write was legal and recovery removes the tail |
+| after WAL durability, before page write | retain the dirty page | redo reconstructs/re-extends page `N` if required |
+| during page write | write failure leaves the resident page dirty; do not truncate | durable PAGE_INIT repairs a missing/torn page |
+| after stable page write | page is durably published; normal generation reconciliation applies | valid page or PAGE_INIT redo supplies the same initialized state |
+
+Physical extension by itself is never semantic publication. This content/length protocol concerns an already managed file and does not alter the A-003 filesystem-name publication rules in §4.7.
 
 ### 4.11.2 Runtime visibility and heap/FSM growth
 
@@ -1126,7 +1168,7 @@ If an invalid/torn page is known published and required recovery WAL exists, rec
 
 If a nontrailing invalid page is neither reconstructible nor legitimately unused under an owning page-reuse protocol, recovery reports corruption.
 
-Whole-file shrinking remains unnecessary during normal execution; the narrow recovery truncation above exists only to discard unpublished append tails.
+Whole-file shrinking remains unnecessary during normal execution except for the exact same-operation rollback in §4.11.1.1 while append serialization proves the suffix unpublished. The recovery truncation above is the corresponding post-crash cleanup. No other normal path truncates a managed page file merely to reclaim space.
 
 ### 4.11.4 Later page reuse
 
@@ -1244,12 +1286,13 @@ Torn-page repair requires a retained complete WAL page image as defined by Chapt
 14. A write to an unallocated page does not allocate or sparsely extend the file.
 15. Concurrent raw append allocation of one managed file cannot return the same new `PageNo` twice.
 16. WAL-mode append publication serializes initialization-record append before `published_page_count`/reachability advances.
-17. Recovery may remove only the contiguous unpublished append suffix after reconstructing every durable page publication.
-18. `page_lsn` is the newest WAL-protected modification reflected in the page once WAL is active.
-19. Page checksums detect torn/corrupt writes; retained full-image WAL supplies repair.
-20. Regular-file synchronization does not durably publish create/rename/unlink directory entries; the required owning directories are synchronized explicitly.
-21. Committed catalog ownership never names a private DDL basename and never precedes durable final-name publication of every required physical file.
-22. A required committed object file is never reconstructed from filename guesswork when its durable final entry is missing.
+17. A known pre-append new-page failure restores and verifies the pre-extension length before append serialization releases; the unpublished trailing PageNo may then be reused.
+18. Recovery may remove only the contiguous unpublished append suffix after reconstructing every durable page publication.
+19. `page_lsn` is the newest validly appended WAL-protected modification reflected in a published page once WAL is active; a candidate reservation is insufficient.
+20. Page checksums detect torn/corrupt writes; retained full-image WAL supplies repair.
+21. Regular-file synchronization does not durably publish create/rename/unlink directory entries; the required owning directories are synchronized explicitly.
+22. Committed catalog ownership never names a private DDL basename and never precedes durable final-name publication of every required physical file.
+23. A required committed object file is never reconstructed from filename guesswork when its durable final entry is missing.
 
 ---
 
@@ -3136,7 +3179,7 @@ The legal combinations are:
 
 Loading, writeback, victim, no-flush, and file-retirement reservations are internal ownership claims, not public pins. No source-code enum or particular arrangement of flags is mandated, but every runtime frame state MUST map unambiguously to this model.
 
-`modification_generation` is a process-local monotonically increasing per-frame counter incremented for every persistent-byte mutation installed in that frame.
+`modification_generation` is a process-local monotonically increasing per-frame counter incremented for every **published** persistent-byte mutation installed in that frame. Provisional bytes restored under §12.12 never consume a generation.
 
 It is not persisted.
 
@@ -3162,7 +3205,7 @@ The following transitions are canonical. “Mapping” includes the in-progress 
 | `LOADING` | new-page PAGE_INIT/MTR, validation, and owning publication bound succeed under §7.12.4 | `RESIDENT + NONE` | atomically publish the same entry as usable with the owning page-count/reachability publication | convert the creator's private claim into exactly one pin | publish dirty with PAGE_INIT/MTR recovery metadata and generation | not applicable |
 | `LOADING` | read or validation fails | `FREE + NONE` | close/remove the failed in-progress entry; retain its completion result only for registered waiters | no claim becomes a pin | reset clean | all current waiters receive the same load error; a later independent fetch may retry |
 | `RESIDENT` | fetch hit while not victim-reserved/retiring and pin count can increase | `RESIDENT` | unchanged | atomically add one pin | unchanged | not applicable |
-| `RESIDENT` | publish one WAL-protected persistent mutation under §7.10.1 | `RESIDENT` | unchanged | caller already pinned/latched | increment generation; publish dirty/`rec_lsn`/DPT state | failure before publication remains protected and follows the owning WAL protocol; no inconsistent frame may become usable/flushable |
+| `RESIDENT` | publish one WAL-protected persistent mutation under §7.10.1 | `RESIDENT` | unchanged | caller already pinned/latched | increment generation; publish dirty/`rec_lsn`/DPT state | known failure before the publication-authorizing append restores §12.12 pre-operation state; uncertain/post-authorizing-append publication failure is noncontinuable; no inconsistent frame becomes usable/flushable |
 | `RESIDENT + NONE` | begin explicit/background copied writeback; dirty, flushable, no no-flush barrier | `RESIDENT + WRITEBACK_IN_PROGRESS` | unchanged | unchanged; new pins remain allowed | remains dirty | failure returns to `RESIDENT + NONE`, still dirty |
 | `RESIDENT + WRITEBACK_IN_PROGRESS` | stable writeback succeeds and copied generation is still current | `RESIDENT + NONE` | unchanged | unchanged | atomically clean, clear `rec_lsn`, remove DPT entry | not applicable |
 | `RESIDENT + WRITEBACK_IN_PROGRESS` | stable writeback succeeds but a newer generation exists | `RESIDENT + NONE` | unchanged | unchanged | remains dirty with existing dirty-interval metadata; reflush is required for current durability | not applicable |
@@ -3367,7 +3410,7 @@ Commit does not require heap/index data-page writeback because v1 is NO-FORCE.
 
 ### 7.10.1 Persistent mutation publication
 
-Acquiring a write guard alone does not make a page dirty. A successful persistent mutation is published while its write guard is held and only after the owning WAL protocol has produced the complete record/image needed for that mutation. The owning protocol decides whether it stages bytes until after WAL append or temporarily installs final bytes behind a no-flush barrier before append; §12.10.3 owns the B+ MTR ordering.
+Acquiring a write guard alone does not make a page dirty. A successful persistent mutation is published while its write guard is held and only after the owning WAL protocol has produced the complete record/image needed for that mutation. A protocol may stage after-images privately or temporarily install them behind a no-flush barrier, but every pre-append difference is provisional and obeys the exact rollback/publication contract in §12.12; §12.10.3 specializes that contract for B+ MTRs.
 
 The canonical publication order is:
 
@@ -3399,7 +3442,9 @@ The clean-to-dirty and checkpoint-epoch full-image rules are §12.10; `TXN_STATU
 
 An owning no-flush barrier and `WRITEBACK_IN_PROGRESS` are mutually exclusive. A protocol such as B+ MTR that must install protected bytes before its WAL record exists first waits for any older copied writeback to finish, then acquires the no-flush reservation before changing bytes; it does not wait while holding a page latch needed by that writeback's copy/reconciliation. Once installed, the barrier rejects/skips new writeback reservations until the owning protocol publishes or enters its defined failure disposition.
 
-If a protocol stages bytes until step 3, expected failure beforehand leaves page bytes/frame metadata unchanged. If an owning protocol permits protected pre-WAL byte installation, BufferPool MUST preserve its write latch/no-flush reservation and MUST NOT independently publish, flush, or clean those bytes when the owning operation fails. The owning protocol defines its own rollback/failure disposition; this BufferPool rule does not resolve or replace that protocol. No path may release an ordinarily usable frame with partially installed bytes lacking matching `page_lsn`, generation, dirty, and recovery metadata. Such an untracked publication is an internal invariant failure, not a clean operation error.
+Barrier acquisition and copied-writeback reservation are competing atomic transitions. If writeback wins, the mutation owner waits for complete reconciliation and captures state only afterward; a failed writeback fails the unchanged mutation attempt. If no-flush wins, explicit flush waits and background/eviction writeback cannot begin. The barrier covers every affected frame from before its first provisional byte through complete §12.12 publication or exact rollback.
+
+If a protocol stages bytes until step 3, expected failure beforehand leaves page bytes/frame metadata unchanged. If it installs protected pre-WAL bytes, a known failure before the publication-authorizing append restores exact before-images and metadata while preserving the barrier/latches; only after restoration validation may BufferPool release them. Append uncertainty, restoration failure, or inability to finish post-authorizing-append publication enters §12.12.4 noncontinuable state. No path may release an ordinarily usable frame with partially installed bytes lacking matching `page_lsn`, generation, dirty, and recovery metadata.
 
 Mutable access cannot be silently released after changing persistent bytes without this publication. A concrete write-guard API may require an explicit commit/mark operation or provide a mutation closure; it MUST make an unreported persistent mutation an invariant violation.
 
@@ -3468,6 +3513,8 @@ Dirty publication, current-generation stable-clean publication, and checkpoint D
 - clean-to-dirty publication occurs after capture ordering, and §12.10/§13.5 ordering guarantees its full image remains in the checkpoint's retained WAL scan/range.
 
 In particular, frame/DPT-transition synchronization begins before the clean-to-dirty full-image decision/WAL append and ends only after dirty/`rec_lsn`/FPI metadata are visible, as specialized for status pages in §12.10.5. Checkpoint cannot observe “clean” between that image append and frame/DPT publication.
+
+A provisional §12.12 mutation changes no checkpoint-visible DPT metadata. Its transition reservation blocks capture until either exact rollback exposes the old frame/DPT state or successful append publication exposes the complete new state. For a multi-page MTR, acquiring the complete affected set and publishing its DPT changes occur inside one conceptual DPT-publication gate also used by checkpoint capture; thus capture cannot collect part of the old set and part of the new set. This specifies the serialization boundary, not a required mutex/container implementation.
 
 Stable-clean reconciliation removes the DPT entry and sets `rec_lsn=INVALID_LSN` atomically with respect to checkpoint capture. A generation-mismatched writeback changes neither.
 
@@ -3593,7 +3640,7 @@ One complete CLOCK attempt that finds no reservable `FREE`/victim frame returns 
 
 The owner then follows §4.11.1: constructs the complete initialized image, appends its `PAGE_INIT` (or B+ MTR), installs `page_lsn`/checksum and frame recovery metadata, and validates the canonical image while the frame remains non-usable `LOADING`. For an append-count-governed page, advancing the owning `published_page_count` and changing the frame to `RESIDENT` with a pin for the creator are one publication event with respect to ordinary scans/fetches. A B+ page remains additionally unreachable from tree traversal until its owning MTR publication rule permits it. The PageId cannot be fetched generally before the owning publication contract permits it.
 
-Failure before publication removes the in-progress mapping and returns the frame to `FREE`. Physical append-tail reconciliation remains §4.11.3; this state machine does not silently invent rollback/reuse of an unpublished appended PageNo.
+Failure before valid WAL append removes the in-progress mapping, returns the frame to `FREE`, and performs the serialized tail restoration in §4.11.1.1 before publication ownership is released. After successful truncation the unpublished PageNo may be reused. Failure after valid append must finish publication or enter §12.12.4 noncontinuable state; it cannot remove/reuse the PageNo and continue. Crash-time reconciliation remains §4.11.3.
 
 ### 7.12.5 File retirement and drain
 
@@ -3632,14 +3679,16 @@ FILE_OR_PAGE_NOT_FOUND
 RAW_IO_FAILURE
 CORRUPT_PAGE
 NO_REPLACEABLE_FRAME
+WAL_RESERVATION_OR_APPEND_FAILURE
 WAL_DURABILITY_FAILURE
 FILE_RETIRED_OR_CLOSING
 PIN_COUNT_OVERFLOW
 BUFFERPOOL_QUIESCING
+STORAGE_NONCONTINUABLE
 INTERNAL_INVARIANT_FAILURE
 ```
 
-The first eight are explicit operation/storage errors in their applicable contexts; none is converted into successful fetch/flush/publication. An internal invariant failure means frame/page-table ownership has become contradictory and is not an ordinary retry result. Whether a storage error aborts a SQL statement/transaction or places the whole database in a failed state is the separate §39 upper-layer policy.
+The first nine categories before `STORAGE_NONCONTINUABLE` are explicit operation/storage errors in their applicable contexts; none is converted into successful fetch/flush/publication. `STORAGE_NONCONTINUABLE` is the §12.12.4 database-owner gate after uncertain append/restoration/publication state and is not an ordinary retry result. An internal invariant failure means frame/page-table ownership has become contradictory and likewise cannot continue ordinarily. Whether a locally recoverable storage error aborts a SQL statement/transaction is the separate M-005/§39 upper-layer policy.
 
 ## 7.13 I/O and buffer invariants
 
@@ -3675,6 +3724,10 @@ The first eight are explicit operation/storage errors in their applicable contex
 30. File retirement blocks new pins/loads and drains every frame before close/unlink.
 31. Regular-file `fdatasync` and parent-directory `fsync` have distinct content and namespace durability responsibilities.
 32. A file create/rename/unlink is not durably published until the owning §4.7 directory synchronization succeeds.
+33. No-flush ownership and copied writeback are mutually exclusive; the winner is established before provisional byte mutation or copied snapshot capture.
+34. A known provisional-mutation failure before the publication-authorizing append restores exact pre-operation bytes and frame/DPT metadata before barriers release.
+35. A reserved LSN is not a published `page_lsn`; only the owning publication-authorizing record permits dirty mutation publication.
+36. Append uncertainty, failed restoration, or failed post-append publication makes storage noncontinuable rather than exposing incoherent pages.
 
 ---
 
@@ -5060,6 +5113,8 @@ A structurally valid split/merge/root shape is not conceptually rolled back mere
 
 Chapter 12 defines the exact recovery mechanism: every physical B+ mutation is a recovery-safe B+ mini-transaction/system structural action encoded as one logical `BTREE_MTR` record with a temporary no-flush barrier.
 
+That same protocol also owns non-crash failure atomicity: §12.10.3 requires exact pre-MTR rollback for a known append failure and noncontinuable escalation for append uncertainty, failed restoration, or failed post-append publication. User-transaction abort behavior in §12.10.4 is distinct from this pre-publication storage rollback.
+
 Chapter 8 does not duplicate that WAL payload format or barrier protocol; Chapter 12 owns them.
 
 ### 8.25.1 Page LSN and WAL-before-data participation
@@ -5100,6 +5155,8 @@ New pages are initialized before publication.
 Routing pointers are published only while the required structural latches are held.
 
 Runtime atomicity is provided by latch and publication ordering.
+
+Provisional MTR bytes are visible only inside the exclusive §12.10.3 ownership domain. Root identity/height/generation, parent/sibling reachability, and free-list effects become ordinary-reader-visible only at the successful MTR publication point; known pre-append failure restores all of them before latches release.
 
 Crash atomicity is provided by the later WAL/recovery protocol.
 
@@ -5178,6 +5235,7 @@ The verifier is a structural correctness facility, not merely a debugging conven
 25. Horizontal adjacent-leaf latch acquisition is left-to-right or the operation restarts.
 26. Tree-local page reuse occurs only after safe structural detachment.
 27. Physical UNIQUE-index duplicates remain representable because uniqueness is transactionally enforced above the tree.
+28. A failed pre-append MTR restores exact page/root/free-list runtime state; a new/reused page cannot escape as both reachable and free or as an unpublished child/root.
 ---
 
 # Part IV — Transactions and Durability
@@ -7072,21 +7130,75 @@ page_lsn = mtr.lsn
 
 ### 12.10.3 MTR no-flush barrier
 
-While an MTR is being constructed, every affected resident frame is non-flushable.
+While an MTR is being constructed, every affected resident frame is provisional and non-flushable under the canonical §12.12 protocol. The MTR owner captures exact rollback state before the first byte mutation and is the only observer permitted to interpret provisional tree bytes.
 
 The publication sequence is:
 
 ```text
-1. acquire/latch required pages
-2. install one valid final runtime tree state
-3. reserve the MTR LSN and construct the complete canonical payload
-4. append the complete BTREE_MTR record
-5. install each affected resident page_lsn = mtr.lsn
-6. remove no-flush barriers
-7. release page latches/pins
+1. acquire required tree/root synchronization, append-publication lock(s) for
+   any new tail pages, and every page pin/latch in canonical B+ order
+2. identify the complete affected page/metadata set; reserve private LOADING
+   frames for new pages; wait for active copied writebacks to reconcile; acquire
+   every frame/DPT-transition reservation, the one checkpoint-shared
+   DPT-publication gate for the complete set, and all fallible rollback/WAL memory
+3. capture exact pre-MTR bytes and frame metadata for each existing page,
+   pre-MTR root/height/root_generation state, free-list/allocation state, and
+   pre-extension physical/published page counts
+4. install no-flush ownership on every affected frame before changing bytes
+5. install one deterministic valid final tree shape as provisional bytes while
+   keeping published page_lsn/generation/dirty/rec_lsn/DPT/FPI metadata and
+   ordinary root/reachability publication at their pre-MTR state
+6. reserve candidate mtr.lsn, construct every FULL_IMAGE/PATCH_SET entry from
+   that final shape, finalize canonical image checksums, and validate the whole
+   BTREE_MTR record
+7. validly append the complete BTREE_MTR atomically under §12.12.2
+8. as one protected MTR publication:
+       set every affected resident page_lsn = mtr.lsn
+       increment each affected page generation exactly once
+       publish dirty/rec_lsn/DPT/FPI metadata from each page's pre-MTR state
+       publish new-page counts/reachability and process-local root metadata
+       publish all persistent root/sibling/parent/free-list effects together
+9. remove no-flush barriers and release transition/page/structural ownership
 ```
 
-If the process fails before step 4 completes, protected frames were not eligible for data-file write.
+No ordinary observer can see a half-published root, sibling chain, parent link, or free list because the required structural latches and provisional visibility boundary span steps 1–9. Persistent root/free-list metadata pages are ordinary affected MTR pages, while process-local root identity/height/generation publication occurs only in step 8.
+
+If candidate reservation, record construction, or append fails with a known no-append outcome after provisional bytes exist, the MTR owner, while retaining every latch/barrier/reservation:
+
+```text
+1. restores every existing affected page's exact pre-MTR 8192 bytes
+2. restores its exact PageId/frame identity, page_lsn, dirty flag,
+   modification_generation, rec_lsn, DPT membership, and FPI epoch metadata
+3. restores process-local root/height/root_generation and allocation/free-list
+   metadata exactly
+4. removes every failed new page from tree reachability/private LOADING state
+5. truncates/verifies every consecutively appended unpublished B+ tail page as
+   one §4.11.1.1 rollback unit
+6. validates that the complete pre-MTR runtime state is reestablished
+7. only then removes no-flush ownership, releases latches/pins, and returns the
+   structured construction/WAL/I/O error to the owning operation
+```
+
+A page dirty before the MTR therefore remains dirty with exactly its old contents, generation, `page_lsn`, `rec_lsn`, DPT membership, and FPI state after rollback. A clean page returns clean. Rollback neither advances nor resets a generation. Reused free-list pages return to their old free state; newly appended PageNos become reusable only after successful serialized tail truncation. Parent/root/sibling/free-list restoration prevents a page from being simultaneously reachable and free or from acquiring two free-list owners.
+
+After step 7 append success, rollback-and-continue is forbidden. Step 8 must complete or the database storage owner becomes noncontinuable under §12.12.4, retaining barriers rather than exposing a runtime tree inconsistent with a possibly recovery-visible MTR. MTR append does not itself require `fdatasync`; after step 8 the pages are legal ordinary dirty state, and a later WAL-flush failure preserves them while preventing page writeback.
+
+The exact crash/non-crash outcomes are:
+
+| Point | Non-crash failure outcome | Process crash / recovery outcome |
+|---|---|---|
+| before no-flush acquisition | unchanged tree; release ordinary ownership | unchanged durable tree |
+| after no-flush, before mutation | release barrier with unchanged state | volatile ownership disappears; durable tree unchanged |
+| after first or all provisional page mutations | exact pre-MTR restoration before release | provisional bytes disappear and were never flushable |
+| during record construction/reservation | cancel reservation and restore exactly | provisional bytes disappear; no complete record is replayed |
+| known BTREE_MTR append failure | valid WAL end unchanged; restore exactly | incomplete persisted tail is not a record and is ignored |
+| valid append success, before publication | complete publication or become noncontinuable | a surviving complete valid MTR is redone atomically; otherwise old durable pages remain |
+| publication, before WAL durability | legal dirty tree; durability failure does not roll back | surviving valid MTR redoes the tree; absent MTR implies no affected page write was legal |
+| after WAL durability | legal dirty tree | recovery atomically redoes/skips every affected page by page_lsn |
+| during later copied writeback | ordinary failure remains dirty; no MTR rollback | torn pages are reconstructed from retained MTR full images and later WAL |
+| after stable writeback | normal generation/DPT reconciliation | trusted pages skip reflected MTR actions; redo repairs any older page |
+
+For new B+ pages, a crash before a complete valid MTR leaves only an unpublished tail removed by §4.11.3. A surviving complete MTR makes those pages published recovery targets; recovery re-extends/reconstructs them before tree use. A failed structural MTR can never leave a new root or pointer to an unpublished page visible.
 
 MTR append itself does not require `fdatasync`; later writeback or transaction commit may make it durable.
 
@@ -7146,6 +7258,8 @@ The terminal record remains on the user transaction's WAL chain and its `prev_tx
 The full image contains every status already reflected in the page before this terminal update, but it contains neither this update's terminal bits nor any other semantic evidence for this terminal outcome. Its changed embedded `page_lsn=F` makes it the canonical physical after-image of the reconstruction-base installation.
 
 If appending the terminal record fails after the system image was appended, the status bits, resident `page_lsn`, dirty state, `rec_lsn`, and FPI-epoch state remain unmodified by this attempt. The standalone pre-terminal image is redo-safe and semantically inert; a later attempt reevaluates the full-image conditions normally.
+
+Every reservation/append above obeys §12.12. A **known** terminal-record no-append failure therefore returns with the exact pre-terminal page/frame state, while an uncertain append outcome is noncontinuable. Once the terminal record validly appends, step 5 must complete under the retained latch/transition ownership or storage becomes noncontinuable; rolling the status page back and continuing would conflict with terminal evidence that may later become durable. A later WAL durability failure does not make the installed status-page bytes structurally illegal or roll them back; COMMIT's required durability/runtime-publication outcome and broader transaction error semantics remain §9.14.1/M-005 scope.
 
 The frame/DPT-transition synchronization is held from before step 2 through the dirty/`rec_lsn`/FPI-epoch publication in step 5. Checkpoint DPT capture uses the same synchronization. Therefore a checkpoint either:
 
@@ -7234,36 +7348,156 @@ If an index page is forced before user commit, flushing WAL through the later in
 
 The user transaction may still abort; MVCC status handles visibility.
 
-## 12.12 WAL append buffer
+## 12.12 WAL append atomicity and runtime page publication
 
-`WalManager` owns an in-memory append buffer.
+This section is the canonical non-crash failure contract for WAL-backed page mutation. It distinguishes:
 
-The initial target capacity is:
+```text
+candidate LSN reservation:
+    exclusive process-local right to try constructing the next record
+
+validly appended record:
+    one complete framed/CRC-valid record published in the process-local
+    contiguous logical WAL stream
+
+durable record:
+    a validly appended record covered by durable_lsn after the required
+    segment namespace and content synchronization
+
+provisional page mutation:
+    private runtime bytes protected from ordinary observation/writeback and
+    still rollback-capable because their required record is not yet appended
+
+published page mutation:
+    ordinary dirty runtime state whose complete required WAL record set
+    through its publication-authorizing record has validly appended,
+    whether or not that record set is durable yet
+```
+
+Append success and WAL durability are deliberately different publication points.
+
+An owning protocol may require more than one ordered record. It MUST identify which complete record is the final **publication-authorizing record** for the page mutation. Earlier validly appended preparatory records remain in WAL if a later required append fails, but they must be redo-safe in the exact pre-operation semantic state and do not authorize ordinary page publication by themselves. A-001's pre-terminal status-page `PAGE_IMAGE` followed by the terminal semantic record is the canonical example. For single-record PAGE_INIT/PAGE_IMAGE/PAGE_DELTA/BTREE_MTR operations, that record is itself publication-authorizing.
+
+### 12.12.1 LSN reservation and no-hole rule
+
+`WalManager` maintains one process-local contiguous valid append end. Reserving a candidate record range:
+
+- is serialized with every competing reservation/append, or provides equivalent exclusive ownership of the current logical end,
+- computes the candidate record-start LSN and complete physical span, including any required §12.3 segment padding,
+- may prepare/create the next WAL segment through §12.2.1,
+- does **not** advance the valid append end or make an LSN usable by ordinary page/frame metadata,
+- does **not** create a legal logical hole if canceled.
+
+The reservation includes any required preceding `WAL_PAD` or all-zero short segment tail. That padding and the target record become part of the valid logical prefix only when the target append publishes successfully; failure leaves the valid append end unchanged even if private buffer bytes or an empty next segment were prepared.
+
+If reservation prepared an exact next segment through §12.2.1 but the record never appends, that namespace-durable empty segment is only the permitted next-contiguous artifact described in §13.11. It neither consumes an LSN nor extends the valid logical WAL stream, and startup may retain/reconcile it under the existing A-003 rules.
+
+A reserved candidate LSN may appear only in private record-construction buffers and canonical full-image copies that remain inaccessible under §12.12.3 ownership. A resident page's published `page_lsn`, dirty generation, DPT entry, checkpoint metadata, or user transaction's published `last_wal_lsn` MUST NOT advertise a merely reserved LSN. The transaction WAL-chain tail advances only after the complete user record validly appends; canceling a reservation leaves the prior chain tail unchanged.
+
+If reservation, size arithmetic, memory acquisition, or record-shape validation fails, no logical WAL position is consumed. An immediate internal retry while retaining the same reservation may reuse the candidate LSN. Once the reservation is canceled/released, another record may append; a later operation retry obtains the then-current candidate LSN, which may differ. Both cases preserve a contiguous stream with no reserved-but-unwritten gaps.
+
+### 12.12.2 Atomic append success and physical-tail failures
+
+A WAL append succeeds exactly when:
+
+```text
+the complete header, payload, CRC, and required zero alignment bytes
+have been installed in append-owned memory
+AND
+the valid append end is atomically advanced across required segment padding
+and that one complete record
+```
+
+Until that event, the WAL writer and every other observer use the old valid append end and cannot consume partially copied bytes. After it, the record is part of the valid process-local WAL stream in its entirety. There is no architecture-visible state in which half a record is appended.
+
+An implementation may use a private encoded record followed by one mutex-protected copy/publication, a reserved append buffer with an unpublished completion marker, or another mechanism with exactly these outcomes. It may not expose WAL holes or let a page infer append success from LSN reservation alone.
+
+Physical WAL writing occurs after this logical append publication. A short/partial segment `pwrite`, segment-write error, or `fdatasync` error does not retroactively make the in-memory append outcome uncertain: the append buffer retains the exact valid bytes, `durable_lsn` remains at the prior proven prefix, and the writer may rewrite/resynchronize that same range. After crash, §13.11 framing, embedded LSN, zero-padding, and CRC validation accept only the complete valid persisted prefix and ignore/discard an incomplete tail record.
+
+If the running process cannot determine whether its valid append end advanced, or cannot retain/reconstruct the exact bytes assigned to the published range, this is not an ordinary append failure. The WAL/storage owner enters the noncontinuable state in §12.12.4; no caller may guess, release provisional pages as published, or append past an uncertain logical position.
+
+### 12.12.3 Canonical provisional-mutation and publication protocol
+
+Before a WAL-backed operation changes one or more resident pages, it uses this protocol:
+
+```text
+1. identify every affected existing/new page and process-local structural
+   metadata that can change
+2. acquire the required pins, page/structural latches, new-page intents,
+   append-publication lock(s), and frame/DPT-transition reservations
+3. resolve the copied-writeback race: wait for any earlier writeback to
+   reconcile before taking no-flush ownership; do not wait while holding a
+   page latch needed by that writeback
+4. acquire all fallible rollback/WAL-construction memory practical before
+   byte mutation and capture exact pre-operation rollback state
+5. install the owning no-flush barrier on every affected frame before any
+   resident byte differs from its published generation
+6. stage or install the deterministic final data/structure bytes as
+   provisional state; published page_lsn/generation/dirty/rec_lsn/DPT/FPI
+   metadata still describes the pre-operation generation
+7. construct and validate the complete required WAL record(s), using a
+   candidate LSN only in private/provisional state, then validly append them
+8. only after every required record append succeeds, publish under the held
+   page/structural and frame/DPT synchronization:
+       final resident page bytes and authoritative page_lsn
+       exactly one new modification generation per affected page
+       dirty state and clean-to-dirty rec_lsn/DPT insertion
+       preserved rec_lsn for pages already dirty
+       checkpoint/FPI epoch state
+       any new-page count/reachability and root/free-list runtime metadata
+9. remove no-flush barriers and release ownership only after the complete
+   publication is visible
+```
+
+Step 8 is the architecture-level volatile mutation publication point. Before it, only the operation and explicitly cooperating participants inside the same exclusive MTR/page-mutation ownership domain may inspect provisional bytes. Ordinary Fetch/page guards, scans, tree searches, checkpoint capture, background/explicit flush, eviction, and unrelated writers/readers observe either the complete pre-operation state or the complete published post-WAL state.
+
+The owning page/MTR operation installs and releases no-flush through BufferPool's frame-transition ownership; BufferPool never guesses that ownership from changed bytes. No-flush ownership and `WRITEBACK_IN_PROGRESS` are mutually exclusive. If writeback reserves first, mutation waits for its copy/I/O/reconciliation to finish and captures rollback state afterward; a reported writeback failure causes this mutation attempt to return unchanged without acquiring provisional ownership. If no-flush reserves first, no copied writeback or eviction writeback may begin until publication or completed rollback releases it. Checkpoint DPT capture uses the same DPT-publication gate as mutation publication. A single-page mutation serializes its one transition; a multi-page MTR holds the gate across publication of its complete affected set, so capture observes either old frame/DPT state or fully published WAL-backed state and never a mixed subset.
+
+Rollback support is runtime-only. For each existing page it retains exact pre-operation page bytes plus its PageId/frame identity token, `page_lsn`, dirty flag, modification generation, `rec_lsn`, DPT membership, FPI/checkpoint metadata, and any other owning process-local state needed for exact restoration. Multi-page operations also retain exact pre-operation root/height/generation and allocation/free-list runtime metadata. This is not persisted before-image WAL, transaction undo, ARIES undo, or a CLR.
+
+Publication after append is designed to require no new allocation or fallible filesystem operation. Once the final publication-authorizing record validly appends, the owner MUST complete/retry step 8 while retaining ownership; it MUST NOT restore the old runtime state and continue, because that record may later become durable and recovery-visible. If a later required record has a known no-append failure before that point, exact rollback is permitted only under an owning protocol that proves every earlier appended preparatory record redo-safe for the restored state, as §12.10.5 does. Failure to establish complete post-authorizing-append publication is noncontinuable under §12.12.4.
+
+### 12.12.4 Failure classes, retry, rollback, and escalation
+
+The observable v1 failure classes are:
+
+| Failure class | Required storage-level outcome |
+|---|---|
+| WAL reservation/resource failure | no valid range consumed; fail before mutation where practical, otherwise restore exact pre-operation state |
+| WAL construction/encoding/overflow/validation failure | no valid record; restore if provisional mutation began |
+| known append failure before append publication | valid append end unchanged; restore exact pre-operation state |
+| append outcome or valid-end ownership uncertain | noncontinuable; do not publish, roll back-and-continue, or append further |
+| WAL write/flush/durability failure after valid append | keep published page mutation as legal dirty state, do not advance `durable_lsn`, forbid dependent page writeback, retain bytes and retry durability when exact retry is possible |
+| physical page/file extension failure | restore/verify pre-extension length while append serialization is retained; uncertainty or cleanup failure is noncontinuable |
+| BufferPool/page publication failure before valid append | restore/remove private state and return the error |
+| BufferPool/page publication failure after the publication-authorizing append | complete/retry publication under ownership or become noncontinuable |
+| page initialization failure | fail before append and perform §4.11.1.1 cleanup; post-append initialization/publication failure is noncontinuable |
+| MTR construction failure before mutation | release unchanged ownership/state |
+| MTR failure after provisional mutation but before known append success | restore every affected page/metadata item exactly, then release barriers |
+| process crash | volatile ownership/provisional bytes disappear; recovery uses only the complete valid persisted WAL prefix and data files |
+
+A failure is **locally recoverable** only when the operation proves either that no runtime mutation occurred or that exact pre-operation runtime state has been restored. Restoration of existing frames is memory restoration under retained exclusive ownership and performs no filesystem I/O. It restores a preexisting dirty page as the same dirty bytes/generation/`page_lsn`/`rec_lsn`/DPT/FPI state; it never converts that page to clean. A failed provisional mutation does not consume a modification generation. The sole fallible physical rollback is truncation/verification of newly appended unpublished tail pages under §4.11.1.1.
+
+If restoration cannot be established, a required ownership invariant is uncertain, tail cleanup fails, or an append/durability range cannot be reconciled exactly, the affected database storage owner becomes **noncontinuable**:
+
+- no further ordinary mutation, WAL append past the uncertain point, page publication, writeback of affected provisional frames, or clean shutdown claim may proceed,
+- affected latches/reservations/barriers are not released as ordinary usable state,
+- the database owner surfaces the storage failure and performs a non-clean controlled stop,
+- the next open runs normal crash recovery from the valid persisted WAL/data prefix before ordinary traffic.
+
+Rollback failure is therefore never hidden by releasing incoherent pages. This section fixes storage state only; it does not decide whether a locally recoverable error aborts a statement or transaction, or the general post-commit error policy. Those decisions remain M-005/§39 scope.
+
+The storage layer automatically retries syscall-level `EINTR` as specified in §7.4.3. It MAY retry another operation internally only while retaining every reservation/latch/barrier needed to keep all attempts unobservable and only when append/physical outcomes are known. Deterministic encoding/resource exhaustion, returned append errors, and WAL durability errors are not SQL statement retries; they return their structured lower-layer error when internal retry ends.
+
+### 12.12.5 WAL append buffer
+
+`WalManager` owns an in-memory append buffer with an initial configurable target capacity of:
 
 ```text
 8 MiB
 ```
 
-and is configurable.
-
-Conceptual append:
-
-```text
-serialize record
-assign its LSN
-copy complete record bytes into WAL buffer/reservation
-advance the WAL append position
-```
-
-The initial implementation MAY serialize append/reservation under one mutex.
-
-The architecture leaves room for later measured alternatives such as:
-
-- atomic range reservation,
-- per-thread staging,
-- a larger/ring-style buffer.
-
-Lock-free WAL append is not required for correctness.
+The initial implementation MAY serialize candidate reservation, private-record completion, append-buffer copy, and valid-end publication under one mutex. Later measured alternatives such as completion-marked atomic reservations, per-thread staging, or a larger/ring-style buffer are allowed only if they preserve §§12.12.1–12.12.4 exactly. Lock-free WAL append is not required for correctness.
 
 ## 12.13 WAL writer and durable LSN
 
@@ -7423,6 +7657,8 @@ until the complete BTREE_MTR record exists and page_lsn is installed
 
 Only after that barrier is removed does ordinary WAL-before-data writeback apply.
 
+All WAL-backed page mutations use the broader §12.12 provisional-publication rule: no-flush begins before unpublished resident bytes appear, excludes copied writeback/eviction, and ends only after complete post-append publication or exact known-failure rollback. A merely reserved LSN cannot satisfy this section. A valid append permits legal volatile dirty publication; only later WAL durability through that LSN permits data-page writeback.
+
 The complete copied-image, file-synchronization, generation-reconciliation, and failure state machine is canonical in §§7.10–7.11. WAL durability is established before `pwrite`; dirty/DPT clean publication occurs only after the covering page-file `fdatasync` succeeds.
 
 ## 12.18 WAL and commit invariants
@@ -7451,6 +7687,11 @@ The complete copied-image, file-synchronization, generation-reconciliation, and 
 22. Status-page WAL append and page mutation are serialized so a later status-page `page_lsn` implies that all earlier same-page terminal updates are reflected.
 23. A WAL segment is namespace-durable before any record inside it may advance `durable_lsn` or satisfy commit/WAL-before-data.
 24. Segment creation uses an exact final basename and immediate `fsync(database_root/wal)`; segment content durability still requires `fdatasync` through the requested record.
+25. Candidate LSN reservation consumes no logical position and never creates a WAL hole; only one complete framed/CRC-valid append advances the contiguous valid end.
+26. A page cannot publish `page_lsn`, dirty generation, `rec_lsn`, or DPT/FPI state from a merely reserved LSN.
+27. A known failure before the publication-authorizing append restores exact pre-operation runtime page/metadata state before no-flush ownership releases.
+28. Publication-authorizing append success permits legal volatile dirty publication but does not imply durability; a later WAL flush failure preserves that state and blocks dependent data writeback.
+29. Append uncertainty, failed exact restoration, or inability to finish post-append publication makes the database storage owner noncontinuable.
 
 ---
 
@@ -7855,6 +8096,8 @@ Startup:
 
 Every segment needed from the installed recovery start through the valid WAL tail has its exact §12.2 basename and no missing interior segment index. An extra next-contiguous all-zero segment durably created under §12.2.1 is an empty tail, not corruption. Segments proven wholly older than the installed retention floor may be absent or may be re-unlinked if a precrash unlink was not directory-durable.
 
+The scan reconstructs the same contiguous no-hole valid prefix defined by §12.12. A candidate reservation or partially copied/written record never advances that prefix; recovery either recognizes the complete record in full or excludes it and every later byte. A restart after the §12.12.4 noncontinuable gate is therefore an ordinary crash-recovery open, not continuation from uncertain in-memory publication state.
+
 A next-contiguous empty/short segment left by a failed creation attempt, containing no valid WAL record beyond the prior durable logical end, is an unacknowledged namespace artifact: recovery may unlink/synchronize and recreate it through §12.2.1. A malformed, short, or missing segment inside the required retained WAL range is corruption.
 
 Malformed required WAL before the valid-tail boundary is corruption, not ordinary crash-tail truncation.
@@ -7931,6 +8174,8 @@ A complete valid BTREE_MTR is one committed system mini-transaction for recovery
 For each affected page with older/untrusted state, apply its full image or patches and set `page_lsn = mtr.lsn`.
 
 A torn/incomplete MTR record is not a record and is never partly replayed.
+
+Runtime provisional MTR bytes are irrelevant after crash. If the complete MTR belongs to the valid persisted WAL prefix, redo may reconstruct every affected page/new allocation and root/free-list effect; otherwise recovery retains the pre-MTR durable tree and removes any unpublished appended tail under §4.11.3.
 
 ## 13.14 Torn/corrupt data pages during redo
 
@@ -8105,6 +8350,8 @@ This separation between physical residue and logical visibility is central to th
 23. Every physical file required by bootstrap or committed catalog state exists at its exact durably synchronized final name before ONLINE.
 24. Missing recovery targets are skipped only after proving that no bootstrap/committed catalog owner requires them.
 25. WAL-segment creation and recycling include the required `wal/` directory synchronization; reappearing recycled segments below the retention floor do not extend the logical WAL stream.
+26. Recovery's valid WAL range is a contiguous prefix of complete records; candidate reservations and incomplete tails create no replayable holes.
+27. Volatile provisional page/MTR mutations disappear on crash and have no recovery meaning unless their complete publication record is in the valid persisted WAL prefix.
 
 ---
 
@@ -18636,11 +18883,14 @@ UniqueViolation
 TransactionAborted
 LockCancelled
 WalIOError
+StorageNoncontinuable
 RecoveryError
 CorruptionError
 ```
 
 These are not collapsed into one generic internal-error category.
+
+`WalIOError` includes locally recoverable reservation/append/durability failures whose exact lower-layer outcome is known. `StorageNoncontinuable` is the §12.12.4 database-owner gate when append, restoration, or required post-append publication cannot be established; it forbids further ordinary storage activity and requires non-clean controlled stop/recovery. This classification does not decide whether a locally recoverable storage error aborts the current statement or transaction; that remains the separate M-005 policy.
 
 A later SQL layer may map them to SQLSTATE-like surface codes without erasing the underlying distinction.
 
@@ -19148,6 +19398,21 @@ vacuum index cleanup
 NORMAL -> DEAD
 DEAD -> UNUSED
 ```
+
+Deterministic non-crash fault injection MUST separately cover the §12.12 outcomes for:
+
+```text
+reservation/resource failure before mutation
+record construction/encoding failure after no-flush acquisition
+known append failure after one and after all provisional page mutations
+append-outcome uncertainty and the noncontinuable gate
+valid append followed by post-append publication failure
+valid append followed by WAL pwrite/fdatasync failure
+failure while restoring/truncating an unpublished appended tail
+copied-writeback winning and no-flush winning their reservation race
+```
+
+The checks compare exact pre-operation bytes and frame metadata for both initially clean and initially dirty pages, including generation, `page_lsn`, `rec_lsn`, DPT membership, and FPI state. Ordinary PAGE_INIT tests verify immediate serialized tail truncation, no published count/reference, and deterministic PageNo reuse after a known failure. B+ MTR tests additionally verify all-page rollback, new/reused-page disposition, and exact root/height/sibling/parent/free-list restoration. Checkpoint/flush observers must see only the old state or the fully published WAL-backed state, never provisional metadata.
 
 Recovery property tests compare reopened **logical committed contents** against a model containing only transactions whose commit became durable. Physical aborted garbage is allowed.
 
