@@ -704,7 +704,7 @@ If file-content synchronization succeeds but a required directory sync fails, th
 
 If the final directory entry is durable but catalog WAL construction, transaction commit, or precommit processing later fails, that file remains `FINAL_DURABLE_UNCOMMITTED` and is an orphan candidate. This is intentional physical residue, not a visible half-created object.
 
-A namespace-durability failure is an I/O/durability failure and MUST NOT be reported as successful publication. Its diagnostic retains the affected directory/path, namespace operation, and underlying error. Its statement/transaction surface behavior follows §39's separate general error-state rules; this section requires that every CREATE namespace prerequisite completes before durable terminal commit. The separate general handling of an unrelated error discovered after commit is outside this protocol and is not changed by it.
+A namespace-durability failure is an I/O/durability failure and MUST NOT be reported as successful publication. Its diagnostic retains the affected directory/path, namespace operation, and underlying error. Its statement/transaction behavior is §39.1.3–§39.1.5: a pre-catalog survivor that has deterministic orphan ownership is not a transaction-owned published write, while durable commit remains irreversible. Every CREATE namespace prerequisite completes before terminal COMMIT begins.
 
 Ordinary object-file creation has these canonical crash interpretations:
 
@@ -3502,7 +3502,7 @@ If WAL flush, page write, complete-transfer handling, or required `fdatasync` fa
 
 The page is never reassigned on failed eviction writeback. Even if some bytes reached the operating system or disk before the reported error, runtime state conservatively treats the frame as dirty.
 
-This section does not choose the later SQL transaction effect of a storage error. It fixes the BufferPool state after failure; §39 owns upper error propagation.
+This section fixes the BufferPool state after failure; §39.1 applies the current statement-write boundary and terminal-protocol rules to that structured result.
 
 ### 7.10.5 DPT and checkpoint synchronization
 
@@ -3688,7 +3688,7 @@ STORAGE_NONCONTINUABLE
 INTERNAL_INVARIANT_FAILURE
 ```
 
-The first nine categories before `STORAGE_NONCONTINUABLE` are explicit operation/storage errors in their applicable contexts; none is converted into successful fetch/flush/publication. `STORAGE_NONCONTINUABLE` is the §12.12.4 database-owner gate after uncertain append/restoration/publication state and is not an ordinary retry result. An internal invariant failure means frame/page-table ownership has become contradictory and likewise cannot continue ordinarily. Whether a locally recoverable storage error aborts a SQL statement/transaction is the separate M-005/§39 upper-layer policy.
+The first nine categories before `STORAGE_NONCONTINUABLE` are explicit operation/storage errors in their applicable contexts; none is converted into successful fetch/flush/publication. `STORAGE_NONCONTINUABLE` is the §12.12.4 database-owner gate after uncertain append/restoration/publication state and is not an ordinary retry result. An internal invariant failure means frame/page-table ownership has become contradictory and likewise cannot continue ordinarily. The exact statement/transaction consequence is §39.1.3; COMMIT and ABORT use §§39.1.5–39.1.6.
 
 ## 7.13 I/O and buffer invariants
 
@@ -5409,21 +5409,35 @@ optional<Snapshot> transaction_snapshot
 optional<Snapshot> statement_snapshot
 Lsn last_wal_lsn
 bool has_persistent_writes
+bool current_statement_has_published_write
 held logical locks
 cancellation/deadlock flag
 ```
 
-Initial transaction states are:
+The conceptual runtime transaction states are:
 
 ```text
 ACTIVE
+MUST_ABORT
 COMMITTING
 COMMITTED
 ABORTING
 ABORTED
 ```
 
-State transitions are monotonic.
+`ACTIVE` may begin ordinary statements and may request COMMIT or ABORT. `MUST_ABORT` is transaction-fatal but nonterminal: no ordinary statement or COMMIT is legal, and the command layer must drive ABORT/cleanup. `COMMITTING` and `ABORTING` admit no ordinary statement and retain the transaction's locks/registry ownership until terminal publication. `COMMITTED` and `ABORTED` are terminal.
+
+The legal state-transition shapes are:
+
+```text
+ACTIVE -> COMMITTING -> COMMITTED
+ACTIVE -> COMMITTING(before publication-authorizing append)
+       -> MUST_ABORT -> ABORTING -> ABORTED
+ACTIVE -> ABORTING -> ABORTED
+ACTIVE -> MUST_ABORT -> ABORTING -> ABORTED
+```
+
+`COMMITTING -> MUST_ABORT` is legal only when commit fails or is canceled before the publication-authorizing `TXN_COMMIT` append. After that append, `COMMITTING` cannot transition to `MUST_ABORT`, `ABORTING`, or `ABORTED`; §39.1 owns completion/failure semantics from that point. State transitions are monotonic.
 
 `COMMITTING` and `ABORTING` are transient lifecycle states.
 
@@ -5483,7 +5497,11 @@ The initial command ID is:
 
 and `CommandId{0}` is a valid command ID.
 
-After one SQL statement completes, the transaction increments the command ID exactly once.
+The command layer assigns the current CommandId once when it admits one nonterminal SQL statement in an `ACTIVE` transaction. Every internal attempt/retry of that same logical statement uses that same CommandId.
+
+The assigned CommandId is consumed exactly once when the statement ends, whether it succeeds, fails while leaving the transaction `ACTIVE`, or makes the transaction `MUST_ABORT`. CommandIds are monotonically increasing and never reused. If the transaction remains `ACTIVE`, its next admitted statement receives the checked next CommandId. Transaction-control commands that terminate the transaction do not need a new MVCC command boundary.
+
+A parse/bind/planning failure inside an explicit transaction is still a failed admitted statement for this purpose. No tuple may exist for that CommandId, but reusing it is forbidden. If increment would overflow `CommandId`, no later ordinary statement may begin; existing transaction work may still be committed or aborted.
 
 Tuple versions store:
 
@@ -5555,6 +5573,7 @@ A transaction remains snapshot-active until terminal outcome publication removes
 
 ```text
 ACTIVE
+MUST_ABORT
 COMMITTING
 ABORTING
 ```
@@ -5636,12 +5655,14 @@ register it as active
 
 The statement uses that one stable snapshot for its full execution attempt.
 
-At successful statement completion:
+At statement completion while the transaction remains usable:
 
 ```text
 unregister the statement snapshot
-increment current_command_id
+consume current_command_id
 ```
+
+This applies to both `SUCCESS` and `FAILED_TRANSACTION_REMAINS_ACTIVE`. The next READ COMMITTED statement captures a fresh statement snapshot and receives the next CommandId; it never reuses the failed statement's snapshot or CommandId.
 
 Two statements in the same READ COMMITTED transaction may therefore observe different committed database states.
 
@@ -5950,6 +5971,8 @@ This chapter owns the transaction-lifecycle requirement that terminal COMMITTED 
 
 The physical transaction-status page mutation follows the full-image/terminal-record protocol in §12.10.5. Installing the status bits in a resident page is not the runtime terminal-publication linearization point.
 
+Durable `TXN_COMMIT` is nevertheless already the irreversible semantic outcome. Failure before §9.14.1 completes cannot publish ABORTED; it follows §39.1.5's committed-but-runtime-noncontinuable/client-uncertain rule.
+
 ### 9.14.3 Abort
 
 The integrated ABORT sequence is canonical in §15.6.
@@ -5961,6 +5984,8 @@ An ordinary abort does not require immediate abort-WAL `fdatasync` merely to ack
 The physical transaction-status page mutation follows §12.10.5 even when the terminal record is a recovery-generated `TXN_ABORT`.
 
 Ordinary user abort does not physically restore heap/index bytes.
+
+Known/uncertain abort-publication failures and mandatory cleanup from `MUST_ABORT` follow §39.1.6; no abort failure restores commit eligibility or permits early lock release.
 
 ## 9.15 Read-only transactions
 
@@ -5988,7 +6013,7 @@ Durable TxnId block reservation prevents harmful TxnId reuse even when a read-on
 4. A crash may create gaps in the TxnId sequence.
 5. `FROZEN_TXN_ID` is always treated as committed for visibility.
 6. V1 isolation levels are READ COMMITTED and REPEATABLE READ; REPEATABLE READ is snapshot isolation, not serializable isolation.
-7. `CommandId{0}` is valid and command IDs advance once per successfully completed SQL statement.
+7. `CommandId{0}` is valid; one admitted statement and all of its internal retries use one CommandId, and that ID is consumed on every success or failure rather than reused.
 8. Snapshot capture atomically observes the TxnId high-water mark and relevant nonterminal active registry.
 9. `snapshot.active` excludes `owner_txn_id`; `snapshot.xmin` is the smallest other active TxnId, or `xmax` when none exists.
 10. One READ COMMITTED statement attempt uses one stable snapshot.
@@ -5999,6 +6024,8 @@ Durable TxnId block reservation prevents harmful TxnId reuse even when a read-on
 15. A transaction is not published COMMITTED before its commit WAL is durable.
 16. Read-only transactions may end without terminal persistent status because they create no persistent TxnId references.
 17. A referenced normal TxnId with no legal active/terminal/frozen/retired interpretation is an invariant failure, not implicitly committed.
+18. `MUST_ABORT` is runtime-only, remains nonterminal for visibility, forbids ordinary statements/COMMIT, and can transition only toward ABORTED.
+19. A publication-authorizing commit-record append makes COMMIT uncancellable; durable commit makes the semantic outcome irreversibly COMMITTED.
 
 ---
 
@@ -7259,7 +7286,7 @@ The full image contains every status already reflected in the page before this t
 
 If appending the terminal record fails after the system image was appended, the status bits, resident `page_lsn`, dirty state, `rec_lsn`, and FPI-epoch state remain unmodified by this attempt. The standalone pre-terminal image is redo-safe and semantically inert; a later attempt reevaluates the full-image conditions normally.
 
-Every reservation/append above obeys §12.12. A **known** terminal-record no-append failure therefore returns with the exact pre-terminal page/frame state, while an uncertain append outcome is noncontinuable. Once the terminal record validly appends, step 5 must complete under the retained latch/transition ownership or storage becomes noncontinuable; rolling the status page back and continuing would conflict with terminal evidence that may later become durable. A later WAL durability failure does not make the installed status-page bytes structurally illegal or roll them back; COMMIT's required durability/runtime-publication outcome and broader transaction error semantics remain §9.14.1/M-005 scope.
+Every reservation/append above obeys §12.12. A **known** terminal-record no-append failure therefore returns with the exact pre-terminal page/frame state, while an uncertain append outcome is noncontinuable. Once the terminal record validly appends, step 5 must complete under the retained latch/transition ownership or storage becomes noncontinuable; rolling the status page back and continuing would conflict with terminal evidence that may later become durable. A later WAL durability failure does not make the installed status-page bytes structurally illegal or roll them back; §§39.1.5–39.1.6 define the resulting COMMIT/ABORT runtime and client outcome.
 
 The frame/DPT-transition synchronization is held from before step 2 through the dirty/`rec_lsn`/FPI-epoch publication in step 5. Checkpoint DPT capture uses the same synchronization. Therefore a checkpoint either:
 
@@ -7485,7 +7512,7 @@ If restoration cannot be established, a required ownership invariant is uncertai
 - the database owner surfaces the storage failure and performs a non-clean controlled stop,
 - the next open runs normal crash recovery from the valid persisted WAL/data prefix before ordinary traffic.
 
-Rollback failure is therefore never hidden by releasing incoherent pages. This section fixes storage state only; it does not decide whether a locally recoverable error aborts a statement or transaction, or the general post-commit error policy. Those decisions remain M-005/§39 scope.
+Rollback failure is therefore never hidden by releasing incoherent pages. This section fixes storage state; §39.1 consumes its local-recoverable/noncontinuable result without weakening these ownership rules.
 
 The storage layer automatically retries syscall-level `EINTR` as specified in §7.4.3. It MAY retry another operation internally only while retaining every reservation/latch/barrier needed to keep all attempts unobservable and only when append/physical outcomes are known. Deterministic encoding/resource exhaustion, returned append errors, and WAL durability errors are not SQL statement retries; they return their structured lower-layer error when internal retry ends.
 
@@ -7578,7 +7605,7 @@ its TXN_COMMIT WAL record is durable
 
 If that terminal record resides in a newly created segment, “durable” includes successful prior synchronization of the segment's `wal/` directory entry under §12.2.1.
 
-The detailed transaction state/status/lock-release sequence is canonical in §9.14.1 and later end-to-end write-protocol material.
+WAL durability is necessary but not sufficient for successful client acknowledgement. The detailed transaction state/status/cache/lock-release and acknowledgement sequence is canonical in §§15.5 and 39.1.5.
 
 Commit does not force the transaction's heap or B+ pages.
 
@@ -7692,6 +7719,8 @@ The complete copied-image, file-synchronization, generation-reconciliation, and 
 27. A known failure before the publication-authorizing append restores exact pre-operation runtime page/metadata state before no-flush ownership releases.
 28. Publication-authorizing append success permits legal volatile dirty publication but does not imply durability; a later WAL flush failure preserves that state and blocks dependent data writeback.
 29. Append uncertainty, failed exact restoration, or inability to finish post-append publication makes the database storage owner noncontinuable.
+30. A publication-authorizing `TXN_COMMIT` append is uncancellable; its durability makes COMMITTED irreversible even before runtime terminal publication.
+31. A COMMIT success acknowledgement follows required runtime terminal publication and coherent lock/cache cleanup, not merely `durable_lsn` advancement.
 
 ---
 
@@ -8249,7 +8278,7 @@ status_page.page_lsn = X
 
 where appropriate for that page mutation.
 
-This is why normal commit may acknowledge after durable commit WAL without forcing the status page itself.
+This is why normal commit does not force the status page itself. Successful acknowledgement still waits for §15.5 C4–C5 runtime terminal publication and coherent cleanup after durable commit WAL.
 
 ## 13.18 Approximate/rebuildable metadata
 
@@ -8307,11 +8336,13 @@ its durable logical changes remain committed
 
 For committed CREATE DDL this guarantee includes continued presence of every required final object-file directory entry. For a terminal record in a rotated WAL segment it includes continued presence of that segment entry. Sections §4.7 and §12.2.1 establish those namespace prerequisites before acknowledgement.
 
-If COMMIT had not become durable before the crash:
+If no complete `TXN_COMMIT` for the transaction belongs to the valid persisted WAL prefix:
 
 ```text
-recovery may classify the transaction as aborted
+recovery classifies the transaction as a loser/ABORTED
 ```
+
+If a complete commit record survived in that valid prefix—even though the process had not advanced `durable_lsn` or acknowledged the client—recovery classifies it COMMITTED. This is the crash form of §39.1.5 client outcome uncertainty.
 
 For an explicitly aborted or crash-loser transaction:
 
@@ -8352,6 +8383,8 @@ This separation between physical residue and logical visibility is central to th
 25. WAL-segment creation and recycling include the required `wal/` directory synchronization; reappearing recycled segments below the retention floor do not extend the logical WAL stream.
 26. Recovery's valid WAL range is a contiguous prefix of complete records; candidate reservations and incomplete tails create no replayable holes.
 27. Volatile provisional page/MTR mutations disappear on crash and have no recovery meaning unless their complete publication record is in the valid persisted WAL prefix.
+28. Runtime ACTIVE/MUST_ABORT and pre-commit-record COMMITTING transactions are crash losers; a complete valid persisted `TXN_COMMIT` is recovered COMMITTED regardless of missing client acknowledgement.
+29. Durable COMMIT is never converted to ABORTED by loser handling or a later runtime/cache/transport failure.
 
 ---
 
@@ -9069,43 +9102,50 @@ For a transaction with persistent writes:
 A transaction that created DDL physical resources MUST first satisfy the §21.5 durable final-name prerequisite for every file referenced by its prospective committed catalog state.
 
 ```text
-1. state ACTIVE -> COMMITTING
-2. while the transaction remains nonterminal in the active registry,
-   execute the §12.10.5 status-page protocol under the page write latch:
-       append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
-       append TXN_COMMIT(txn_id, prev_txn_lsn) at commit_lsn
-       install COMMITTED and status-page page_lsn = commit_lsn
-3. submit commit_lsn to CommitCoordinator
-4. wait until durable_lsn >= commit_lsn
-5. execute the §9.14 runtime terminal-publication linearization
-6. release TUPLE_WRITE and UNIQUE_KEY locks
-7. release shared TableWriterGate holdings
-8. unregister the transaction's own active snapshot(s)
-9. finish transaction object cleanup
-10. return success
+C0. accept COMMIT only from ACTIVE; no ordinary statement may still be running
+C1. validate every commit prerequisite, including DDL final-name durability,
+    and reserve every fallible resource needed through runtime publication
+C2. state ACTIVE -> COMMITTING; while still nonterminal in the registry,
+    execute the §12.10.5 status-page protocol under its write latch:
+        append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
+        validly append TXN_COMMIT(txn_id, prev_txn_lsn) at commit_lsn
+        install COMMITTED and status-page page_lsn = commit_lsn
+        publish the status frame's ordinary dirty/DPT state
+C3. submit commit_lsn to CommitCoordinator and do not leave COMMITTING until
+    durable_lsn >= commit_lsn
+C4. execute the §9.14 runtime terminal-publication linearization, including
+    runtime outcome cache COMMITTED, state COMMITTED, and active removal
+C5. put catalog/statistics caches in a coherent installed-or-invalidated state,
+    release TUPLE_WRITE/UNIQUE_KEY locks and TableWriterGate/SchemaLock holdings,
+    unregister snapshots, and finish required transaction cleanup
+C6. only now return/send successful COMMIT acknowledgement
 ```
 
 Commit does **not** force dirty heap/index pages.
 
-Once a valid TXN_COMMIT record is durable, that transaction outcome cannot subsequently become ABORTED.
+The C2 status-page installation intentionally precedes C3 durability under A-001; the status page remains NO-FORCE and cannot itself reach disk before WAL-before-data. C3 is the irreversible durable-commit point: once `TXN_COMMIT` is durable, recovery necessarily establishes COMMITTED and no later runtime, cache, cleanup, or client failure may change that outcome to ABORTED.
+
+After the publication-authorizing `TXN_COMMIT` append within C2, commit is uncancellable. A connection loss or cancellation request cannot redirect it to ABORT. Exact failure outcomes for every C0–C6 boundary are canonical in §39.1.5.
+
+A read-only transaction elides C2–C3 because it has no persistent references or terminal WAL requirement. Its runtime terminal publication at C4 ends the transaction; C5 still precedes acknowledgement.
 
 ## 15.6 ABORT
 
-For an abortable transaction:
+For an abortable transaction in `ACTIVE` or `MUST_ABORT`:
 
 ```text
-1. state ACTIVE/eligible transient state -> ABORTING
-2. if persistent WAL-visible state exists:
+A0. state ACTIVE/MUST_ABORT -> ABORTING; reject ordinary statements/COMMIT
+A1. if persistent WAL-visible state exists:
        execute the §12.10.5 status-page protocol under the page write latch:
            append a system PAGE_IMAGE first if the dirty/FPI-epoch rule requires it
            append TXN_ABORT at abort_lsn
            install ABORTED and status-page page_lsn = abort_lsn
-3. execute the §9.14 runtime terminal-publication linearization
-4. release logical locks
-5. release shared TableWriterGate holdings
-6. unregister the transaction's own snapshots
-7. finish transaction object cleanup
-8. return/raise abort
+A2. execute the §9.14 runtime terminal-publication linearization, including
+    runtime outcome cache ABORTED, state ABORTED, and active removal
+A3. release logical locks and TableWriterGate/SchemaLock holdings, unregister
+    snapshots, transfer private/orphan cleanup ownership, and finish cleanup
+A4. only then acknowledge explicit ROLLBACK or return the transaction-fatal
+    statement's original error with transaction outcome ABORTED
 ```
 
 Ordinary abort performs no write-set scan to restore old heap/index bytes.
@@ -9116,6 +9156,10 @@ A transaction whose COMMIT is already durable is no longer eligible to transitio
 
 Ordinary ABORT does not wait for `abort_lsn` durability before runtime ABORTED publication, but §12.17 prevents its dirty status page from reaching disk before WAL is durable through that page's current `page_lsn`. If the abort record is lost in a crash, loser resolution repeats the canonical ABORT protocol.
 
+V1 automatically drives A0–A4 after a statement enters `MUST_ABORT`, including inside an explicit transaction block; the client is not required to issue a later ROLLBACK merely to prevent partial effects from committing. `MUST_ABORT` remains observable while abort is pending, and an explicit ROLLBACK arriving then may only join/wait for that cleanup. COMMIT and ordinary statements remain forbidden.
+
+An abort-path failure never restores commit eligibility. The exact retry, noncontinuable escalation, diagnostic precedence, and recovery behavior are §39.1.6.
+
 ## 15.7 READ COMMITTED retry boundary
 
 V1 does **not** provide statement-level physical undo, savepoints, or subtransaction outcome IDs.
@@ -9123,17 +9167,17 @@ V1 does **not** provide statement-level physical undo, savepoints, or subtransac
 Therefore one statement attempt tracks process-local:
 
 ```text
-has_persistent_statement_writes
+current_statement_has_published_write
 ```
 
-which becomes true immediately after the first persistent heap/index/catalog WAL-visible mutation belonging to that attempt is installed.
+Its exact transition is §39.1.2: it becomes true at the first transaction-owned WAL-backed database mutation publication, not at LSN reservation or provisional mutation.
 
 ### 15.7.1 Retry before the first persistent write
 
 If a READ COMMITTED conflict requires fresh-snapshot restart while:
 
 ```text
-has_persistent_statement_writes == false
+current_statement_has_published_write == false
 ```
 
 then the engine may:
@@ -9152,7 +9196,7 @@ No database state from the abandoned attempt needs rollback.
 If a conflict requiring statement restart is discovered after:
 
 ```text
-has_persistent_statement_writes == true
+current_statement_has_published_write == true
 ```
 
 v1 MUST NOT restart that statement inside the same transaction.
@@ -9160,13 +9204,14 @@ v1 MUST NOT restart that statement inside the same transaction.
 Instead:
 
 ```text
-abort the transaction
+state ACTIVE -> MUST_ABORT
+automatically execute §15.6 ABORT
 return a retryable serialization/write-conflict outcome to the transaction-owning layer
 ```
 
-An autocommit SQL layer may later choose to create a **new TxnId** and rerun the entire statement according to its own bounded retry policy.
+V1 does not transparently rerun an aborted autocommit transaction. It returns the retryable conflict after ABORT; the client/application may submit a new request, which receives a **new TxnId**. A future explicit opt-in retry policy may do the same but cannot reuse this transaction identity.
 
-An explicit user transaction is aborted and the client/application decides whether to retry.
+An explicit user transaction is terminally aborted by this failure and the client/application decides whether to begin a new transaction and retry.
 
 This is necessary because writes from the abandoned statement attempt would otherwise become visible if the same transaction later advanced `CommandId`.
 
@@ -9212,6 +9257,11 @@ This chapter is the boundary between the persistent transactional storage core a
 13. Transaction-lifetime tuple/unique locks are released only after terminal outcome publication.
 14. Vacuum performs delayed exact index garbage removal and RID reuse.
 15. External output from a potentially retryable statement does not escape before its retry-safe boundary.
+16. A non-success statement that has published a transaction-owned persistent write cannot leave the transaction commit-eligible.
+17. `MUST_ABORT` is followed automatically by semantic ABORT; no partial user-DML statement effects can later commit.
+18. CommandIds are consumed by failed as well as successful statements and are never reused.
+19. COMMIT is uncancellable after its publication-authorizing record append and irreversible after durable commit.
+20. Successful COMMIT acknowledgement follows runtime terminal publication and required coherent cleanup.
 
 ---
 
@@ -11794,7 +11844,7 @@ SchemaLock
 
 or equivalent exclusive catalog-DDL mutex.
 
-A transaction that performs schema-changing DDL holds this exclusivity through its terminal publication/abort boundary.
+A transaction that successfully completes schema-changing DDL or publishes its first transaction-owned catalog mutation holds this exclusivity through its terminal publication/abort boundary. A recoverable failed attempt that remains pre-catalog under §39.1.4 transfers every physical survivor to orphan cleanup and releases attempt-only DDL exclusivity before leaving the transaction `ACTIVE`.
 
 Ordinary read-only queries do not hold this lock for their execution lifetime.
 
@@ -11906,6 +11956,8 @@ private or final-uncommitted physical files become orphan-retirement candidates
 V1 need not physically undo their bytes. Orphan classification and durable unlink use §4.7.6–§4.7.7 only after no live in-process owner can reference the file.
 
 An object file is never considered committed merely because it exists on disk.
+
+Consumed nonreusable TableId/IndexId/ConstraintId/FileId values, private-file initialization/build WAL, and durable private/final namespace entries remain allocator/DDL-cleanup artifacts rather than transaction-owned logical statement writes until catalog mutation publishes. A recoverable failure before that catalog boundary may leave the explicit transaction `ACTIVE` only after every survivor has deterministic orphan-cleanup ownership and attempt-only DDL locks are released. IDs remain consumed. Publishing a CREATE catalog row or DROP/catalog deletion marker crosses §39.1.2's boundary; any later statement failure mandates ABORT.
 
 Before a DDL transaction may enter its terminal COMMIT sequence, every physical file referenced by that transaction's new catalog state MUST have completed the §4.7.4 final-name publication barrier. A namespace-sync failure therefore occurs before durable terminal commit and cannot be reported as successful CREATE publication.
 
@@ -12092,6 +12144,8 @@ terminal committed DROP:
 
 DDL MUST NOT mutate descriptors already retained by active plans.
 
+After durable COMMIT, failure to allocate/install a new cache entry cannot change the transaction outcome. The coordinator must safely publish the new immutable entry or invalidate/bypass affected cache lookup so §16.10's snapshot-aware catalog path remains authoritative before COMMIT acknowledgement. Failure to establish either coherent state is database-noncontinuable under §39.1.5.
+
 ## 21.11 INSERT binding
 
 For:
@@ -12246,6 +12300,8 @@ No externally visible RETURNING row is emitted from an attempt that may still re
 
 The physical execution layer additionally buffers through successful statement completion as specified in §31.9, preventing a later row-level execution error from exposing a partial RETURNING prefix.
 
+If RETURNING evaluation or its memory/spill spool fails before any DML publication, §39.1 may leave an explicit transaction active. If any current-statement write already published, the statement fails and the transaction automatically aborts. A returned row is never a COMMIT acknowledgement.
+
 ## 21.16 Error contract for semantic planning
 
 Front-end semantic failures are classified rather than collapsed.
@@ -12325,7 +12381,7 @@ successful ANALYZE statement
 
 For autocommit, global publication occurs only after the statement's owning transaction reaches terminal COMMITTED.
 
-A failed/cancelled ANALYZE publishes neither a partial descriptor nor a global cache entry.
+A failed/cancelled ANALYZE publishes neither a partial descriptor nor a global cache entry. If it had already published any transaction-owned `sys_statistics` row, §39.1 requires automatic transaction abort; otherwise the explicit transaction may remain `ACTIVE`.
 
 ## 21.18 SQL v1 supported target
 
@@ -13331,7 +13387,7 @@ SpillIOError
 
 Query cancellation or execution failure unwinds MemoryReservation, RowCollection, arena backing pages, spill files, and operator state through ordinary lifetime/RAII ownership.
 
-Spill cleanup does not commit/abort the SQL transaction by itself; the command/transaction layer owns the surrounding transaction outcome.
+Spill cleanup does not commit/abort the SQL transaction by itself; §39.1 applies `OutOfMemory`/`SpillIOError` relative to the current statement's first published database write.
 
 ## 24.11 Memory/spill invariants
 
@@ -13347,6 +13403,7 @@ Spill cleanup does not commit/abort the SQL transaction by itself; the command/t
 10. Spill serialization never dumps compiler-native pointer/object memory.
 11. Spill I/O is block/sequential oriented rather than row-at-a-time.
 12. Cancellation/error releases memory and temp resources through ownership semantics.
+13. Memory/spill failure changes transaction state only through §39.1's current-statement publication boundary or an independent fatal classification.
 
 ---
 
@@ -14927,7 +14984,7 @@ If any persistent statement write has already occurred:
 
 ```text
 same-TxnId whole-statement restart is forbidden
-transaction -> abort/conflict outcome
+transaction -> MUST_ABORT -> automatic ABORT/conflict outcome
 ```
 
 This follows the Chapter-15 retry boundary and the no-physical-user-DML-undo architecture.
@@ -15015,9 +15072,13 @@ no internal retry remains possible
 statement execution outcome is successful
 ```
 
-At that point the result spool may be consumed by the client/result cursor even if the surrounding explicit transaction has not yet committed; a later explicit transaction rollback does not retroactively invalidate the fact that the client observed a successful statement's RETURNING result.
+At that point, inside an **explicit** transaction, the result spool may be consumed by the client/result cursor before the later transaction COMMIT; a later explicit ROLLBACK does not retroactively invalidate the fact that the client observed a successful statement's RETURNING result.
+
+For **autocommit** DML, successful statement execution is followed immediately by the implicit §15.5 COMMIT inside the same client request. The RETURNING spool remains request-owned and unexposed until COMMIT C4–C5 complete. Only then may result chunks and the final successful command completion be delivered. A known pre-durable commit failure therefore discards the spool and exposes no RETURNING prefix. If transport fails while delivering the already committed result, the transaction remains COMMITTED and the client may have observed only a prefix; that is connection/commit-observation uncertainty, not a failed DML statement or transaction rollback.
 
 If the statement aborts/fails, the unpublished RETURNING spool is discarded.
+
+Failure while constructing/finalizing that spool follows §39.1's statement-write boundary. No implementation may mark the DML statement successful merely because some result rows were already computed internally.
 
 ## 31.10 Query result interface
 
@@ -15113,6 +15174,8 @@ ANALYZE never mutates an existing published `StatsDescriptor` in place.
 
 A cancellation/error before statement success discards the in-memory candidate and leaves the previous committed descriptor authoritative.
 
+If no transaction-owned statistics row published, this is a statement-only failure for an explicit transaction unless independently fatal. If one or more rows for the new StatsVersion published, the transaction automatically aborts under §39.1 even though completeness filtering keeps that version globally unusable.
+
 An abort after successful ANALYZE but before transaction commit leaves the new catalog rows MVCC-invisible to other transactions and suppresses global cache publication.
 
 ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinary DML; its SQL-visible row set is stabilized by MVCC.
@@ -15132,6 +15195,8 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
 11. Client-visible result chunks never depend on an expired internal borrowed chunk.
 12. DDL/VACUUM/ANALYZE control operators preserve their owning catalog/storage/statistics transaction protocols.
 13. ANALYZE never globally publishes an uncommitted or partial StatsDescriptor.
+14. Any failed DML statement with a published transaction-owned write automatically aborts; a pre-write recoverable failure may leave an explicit transaction active.
+15. Autocommit DML does not expose RETURNING rows before implicit COMMIT C4–C5 complete; later transport failure cannot undo that commit.
 
 ---
 
@@ -16214,6 +16279,8 @@ The catalog/statistics cache is an acceleration mechanism and preserves the call
 
 Global cache publication is a commit-side effect; an aborted transaction never leaves its descriptor globally published.
 
+After durable commit, inability to install the new descriptor in the statistics cache does not alter COMMITTED. Retaining the prior descriptor or selecting missing-statistics fallback is a coherent recovery path because statistics are approximate; the cache must never expose an uncommitted/partial candidate.
+
 Transaction-local use, old cache entries held by existing planners, concurrent committed DML, and committed publication of a newer descriptor all preserve §34.1: descriptor freshness changes estimates only and never supplies semantic proof.
 
 ## 34.16 Freshness and modification counters
@@ -16262,6 +16329,8 @@ A transaction-local or later-aborted ANALYZE does not reset globally visible mod
 14. Statistics payloads use the byte-exact chunked v1 format and shared persisted-scalar codec.
 15. Numerical zero or apparent domain absence from table, column, index, MCV, histogram, HLL-derived, sampled, cached, or composed statistics never establishes semantic emptiness.
 16. Statistics rejected as corrupt and statistics accepted as structurally valid are both incapable of creating a semantic proof; they differ only in whether their estimates are used or fallback is selected.
+17. Partial transaction-owned ANALYZE rows require transaction abort on statement failure even though descriptor completeness rules prevent their global use.
+18. Post-commit statistics-cache installation failure retains COMMITTED and uses an older/missing descriptor fallback rather than redefining transaction outcome.
 
 ---
 
@@ -18881,6 +18950,9 @@ SerializationFailure
 DeadlockVictim
 UniqueViolation
 TransactionAborted
+TransactionMustAbort
+CommitOutcomeUncertain
+ConnectionFailure
 LockCancelled
 WalIOError
 StorageNoncontinuable
@@ -18890,9 +18962,281 @@ CorruptionError
 
 These are not collapsed into one generic internal-error category.
 
-`WalIOError` includes locally recoverable reservation/append/durability failures whose exact lower-layer outcome is known. `StorageNoncontinuable` is the §12.12.4 database-owner gate when append, restoration, or required post-append publication cannot be established; it forbids further ordinary storage activity and requires non-clean controlled stop/recovery. This classification does not decide whether a locally recoverable storage error aborts the current statement or transaction; that remains the separate M-005 policy.
+`WalIOError` includes locally recoverable reservation/append/durability failures whose exact lower-layer outcome is known. `StorageNoncontinuable` is the §12.12.4 database-owner gate when append, restoration, or required publication cannot be established; it forbids further ordinary storage activity and requires non-clean controlled stop/recovery. `CommitOutcomeUncertain` describes what a client may know, not a third durable transaction status.
 
 A later SQL layer may map them to SQLSTATE-like surface codes without erasing the underlying distinction.
+
+### 39.1.1 Runtime states and statement outcomes
+
+The canonical runtime states are §9.4's:
+
+```text
+ACTIVE
+MUST_ABORT
+COMMITTING
+COMMITTED
+ABORTING
+ABORTED
+```
+
+Only `ACTIVE` admits an ordinary statement or COMMIT. `MUST_ABORT`, `COMMITTING`, and `ABORTING` remain nonterminal and snapshot-active until §9.14 terminal publication. `MUST_ABORT` may perform only automatic/explicit ABORT cleanup; COMMIT is categorically illegal. No new two-bit `TXN_STATUS` code is introduced for any runtime-only state.
+
+One statement/transaction-control request has exactly one of these command-layer outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `SUCCESS` | the statement completed; an explicit transaction remains `ACTIVE`, while autocommit proceeds to COMMIT |
+| `FAILED_TRANSACTION_REMAINS_ACTIVE` | the statement failed without a transaction-fatal/database-fatal condition and without a published write from this statement; cleanup completed and another statement or COMMIT is legal |
+| `FAILED_TRANSACTION_MUST_ABORT` | this statement cannot be allowed to commit its TxnId; transition to `MUST_ABORT` and automatically execute §15.6 |
+| `COMMIT_OUTCOME_UNCERTAIN` | no successful acknowledgement was delivered after commit became uncancellable; the connection cannot continue and recovery/server state determines or already knows the durable outcome |
+| `DATABASE_NONCONTINUABLE` | storage/runtime invariants do not permit ordinary continuation; close affected connections and perform non-clean controlled stop/recovery |
+
+Client-visible request status and transaction semantic outcome are distinct. In particular, `COMMIT_OUTCOME_UNCERTAIN` after the durable commit point means the actual transaction is COMMITTED even though the client did not receive a successful acknowledgement.
+
+`MUST_ABORT` is transaction-fatal only: other transactions and the database remain usable while this transaction is automatically terminated. `DATABASE_NONCONTINUABLE` is a database/storage-owner gate: ordinary mutation/transaction continuation for that database stops because WAL, page, terminal-publication, or ownership coherence is not established. Ordinary user/constraint/resource errors are not promoted to database-fatal merely because they fail a statement.
+
+### 39.1.2 First persistent statement write and the no-undo rule
+
+Each admitted statement begins with:
+
+```text
+current_statement_has_published_write = false
+```
+
+It becomes true exactly when an effect logically owned by that transaction and statement reaches §12.12's publication point as a valid ordinary WAL-backed database mutation understood by crash recovery and transaction visibility. The same event sets the transaction-wide `has_persistent_writes = true`, which never resets before transaction end. `has_persistent_writes` is intentionally broader: a user-transaction-chained empty-page allocation or other structural record may require later terminal WAL and set the transaction-wide bit without setting the per-statement logical-effect bit. Examples that set both include:
+
+- publishing an inserted heap version,
+- publishing an old-version `xmax/cmax` delete or supersession marker,
+- publishing a B+ entry/MTR whose logical entry belongs to the transaction's tuple version,
+- publishing transaction-owned catalog rows or catalog-row deletion markers,
+- publishing any `sys_statistics` row for the statement's StatsVersion.
+
+The following do **not** cross the boundary:
+
+- parsing, binding, planning, expression evaluation, locks, snapshots, and query memory,
+- temporary RowCollections/spill files/result spools,
+- candidate LSN reservation or WAL-record construction alone,
+- an M-003 provisional mutation restored before its publication-authorizing append,
+- durable TxnId/FileId/catalog-object-ID reservation/allocation gaps,
+- publication of an empty ordinary page/PageNo or pure B+ allocation/shape/FSM maintenance state that is architecture-valid independently of the user transaction and carries no transaction-owned tuple/index/catalog/statistics effect,
+- private DDL file construction and `PRIVATE_DURABLE`/`FINAL_DURABLE_UNCOMMITTED` orphan-capable files before transaction-owned catalog mutation,
+- read-only work and system maintenance effects not logically owned by the user statement.
+
+A WAL LSN or valid preparatory/structural record alone is insufficient; the transaction-owned logical mutation publication boundary matters. A record/MTR that also publishes a tuple version, `xmax`, logical index entry, catalog row, or statistics row does cross the boundary even if it simultaneously performs structural allocation. Once this per-statement flag becomes true it never becomes false for that attempt. V1 has no savepoint, subtransaction, or complete physical statement-undo mechanism that can erase a crossed boundary. M-003 rollback prevents one failing primitive from crossing it; it does not undo an earlier published effect from the same statement.
+
+The normative rule is:
+
+```text
+recoverable non-success while flag == false:
+    FAILED_TRANSACTION_REMAINS_ACTIVE
+
+recoverable non-success while flag == true:
+    FAILED_TRANSACTION_MUST_ABORT
+
+independently transaction-fatal error:
+    FAILED_TRANSACTION_MUST_ABORT regardless of flag
+
+database/storage-fatal error:
+    DATABASE_NONCONTINUABLE regardless of flag
+```
+
+Earlier **successful statements** in the same explicit transaction do not make an otherwise effect-free later statement error transaction-fatal. The boundary is per current statement. Conversely, physical invisibility or complete-generation filtering of partial current-statement rows does not permit that transaction to commit them.
+
+A failed SELECT or other read-only statement therefore normally leaves an explicit transaction `ACTIVE`. Persistent corruption, a lower-layer noncontinuable state, or an internal invariant failure overrides this statement-only rule.
+
+### 39.1.3 Normative statement-error matrix
+
+In this table:
+
+```text
+FA = FAILED_TRANSACTION_REMAINS_ACTIVE; COMMIT remains legal; no ABORT required
+MA = FAILED_TRANSACTION_MUST_ABORT; COMMIT forbidden; automatic ABORT required
+NC = DATABASE_NONCONTINUABLE; no ordinary transaction/connection continuation
+AB = semantic ABORT requested/completed through §15.6
+```
+
+“Before” and “after” refer to the current statement's first persistent-write boundary.
+
+| Failure class | Before boundary | After boundary | Required qualification |
+|---|---:|---:|---|
+| parse/lex error | FA | MA | normally cannot arise after execution, but delayed discovery cannot evade the universal rule |
+| bind/name/type/catalog error | FA | MA | unsupported feature is the same |
+| planner/optimizer resource failure | FA | MA | final-plan invariant failure is NC, not a user/resource error |
+| expression evaluation, arithmetic, division, or cast error | FA | MA | includes errors in later rows/batches |
+| NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | this does not define M-004's conflict predicate |
+| READ COMMITTED write conflict or stale-target revalidation | retry/FA | MA | transparent retry is permitted only while the flag is false |
+| REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; deadlock resolution cannot retain victim locks |
+| cancellation/lock cancellation | FA | MA | unless deadlock/other transaction-fatal cause applies |
+| `OutOfMemory` | FA | MA | temporary allocation itself is not persistent state |
+| `SpillIOError`, temp disk full, or spill corruption | FA | MA | spill files remain temporary |
+| BufferPool fetch/load persistent-page corruption | NC | NC | ordinary online execution stops; controlled recovery/repair is required |
+| known BufferPool flush or WAL-durability failure during ordinary execution | FA | MA | the lower layer preserves dirty state; COMMIT/ABORT use §§39.1.5–39.1.6 |
+| known WAL append failure with exact M-003 restoration | FA | MA | the failed primitive adds no published write; earlier statement writes still govern |
+| MTR provisional failure with exact restoration | FA | MA | exact pre-MTR state is not transaction garbage |
+| MTR/append/restoration state reported noncontinuable | NC | NC | lower-layer fatal classification cannot be downgraded |
+| known raw page/file I/O failure with coherent retained state | FA | MA | uncertain ownership/bytes/length instead yields NC |
+| DDL namespace synchronization/publication failure | FA | MA | FA requires no catalog mutation and conservative orphan ownership; incoherent namespace ownership yields NC |
+| ANALYZE collection/encoding failure | FA | MA | writing the first transaction-owned statistics row crosses the boundary |
+| explicit user ROLLBACK | AB | AB | enters ABORTING; it is not a statement error |
+| internal invariant failure | NC | NC | assertions are not a continuation policy |
+
+For every `MA` result the command layer first records the original structured error, atomically changes `ACTIVE -> MUST_ABORT`, and invokes ABORT. The error response is not successful statement completion and indicates that the explicit transaction ended ABORTED. If ABORT itself encounters a stronger failure, §39.1.7 precedence applies.
+
+The matrix applies when the failure terminates the current statement. An unrelated background copied-writeback/WAL flush error that merely leaves another page dirty does not retroactively fail an already completed or concurrently running statement; it is recorded and affects a transaction only when a required operation observes/returns that error or the lower layer raises the database-noncontinuable gate.
+
+### 39.1.4 Statement completion, retry, and subsystem consequences
+
+CommandId and snapshots obey §§9.6 and 9.9:
+
+- one logical statement and all of its internal pre-write retries share one CommandId,
+- every failed or successful admitted statement consumes that CommandId,
+- a `FAILED_TRANSACTION_REMAINS_ACTIVE` READ COMMITTED statement unregisters its failed snapshot and the next statement obtains a fresh snapshot,
+- no ordinary CommandId-producing statement begins in `MUST_ABORT`/`COMMITTING`/`ABORTING`.
+
+Automatic statement retry is allowed only while `current_statement_has_published_write == false` and all attempt-local output/state is discardable. A retry gets a fresh READ COMMITTED snapshot but retains the logical statement's CommandId. Once the flag is true, transparent same-TxnId retry is forbidden. V1 does not automatically rerun an aborted autocommit transaction; any later client/future opt-in whole-request retry uses a new transaction and TxnId.
+
+For a five-row INSERT where rows 1–4 published heap/index effects and row 5 fails conversion/arithmetic/constraint evaluation:
+
+```text
+statement result = FAILED_TRANSACTION_MUST_ABORT
+transaction      = MUST_ABORT -> ABORTING -> ABORTED
+COMMIT            = forbidden
+rows 1..4         = physically retained, logically aborted garbage
+```
+
+Vacuum/recovery handles those versions under the existing no-physical-undo rules. The same result applies to UPDATE after any new version/old `xmax`/index effect publishes and to DELETE after any `xmax/cmax` publishes. UPDATE/DELETE target-spool, assignment, or spill failure before the first mutation is FA.
+
+Constraint checking may be ordered early for efficiency, but the transaction result depends only on where the reported violation falls relative to the boundary. This section does not define exact UNIQUE conflict membership.
+
+DML `RETURNING` remains buffered through successful statement completion. If any row/write/result-spool step fails, no prefix is emitted; after a crossed write boundary the transaction aborts. Returned rows are not durability or commit acknowledgements. After a successful statement in an explicit transaction, consuming its RETURNING spool remains legal even though a later explicit ROLLBACK may abort the transaction. In autocommit, the request-owned spool remains unexposed through implicit COMMIT C5 and is released only as part of the successful post-commit response; a pre-C3 commit failure therefore exposes no rows, while transport failure during/after post-C5 delivery means the transaction is COMMITTED and client observation may be incomplete/uncertain.
+
+OOM and spill failures follow the same boundary rather than a uniform “disk full aborts everything” rule. Query-temporary files are cleaned independently; cleanup does not erase a prior database write.
+
+ANALYZE in-memory collection/finalization failure is FA. Once any `sys_statistics` row publishes, later failure is MA even though incomplete-generation rules prevent global use. A successful ANALYZE remains transaction-local until commit. Failure to install a committed descriptor in the global cache follows §39.1.8 and does not reopen the transaction.
+
+For CREATE, consumed nonreusable IDs, private construction, and durable final-name publication are allocator/cleanup-owned artifacts and do not cross the transaction statement-write boundary before catalog rows publish. A recoverable pre-catalog failure may therefore be FA after transferring every survivor to deterministic orphan cleanup and releasing attempt-only DDL ownership; allocated IDs remain consumed. CREATE catalog publication and DROP catalog `xmax` publication cross the boundary; later failure is MA. Namespace uncertainty that A-003 can conservatively classify as an orphan is not WAL append uncertainty; inability to establish that ownership is NC.
+
+V1 supports autocommit. A one-statement implicit transaction applies the same classification, but it has no later statement continuation: statement success enters COMMIT, while either FA or MA statement failure drives ABORT. Post-commit-record and post-durable acknowledgement uncertainty remains exactly §39.1.5.
+
+### 39.1.5 COMMIT failure, durability, and client acknowledgement
+
+The exact successful stages are §15.5 C0–C6. For persistent transactions, C3 (`durable_lsn >= commit_lsn`) is the irreversible durable semantic point. The resident status-page update in C2 is required A-001 runtime state but remains NO-FORCE; the globally observable runtime terminal cache is published only at C4.
+
+| Failure point | Transaction/storage outcome | Client/API outcome |
+|---|---|---|
+| C0/C1 precondition or resource failure, before terminal protocol | no commit record; `ACTIVE -> MUST_ABORT`, then automatic ABORT | COMMIT failed; never success |
+| C2 preparatory image/reservation/construction or known commit-record no-append failure | A-001/M-003 restores exact pre-terminal status state; any inert preparatory image may remain; automatic ABORT | COMMIT failed and transaction aborts; no external COMMIT retry |
+| C2 append outcome uncertain | storage noncontinuable; do not append ABORT, publish terminal state, or release locks | `CommitOutcomeUncertain`/connection-fatal; recovery inspects the valid persisted prefix |
+| C2 commit record appended but status-page/frame publication cannot complete | M-003 noncontinuable; COMMIT cannot be redirected to ABORT | `CommitOutcomeUncertain`/connection-fatal; recovery may commit if the record survived |
+| C3 WAL write/`fdatasync` failure with exact append bytes retained | remain COMMITTING and retry durability under retained ownership; do not abort or acknowledge | request remains pending; no ordinary failure result authorizes retry/cancellation |
+| C3 durability cannot be established while safe continuation/retry is impossible | storage noncontinuable; recovery decides from the surviving complete WAL prefix | `CommitOutcomeUncertain`/connection-fatal |
+| after C3, before/during C4 runtime terminal publication | durable outcome is irrevocably COMMITTED; publication failure makes runtime/database noncontinuable | never ABORTED; without C6 acknowledgement report/observe commit outcome uncertainty |
+| C5 catalog/statistics cache side effect fails but safe invalidate/bypass/fallback succeeds | COMMITTED; continue cleanup using authoritative MVCC catalog/statistics fallback | success may still be acknowledged after C5 completes safely |
+| C5 registry/lock/visibility cleanup cannot be made coherent | COMMITTED plus database noncontinuable; retain unsafe ownership rather than expose contradiction | commit outcome uncertain unless success was already delivered (v1 delivers only at C6) |
+| C6 success acknowledgement delivered | COMMITTED, runtime publication and required cleanup complete | successful COMMIT |
+| C6 socket/write failure before delivery | COMMITTED; database may remain healthy and closes that connection | client-observed outcome uncertain; retrying the transaction is unsafe without application reconciliation |
+
+Once the publication-authorizing commit record validly appends, COMMIT is uncancellable: client disconnect, timeout, or cancellation does not initiate ABORT. The server continues C2–C5 or enters the noncontinuable gate. A known commit append failure is not exposed as a retryable COMMIT on the same transaction; v1 aborts that transaction, and an application retry begins a new transaction.
+
+A group-commit flush failure applies this same rule to every waiting transaction whose commit record already validly appended. They remain COMMITTING while the exact shared WAL prefix is retried; none may be selectively converted to ABORTED because its individual waiter has not yet been acknowledged.
+
+Under A-001, resident status-page installation is a C2 prerequisite and may not be intentionally deferred until after durability. If C3 has nevertheless completed and a latent failure proves that required installation/runtime state was not completed, the transaction remains COMMITTED and the database is noncontinuable. Ordinary post-C3 runtime cache publication, logical-lock release bookkeeping, catalog/statistics cache publication, or client transport failure likewise cannot change the outcome. No error path may append/publish ABORTED for that TxnId. A nonrequired background status-page flush scheduling failure may leave the page dirty/retryable under M-001 and does not by itself fail an otherwise complete COMMIT.
+
+Successful COMMIT is sent only after C4 terminal publication and C5's required coherent installed-or-invalidated cache/ownership state. V1 does not acknowledge at WAL durability and finish runtime publication asynchronously.
+
+### 39.1.6 ABORT failure and automatic MUST_ABORT cleanup
+
+The exact successful stages are §15.6 A0–A4. ABORT performs semantic outcome publication, not physical user-DML undo.
+
+| Failure point | Required outcome |
+|---|---|
+| before A1 with no persistent state | publish runtime ABORTED, release after terminal publication, acknowledge |
+| known preparatory/`TXN_ABORT` append failure | retain ABORTING/locks and internally retry while exact outcome is known; never restore ACTIVE/commit eligibility |
+| append outcome uncertain or post-abort-record status-page publication failure | storage noncontinuable; do not release locks as ordinary state; controlled stop/recovery |
+| inability to complete a known-failure retry/abort publication | storage noncontinuable; preserve original error and require recovery loser handling |
+| A2 runtime ABORTED publication failure | storage noncontinuable; no false lock release or terminal-cache claim |
+| A3 cleanup failure after terminal ABORTED publication | outcome remains ABORTED; lock/registry ownership uncertainty makes the database noncontinuable |
+| A4 acknowledgement transport failure | outcome remains ABORTED; close connection; database may remain healthy |
+
+Ordinary ABORT need not synchronously make `TXN_ABORT` durable. If it is lost, crash recovery classifies the noncommitted transaction as a loser and establishes ABORTED. An uncertain/failed abort can therefore never become COMMITTED, but ordinary execution still cannot release locks or claim clean completion without the required runtime terminal publication.
+
+### 39.1.7 Connection loss, recovery classification, and error precedence
+
+Connection/session loss has these outcomes:
+
+| Runtime point | Required handling |
+|---|---|
+| ACTIVE, no COMMIT in progress | automatically ABORT and clean up |
+| MUST_ABORT | continue/join mandatory ABORT cleanup |
+| COMMITTING before publication-authorizing commit append | cancel commit and ABORT |
+| COMMITTING after publication-authorizing append, before durable commit | commit is uncancellable; continue it or enter noncontinuable/recovery; client outcome is uncertain |
+| after durable commit, before acknowledgement | transaction remains COMMITTED; finish safe runtime cleanup where possible; client outcome is uncertain |
+| ABORTING | continue abort cleanup; never revive transaction |
+
+Crash recovery maps runtime states using only persisted WAL/status evidence:
+
+| Precrash runtime state | Recovery outcome |
+|---|---|
+| ACTIVE or MUST_ABORT | loser -> ABORTED |
+| COMMITTING before a surviving complete `TXN_COMMIT` | loser -> ABORTED |
+| COMMITTING with complete commit record in the valid persisted WAL prefix | COMMITTED |
+| COMMITTING after durable commit | COMMITTED |
+| ABORTING with or without a surviving abort record | ABORTED, directly or by loser resolution |
+| COMMITTED | COMMITTED |
+| ABORTED | ABORTED |
+
+Runtime-only states require no additional persisted status code.
+
+When multiple errors occur, semantic precedence is:
+
+```text
+durable COMMIT outcome
+    dominates every later error and can never be rewritten
+
+required noncommit/MUST_ABORT outcome
+    remains noncommit even if abort cleanup later fails
+
+database/storage noncontinuable condition
+    is additionally reported and governs server continuation
+
+original statement/commit/rollback error
+    remains the primary causal diagnostic, with cleanup/fatal errors chained
+```
+
+For example, a UNIQUE violation followed by fatal abort I/O remains “UNIQUE violation; transaction must not commit” plus “database noncontinuable”; the cleanup error does not erase the original cause or make COMMIT legal.
+
+### 39.1.8 Locks, terminal cache, derived caches, and observability
+
+Transaction-lifetime locks, TableWriterGate, SchemaLock, and transaction snapshots remain owned through §9.14 terminal publication. `MUST_ABORT` alone does not release them. COMMIT releases only after COMMITTED publication; ABORT releases only after ABORTED publication. Another transaction therefore never observes released conflict protection while status lookup still says IN_PROGRESS.
+
+The globally observable terminal-outcome cache updates in the same §9.14 linearization that changes runtime state and active-registry membership. A BufferPool-resident `TXN_STATUS` page is not that cache and cannot independently make a transaction publicly terminal.
+
+Catalog and statistics caches do not define transaction outcome. After durable commit they must either install the committed descriptor, safely invalidate/bypass the affected entry so authoritative MVCC catalog lookup is used, or—statistics only—retain an older/missing approximate descriptor. If coherent fallback cannot be guaranteed, the transaction remains COMMITTED and the database becomes noncontinuable.
+
+Diagnostics/API metadata must distinguish at least:
+
+```text
+statement failed; transaction remains ACTIVE
+statement failed; transaction entered mandatory ABORT and is ABORTED/ABORTING
+COMMIT not acknowledged; client outcome uncertain
+transaction durably COMMITTED despite later completion/transport failure
+database/storage noncontinuable
+```
+
+The following implementations are forbidden:
+
+1. committing rows 1–4 after row 5 made their multirow DML statement fail,
+2. transparently retrying a statement after any transaction-owned write published,
+3. reusing a failed statement's CommandId or READ COMMITTED snapshot,
+4. treating an exactly restored M-003 provisional mutation as published garbage,
+5. changing durable COMMITTED to ABORTED or reporting ABORTED after durable commit,
+6. acknowledging COMMIT before C4/C5 required runtime completion,
+7. releasing transaction locks before terminal publication,
+8. executing ordinary statements or COMMIT in `MUST_ABORT`,
+9. making an ordinary effect-free SELECT user error transaction-fatal without an independent fatal cause,
+10. treating every OOM/spill/disk-full failure identically without checking the statement boundary,
+11. exposing a successful partial RETURNING prefix from a statement that later fails, or exposing autocommit RETURNING before implicit COMMIT C4–C5,
+12. allowing cache publication failure to redefine durable transaction outcome.
 
 ## 39.2 SQL front-end and logical-planning errors
 
@@ -18942,6 +19286,8 @@ TransactionConflict  -> may contain SerializationFailure / DeadlockVictim
 RAII/lifetime ownership unwinds query-owned chunks, row collections, reservations, spill files, pipeline tasks, and operator state.
 
 Execution failure does not independently release transaction-owned logical locks; the command/transaction layer drives the required abort/terminal path.
+
+That command-layer decision is exactly §39.1's statement-write matrix; an execution operator does not choose statement-only versus transaction-fatal behavior independently.
 
 No partially active pipeline/task graph remains runnable after a terminal query execution failure.
 
@@ -19041,6 +19387,12 @@ The engine exposes enough counters to diagnose both correctness and performance,
 
 ```text
 transactions begun / committed / aborted
+statement failures leaving transaction active
+statement failures requiring/triggering abort
+transactions observed in MUST_ABORT / ABORTING
+commit outcome-uncertain responses / connection losses
+post-durable-commit completion failures
+storage-noncontinuable transitions
 deadlock victims
 serialization failures
 statement retries
@@ -19078,6 +19430,8 @@ Internal/debug interfaces or test hooks SHOULD permit inspection of:
 active transactions
 active snapshots
 transaction status by TxnId
+runtime transaction state and current COMMIT/ABORT stage
+current statement CommandId and published-write boundary flag
 logical lock table
 wait-for graph
 durable_lsn
@@ -19413,6 +19767,10 @@ copied-writeback winning and no-flush winning their reservation race
 ```
 
 The checks compare exact pre-operation bytes and frame metadata for both initially clean and initially dirty pages, including generation, `page_lsn`, `rec_lsn`, DPT membership, and FPI state. Ordinary PAGE_INIT tests verify immediate serialized tail truncation, no published count/reference, and deterministic PageNo reuse after a known failure. B+ MTR tests additionally verify all-page rollback, new/reused-page disposition, and exact root/height/sibling/parent/free-list restoration. Checkpoint/flush observers must see only the old state or the fully published WAL-backed state, never provisional metadata.
+
+Statement/transaction error verification MUST cover every §39.1.3 matrix row on both sides of the first-published-write boundary where reachable. Required scenarios include multirow INSERT row-5 failure after four published rows, partial UPDATE/DELETE, pre-write read-only/cast/constraint/OOM/spill failure, M-003 exact local rollback with and without an earlier statement write, empty-page/structural publication without a transaction-owned logical row effect, CommandId nonreuse, fresh READ COMMITTED snapshot after FA, rejection of same-TxnId retry after publication, explicit-transaction RETURNING failure before exposure, and autocommit RETURNING held through implicit COMMIT.
+
+COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
 
 Recovery property tests compare reopened **logical committed contents** against a model containing only transactions whose commit became durable. Physical aborted garbage is allowed.
 
@@ -20056,6 +20414,9 @@ The following global invariants apply across subsystem boundaries and MUST NOT b
 11. Recovery is verified with simulated crashes.
 12. Performance-sensitive changes require measurement.
 13. Acknowledged durable state never depends on a file or WAL-segment namespace entry whose required parent-directory synchronization has not succeeded.
+14. A failed statement that published any transaction-owned database mutation cannot leave that transaction commit-eligible in v1.
+15. Durable `TXN_COMMIT` is irreversible and cannot be reclassified ABORTED by any later runtime, cache, cleanup, or transport failure.
+16. Successful COMMIT acknowledgement follows required runtime terminal publication and coherent ownership/cache cleanup.
 
 Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.27; base-access/cost invariants in §36.19; join/property invariants in §37.18; memo/search invariants in §38.25.
 
