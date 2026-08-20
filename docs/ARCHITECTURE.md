@@ -189,7 +189,9 @@ Measured hot paths MAY justify more complex algorithms or representations. Compl
 
 ## 2.4 Shared-state and concurrency direction
 
-The engine is single-process and multi-threaded.
+The engine is single-process and multi-threaded. “Single-process” is an actively
+enforced per-database invariant, not a deployment assumption; §3.3.2 defines
+the exclusive database-owner lock and same-process owner rule.
 
 Centralized global locks SHOULD NOT be used in hot paths merely to simplify synchronization.
 
@@ -274,7 +276,7 @@ The initial supported environment is:
 - Linux,
 - x86-64 or ARM64,
 - POSIX file APIs,
-- a single database process,
+- one actively exclusive database process per opened database root,
 - multiple worker threads.
 
 Portability is desirable but secondary to correctness, observability, and direct access to the required operating-system mechanisms.
@@ -299,6 +301,384 @@ C++20 was selected because it provides direct control over:
 - low-level profiling and optimization.
 
 The design accepts the associated risks—undefined behavior, memory-safety failures, accidental allocation/copying, and difficult concurrency bugs—as engineering risks that must be controlled by explicit ownership, serialization, validation, testing, and sanitizer/tooling discipline.
+
+## 3.3 Database process lifecycle
+
+This section is the canonical v1 database-owner lifecycle. It owns process
+exclusivity, open/recovery admission, READY publication, controlled shutdown,
+failed-open cleanup, and the database-level response to the noncontinuable gate
+from §§12.12.4 and 39.1. It does not change the local recovery, BufferPool,
+transaction-terminal, catalog, or filesystem-publication protocols that it
+orders.
+
+### 3.3.1 Runtime states and legal transitions
+
+Each process-local database owner is in exactly one conceptual state:
+
+| State | Meaning and admitted work |
+|---|---|
+| `CLOSED` | No process-local database ownership, manager, worker, frame, guard, file registration, or exclusive lock remains. |
+| `OPENING` | The final root has been opened and exclusive ownership is being acquired/held while bootstrap prerequisites and recovery inputs are validated. Only lifecycle-owned open/cleanup work is admitted. |
+| `RECOVERING` | The exclusive owner and recovery-scoped managers exist; recovery has sole authority to inspect/repair persistent state. No ordinary transaction, SQL, DDL, ANALYZE, vacuum, normal checkpoint/writeback worker, or ordinary catalog publication is admitted; recovery-authorized page I/O/checkpoint work remains legal. |
+| `READY` | Every §3.3.4 prerequisite has been published atomically and ordinary transaction/statement admission is enabled. |
+| `DRAINING` | The shutdown admission gate has closed. No new ordinary transaction, statement, maintenance operation, or optional background task is admitted. New ordinary file/page work is rejected, while already-admitted terminal/cancellation and lifecycle shutdown protocols may still perform their required internal file/page/WAL operations under §3.3.6. |
+| `CLOSING` | No ordinary work remains; the owner is executing final durability and/or resource teardown. It never readmits work. |
+| `NONCONTINUABLE` | A database/storage invariant or outcome cannot support safe ordinary continuation. Admission is closed and only failure propagation, quiescence, and non-clean owner teardown/recovery preparation are legal. |
+
+`OPEN_FAILED` and `SHUTDOWN_FAILED` are operation results, not additional
+long-lived states. A failed open whose resources can be fully unwound ends in
+`CLOSED`; an owner whose safe teardown is not yet complete remains
+`NONCONTINUABLE`. A failed close may eventually reach `CLOSED` through non-clean
+teardown, but that does not convert its result into a successful controlled
+close or imply any clean-shutdown marker.
+
+The normative transition table is:
+
+| From | Trigger / required gate | To | Exclusive-lock and failure outcome |
+|---|---|---|---|
+| `CLOSED` | `OpenDatabase` safely opens the final root, claims the process-local root identity, and begins lock acquisition | `OPENING` | no database content is trusted; lock is acquired before validation/recovery |
+| `OPENING` | lock held and bootstrap/recovery dependencies are sufficiently opened and validated | `RECOVERING` | lock remains held; recovery owns all mutation |
+| `OPENING` | known validation/open failure and complete cleanup | `CLOSED` | all database users/descriptors except the lock descriptor stop first; then the OS lock is released, the process claim is removed, and future open may retry |
+| `OPENING` | ownership, I/O outcome, worker stop, or cleanup cannot be established | `NONCONTINUABLE` | lock remains held by the cleanup owner |
+| `RECOVERING` | §§13.11–13.19 and every §3.3.4 READY prerequisite complete | `READY` | READY/admission publication is one process-local linearization while the lock remains held |
+| `RECOVERING` | known recovery/corruption failure and complete non-live cleanup | `CLOSED` | no handle is published; future open may retry/re-report the persistent failure |
+| `RECOVERING` | uncertain mutation/publication state or incomplete quiescence/cleanup | `NONCONTINUABLE` | ordinary work remains forbidden and the lock stays held |
+| `READY` | controlled close wins the admission gate | `DRAINING` | lock remains held; only already-admitted completion/cancellation and shutdown work continue |
+| `READY` | §12.12.4/§39.1 database-fatal transition | `NONCONTINUABLE` | admission closes immediately; durable transaction outcomes are preserved |
+| `DRAINING` | admitted work and producer services have quiesced | `CLOSING` | normal durability sequence continues with the lock held |
+| `DRAINING` | shutdown invariant/durability failure | `NONCONTINUABLE` | successful close is forbidden |
+| `NONCONTINUABLE` | owner starts non-clean quiescence/resource destruction | `CLOSING` | no final-checkpoint/clean-state claim; lock remains held until teardown's last step |
+| `CLOSING` | every normal §3.3.6 close prerequisite completes | `CLOSED` | managers/descriptors close first; OS lock release is the external ownership transition, then the local claim/state publish completes; report success |
+| `CLOSING` | non-clean teardown safely releases all process-local users | `CLOSED` | use the same final ownership-release order and report the original open/shutdown/noncontinuable failure, never success |
+| `CLOSING` | a live guard/worker/ownership invariant still prevents safe destruction | `NONCONTINUABLE` | retain the owner and lock; retry teardown or let process termination release OS resources |
+
+Only `READY` admits normal work. APIs and diagnostics MUST expose enough state to
+distinguish not-open/closed, opening, recovering, ready, draining, and
+noncontinuable; they may also expose closing. An operation cannot silently run
+against an owner that has not reached `READY`.
+
+### 3.3.2 Active process exclusivity and lock object
+
+V1 actively enforces one process-local database owner and one operating-system
+process owner for one actual opened database root. It never permits independent
+WAL managers, BufferPools, file registries, recovery coordinators, or catalog
+caches for that root.
+
+The lock object is the existing regular file:
+
+```text
+database_root/database.control
+```
+
+The owner opens the final root with §4.7 no-follow, directory-relative rules,
+opens `database.control` read/write as a regular file with no-follow and
+close-on-exec, and obtains a nonblocking exclusive whole-file POSIX
+`fcntl(F_SETLK)` write lock with `l_whence=SEEK_SET`, `l_start=0`, and `l_len=0`.
+The lock is process-associated. It is OS lock state, not a byte, slot, flag, or generation
+inside `database.control`; the control-file format is unchanged. There is no
+v1 lock file whose mere directory-entry existence denotes ownership.
+
+Only opening/fstat/type-checking the final root and `database.control` may occur
+before the lock attempt. The engine MUST NOT read/choose control slots,
+inventory managed objects/WAL, initialize storage managers, run recovery, or
+mutate database state before the lock succeeds. Failure because another process
+owns the lock returns a distinct nonwaiting `DATABASE_BUSY` result and performs
+none of those operations.
+
+Because process-associated record locks do not conflict with another open by
+the same process, a synchronized process-local registry keyed by stable identity
+of the actual opened root/control inode is also mandatory. A second
+`OpenDatabase` for the same root, including a path alias, fails `DATABASE_BUSY`;
+v1 does not coalesce handles and does not permit two independent owner objects.
+Path strings alone are not owner identity. All managed access remains relative
+to the retained opened root/directory descriptors, so later path rebinding does
+not move the ownership domain.
+
+The control descriptor that owns the lock is the sole independently opened
+descriptor for that control inode in the owner process. All control reads and
+alternating-slot writes borrow that descriptor. This avoids the POSIX rule that
+closing another descriptor for the same inode can release the process's record
+locks. The owner holds the lock continuously through `OPENING`, `RECOVERING`,
+`READY`, `DRAINING`, `CLOSING`, and `NONCONTINUABLE`. It releases the lock only
+after all workers, guards, BufferPool frames, file registrations, managers, and
+other descriptors that can use database state are gone. The process-local claim
+remains held while the OS lock is released/its descriptor is closed, preventing
+a same-process opener from exploiting process-associated lock semantics; only
+then is the claim removed and `CLOSING -> CLOSED` published.
+
+Process termination releases the POSIX lock automatically. Record locks are not
+inherited as owned locks by a forked child, and close-on-exec prevents descriptor
+inheritance through successful `exec`. Using a live database owner from a
+post-`fork` child is unsupported: the child MUST NOT execute database APIs using
+copied handles and must close/discard inherited descriptors or `exec`. A child
+that independently opens the same database still conflicts with the parent's
+lock. No fork-support or ownership-transfer protocol exists in v1.
+
+### 3.3.3 Open preconditions, ordered protocol, and recovery entry
+
+`OpenDatabase(path)` accepts only the exact final database root. A missing path,
+non-directory, recognized `.dblusblus-creating` staging root, missing
+`database.control`, or incomplete bootstrap is not opened as a database. Managed
+directories/files obey §4.7's object-type, no-follow, same-filesystem, permission,
+and stable-directory-descriptor rules. The engine does not follow a symlink or
+substitute a similarly named staging/private object.
+
+V1 has no persisted clean-shutdown bit and does not infer cleanliness from a
+successful prior close. Every open runs the bounded WAL-tail validation,
+analysis, redo, loser resolution, transaction-status repair, and recovery
+checkpoint protocol in §§13.11–13.19. A successful final shutdown checkpoint
+reduces that work but never authorizes skipping it. No persisted-format field is
+introduced for this lifecycle decision.
+
+The selected filesystem must also provide reliable interprocess POSIX record
+locking for the control inode. Unsupported/broken lock service is an open
+I/O/platform failure; the engine never degrades to convention-only ownership.
+
+The ordered open protocol is:
+
+| Step | Required action and dependency |
+|---:|---|
+| 1 | Open and identify the caller's final root under §4.7; reject staging roots and unsafe object types. |
+| 2 | Atomically claim the process-local root identity, open `database.control`, and acquire §3.3.2's nonblocking exclusive lock. On contention, release the claim/descriptor and return `DATABASE_BUSY` without recovery. |
+| 3 | Retain root, `pending/`, and `wal/` directory descriptors and inventory only exact managed names. Unknown names are recorded/ignored, never deleted by guesswork. |
+| 4 | Validate both control slots independently under §13.2, the immutable `catalog.dat` bootstrap locator/header under §16.9, the `txn_status.dat` superblock, and bootstrap-referenced system heap/FSM identities needed to address recovery. Data/status/catalog pages that WAL may repair are opened in recovery-private form and are not published to ordinary readers. |
+| 5 | Inventory exact WAL segment names, consider usable control generations in descending order, validate the selected checkpoint and required contiguous retained segment range, and establish that enough recovery input exists to enter recovery. |
+| 6 | Construct only recovery-scoped DiskManager/file registry, WAL, BufferPool/page-reconstruction, checkpoint, transaction-status, and catalog-bootstrap services; do not start normal background services. Transition `OPENING -> RECOVERING`. |
+| 7 | Establish the valid contiguous WAL prefix and reconcile its tail, then run analysis and redo for bootstrap-addressable status/catalog/system state under Chapter 13. Keep redo for not-yet-classified non-bootstrap FileIds deferred as §13.13.1 requires. Raw transaction-status data is not an ordinary lookup authority during this step. |
+| 8 | Resolve losers and repair terminal status, decode the recovered self-hosted catalog rows through the immutable bootstrap descriptors, cross-check bootstrap identities, require every bootstrap/committed catalog-owned file at its exact final basename with valid identity/superblock, and then apply/finish any deferred redo and append-tail reconciliation for required files. |
+| 9 | Durably complete/install the required recovery checkpoint, including control-slot publication, after all required redo/status/file reconciliation and before enabling ordinary status/catalog use. |
+| 10 | Classify every exact managed `pending/` entry and unowned exact managed final file under §4.7.6. Classification is mandatory before READY; durable physical unlink may be completed now or retained as an explicit cleanup task because catalog/bootstrap lookup cannot expose the orphan. Unknown names remain untouched. |
+| 11 | Enable ordinary transaction-status lookup, construct immutable catalog/schema and required runtime terminal/ownership caches, finish normal BufferPool/file registrations, and construct background services behind a closed start gate. |
+| 12 | Atomically publish `RECOVERING -> READY`, open transaction/statement admission, and release the background-service start gate. The exclusive process lock remains held. |
+
+The immutable catalog locator and bootstrap-required identities are pre-recovery
+addressing roots, not ordinary catalog state. The self-hosted catalog rows become
+semantic authority only after their physical pages have been recovered and the
+post-recovery cross-check succeeds. Likewise, `txn_status.dat` may contain a
+torn/corrupt recoverable page before A-001 redo; ordinary snapshot/visibility
+lookup is enabled only after recovery status repair and loser resolution.
+
+Control-file lifecycle outcomes are exact:
+
+- each slot is accepted/rejected independently under §13.2.3;
+- with two valid unequal generations, the highest usable generation wins; one
+  valid slot is sufficient; equal-generation differing slots are corruption;
+- a checksum-bad slot is simply not a valid candidate, but absence of any valid
+  supported slot prevents open;
+- a control slot or immutable bootstrap root with the correct format-family
+  magic but an unsupported version returns `UNSUPPORTED_FORMAT` and forbids
+  fallback to an older supported slot; an unknown version is not treated as an
+  ignorable torn update;
+- invalid magic/incomplete bootstrap returns
+  `NOT_A_DATABASE` when no database format can be established, otherwise
+  `CORRUPT_DATABASE`;
+- a selected checkpoint whose required sequence/WAL is unavailable may fall
+  back only to another independently valid control generation whose complete
+  recovery range remains valid; otherwise open fails `RECOVERY_FAILED` or
+  `CORRUPT_DATABASE` and never reaches READY.
+
+Required-file classification is:
+
+| Class | Open rule |
+|---|---|
+| final root/control/directories and immutable bootstrap/status/catalog addressing roots required before recovery | absence, wrong type, unsupported format, or unrecoverable identity failure prevents recovery/READY |
+| bootstrap system files named by the immutable locator | must be openable for recovery and valid after recovery; absence is corruption, not an orphan case |
+| files required by recovered committed catalog state | may be classified only after recovery/catalog reconstruction, but each must then exist under its exact durable final name and validate before READY |
+| exact managed private/final files proven unowned | orphan cleanup input; never semantic evidence and never opened as committed state |
+| catalog-retired files pending lifetime cleanup | not required by current committed catalog; remain inaccessible and follow retirement/orphan cleanup |
+| unrelated/unknown names | never treated as database objects or automatically deleted |
+
+WAL startup accepts only §12.2's exact segment grammar and §13.11's contiguous
+valid record prefix. An incomplete/torn final record is excluded with the tail;
+malformed required earlier WAL or a missing interior required segment is
+corruption. One exact next-contiguous all-zero precreated segment is only the
+permitted empty artifact and may be adopted or durably removed through existing
+rules. Older segments may be ignored/recycled only after the installed retention
+floor proves them unnecessary. No control/checkpoint state is accepted unless
+its complete required WAL range exists and validates.
+
+### 3.3.4 READY publication and failed-open cleanup
+
+The READY linearization may occur only when all of these are true:
+
+```text
+exclusive OS lock and process-local owner claim held
+stable managed directory/file ownership established
+valid control/checkpoint and contiguous WAL prefix established
+analysis, all required/deferred redo, append-tail reconciliation, and loser resolution complete
+recovery checkpoint durable and installed
+transaction-status state safe for ordinary lookup
+immutable bootstrap and recovered self-hosted catalog cross-checked
+every bootstrap/committed physical file present and validated
+all managed pending/final survivors classified as required or orphan/retired
+normal BufferPool/file registry/terminal/catalog services coherent
+normal background services constructed but unable to race before the gate
+```
+
+Before that one publication, no transaction/statement API or background service
+may observe a partly recovered database. After it, every admitted component sees
+the same recovered ownership/status/catalog state.
+
+Open uses scoped ownership so any failure stops and joins all started recovery tasks,
+quiesces and destroys a partial BufferPool before closing its files, closes every
+registration/descriptor except the lock descriptor, releases and closes the OS lock,
+and only then removes the process-local identity claim. No owner is exposed as
+READY and no worker survives failed-open return.
+
+A known validation/corruption/recovery error whose process-local state can be
+fully quiesced ends in `CLOSED`; a later independent open may retry and either
+recover or report the same persistent defect. Recovery writes that were validly
+WAL-backed/durable remain ordinary recovery input for that later attempt. If an
+append/publication outcome is uncertain, exact provisional restoration failed,
+or a worker/guard/manager cannot be proven stopped, the temporary owner enters
+`NONCONTINUABLE` and retains the lock until non-clean teardown or process exit.
+An orphan unlink/sync failure alone does not prevent READY when the entry has
+already been authoritatively classified unowned and remains catalog-inaccessible;
+after §4.7.2 reconciliation, every possible namespace outcome remains that same
+unowned cleanup input and its A-003 cleanup task is retained/retried. Failure of a synchronization required
+for WAL, status repair, checkpoint/control installation, or a required namespace
+does prevent READY.
+
+### 3.3.5 Database-noncontinuable behavior
+
+Any §12.12.4/§39.1 `DATABASE_NONCONTINUABLE` transition atomically closes the
+database admission gate. No new transaction, statement, maintenance operation,
+ordinary page/file load, WAL append, page writeback, checkpoint, or ordinary
+mutation may start. In-flight work is canceled/failed at safe ownership
+boundaries; protected provisional pages/barriers are not released as ordinary
+state. No new successful COMMIT acknowledgement may be sent beyond an
+acknowledgement whose complete §15.5 C6 boundary already occurred.
+
+Transactions whose `TXN_COMMIT` is already durable remain COMMITTED forever,
+including when terminal/cache/shutdown completion later fails. Transactions
+without a surviving complete commit record remain recovery losers. The owner
+preserves those facts, reports the causal failure plus database-noncontinuable
+state, stops ordinary connections, and enters the non-clean `CLOSING` path.
+
+Non-clean close does not flush uncertain protected frames, install a final
+checkpoint, recycle WAL, or claim clean durability. It stops and joins components in
+dependency order where possible, discards only volatile state after no observer
+can use it, closes descriptors, and releases exclusivity last. If a live guard or
+worker prevents safe destruction, the owner and lock remain in
+`NONCONTINUABLE`; a second process is not allowed to recover concurrently. The
+next owner after release always runs the full §3.3.3 recovery protocol.
+
+### 3.3.6 Controlled shutdown protocol
+
+Controlled close begins at one `READY -> DRAINING` admission linearization.
+After it wins, new transactions, statements, COMMIT requests not already in
+`COMMITTING`, maintenance work, ordinary file opens/page loads, and scheduled
+checkpoint/flush producers are rejected. Already-admitted COMMIT/ABORT and
+lifecycle cleanup may still use their required internal BufferPool/WAL paths
+until the later BufferPool quiesce in step 4. Exact shutdown ordering is:
+
+| Step | Required action and dependency |
+|---:|---|
+| 1 | Publish `DRAINING`; stop admission and prevent new maintenance/checkpoint work from starting. |
+| 2 | Request cancellation of admitted ordinary statements/maintenance at safe points and wait for their operation-local ownership to unwind. Drive every `ACTIVE` or `MUST_ABORT` transaction through §15.6 ABORT. Allow already-`COMMITTING` and already-`ABORTING` terminal protocols to complete under M-005; a commit past its publication-authorizing append remains uncancellable. Wait for terminal publication, snapshots, logical locks, writer gates, and statement resources to release. |
+| 3 | Stop/join vacuum, ANALYZE/statistics, scheduler/query workers, and ordinary checkpoint production after their admitted transaction work reaches step 2's terminal boundary. Keep BufferPool writeback and WAL writer/group-commit durability services alive. |
+| 4 | Quiesce BufferPool external Fetch/new-page admission, drain loads/evictions/writebacks and every guard/pin/latch owner, and stably flush every dirty non-retired page required for normal close under WAL-before-data. A frame belonging to a proven retired/orphan object may use §7.12.5's discard rule; no other dirty frame may be discarded. |
+| 5 | With no active writer and an empty DPT, append, durably flush, and install one final checkpoint through §13.5, including the alternating control-slot `fdatasync`. This checkpoint is mandatory for a successful controlled close but is an optimization, not a clean marker or a prerequisite for later recovery correctness. |
+| 6 | Complete every already-classified orphan/retirement cleanup task owned by this lifecycle and every namespace mutation initiated by shutdown, including each required parent-directory `fsync` under §4.7. WAL recycling remains optional, but any recycling begun must likewise become directory-durable. Unknown names remain untouched. No unacknowledged namespace mutation or queued owned cleanup is called complete. |
+| 7 | Stop and join BufferPool helper activity after its drain, then stop and join the WAL writer/group-commit service only after no page flush, terminal protocol, checkpoint, control update, or WAL recycle can need it. Destroy BufferPool frames/page table and close file registrations/managers and non-lock directory descriptors while retaining the control lock descriptor. |
+| 8 | Release/close the exclusive OS lock descriptor only after step 7, then remove the process-local root claim, publish `CLOSED`, and only then return successful `CloseDatabase`. |
+
+Shutdown does not wait for ordinary `ACTIVE` transactions to choose commit: it
+cancels their current statement where safely possible and aborts them. A
+`MUST_ABORT` transaction continues mandatory abort. An already `COMMITTING` or
+`ABORTING` transaction is allowed to finish its terminal protocol because
+discarding it would violate §§9.14, 15.5, and 15.6. Shutdown cannot release
+transaction locks or live transaction state before terminal publication.
+
+WAL durability service therefore outlives transaction terminal completion,
+every required page-file flush, and final checkpoint/control publication.
+`close()` is never used as a durability primitive. The final checkpoint is
+required only to call the close successful; every later open still runs recovery
+and no control bit records “clean.”
+
+If WAL/page/checkpoint/control/directory synchronization fails, an internal
+invariant fails, or a guard/worker will not drain, `CloseDatabase` MUST NOT report
+success. The owner enters `NONCONTINUABLE`. Known safe resource teardown may then
+release descriptors and the lock last and return `SHUTDOWN_FAILED`; this is a
+non-clean close and the next open recovers from the last valid durable
+control/WAL/data state. If teardown cannot prove all process-local users stopped,
+the owner and lock remain live until teardown succeeds or the process exits.
+Dirty frames are never dropped and described as durably flushed, and a shutdown
+failure never changes a durable COMMIT to ABORTED.
+
+### 3.3.7 Create, removal, crash, and lifecycle errors
+
+After §4.7.8 durably renames/synchronizes a newly created staging root, a creator
+that returns an open database handle MUST pass through the same §3.3.2–§3.3.4
+ownership, validation, recovery, cache, and READY gates. It may retain safely
+opened root/control descriptors and a lock established on the same control inode
+across the final rename only if doing so is exactly equivalent to those gates;
+there is no separate less-validated “new database ready” path. Database creation
+success without an open handle may stop after durable root publication.
+
+Whole-database DROP/removal is not a v1 online operation. External/offline root
+removal is supported only while the database is `CLOSED` and the remover has
+acquired the same exclusive control-file lock, so removal cannot race open or
+recovery. It follows A-003 durability for every namespace deletion it chooses to
+acknowledge.
+
+Process crash releases the process-associated lock and all runtime state. Machine
+crash likewise removes OS lock state. Neither requires a stale-lock-file cleanup,
+because no lock file exists and control-file existence alone is not ownership.
+The next opener acquires exclusivity and always runs recovery; A-003 determines
+which namespace mutations survived, while control/WAL/page protocols determine
+database state.
+
+Lifecycle APIs preserve distinctions equivalent to:
+
+```text
+DATABASE_BUSY
+NOT_A_DATABASE
+UNSUPPORTED_FORMAT
+CORRUPT_DATABASE
+RECOVERY_FAILED
+IO_OR_DURABILITY_FAILURE
+DATABASE_NONCONTINUABLE
+SHUTDOWN_FAILED
+```
+
+`DATABASE_BUSY` is retryable only after the other owner releases exclusivity.
+Known open/validation/I/O failures permit a future open after cleanup, although
+the underlying persistent fault may recur. `DATABASE_NONCONTINUABLE` permits no
+same-owner ordinary retry; teardown and a fresh recovery open are required.
+
+Canonical crash-point outcomes are:
+
+| Crash point | Durable/runtime consequence and next open |
+|---|---|
+| after lock acquisition or some required files opened | OS releases lock; no READY was published; next open repeats full validation/recovery |
+| during recovery | only valid WAL/data/control/namespace publications survive; next open restarts idempotent recovery and loser resolution |
+| after recovery completion but before READY | no user work was admitted; next open still reruns recovery and rebuilds runtime caches |
+| immediately after READY | admitted work survives only through normal WAL/page rules; next open performs crash recovery |
+| immediately after DRAINING or during statement/transaction abort drain | no clean claim exists; next open resolves every non-durable transaction as a loser and preserves durable commits |
+| during dirty-page flush | WAL-before-data and checksums/FPI recovery govern any partial data write; next open restores from the valid durable prefix |
+| during final checkpoint/control publication | dual control slots select the newest independently valid complete checkpoint or legal fallback; next open never trusts a torn slot/incomplete checkpoint |
+| after all shutdown durability work but before lock release | runtime crash releases the lock; the durable final checkpoint may shorten, but never eliminates, next-open recovery |
+| after lock release | all successful-close prerequisites and manager teardown already completed; the next owner still performs normal recovery validation |
+
+The following v1 implementations are forbidden:
+
+1. relying on deployment convention instead of acquiring the exclusive database lock;
+2. reading/choosing control state, inventorying WAL, mutating, or recovering before exclusivity;
+3. treating a stale filename or control-file existence as proof of a live owner;
+4. creating two independent owner/BufferPool/WAL-manager instances for one actual root in one process;
+5. admitting normal work before recovery, status repair, catalog reconstruction, file validation, and READY publication complete;
+6. trusting a torn transaction-status page before A-001 recovery;
+7. ignoring or recreating a missing bootstrap/committed catalog-owned file;
+8. deleting unknown root entries as presumed orphans;
+9. shutting down WAL durability before transaction completion, dirty-page drain, and final checkpoint;
+10. dropping durability-required dirty pages after flush failure and reporting close success;
+11. releasing the process lock while any manager, worker, guard, registration, or descriptor can still use database state;
+12. changing a durable COMMIT to ABORTED because recovery/open/shutdown later failed;
+13. recording or inferring clean shutdown without durably satisfying every required close prerequisite;
+14. performing ordinary work after `DATABASE_NONCONTINUABLE`;
+15. treating `close()` as file or namespace durability;
+16. running ordinary transaction, maintenance, catalog-publication, or background writeback work concurrently with recovery.
 
 ---
 
@@ -589,6 +969,10 @@ database_root/wal
 
 and resolves managed entries relative to those descriptors. The external parent directory descriptor is required only while creating and durably publishing the database root itself.
 
+`database.control` also supplies the process-associated advisory lock object in
+§3.3.2. Lock ownership is operating-system state, not control-file contents or
+filename existence; this adds no control-slot field or persistent-format value.
+
 Opening an existing database uses no-follow directory-relative lookup for managed names. `database_root`, `pending/`, and `wal/` must be directories; control/object/segment names must be regular files. A managed-name symlink or wrong filesystem object type is an open/corruption error, not an alternate path to follow.
 
 All three managed directories and the database root's external parent/destination are on one filesystem for operations that use rename. V1 does not support cross-filesystem publication fallback.
@@ -791,6 +1175,9 @@ The staging root as a whole is private; startup-critical files inside it use the
 A crash before step 7 leaves no final database root and may leave only a recognized staging-root orphan. A crash after rename but before parent sync is an unacknowledged creation: after restart the final or staging name may survive; a surviving final root is usable only if complete bootstrap validation succeeds, while a staging root is never opened as a database. A crash after step 8 leaves a durably named, fully initialized database. Stale staging roots are removed only by explicit engine create/maintenance logic after proving that no live creator owns them, and their removal is synchronized in the external parent directory.
 
 Opening an existing database never treats `D.dblusblus-creating` as an alias for `D`.
+If creation returns an opened handle rather than only a durable-create result,
+the creator follows §3.3.7's normal exclusive-owner/recovery/READY gates; it does
+not publish a second shortcut startup state.
 
 ## 4.8 Common page header
 
@@ -3668,7 +4055,7 @@ The retirement gate then removes mappings and any corresponding DPT entries unde
 
 On controlled shutdown, BufferPool enters a quiescing state that rejects new external fetch/new-page operations, lets already issued guards and internal I/O drain, and performs stable flushes for dirty non-retired pages when the database owner requests a normal durable shutdown.
 
-Flush/drain failure is reported to the database lifecycle owner and the BufferPool MUST NOT claim a successful clean shutdown or silently discard dirty pages whose persistence remains required. Process-crash shutdown instead relies on WAL recovery. The complete database boot/open/shutdown state machine is owned separately; this subsection fixes only BufferPool-local behavior.
+Flush/drain failure is reported to the database lifecycle owner and the BufferPool MUST NOT claim a successful clean shutdown or silently discard dirty pages whose persistence remains required. Process-crash shutdown instead relies on WAL recovery. The complete database boot/open/shutdown state machine and its BufferPool-before-WAL teardown order are canonical in §3.3; this subsection fixes BufferPool-local behavior.
 
 ### 7.12.7 BufferPool error categories
 
@@ -5449,6 +5836,11 @@ ACTIVE -> MUST_ABORT -> ABORTING -> ABORTED
 `COMMITTED` and `ABORTED` are terminal states.
 
 A terminal transaction MUST NOT transition back to an active/transient state.
+
+Transaction admission is additionally gated by the database-owner state in
+§3.3: only `READY` may create/admit an ordinary transaction or statement.
+Controlled shutdown handles each nonterminal transaction state exactly as
+§3.3.6 specifies without weakening the terminal-publication rules below.
 
 The exact WAL/durability steps that complete `COMMITTING` or reconstruct terminal state after a crash belong to the later durability/recovery chapters.
 
@@ -7760,6 +8152,10 @@ If restoration cannot be established, a required ownership invariant is uncertai
 - the database owner surfaces the storage failure and performs a non-clean controlled stop,
 - the next open runs normal crash recovery from the valid persisted WAL/data prefix before ordinary traffic.
 
+The database-level admission closure, owner-lock retention, non-clean teardown,
+and fresh-open requirement are §3.3.5. This storage transition cannot be
+downgraded by lifecycle cleanup.
+
 Rollback failure is therefore never hidden by releasing incoherent pages. This section fixes storage state; §39.1 consumes its local-recoverable/noncontinuable result without weakening these ownership rules.
 
 The storage layer automatically retries syscall-level `EINTR` as specified in §7.4.3. It MAY retry another operation internally only while retaining every reservation/latch/barrier needed to keep all attempts unobservable and only when append/physical outcomes are known. Deterministic encoding/resource exhaustion, returned append errors, and WAL durability errors are not SQL statement retries; they return their structured lower-layer error when internal retry ends.
@@ -8107,6 +8503,11 @@ During ordinary open, choose the structurally valid slot with the highest `gener
 
 Falling back to an older structurally valid slot is legal only when every recovery object it references is still retained and valid.
 
+Lifecycle format dispatch applies before this fallback: a slot with the correct
+control-family magic but an unsupported `format_version` causes
+`UNSUPPORTED_FORMAT` under §3.3.3. V1 does not bypass a recognizable newer
+control format by selecting an older v1 slot.
+
 Equal-generation valid slots with different contents are corruption.
 
 Generation is uint64 monotonic and MUST NOT wrap. An update when the selected generation is `UINT64_MAX` fails rather than wrapping.
@@ -8227,6 +8628,10 @@ The conceptual protocol is:
 ```
 
 Checkpointing remains fuzzy and does not force all dirty pages.
+The recovery-completion checkpoint and controlled-close final checkpoint are
+ordered by §3.3.3 and §3.3.6 respectively and use this same format/protocol.
+Controlled close first establishes no active writer and an empty DPT; that does
+not create a separate clean-shutdown flag or checkpoint format.
 
 ## 13.6 CHECKPOINT_BEGIN payload
 
@@ -8358,7 +8763,9 @@ Only the successful directory sync makes segment removal durable. A crash after 
 
 ## 13.11 Recovery startup and WAL-tail validation
 
-Startup:
+Startup executes only after §3.3.2 has established exclusive process/database
+ownership. The complete manager/catalog/status/READY dependency order is
+§3.3.3; within its recovery portion:
 
 1. opens/validates the final database root plus required `pending/` and `wal/` directories under §4.7,
 2. inventories exact managed pending/final object basenames without yet treating final-file existence as catalog ownership,
@@ -8501,7 +8908,9 @@ Before normal SQL traffic begins, recovery:
 3. assigns each transaction-status page_lsn from the latest terminal WAL
    record reflected in that page
 4. durably flushes the WAL required for those terminal outcomes
-5. completes and installs a recovery checkpoint
+5. after §3.3.3 has reconstructed catalog ownership, completed every required
+   deferred redo/append-tail reconciliation, and rejected missing required
+   files, completes and installs a recovery checkpoint
 ```
 
 This makes the repaired terminal outcomes durable and avoids repeatedly rediscovering the same loser set on every subsequent restart.
@@ -8562,18 +8971,23 @@ losers published ABORTED
 transaction status consistent
 B+ structural MTRs recovered
 control metadata valid
-recovery checkpoint installed
 every bootstrap/committed-catalog physical file present at its exact durable final name
+all required deferred redo and append-tail reconciliation complete
+recovery checkpoint installed
 pending and unowned managed-final files classified for durable orphan cleanup
 ```
 
-Pending entries are never required for ONLINE state and may be unlinked before open completes. An unowned final orphan may be removed immediately or queued for the same durable unlink protocol, but it cannot be opened as a committed object. Unknown non-managed directory entries are not removed automatically.
+Pending entries are never required for READY state and may be unlinked before open completes. An unowned final orphan may be removed immediately or queued for the same durable unlink protocol, but it cannot be opened as a committed object. Unknown non-managed directory entries are not removed automatically. Classification must complete before READY; §3.3.3–§3.3.4 define when deletion may remain queued without weakening semantic invisibility.
 
 Only then may database state become:
 
 ```text
-ONLINE
+READY
 ```
+
+The `RECOVERING -> READY` publication and normal/background admission
+linearization are §3.3.4; recovery completion alone does not let an individual
+subsystem admit work early.
 
 ## 13.20 Crash-recovery correctness principle
 
@@ -8628,7 +9042,7 @@ This separation between physical residue and logical visibility is central to th
 20. SQL traffic begins only after recovery completion and a recovery checkpoint.
 21. A retained dirty `TXN_STATUS` page is reconstructible from its system full-image `rec_lsn` plus later semantic terminal records; terminal records are not substitutes for the image.
 22. A transaction acknowledged committed remains logically committed across every later successful crash/restart.
-23. Every physical file required by bootstrap or committed catalog state exists at its exact durably synchronized final name before ONLINE.
+23. Every physical file required by bootstrap or committed catalog state exists at its exact durably synchronized final name before READY.
 24. Missing recovery targets are skipped only after proving that no bootstrap/committed catalog owner requires them.
 25. WAL-segment creation and recycling include the required `wal/` directory synchronization; reappearing recycled segments below the retention floor do not extend the logical WAL stream.
 26. Recovery's valid WAL range is a contiguous prefix of complete records; candidate reservations and incomplete tails create no replayable holes.
@@ -8636,6 +9050,7 @@ This separation between physical residue and logical visibility is central to th
 28. Runtime ACTIVE/MUST_ABORT and pre-commit-record COMMITTING transactions are crash losers; a complete valid persisted `TXN_COMMIT` is recovered COMMITTED regardless of missing client acknowledgement.
 29. Durable COMMIT is never converted to ABORTED by loser handling or a later runtime/cache/transport failure.
 30. Recovery redo replays authorized physical index history without rerunning SQL UNIQUE checks; normal execution alone authorizes new logical owners through §11.10.
+31. Recovery starts only under §3.3's exclusive database owner, and ordinary/background work begins only at the atomic READY publication point.
 
 ---
 
@@ -10071,22 +10486,27 @@ That bootstrap descriptor set is not an independently mutable metadata authority
 Startup proceeds conceptually as:
 
 ```text
-open + validate catalog.dat
+under §3.3 exclusive OPENING ownership, open + validate catalog.dat
     ↓
 decode the six bootstrap entries
     ↓
-open each referenced system heap/FSM using normal FileId/object checks
+open each referenced system heap/FSM in recovery-private mode using
+normal FileId/object checks
     ↓
-decode sys_tables/sys_columns/... with bootstrap schema version 1
+recover their physical pages and transaction-status dependencies
+    ↓
+decode recovered sys_tables/sys_columns/... with bootstrap schema version 1
     ↓
 construct ordinary immutable catalog descriptors
     ↓
 cross-check the six bootstrap identities against visible self-describing catalog rows
     ↓
-ordinary metadata lookup uses the catalog relations
+publish the ordinary metadata cache only at §3.3 READY
 ```
 
 A bootstrap identity/schema mismatch against the self-hosted catalog is corruption and prevents normal open.
+No normal binder, DDL, ANALYZE, or catalog-cache consumer may run between
+bootstrap decoding and READY publication.
 
 ### 16.9.5 Creation and lifetime
 
@@ -19237,6 +19657,12 @@ These are not collapsed into one generic internal-error category.
 
 `WalIOError` includes locally recoverable reservation/append/durability failures whose exact lower-layer outcome is known. `StorageNoncontinuable` is the §12.12.4 database-owner gate when append, restoration, or required publication cannot be established; it forbids further ordinary storage activity and requires non-clean controlled stop/recovery. `CommitOutcomeUncertain` describes what a client may know, not a third durable transaction status.
 
+The database-level lifecycle transition caused by `StorageNoncontinuable`, its
+admission closure, exclusive-lock lifetime, and non-clean teardown are canonical
+in §3.3.5. Lifecycle/open/close failures preserve the distinct categories in
+§3.3.7 rather than collapsing busy, unsupported, corrupt, recovery, and shutdown
+outcomes into a generic transaction error.
+
 A later SQL layer may map them to SQLSTATE-like surface codes without erasing the underlying distinction.
 
 ### 39.1.1 Runtime states and statement outcomes
@@ -19666,6 +20092,9 @@ transactions observed in MUST_ABORT / ABORTING
 commit outcome-uncertain responses / connection losses
 post-durable-commit completion failures
 storage-noncontinuable transitions
+database lifecycle transitions / time in OPENING, RECOVERING, DRAINING, CLOSING
+database-busy open failures
+failed opens / recovery failures / shutdown failures
 deadlock victims
 serialization failures
 statement retries
@@ -19711,6 +20140,7 @@ durable_lsn
 current WAL end
 dirty-page table
 latest checkpoint
+database lifecycle state and exclusive-owner identity/lock-held state
 vacuum horizon
 RID retirement epochs
 ```
@@ -20042,6 +20472,29 @@ copied-writeback winning and no-flush winning their reservation race
 ```
 
 The checks compare exact pre-operation bytes and frame metadata for both initially clean and initially dirty pages, including generation, `page_lsn`, `rec_lsn`, DPT membership, and FPI state. Ordinary PAGE_INIT tests verify immediate serialized tail truncation, no published count/reference, and deterministic PageNo reuse after a known failure. B+ MTR tests additionally verify all-page rollback, new/reused-page disposition, and exact root/height/sibling/parent/free-list restoration. Checkpoint/flush observers must see only the old state or the fully published WAL-backed state, never provisional metadata.
+
+Database-lifecycle verification MUST additionally cover §3.3's active
+exclusivity and every state/failure gate, including:
+
+```text
+two-process and same-process alias opens (exactly one owner)
+DATABASE_BUSY before control/WAL inspection or recovery
+process exit/crash releasing the OS lock
+unsupported forked-handle use and close-on-exec behavior
+one-valid/two-valid/no-valid control-slot opens and legal fallback
+missing required WAL/bootstrap/committed files
+torn txn-status recovery before ordinary lookup
+crash/failure at every §3.3.7 open/shutdown point
+no transaction/background admission before READY
+failed-open worker/descriptor/BufferPool/lock cleanup
+orphan classification without deletion of unknown names
+READY -> DRAINING preventing all new admission
+ACTIVE/MUST_ABORT/COMMITTING/ABORTING shutdown handling
+BufferPool drain and final checkpoint before WAL service stop
+flush/checkpoint/control/directory-sync shutdown failures never reporting success
+NONCONTINUABLE preventing ordinary work while retaining exclusivity through teardown
+durable COMMIT survival across failed open/shutdown and next recovery
+```
 
 Statement/transaction error verification MUST cover every §39.1.3 matrix row on both sides of the first-published-write boundary where reachable. Required scenarios include multirow INSERT row-5 failure after four published rows, partial UPDATE/DELETE, pre-write read-only/cast/constraint/OOM/spill failure, M-003 exact local rollback with and without an earlier statement write, empty-page/structural publication without a transaction-owned logical row effect, CommandId nonreuse, fresh READ COMMITTED snapshot after FA, rejection of same-TxnId retry after publication, explicit-transaction RETURNING failure before exposure, and autocommit RETURNING held through implicit COMMIT.
 
@@ -20695,6 +21148,14 @@ The following global invariants apply across subsystem boundaries and MUST NOT b
 15. Durable `TXN_COMMIT` is irreversible and cannot be reclassified ABORTED by any later runtime, cache, cleanup, or transport failure.
 16. Successful COMMIT acknowledgement follows required runtime terminal publication and coherent ownership/cache cleanup.
 17. UNIQUE/PRIMARY KEY ownership is decided by §11.10's serialized current-state predicate, not ordinary snapshot visibility or physical index presence alone.
+18. One actual database root has at most one process-local owner and one
+    OS-exclusive process owner; recovery and ordinary mutation never run without
+    that ownership.
+19. Ordinary work begins only at §3.3's READY publication, and the exclusive
+    lock is released only after every database user/manager has stopped.
+20. Successful controlled close drains transaction and BufferPool ownership,
+    keeps WAL durability available through page flush/final checkpoint, and
+    completes required namespace durability before reporting success.
 
 Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.27; base-access/cost invariants in §36.19; join/property invariants in §37.18; memo/search invariants in §38.25.
 
