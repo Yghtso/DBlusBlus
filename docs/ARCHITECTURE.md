@@ -445,7 +445,7 @@ The ordered open protocol is:
 | 5 | Inventory exact WAL segment names, consider usable control generations in descending order, validate the selected checkpoint and required contiguous retained segment range, and establish that enough recovery input exists to enter recovery. |
 | 6 | Construct only recovery-scoped DiskManager/file registry, WAL, BufferPool/page-reconstruction, checkpoint, transaction-status, and catalog-bootstrap services; do not start normal background services. Transition `OPENING -> RECOVERING`. |
 | 7 | Establish the valid contiguous WAL prefix and reconcile its tail, then run analysis and redo for bootstrap-addressable status/catalog/system state under Chapter 13. Keep redo for not-yet-classified non-bootstrap FileIds deferred as §13.13.1 requires. Raw transaction-status data is not an ordinary lookup authority during this step. |
-| 8 | Resolve losers and repair terminal status, decode the recovered self-hosted catalog rows through the immutable bootstrap descriptors, cross-check bootstrap identities, require every bootstrap/committed catalog-owned file at its exact final basename with valid identity/superblock, and then apply/finish any deferred redo and append-tail reconciliation for required files. |
+| 8 | Resolve losers and repair terminal status, decode the recovered self-hosted catalog rows through the exact §16.5 schema-v1 descriptors, perform §16.5.9–§16.5.10 fixed-point/reference validation, require every bootstrap/committed catalog-owned file at its exact final basename with valid identity/superblock, and then apply/finish any deferred redo and append-tail reconciliation for required files. |
 | 9 | Durably complete/install the required recovery checkpoint, including control-slot publication, after all required redo/status/file reconciliation and before enabling ordinary status/catalog use. |
 | 10 | Classify every exact managed `pending/` entry and unowned exact managed final file under §4.7.6. Classification is mandatory before READY; durable physical unlink may be completed now or retained as an explicit cleanup task because catalog/bootstrap lookup cannot expose the orphan. Unknown names remain untouched. |
 | 11 | Enable ordinary transaction-status lookup, construct immutable catalog/schema and required runtime terminal/ownership caches, finish normal BufferPool/file registrations, and construct background services behind a closed start gate. |
@@ -10039,6 +10039,7 @@ The stable identifier widths are:
 TableId  = uint64
 ColumnId = uint32
 IndexId  = uint64
+ConstraintId = uint64
 TypeId   = uint32
 ```
 
@@ -10091,148 +10092,296 @@ Because `sys_columns.type_id` is persistent semantic metadata, v1 assigns stable
 
 These TypeId values are a catalog-format contract and MUST NOT be renumbered because of source-language enum order.
 
-## 16.5 Catalog system relations
+## 16.5 Catalog schema version 1
 
-Persistent semantic metadata is represented through relational system tables.
-
-The initial system relations are:
+This section is the canonical persisted and semantic descriptor set selected by:
 
 ```text
-sys_tables
-sys_columns
-sys_indexes
-sys_index_columns
-sys_constraints
-sys_statistics
+catalog_schema_version = 1
 ```
 
-Their canonical semantic fields are:
+The six relations use the ordinary tuple format and ordinary `SchemaDescriptor` layout rules. There is no catalog-only tuple codec. Every tuple version in these six relations has tuple-header `schema_version=1`; physical column order is exactly the ordinal order in the tables below, and `ColumnId` is the listed stable identity, not an inferred ordinal. Any change to a listed column, order, TypeId, NULLability rule, or catalog-specific code requires a new catalog schema version or an explicit migration.
 
-### 16.5.1 `sys_tables`
+The bootstrap `catalog_schema_version` selects this built-in compatibility contract. It is distinct from `sys_tables.schema_version`, which selects the ordinary tuple-body `SchemaDescriptor` for one table. Both happen to be `1` for all six built-ins in v1; they are not interchangeable fields.
+
+All semantic fields in a catalog tuple version are immutable after that version is inserted. Catalog changes create/delete ordinary MVCC row versions; they do not update these fields in place. The tuple header's `xmin/cmin/xmax/cmax` remains owned by the ordinary heap/MVCC contract and is not duplicated as descriptor columns.
+
+### 16.5.1 Built-in identities and scalar carriers
+
+The six bootstrap relation codes are also their exact built-in TableIds:
+
+| Relation code / TableId | Canonical relation name |
+|---:|---|
+| `1` | `sys_tables` |
+| `2` | `sys_columns` |
+| `3` | `sys_indexes` |
+| `4` | `sys_index_columns` |
+| `5` | `sys_constraints` |
+| `6` | `sys_statistics` |
+
+Database creation performs the first six catalog-object allocations, in that order, before any other catalog-object allocation. It therefore assigns exactly `TableId{1}` through `TableId{6}` and durably advances `next_catalog_object_id` to `7`. Values `1..6` are permanently reserved as these TableIds in the shared TableId/IndexId/ConstraintId allocator domain. No built-in IndexId or ConstraintId is implied. Every subsequently allocated user or internal TableId, IndexId, or ConstraintId is at least `7`; crash gaps remain legal.
+
+The ordinary stored scalar registry has signed SQL integer types but several catalog identities are unsigned. Catalog schema v1 uses these exact carrier rules:
+
+| Logical catalog domain | Physical TypeId | Canonical carrier and validation |
+|---|---:|---|
+| `TableId`, `IndexId`, `ConstraintId`, normal `TxnId`, or polymorphic uint64 identity | `INT64` (`3`) | Persist the logical uint64 bit pattern unchanged in the INT64 payload; decoding reinterprets those 64 bits as uint64. A negative SQL INT64 carrier is not a negative identifier. The catalog validator then enforces the field's narrower logical domain. |
+| `FileId`, `ColumnId`, `SchemaVer`, `CommandId` | `INT64` (`3`) | Persist the zero-extended uint32 value. The SQL INT64 value must be in `0..UINT32_MAX`, then the field-specific sentinel/range rule applies. |
+| TypeId, physical/logical/key ordinal, catalog enum code, chunk index/count | `INT32` (`2`) | Persist a nonnegative INT32 and enforce the exact field-specific range below. |
+| Boolean property | `BOOLEAN` (`1`) | Use the ordinary canonical BOOLEAN scalar encoding only. |
+| Name or opaque bounded byte sequence | `VARCHAR` (`7`) | Use ordinary binary VARCHAR. Names obey the canonical-name rule below; opaque blobs may contain any byte, including zero. |
+
+These are scalar carriers, not conversions between identifier domains. A TableId carrier cannot be accepted as an IndexId merely because both use INT64. Equality, allocation-order comparison, StatsVersion ordering, filename rendering, and range validation occur after decoding to the named unsigned logical domain; signed INT64 ordering/arithmetic over the carrier is not identifier authority. `TableId{0}`, `IndexId{0}`, `ConstraintId{0}`, `FileId{0}`, `ColumnId{0}`, and TypeId `0` are illegal wherever the corresponding object identity is required. A statistics TABLE `scope_id` is the only catalog identity field below that permits zero. `stats_txn_id` must be a normal TxnId (`>= FIRST_NORMAL_TXN_ID`), never `INVALID_TXN_ID` or `FROZEN_TXN_ID`; `stats_command_id` may be `0` and must be a valid CommandId of that transaction. No catalog column persists an LSN.
+
+Names are stored as the exact canonical identifier bytes produced by binding: unquoted identifiers have already been normalized to lowercase and quoted identifiers preserve exact bytes/case under §18.4. Name comparison is binary. Names must be nonempty and the resulting catalog tuple must satisfy the ordinary tuple-size contract; catalog schema v1 does not introduce a separate SQL identifier-length limit. The built-in relation and column names below are exact unquoted canonical spellings.
+
+Every column below is system-managed. Ordinary user `SELECT` may read system relations after normal catalog visibility/READY checks. Direct user `INSERT`, `UPDATE`, `DELETE`, or DDL targeting these six relations is forbidden. DDL and ANALYZE use the internal transactional catalog writers.
+
+### 16.5.2 `sys_tables` — TableId `1`
+
+`sys_tables` has exactly six columns:
+
+| Ordinal | ColumnId | Name | TypeId | Nullable? | Meaning and canonical constraints |
+|---:|---:|---|---|---|---|
+| `0` | `1` | `table_id` | `INT64` | no | Required TableId using the uint64 carrier; nonzero allocated identity. |
+| `1` | `2` | `namespace` | `VARCHAR` | no | Exactly `main` in v1. |
+| `2` | `3` | `table_name` | `VARCHAR` | no | Nonempty binder-canonical table name. |
+| `3` | `4` | `heap_file_id` | `INT64` | no | Required nonzero FileId encoded as zero-extended uint32. |
+| `4` | `5` | `fsm_file_id` | `INT64` | no | Required nonzero FileId encoded as zero-extended uint32. |
+| `5` | `6` | `schema_version` | `INT64` | no | Current required SchemaVer, encoded as zero-extended uint32; `0` is invalid and CREATE TABLE begins at `1`. |
+
+Semantic uniqueness is required for `table_id`, `(namespace, table_name)`, `heap_file_id`, and `fsm_file_id`. A FileId cannot occupy both heap and FSM roles or belong to two tables. The two files must be the managed `table_<table_id>.heap` and `table_<table_id>.fsm` entries required by A-003, with matching FileSuperblock FileId, kind, and `object_id = table_id`.
+
+The six built-in rows use their exact TableIds/names above, `namespace = main`, `schema_version = 1`, and the heap/FSM FileIds from the corresponding bootstrap entries. Built-ins use ordinary separate HEAP and FSM files; their tuples do not live in `catalog.dat`. No `flags`, `is_system`, or `is_dropped` column exists. Built-in identity follows the reserved TableId/name set; DROP is represented by ordinary MVCC/catalog visibility and delayed A-003 retirement, not a mutable dropped bit.
+
+### 16.5.3 `sys_columns` — TableId `2`
+
+`sys_columns` has exactly ten columns:
+
+| Ordinal | ColumnId | Name | TypeId | Nullable? | Meaning and canonical constraints |
+|---:|---:|---|---|---|---|
+| `0` | `1` | `table_id` | `INT64` | no | Owning nonzero TableId using the uint64 carrier. |
+| `1` | `2` | `schema_version` | `INT64` | no | Nonzero SchemaVer whose complete descriptor contains this column. |
+| `2` | `3` | `column_id` | `INT64` | no | Table-local nonzero ColumnId encoded as zero-extended uint32. |
+| `3` | `4` | `physical_ordinal` | `INT32` | no | Zero-based tuple-body column position. |
+| `4` | `5` | `logical_ordinal` | `INT32` | no | Zero-based logical/`SELECT *` presentation position. |
+| `5` | `6` | `column_name` | `VARCHAR` | no | Nonempty binder-canonical column name. |
+| `6` | `7` | `type_id` | `INT32` | no | One recognized stored TypeId `1..7`; `NULL`/`UNKNOWN`/`0` are invalid. |
+| `7` | `8` | `nullable` | `BOOLEAN` | no | Authoritative ordinary/PK-induced NULLability for this schema version. |
+| `8` | `9` | `has_default` | `BOOLEAN` | no | Distinguishes absence of a DEFAULT clause from an explicit typed NULL default. |
+| `9` | `10` | `default_value` | `VARCHAR` | yes | SQL NULL when `has_default=false`; otherwise the exact non-NULL byte string containing one §21.12.1 `DefaultValueBlob`. |
+
+For each `(table_id, schema_version)`, rows form one complete `SchemaDescriptor`. `physical_ordinal` and `logical_ordinal` must each be exactly the contiguous set `0..N-1`; neither is derived from `ColumnId` or heap scan order. The semantic unique keys are:
 
 ```text
-table_id
-namespace
-table_name
-heap_file_id
-fsm_file_id
-schema_version
-flags
+(table_id, schema_version, column_id)
+(table_id, schema_version, physical_ordinal)
+(table_id, schema_version, logical_ordinal)
+(table_id, schema_version, column_name)
 ```
 
-### 16.5.2 `sys_columns`
+Every row references a visible `sys_tables.table_id`; rows for its current `schema_version` must reconstruct a complete current descriptor. V1 CREATE assigns ColumnIds `1..N` in declaration order. V1 ALTER TABLE/DROP COLUMN is deferred, so a newly created v1 schema has `column_id = physical_ordinal + 1` and `physical_ordinal = logical_ordinal`, but consumers still use the separate fields and MUST NOT infer that equality as a general identity rule.
+
+Default representation is exactly:
+
+| `has_default` | `default_value` catalog SQL value | Meaning |
+|---|---|---|
+| `false` | SQL NULL | No DEFAULT clause. |
+| `true` | non-NULL VARCHAR containing a valid `DefaultValueBlob` whose `PersistedScalarV1` is typed NULL | Explicit `DEFAULT NULL`. |
+| `true` | non-NULL VARCHAR containing a valid `DefaultValueBlob` whose scalar is non-NULL | Explicit folded non-NULL default. |
+
+`false` plus a non-NULL blob, or `true` plus SQL NULL, is catalog corruption. A present blob is `1..4096` bytes, passes all §21.12.1 magic/version/flags/length/CRC/reserved validation, contains exactly one canonical `PersistedScalarV1`, and its scalar TypeId equals this row's `type_id`. The scalar's NULL state is legal only when `nullable=true`; `DEFAULT NULL` for a NOT NULL column is rejected by DDL and is invalid committed catalog state. No SQL text, expression tree, bytecode, `schema_version_added/removed`, dropped-column marker, or flags are persisted in catalog schema v1.
+
+The fixed self-description contains one `sys_columns` row for every column listed in all six tables in this section. Those built-in descriptor rows use `schema_version=1`, the listed ColumnId/ordinals/name/TypeId/NULLability, `has_default=false`, and SQL NULL `default_value`.
+
+### 16.5.4 `sys_indexes` — TableId `3`
+
+`sys_indexes` has exactly six columns:
+
+| Ordinal | ColumnId | Name | TypeId | Nullable? | Meaning and canonical constraints |
+|---:|---:|---|---|---|---|
+| `0` | `1` | `index_id` | `INT64` | no | Required nonzero allocated IndexId using the uint64 carrier. |
+| `1` | `2` | `table_id` | `INT64` | no | Nonzero TableId of the indexed relation. |
+| `2` | `3` | `index_name` | `VARCHAR` | yes | Binder-canonical name for a standalone CREATE [UNIQUE] INDEX; SQL NULL for a constraint-owned backing index. |
+| `3` | `4` | `btree_file_id` | `INT64` | no | Required nonzero FileId encoded as zero-extended uint32. |
+| `4` | `5` | `is_unique` | `BOOLEAN` | no | Whether normal execution enforces the M-004 UNIQUE owner protocol for this index. |
+| `5` | `6` | `key_schema_version` | `INT32` | no | Exact B+ key encoding schema version; v1 requires `1`. |
+
+`index_id` and `btree_file_id` are each semantically unique. Every row references one `sys_tables` row. The managed file is exactly `index_<index_id>.btree`, with matching FileId, `FileKind::BTREE`, FileSuperblock `object_id = index_id`, key-schema version/fingerprint, and the ordered columns reconstructed from `sys_index_columns`.
+
+A non-NULL `index_name` must be nonempty, binder-canonical, and unique among visible named indexes in `main`; table and index names remain separate classes. A NULL name means the index is owned by exactly one UNIQUE or PRIMARY KEY row in `sys_constraints`. A non-NULL name means a standalone CREATE INDEX/CREATE UNIQUE INDEX object and no constraint row may own it. V1 does not generate a second persisted name for an implicit constraint index.
+
+`is_unique` is the direct semantic authority for whether the physical index uses M-004 enforcement. `sys_constraints` is the sole authority for whether that index also represents a table UNIQUE or PRIMARY KEY constraint. A constraint-owned backing index must have `is_unique=true`; neither the constraint row nor index bit alone is accepted when their required cross-check fails. A standalone `is_unique=true` row represents CREATE UNIQUE INDEX without a table-constraint row. There is no `primary` or flags column; primary-key semantics are never inferred from an index bit.
+
+### 16.5.5 `sys_index_columns` — TableId `4`
+
+`sys_index_columns` has exactly three columns:
+
+| Ordinal | ColumnId | Name | TypeId | Nullable? | Meaning and canonical constraints |
+|---:|---:|---|---|---|---|
+| `0` | `1` | `index_id` | `INT64` | no | Owning nonzero IndexId using the uint64 carrier. |
+| `1` | `2` | `key_ordinal` | `INT32` | no | Zero-based position in the user-key component sequence. |
+| `2` | `3` | `column_id` | `INT64` | no | Nonzero table-local ColumnId encoded as zero-extended uint32. |
+
+For each index, `key_ordinal` is exactly the contiguous set `0..K-1`, where `K>=1`; `(index_id, key_ordinal)` and `(index_id, column_id)` are semantic unique keys. Every `index_id` references one `sys_indexes` row. Every `column_id` references a column in that index row's `table_id` and current indexed `SchemaDescriptor`. The explicit sort key for reconstruction is `(index_id, key_ordinal)`; physical heap row order is irrelevant.
+
+V1 index keys contain columns only. Duplicate components, expression components, included/non-key columns, descending/null-order modifiers, and partial predicates are not encoded by this relation. The existing maximum encoded user key of 1024 bytes is authoritative; descriptor creation rejects any declared key whose canonical maximum/runtime encoding violates it. No separate persisted key-count field exists because the complete contiguous row set determines `K`.
+
+### 16.5.6 `sys_constraints` — TableId `5`
+
+`sys_constraints` has exactly five columns:
+
+| Ordinal | ColumnId | Name | TypeId | Nullable? | Meaning and canonical constraints |
+|---:|---:|---|---|---|---|
+| `0` | `1` | `constraint_id` | `INT64` | no | Required nonzero allocated ConstraintId using the uint64 carrier. |
+| `1` | `2` | `table_id` | `INT64` | no | Nonzero owning TableId. |
+| `2` | `3` | `constraint_kind` | `INT32` | no | Exact v1 code from the table below. |
+| `3` | `4` | `constraint_name` | `VARCHAR` | yes | Explicit binder-canonical name, or SQL NULL for an unnamed constraint. |
+| `4` | `5` | `index_id` | `INT64` | no | Nonzero backing IndexId using the uint64 carrier. |
+
+The only v1 constraint-kind codes represented by rows are:
+
+| Code | Meaning |
+|---:|---|
+| `1` | `UNIQUE` table constraint |
+| `2` | `PRIMARY_KEY` table constraint |
+
+Unknown codes are catalog corruption/unsupported catalog schema and prevent READY. V1 CHECK and FOREIGN KEY are deferred. NOT NULL has no `sys_constraints` row: `sys_columns.nullable=false` is its sole catalog authority, including NOT NULL induced by PRIMARY KEY. Consequently every valid `sys_constraints` row has a backing `index_id`; there is no constraint payload and no payload grammar in schema version 1.
+
+`constraint_id` and `index_id` are each semantically unique in this relation. A non-NULL constraint name must be nonempty and is unique within its owning table; unnamed constraints remain SQL NULL and no hidden generated name is persisted. Each row references an existing table and an existing `sys_indexes` row for that same table whose `index_name` is SQL NULL and `is_unique=true`. The ordered constrained columns are exactly that index's `sys_index_columns` rows; no duplicate column array exists.
+
+For `UNIQUE`, those columns use the complete M-004 key equality, NULL, current-owner, wait/recheck, and lock-lifetime semantics. For `PRIMARY_KEY`, exactly one such row may exist per table, every backing key column's current `sys_columns.nullable` is `false`, and enforcement is PRIMARY KEY = NOT NULL on every component plus the same M-004 UNIQUE predicate. A standalone unique index has `sys_indexes.is_unique=true`, a non-NULL name, and no `sys_constraints` row.
+
+### 16.5.7 `sys_statistics` — TableId `6`
+
+`sys_statistics` has exactly eight columns:
+
+| Ordinal | ColumnId | Name | TypeId | Nullable? | Meaning and canonical constraints |
+|---:|---:|---|---|---|---|
+| `0` | `1` | `table_id` | `INT64` | no | Analyzed nonzero TableId using the uint64 carrier. |
+| `1` | `2` | `scope_kind` | `INT32` | no | `1=TABLE`, `2=COLUMN`, `3=INDEX`; no other v1 code. |
+| `2` | `3` | `scope_id` | `INT64` | no | Polymorphic uint64 carrier: `0` for TABLE, zero-extended nonzero ColumnId for COLUMN, nonzero IndexId for INDEX. |
+| `3` | `4` | `stats_txn_id` | `INT64` | no | Normal creator TxnId using the uint64 carrier; first component of `StatsVersion`. |
+| `4` | `5` | `stats_command_id` | `INT64` | no | Valid CommandId encoded as zero-extended uint32; second component of `StatsVersion`. |
+| `5` | `6` | `chunk_index` | `INT32` | no | Zero-based fragment ordinal. |
+| `6` | `7` | `chunk_count` | `INT32` | no | Identical total fragment count for the scope payload. |
+| `7` | `8` | `payload_fragment` | `VARCHAR` | no | Arbitrary nonempty binary fragment, including zero bytes. |
+
+The exact semantic row identity is:
 
 ```text
-table_id
-column_id
-column_name
-logical_position
-type_id
-nullable
-default_expr_blob/reference
-schema_version_added
-schema_version_removed
-flags
+(table_id, scope_kind, scope_id,
+ stats_txn_id, stats_command_id, chunk_index)
 ```
 
-For v1, `default_expr_blob/reference` contains or references the §21.12.1 `DefaultValueBlob` produced after complete immutable-default folding; it is not a serialized runtime expression object.
+and it is unique among visible rows. `(stats_txn_id, stats_command_id)` is exactly Chapter 34's `StatsVersion`; all rows with that version are created by that transaction/command and their payload headers repeat the same identity. At original insertion, each row's ordinary MVCC `xmin/cmin` equals its `stats_txn_id/stats_command_id`. Any later architecture-authorized tuple freezing changes only ordinary MVCC ownership metadata, never the immutable StatsVersion columns; whether/when status reclamation may do so remains the separate M-009 question.
 
-The schema-version membership semantics are half-open:
+For one `(table_id, scope_kind, scope_id, StatsVersion)`, `chunk_count` is in `1..1,048,576`, every row has the same value, and `chunk_index` is exactly the contiguous set `0..chunk_count-1`. Every nonfinal fragment has exactly 4096 bytes and the final fragment has `1..4096` bytes. Reconstruction sorts by `chunk_index`, concatenates, and then applies every §34.14 total-length, checksum, header, identity, manifest, and payload validation rule. A duplicate/missing/noncontiguous chunk or mismatched count makes that scope/version incomplete; rows from versions are never mixed.
+
+TABLE scope requires `scope_id=0`. COLUMN scope requires a nonzero ColumnId belonging to `table_id`. INDEX scope requires an IndexId belonging to `table_id`. Chapter 34 owns the existing TABLE/COLUMN/INDEX binary payload grammar and complete-generation selection; this schema does not alter it. Binary VARCHAR is valid for fragments because §17.4.6 defines VARCHAR as arbitrary byte strings without UTF-8/text validation.
+
+An unknown `scope_kind` is never interpreted as a future scope. It makes the affected statistics row/version unusable under the statistics fallback rule below; unlike an unknown required constraint kind, it cannot redefine a core catalog descriptor.
+
+Statistics are rebuildable planning metadata. A decodable catalog tuple whose statistics identity/chunk/payload metadata is malformed invalidates that statistics scope/version and selects an older complete version or missing-statistics fallback with a diagnostic under §34.14; it does not by itself make otherwise valid user data or the six core descriptors unreadable. This narrow tolerance does not permit a malformed tuple physical encoding to bypass the ordinary tuple decoder, does not repair cross-version chunks, and does not resolve the general statistics-tolerance policy.
+
+### 16.5.8 Logical keys, references, and physical catalog indexes
+
+The semantic uniqueness rules above are catalog invariants whether or not a physical access path exists. Catalog schema v1 defines no built-in persistent B+ indexes over the six system relations, allocates no hidden built-in IndexIds, and adds no unlisted bootstrap roots. Initial catalog lookup/validation may scan these relations. A later catalog schema/migration may add bootstrapped catalog indexes, but an implementation of schema version 1 cannot assume them.
+
+The required cross-row references are:
 
 ```text
-column belongs to schema version V
-iff
-    schema_version_added <= V
-and
-    (schema_version_removed is absent
-     or V < schema_version_removed)
+sys_columns.table_id                  -> sys_tables.table_id
+sys_indexes.table_id                  -> sys_tables.table_id
+sys_index_columns.index_id            -> sys_indexes.index_id
+sys_index_columns.column_id            -> a sys_columns column of that index's table
+sys_constraints.table_id              -> sys_tables.table_id
+sys_constraints.index_id              -> same-table unique sys_indexes row
+selected sys_statistics COLUMN scope  -> manifest-named column of table_id
+selected sys_statistics INDEX scope   -> manifest-named index of table_id
 ```
 
-An absent removal version means the column remains present in the latest known schema.
+These are catalog structural invariants, not user-declared SQL FOREIGN KEY constraints. Current descriptor/index/constraint rows must reference current committed catalog objects. Statistics may become stale after later DDL: an old/invisible/inapplicable row may retain its historical scope identity, while a selected complete descriptor must match its TABLE manifest and analyzed schema/object identities under Chapter 34. Stale statistics are ignored/fallback metadata, not current catalog constraints.
 
-### 16.5.3 `sys_indexes`
+Catalog semantic meaning never depends on heap row order. Columns sort by `physical_ordinal` or `logical_ordinal` for their respective purpose, index components sort by `key_ordinal`, and statistics fragments sort by `chunk_index`.
+
+### 16.5.9 Bootstrap self-description fixed point
+
+The built-in schema-v1 descriptors in this section are persisted-compatibility facts and the only descriptors permitted to decode the six relations selected by bootstrap `catalog_schema_version=1`. They do not replace self-hosting. After recovery, the committed/frozen self-hosted rows must describe the same six relations exactly:
 
 ```text
-index_id
-table_id
-index_name
-btree_file_id
-unique
-primary
-key_schema_version
-flags
+bootstrap locator + built-in schema-v1 decoder
+    -> recovered catalog rows
+    -> reconstructed ordinary descriptors
+    -> exact equality with this section's six descriptors
 ```
 
-### 16.5.4 `sys_index_columns`
+For each bootstrap entry, open cross-checks the exact relation code/TableId mapping, `relation_schema_version=1`, heap/FSM FileIds against the matching `sys_tables` row, and each opened file's managed basename, FileId, FileKind, and `object_id`. The `sys_tables` and `sys_columns` self-description must reconstruct every listed column with the exact count, ColumnId, ordinal, name, TypeId, NULLability, and no-default state. `sys_indexes`, `sys_index_columns`, and `sys_constraints` contain no bootstrap-only rows or hidden catalog indexes. Initial `sys_statistics` is empty.
+
+A database cannot redefine a built-in relation by changing its self-hosted rows while retaining catalog schema version 1. Any fixed-point or bootstrap cross-check mismatch is committed catalog corruption and prevents M-014 READY.
+
+### 16.5.10 Validation and cache reconstruction
+
+Open/catalog publication validates in this order:
+
+1. ordinary tuple physical validity under the exact built-in descriptor,
+2. scalar/catalog-field validity, including carrier ranges, sentinels, names, enum codes, BOOLEAN canonicality, NULL/default combinations, and opaque-blob structure where applicable,
+3. cross-row uniqueness, references, contiguous ordinals/chunks, index/constraint agreement, one PRIMARY KEY per table, complete descriptor reconstruction, and bootstrap fixed-point equality.
+
+Except for the explicit rebuildable-statistics tolerance in §16.5.7, duplicate active identities/names, duplicate or missing ordinals, unknown TypeIds/codes, wrong-table references, missing required associated indexes/files, two primary keys, impossible default/nullability combinations, or bootstrap/self-description mismatches are catalog corruption. Required committed catalog corruption prevents READY; implementations do not select an arbitrary duplicate row. Internal writers perform the same validation before descriptor/cache publication. Discovering invalid required committed catalog state after READY is `CORRUPT_DATABASE`/database-noncontinuable under M-014; no partial replacement cache is published.
+
+Catalog cache reconstruction is deterministic:
 
 ```text
-index_id
-ordinal
-column_id
+read current committed catalog rows under the open/catalog snapshot
+validate tuple and scalar fields
+group by typed object identity
+validate logical keys and cross-row references
+sort columns/index columns explicitly by ordinal
+construct immutable SchemaDescriptor/IndexDescriptor/constraint metadata
+cross-check all built-ins and physical file identities
+publish the complete cache only after all required checks succeed
 ```
 
-### 16.5.5 `sys_constraints`
+Catalog rows use ordinary heap-version MVCC. CREATE inserts rows transactionally. DROP makes rows invisible through ordinary catalog MVCC and sends owned files through A-003 retirement; old row versions may remain physically. No catalog `is_dropped` bit exists. Cache publication follows M-005 terminal publication and M-014 READY rules.
 
-```text
-constraint_id   // uint64, allocated from the global catalog-object allocator
-table_id
-constraint_type
-constraint_name
-definition payload
+### 16.5.11 Canonical creation traces
+
+For a conceptual:
+
+```sql
+CREATE TABLE t (
+    a INT32 NOT NULL,
+    b VARCHAR DEFAULT 'x'
+);
 ```
 
-Constraint names are table-local in v1.
+the internal DDL path allocates one TableId and two FileIds, durably publishes the managed HEAP/FSM files under A-003, then inserts one `sys_tables` row `(id, main, t, heap, fsm, 1)` and two `sys_columns` rows. Column `a` is `(column_id=1, physical_ordinal=0, logical_ordinal=0, type_id=2, nullable=false, has_default=false, default_value=NULL)`. Column `b` is `(column_id=2, physical_ordinal=1, logical_ordinal=1, type_id=7, nullable=true, has_default=true, default_value=<valid VARCHAR-typed DefaultValueBlob for x>)`. No hidden field is required.
 
-### 16.5.6 `sys_statistics`
+For `UNIQUE(a,b)`, DDL allocates an IndexId, ConstraintId, and B+ FileId; inserts one unnamed `sys_indexes` row with `is_unique=true`; inserts key rows `(index_id,0,column_id(a))` and `(index_id,1,column_id(b))`; and inserts one `sys_constraints` row `(constraint_id,table_id,1,NULL,index_id)`. For `PRIMARY KEY(a)`, the same shape uses kind `2`, the backing key has ordinal `0`, and the `sys_columns` row for `a` has `nullable=false`. Those four normalized facts—constraint kind, unique index, ordered index columns, and column nullability—are the complete authority and must cross-check.
 
-`sys_statistics` stores versioned statistics records using one logical row shape:
+For a standalone `CREATE INDEX i ON t(a,b)`, DDL inserts one `sys_indexes` row with `index_name=i`, `is_unique=false`, and its B+ FileId, plus two ordered `sys_index_columns` rows; there is no `sys_constraints` row. `CREATE UNIQUE INDEX` differs only by `is_unique=true` and uses M-004 enforcement.
 
-```text
-table_id
-scope_kind
-scope_id
-stats_txn_id
-stats_command_id
-chunk_index
-chunk_count
-payload_fragment
-```
+One ANALYZE StatsVersion inserts one TABLE scope chunk set with `scope_id=0`, one COLUMN chunk set for each manifest ColumnId with `scope_id=ColumnId`, and one INDEX chunk set for each manifest IndexId with `scope_id=IndexId`. Every set repeats the same `(table_id,stats_txn_id,stats_command_id)`, uses zero-based contiguous chunk indexes, and carries the already-defined §34.14 payload kind/header. No payload bytes are inferred from catalog row order.
 
-The v1 scope-kind codes are:
+DROP TABLE/INDEX deletes the applicable catalog row versions transactionally under ordinary MVCC. DROP TABLE removes its current table, column, index-column, index, and constraint authority as one DDL transaction; statistics become inapplicable/rebuildable metadata. A-003 retires physical files only after the existing visibility/read-epoch/file-retirement gates. No ID or catalog row is rewritten into a dropped state.
 
-```text
-1 = TABLE
-2 = COLUMN
-3 = INDEX
-```
+### 16.5.12 Forbidden schema-v1 interpretations
 
-`scope_id` is one semantic uint64 field:
+An implementation of catalog schema version 1 MUST NOT:
 
-```text
-0                    for TABLE scope
-zero-extended ColumnId for COLUMN scope
-IndexId                for INDEX scope
-```
-
-`(stats_txn_id, stats_command_id)` is the exact `StatsVersion` defined by Chapter 34.
-
-One scope payload may span multiple catalog rows. `chunk_index` is zero-based, `chunk_count` is the total number of chunks for that scope payload, and `payload_fragment` is an arbitrary byte string stored through the v1 binary-VARCHAR semantics.
-
-V1 limits each statistics payload fragment to:
-
-```text
-STATISTICS_CHUNK_BYTES = 4096
-```
-
-except that the final fragment may be shorter.
-
-All chunks of one scope/version are transaction-owned catalog rows and become visible atomically through the owning transaction's normal MVCC commit semantics.
-
-Chapter 34 owns the exact payload grammar, completeness rules, and descriptor-publication semantics.
-
-The exact physical heap-tuple layout of the system relation itself may evolve through catalog schema versions.
-
-Its semantic fields and stable identity relationships are architectural.
+1. choose different built-in TableIds or ColumnIds;
+2. reorder columns or infer TypeIds/NULLability from source structs;
+3. serialize native structs, enum ordinals, or an implementation-defined constraint payload;
+4. conflate no default with a typed `DEFAULT NULL`;
+5. derive column order from ColumnId or heap scan order;
+6. derive PRIMARY KEY from an index flag or create a NOT NULL constraint row;
+7. accept a constraint/index column array that disagrees with `sys_index_columns`;
+8. assume a hidden built-in catalog index;
+9. treat a physical catalog duplicate as a tie to resolve arbitrarily;
+10. accept unknown catalog enum codes/flag-like data as forward-compatible;
+11. store filesystem path strings instead of the specified FileIds;
+12. publish catalog cache state before complete fixed-point/reference validation.
 
 ## 16.6 Immutable descriptors
 
@@ -10278,9 +10427,9 @@ An `IndexDescriptor` contains at least:
 ```text
 IndexId
 TableId
-index name
+optional standalone index name
 B+ FileId
-unique/primary semantics
+unique semantics and any separately cross-checked constraint owner/kind
 ordered key ColumnIds
 key-schema version
 ```
@@ -10443,7 +10592,7 @@ relation_schema_version = 1
 
 for every entry.
 
-The six TableIds are distinct, nonzero catalog-object IDs.
+Each entry's TableId is exactly equal to its `system_relation_code`, so the six TableIds are exactly `1..6` with the names fixed by §16.5.1. They are the first six allocations from §13.2.6 and are permanently reserved from later user/internal allocation.
 
 Every heap/FSM FileId is nonzero, has the expected file kind/object identity when opened, and no heap/FSM FileId may be reused by another bootstrap entry.
 
@@ -10465,6 +10614,7 @@ entry_count != 6
 catalog_schema_version != 1
 bootstrap_generation != 1
 unknown/out-of-order/duplicate system_relation_code
+TableId not equal to system_relation_code
 zero/duplicate object or file identities where prohibited
 nonzero entry flags/reserved fields
 nonzero bytes 256..8191
@@ -10473,13 +10623,13 @@ checksum mismatch
 
 ### 16.9.4 Minimal interpretation rule
 
-The engine contains one versioned built-in bootstrap descriptor set for:
+The engine contains the one exact built-in descriptor set in §16.5 for:
 
 ```text
 catalog_schema_version = 1
 ```
 
-It knows only enough physical/schema information to decode the six system relations named by the bootstrap entries.
+It contains exactly the physical/schema information listed there to decode the six system relations named by the bootstrap entries.
 
 That bootstrap descriptor set is not an independently mutable metadata authority.
 
@@ -10510,7 +10660,7 @@ bootstrap decoding and READY publication.
 
 ### 16.9.5 Creation and lifetime
 
-Database creation follows the canonical staging-root and parent-directory publication protocol in §4.7.8. Within that private staging root it durably allocates the bootstrap TableIds/FileIds, initializes the six system relation files, and seeds the required self-describing catalog rows as bootstrap-frozen committed metadata:
+Database creation follows the canonical staging-root and parent-directory publication protocol in §4.7.8. Within that private staging root it performs the first six catalog-object allocations in §16.5.1's fixed order, verifies that they returned TableIds `1..6` and left `next_catalog_object_id=7`, allocates the bootstrap FileIds, initializes the six system relation files, and seeds the exact §16.5 self-describing catalog rows as bootstrap-frozen committed metadata:
 
 ```text
 xmin = FROZEN_TXN_ID
@@ -10573,6 +10723,8 @@ Uncommitted DDL may be visible to its own transaction through normal MVCC/self-v
 16. The six bootstrap identities are cross-validated against the self-hosted catalog during open.
 17. Bootstrap metadata remains minimal and cannot become a permanently divergent second catalog.
 18. Database creation is not durable until the complete staging root has been renamed to its final name and the external parent directory has been synchronized.
+19. `catalog_schema_version=1` selects exactly the six relation descriptors, built-in identities, codes, keys, and validation rules in §16.5.
+20. V1 has no hidden persistent catalog indexes, implementation-defined catalog columns, or opaque constraint payloads.
 
 ---
 
@@ -12683,7 +12835,7 @@ Under SchemaLock:
 7. complete §4.7.4 durable final-name publication for the entire required
    heap/FSM/index physical file set
 8. only then install transaction-owned MVCC catalog rows/descriptors that
-   name those final physical files
+   name those final physical files using the exact §16.5 schema-v1 rows
 9. finish the DDL statement while retaining DDL exclusivity until the owning transaction is terminal
 10. before COMMIT, reverify that the transaction's required file set remains
     durably final-name-published
@@ -12714,6 +12866,8 @@ The catalog records the semantic primary-key constraint as its own `ConstraintId
 
 V1 also creates a unique B+ index implementing key lookup/enforcement.
 
+Its normalized catalog representation and exact UNIQUE/PRIMARY KEY/NOT NULL authorities are §16.5.4–§16.5.6.
+
 The physical index and semantic primary-key constraint remain distinct catalog objects.
 
 Every PRIMARY KEY component is runtime-enforced NOT NULL before duplicate checking. Fully non-NULL PRIMARY KEY values then use exactly §11.10's UNIQUE current-owner predicate, key equality, current-command behavior, UPDATE self-exclusion, wait/recheck protocol, and terminal lock lifetime.
@@ -12740,6 +12894,8 @@ and creates an immutable index specification.
 Persistent IndexId/FileId allocation occurs only during execution.
 
 A unique index uses Chapter 11's transactional uniqueness semantics. Its key equality and NULL rule are §11.10.2; v1 UNIQUE constraints are immediate and non-deferrable.
+
+The persistent index row and zero-based ordered key-column rows are exactly §16.5.4–§16.5.5; a standalone unique index is distinct from a constraint-owned backing index as specified there.
 
 ### 21.8.2 Offline build protocol
 
@@ -16742,7 +16898,7 @@ Statistics MUST NOT introduce a second locale/FLOAT ordering model.
 
 ## 34.14 Statistics persistence
 
-Statistics live semantically in `sys_statistics` using the chunked row contract from §16.5.6.
+Statistics live semantically in `sys_statistics` using the exact relation descriptor and chunked row contract from §16.5.7.
 
 Each TABLE/COLUMN/INDEX scope is first encoded as one complete `StatisticsPayloadV1` byte sequence and then split into catalog-row fragments of at most:
 
@@ -21098,7 +21254,9 @@ This appendix indexes canonical persistent-format definitions. It does not repla
 | PersistedScalarV1 total size | `Align8(16 + payload_length)` | §17.13 |
 | DefaultValueBlob v1 header | 24 bytes | §21.12.1 |
 | DefaultValueBlob v1 maximum | 4096 bytes | §21.12.1 |
-| Statistics catalog fragment maximum | 4096 bytes | §16.5.6 / §34.14 |
+| Built-in catalog relation TableIds | `1..6` exactly for `sys_tables` through `sys_statistics` | §16.5.1 |
+| Catalog schema version 1 descriptors | six exact ordinary tuple schemas; no hidden catalog indexes | §16.5 |
+| Statistics catalog fragment maximum | 4096 bytes | §16.5.7 / §34.14 |
 | StatisticsPayloadV1 common header | 40 bytes | §34.14.1 |
 | Statistics TABLE payload fixed prefix | 104 bytes before manifest arrays | §34.14.2 |
 | Statistics COLUMN payload fixed prefix | 104 bytes before scalar/MCV/histogram data | §34.14.3 |
