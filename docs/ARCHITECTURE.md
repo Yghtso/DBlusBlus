@@ -11226,6 +11226,7 @@ known constants
 lineage
 semantic ordering requirements
 estimated-cardinality placeholder
+semantic `is_provably_empty` state and exact proof provenance
 ```
 
 Constraint-derived examples include:
@@ -11238,6 +11239,8 @@ LEFT JOIN right side  -> nullable output
 ```
 
 Such properties may support later optimization, but a rewrite based on them is not valid until its semantic proof/test exists.
+
+Estimated cardinality and semantic emptiness are distinct properties. The canonical separation, approved proof sources, and statistics prohibition are defined by §35.2. Logical property derivation may preserve or compose a proof according to §20.17.10, but it MUST NOT derive one from a numerical estimate.
 
 Logical properties do not substitute for the later physical-property system.
 
@@ -11381,6 +11384,8 @@ NOT NULL column IS NULL
 
 and marks the corresponding logical relation as provably empty before physical search.
 
+These are semantic proofs only when they use exact typed constants, Chapter-17 type semantics, and trusted currently enforced catalog constraints. Statistics-derived min/max, NDV, MCV, histogram, HLL, NULL fraction, row count, or estimated join domains are not constraints and cannot participate in this contradiction proof.
+
 Derived predicates retain ordinary SQL NULL semantics.
 
 No predicate is propagated across nullable outer-join semantics without proof.
@@ -11402,6 +11407,63 @@ Low estimated NDV is never treated as proof of uniqueness.
 
 Foreign-key-based rewrites and join elimination remain deferred until those constraints and semantic proofs exist.
 
+### 20.17.10 Semantic-emptiness propagation
+
+The logical semantic-reasoning layer MUST derive `is_provably_empty` according to the exact-proof whitelist in §35.2 and these operator-specific rules:
+
+```text
+LogicalValues:
+    provably empty exactly when it contains zero rows
+
+LogicalGet:
+    provably empty when its complete attached predicate is proven never TRUE
+    for any base row; base-table statistics alone never prove the Get empty
+
+LogicalFilter:
+    provably empty when its child is already provably empty or the complete
+    filter predicate is proven never TRUE for any child row
+
+LogicalProject:
+    preserves an empty-child proof
+
+LogicalJoin INNER or CROSS:
+    provably empty when either required child is provably empty;
+    INNER is also provably empty when its complete ON condition is
+    proven never TRUE for any candidate pair
+
+LogicalJoin LEFT:
+    provably empty exactly when its preserved left child is provably empty;
+    an empty right child or an ON condition proven never TRUE establishes
+    no matches, not empty output, because left rows are null-extended
+
+LogicalAggregate with one or more grouping expressions:
+    preserves an empty-child proof because an empty input forms no groups
+
+LogicalAggregate with no grouping expressions:
+    is not provably empty merely because its child is empty;
+    global aggregation emits exactly one row under §29.5
+
+LogicalDistinct / LogicalSort:
+    preserve an empty-child proof
+
+LogicalLimit:
+    provably empty when its child is provably empty or its actual bound
+    SQL LIMIT is exactly zero
+
+LogicalInsert / LogicalUpdate / LogicalDelete:
+    a provably empty relational input proves zero input/target rows and
+    empty RETURNING output, but any no-op lowering must preserve statement
+    completion, affected-row reporting, and transaction semantics
+
+LogicalAnalyze:
+    is never eliminated because a prior statistical row count is zero;
+    it executes its required Chapter-34 collection protocol
+```
+
+For `WHERE`, `HAVING`, and INNER JOIN match selection, only TRUE admits a row or pair. Therefore an exact predicate that is constant FALSE or constant UNKNOWN, or otherwise proven unable to become TRUE, may establish the corresponding filter/inner-join proof. LEFT JOIN uses the same TRUE-only match rule, but FALSE/UNKNOWN there does not remove the preserved left row. CASE arms, projections, and other scalar-expression contexts do not become empty merely because an expression is or may be UNKNOWN. `IN`/`NOT IN` may contribute a proof only after exact SQL three-valued evaluation of the complete predicate in a row-rejecting context.
+
+An empty-result helper or equivalent plan replacement may be introduced only for a node whose semantic proof is established by these rules. The replacement must preserve the node's output schema and all statement/operator semantics. A numerical zero estimate is never such authorization.
+
 ## 20.18 Logical-plan validation
 
 Validation runs after initial logical planning and after major rewrite phases.
@@ -11418,6 +11480,8 @@ node output schemas agree with expressions
 LEFT JOIN right-side nullability is preserved
 hidden DML RID/system slots survive when required
 catalog descriptor/schema-version references are internally consistent
+every provably-empty annotation or empty-result replacement has approved
+semantic provenance under §§20.17.10 and 35.2
 ```
 
 Malformed logical plans are architecture errors detected before execution, not conditions left for executor crashes.
@@ -11438,7 +11502,7 @@ Limit 10
           Get orders
 ```
 
-Debug detail may include `LogicalSlotId`, `TableId`, `BindingId`, types, nullability, and lineage.
+Debug detail may include `LogicalSlotId`, `TableId`, `BindingId`, types, nullability, lineage, and a provably-empty proof kind distinct from estimated rows.
 
 The logical EXPLAIN representation does not depend on reparsing or pretty-printing the original AST.
 
@@ -11459,6 +11523,7 @@ The logical EXPLAIN representation does not depend on reparsing or pretty-printi
 13. Logical validation occurs before execution/physical planning consumes a plan.
 14. `LogicalAnalyze` carries a resolved table/schema/index set and does not perform name lookup during execution.
 15. EXPLAIN consumes the bound/logical representation rather than AST syntax alone.
+16. Semantic emptiness is derived only from §35.2 exact facts and propagates by §20.17.10; estimated zero is not a rewrite proof.
 
 ---
 
@@ -15217,6 +15282,8 @@ Likewise, schema/index descriptors obey the caller's catalog snapshot from Chapt
 
 Statistics are performance metadata and do not change semantic visibility or query correctness.
 
+Semantic-emptiness metadata is derived independently under §§20.17.10 and 35.2. The optimizer MUST NOT infer it from `estimated rows == 0`, a zero TRUE fraction, or any statistics descriptor.
+
 ## 33.5 PhysicalPlan output
 
 The optimizer returns one immutable:
@@ -15281,6 +15348,7 @@ The same principle applies to later join/aggregate/sort alternatives.
 6. Physical choice is cost-driven; fixed selectivity thresholds are not the primary selector.
 7. Logical normalization and physical algorithm selection remain distinct stages.
 8. Full Cascades/adaptive optimization remains future work rather than hidden v1 complexity.
+9. Only approved exact semantic proof may eliminate execution; numerical estimates, including zero, affect cost and physical choice only.
 
 ---
 
@@ -15302,6 +15370,10 @@ missing
 without making a query semantically incorrect.
 
 A bad estimate may produce a bad plan; it MUST NOT produce a wrong result.
+
+Query correctness is invariant under the age or numerical contents of any structurally valid statistics descriptor. Values that were exact for the ANALYZE snapshot, including a zero live-row count, exact NULL count, or exact min/max, become ordinary potentially stale statistics when used for planning. They are not execution-time constraints and MUST NOT establish semantic emptiness.
+
+Only the semantic reasoning layer defined by §§20.17.10 and 35.2 may prove a plan subtree empty. Statistics may produce a numerical estimate of zero, but no table, column, index, sampled, cached, or derived statistic may set `is_provably_empty` or authorize an empty-result rewrite.
 
 Statistics therefore remain outside WAL-critical data-correctness paths except for the ordinary transactional persistence of the catalog rows that store them.
 
@@ -15411,7 +15483,7 @@ live_rows_per_heap_page
 physical_tuple_version_estimate
 ```
 
-The optimizer costs SQL-visible rows primarily from `analyzed_live_row_count`, while scan I/O uses physical heap pages and scan CPU may include dead-version pressure.
+The optimizer costs SQL-visible rows primarily from `analyzed_live_row_count`, while scan I/O uses physical heap pages and scan CPU may include dead-version pressure. `analyzed_live_row_count == 0` is a cardinality estimate for the ANALYZE snapshot, not proof that a later scan is empty.
 
 ## 34.5 ColumnStatistics
 
@@ -15436,6 +15508,8 @@ maximum_observed_width
 `NDV` excludes NULL.
 
 All scalar values in statistics use the same logical type semantics as binder/executor comparisons.
+
+`null_fraction`, NDV, min/max, MCVs, histogram boundaries/masses, widths, and values absent from any collected structure are costing evidence only. In particular, `null_fraction == 0` does not prove `IS NULL` impossible, `null_fraction == 1` does not prove `IS NOT NULL` impossible, and absence from an MCV list or histogram does not prove value absence. An enforced `NOT NULL` catalog constraint is a separate semantic fact.
 
 ## 34.6 IndexStatistics
 
@@ -15502,7 +15576,7 @@ and may be used as a fallback when the optimizer lacks a more key-specific garba
 
 and summarizes correlation between leading-key order and heap PageNo order.
 
-These statistics are approximate planning metadata, not B+ structural correctness metadata.
+These statistics are approximate planning metadata, not B+ structural correctness metadata or key-presence facts. A zero `physical_entry_count`, `logical_live_entry_count`, `invisible_entry_count_estimate`, or `leaf_page_count` estimate cannot suppress runtime index/heap access or prove that no key/RID candidate exists.
 
 B+ metadata such as the actual current tree height remains owned by Chapter 8 and may be read from an immutable descriptor/metadata snapshot for costing.
 
@@ -15522,6 +15596,8 @@ bounded distribution samples
 width statistics
 physical/dead-version maintenance estimates
 ```
+
+“Exact” in this collection list means exact for that one ANALYZE snapshot. It does not promote the persisted result to an authoritative constraint for a later statement, including a later command in the same transaction after intervening writes.
 
 For each visible index, ANALYZE additionally obtains the physical index-maintenance statistics required by §34.6.
 
@@ -15869,6 +15945,8 @@ missing statistics + diagnostic
 
 rather than making otherwise valid user data unreadable.
 
+Neither a structurally valid descriptor nor a descriptor rejected as corrupt can produce semantic proof. Rejected statistics are ignored in favor of an older valid descriptor or missing-statistics fallback; the separate statistics-tolerance policy does not alter this rule.
+
 The loader MUST NOT mix rows from different StatsVersions to repair an incomplete descriptor.
 
 Arbitrary C++ object graphs, enum ordinals, process pointers, or native object dumps are never serialized.
@@ -15888,6 +15966,8 @@ Existing planners may finish with the old descriptor.
 The catalog/statistics cache is an acceleration mechanism and preserves the caller's catalog visibility rules.
 
 Global cache publication is a commit-side effect; an aborted transaction never leaves its descriptor globally published.
+
+Transaction-local use, old cache entries held by existing planners, concurrent committed DML, and committed publication of a newer descriptor all preserve §34.1: descriptor freshness changes estimates only and never supplies semantic proof.
 
 ## 34.16 Freshness and modification counters
 
@@ -15933,6 +16013,8 @@ A transaction-local or later-aborted ANALYZE does not reset globally visible mod
 12. Index statistics distinguish logical live entries from physical entry/garbage pressure.
 13. Unsupported/stale/incomplete statistics may degrade plans but never query correctness.
 14. Statistics payloads use the byte-exact chunked v1 format and shared persisted-scalar codec.
+15. Numerical zero or apparent domain absence from table, column, index, MCV, histogram, HLL-derived, sampled, cached, or composed statistics never establishes semantic emptiness.
+16. Statistics rejected as corrupt and statistics accepted as structurally valid are both incapable of creating a semantic proof; they differ only in whether their estimates are used or fallback is selected.
 
 ---
 
@@ -15955,41 +16037,95 @@ estimated_rows >= 0
 is_provably_empty
 ```
 
+These fields are orthogonal. `estimated_rows` is approximate cost metadata. `is_provably_empty` is an exact logical fact with the restricted provenance defined by §35.2.
+
 Pathological arithmetic is clamped to a large finite implementation maximum rather than producing NaN/Infinity inside optimizer math.
 
 The executor still processes integer row counts.
 
-## 35.2 Provably empty versus estimated small
+## 35.2 Cardinality estimate versus semantic-emptiness proof
 
-The estimator distinguishes:
-
-```text
-provably empty
-```
-
-from:
+The architecture separates two concepts:
 
 ```text
-nonempty but estimated very small
+estimated_rows / PredicateTruthEstimate:
+    approximate cost-planning metadata
+
+is_provably_empty:
+    exact logical fact authorizing an empty-output simplification
 ```
 
-Provably-empty examples include:
+Any estimator may return numerical zero. In particular, statistics, sampling, histogram boundaries, MCV absence, HLL/NDV estimates, independence assumptions, clamping, and rounding may produce:
 
 ```text
-WHERE FALSE
-contradictory normalized bounds
-LIMIT 0
+estimated_rows == 0
+PredicateTruthEstimate.true_fraction == 0
 ```
 
-For a relation not proven empty, the estimator may use a minimum working estimate near:
+Neither value implies `is_provably_empty == true`, and an estimated probability of zero does not mean TRUE is logically impossible. An implementation may apply a positive minimum working estimate to a non-proven subtree to avoid cascading zero-cost plans, but that numerical policy does not change semantic proof state.
+
+Only the logical semantic-reasoning layer may originate `is_provably_empty`. Cardinality/predicate estimators may consume and preserve an existing proof, but MUST NOT create one from an estimate or from any statistics descriptor. The exact v1 whitelist of proof sources is:
+
+1. an exact zero-row logical input, specifically `LogicalValues` with zero rows or an equivalent already-proven empty relational node;
+2. successful exact evaluation of a complete constant predicate that is eligible for §20.17.1 constant folding, using the same Chapter-17/operator semantics as execution, when it is FALSE or UNKNOWN in a row-rejecting context; evaluation MUST NOT hide or newly force a SQL error, and STABLE/VOLATILE expressions are not a source;
+3. an exact no-TRUE fact or logical contradiction from Chapter-17 operator/type semantics and normalized typed literals, including ordinary comparison with literal NULL, complete IN/NOT IN cases whose result can never be TRUE, equality of distinct exact constants, contradictory equality/IN/bound sets, and type-domain impossibility established by the binder/TypeResolver's authoritative type domain;
+4. a contradiction with a trusted, currently enforced v1 catalog/schema constraint: `NOT NULL`, including the NOT NULL component of PRIMARY KEY; PRIMARY KEY/UNIQUE key metadata may otherwise prove keys or multiplicity but does not by itself prove value absence;
+5. `LogicalLimit` whose actual SQL `LIMIT` value is exactly zero; and
+6. operator-specific propagation of an existing approved proof exactly as defined by §20.17.10.
+
+The whitelist is closed for v1. CHECK constraints and foreign keys are deferred and cannot be assumed. Disabled, deferred, unvalidated, stale, or unsupported metadata cannot be a proof source. No table/index contents are treated as exact planning metadata merely because a collection routine once observed them.
+
+The following are explicitly forbidden proof sources, individually or in composition:
 
 ```text
-1 row
+table analyzed_live_row_count / row_count
+column or index NDV
+column or index min/max
+MCV presence, absence, or frequency
+histogram boundaries, buckets, absence, or mass
+HLL or any approximate sketch/domain estimate
+null_fraction
+ANALYZE samples or exact-at-ANALYZE observations
+stale/current statistics cache entries
+estimated join-domain overlap/disjointness
+physical/logical/invisible index-entry counts
+index leaf-page/occupancy/correlation statistics
+missing-statistics fallback values
+any composed estimate whose numerical result is 0 or 1
 ```
 
-to avoid cascading zero-cost plans.
+Semantic proof provenance is planner/query-lifetime metadata, not persisted metadata. Conceptually it records one or more exact kinds such as:
 
-The explicit `is_provably_empty` flag—not row count alone—carries logical impossibility.
+```text
+EXACT_EMPTY_INPUT
+CONSTANT_3VL_REJECTION
+EXACT_PREDICATE_CONTRADICTION
+TRUSTED_ENFORCED_CONSTRAINT
+SQL_LIMIT_ZERO
+PROPAGATED_SEMANTIC_PROOF
+```
+
+Estimate confidence/provenance from §35.26 remains separate and can never be promoted into this proof provenance.
+
+Estimates, including zero/full selectivity, may affect join order, access-path cost, startup/total cost, and physical algorithm selection. They MUST NOT establish logical equivalence, remove a filter or join, eliminate rows, replace a subtree with empty output, or remove every runtime access path.
+
+Consequently, each of these is an architecture violation:
+
+```text
+min/max says a value is absent -> replace a scan with empty output
+analyzed row_count == 0 -> eliminate a scan
+null_fraction == 0 -> eliminate IS NULL
+statistical join ranges are disjoint -> eliminate INNER JOIN
+value absent from MCV -> declare equality impossible
+HLL/estimated domain omits a key -> prove the key absent
+estimated_rows == 0 -> set is_provably_empty
+estimated TRUE probability == 0 -> prove FALSE/impossible
+index live/physical-entry estimate == 0 -> skip runtime index/heap access
+```
+
+SQL three-valued context is material. WHERE, HAVING, and INNER JOIN matching retain rows/pairs only for TRUE, so a complete predicate proven always FALSE or UNKNOWN rejects every candidate. For LEFT JOIN ON, such a proof establishes no matches but does not empty the preserved left output. FALSE and UNKNOWN remain distinct values in CASE, projection, and other scalar contexts. IN/NOT IN follow their complete SQL 3VL semantics; partial knowledge that UNKNOWN is possible is not an emptiness proof.
+
+The explicit `is_provably_empty` flag with approved semantic provenance—not estimated row count or probability—alone authorizes elimination of execution or replacement by an empty-result equivalent.
 
 ## 35.3 Row-width estimate
 
@@ -16034,6 +16170,8 @@ with each fraction finite, clamped to `[0,1]`, and the sum normalized to approxi
 
 Every primitive estimator computes all three components rather than leaving FALSE/UNKNOWN implicit.
 
+The three fractions are cardinality-planning fields, even when exact operator semantics determines a particular numerical value. When a primitive or composed NOT/AND/OR formula yields `0` or `1`, semantic impossibility is still derived separately under §35.2; statistical inputs cannot acquire exact logical provenance through composition.
+
 A common finalization step conceptually performs:
 
 ```text
@@ -16068,6 +16206,8 @@ estimated_rows = input_rows * true_fraction
 
 followed by the provably-empty/minimum-nonempty rule.
 
+Here “provably empty” means an independent §35.2 semantic proof. Multiplication, clamping, or rounding to numerical zero does not set the proof flag.
+
 ## 35.6 Equality to a constant
 
 For:
@@ -16091,6 +16231,8 @@ for this comparison expression.
 
 This is not rewritten into `IS NULL`.
 
+This no-TRUE fact comes from exact SQL comparison semantics, not `null_fraction`. In a WHERE/HAVING/INNER JOIN row-rejecting context, the semantic layer therefore records the approved §35.2 proof even though the expression's exact result is UNKNOWN rather than FALSE.
+
 ### 35.6.2 MCV hit
 
 If the non-NULL constant appears in the MCV list:
@@ -16101,16 +16243,15 @@ true_fraction = MCV frequency
 
 subject to consistency clamps.
 
-### 35.6.3 Outside exact known range
+### 35.6.3 Outside statistical range
 
-When orderable min/max statistics prove the non-NULL constant impossible:
+When a non-NULL constant lies outside available orderable min/max statistics:
 
 ```text
 true_fraction = 0
-is_provably_empty = true
 ```
 
-for a simple base filter whose truth cannot arise by another disjunct.
+is an allowed numerical estimate for the equality predicate. It MUST NOT set `is_provably_empty`, even for a simple base filter with no other disjunct, because min/max is potentially stale. Absence from the MCV list, histogram, or an HLL-derived domain estimate has the same cost-only status.
 
 ### 35.6.4 Residual equality
 
@@ -16142,7 +16283,7 @@ with the normal finite/clamp/normalization step.
 0 <= t <= 1 - n
 ```
 
-If min/max or another exact rule proves no non-NULL match:
+If min/max estimates no non-NULL match:
 
 ```text
 t = 0
@@ -16150,7 +16291,7 @@ unknown = n
 false = 1 - n
 ```
 
-The filter may then be provably empty even though the comparison expression still evaluates UNKNOWN on NULL input rows.
+This numerical triple does not prove the filter empty. A separate exact §35.2 rule may do so—for example, exact constant evaluation or a contradiction with an enforced NOT NULL/type-domain fact—but statistical min/max and `null_fraction` cannot.
 
 ## 35.7 Column-to-column equijoin
 
@@ -16182,11 +16323,13 @@ unknown_fraction
 
 The estimated TRUE pair probability is bounded by the joint non-NULL mass, and FALSE is the remaining probability.
 
-If compatible min/max ranges are provably disjoint:
+If compatible statistical min/max ranges are disjoint:
 
 ```text
 join_rows = 0
 ```
+
+is an allowed cardinality estimate. It does not prove an INNER or range join semantically empty and does not authorize join removal. The same prohibition applies to any future semi/anti join implementation. Later committed changes may create overlap. A LEFT JOIN remains required to preserve its left side regardless of estimated match absence.
 
 ## 35.8 MCV-aware equijoin
 
@@ -16201,6 +16344,8 @@ When both sides have MCV lists:
 4. estimate residual values from residual non-NULL mass and residual NDVs.
 
 This protects hot join keys from severe underestimation.
+
+No common MCV value, MCV absence on either side, or zero residual estimated mass proves that the join has no matching key.
 
 ## 35.9 Unique-key refinement
 
@@ -16234,7 +16379,7 @@ For a boundary inside a histogram bin, interpolate when the type supports meanin
 
 For binary VARCHAR, initial within-bin interpolation may be rank/uniform-mass based rather than numeric-distance based.
 
-Out-of-range min/max may prove zero or full non-NULL coverage.
+Out-of-range statistical min/max may estimate zero or full non-NULL coverage.
 
 For a comparison against a non-NULL constant, let:
 
@@ -16253,6 +16398,8 @@ false_fraction   = 1 - t - n
 
 with `0 <= t <= 1 - n`.
 
+For `<`, `<=`, `>`, `>=`, and BETWEEN/range conjunctions, boundary inclusion/exclusion controls the numerical estimate using the exact comparison semantics. A zero estimate caused by a min/max boundary, histogram gap, MCV absence, or clamping remains cost-only and MUST NOT set `is_provably_empty`. Exact contradictory literal bounds are handled separately by §§20.17.8 and 35.2.
+
 ## 35.11 NULL predicates
 
 Let:
@@ -16267,7 +16414,7 @@ For:
 column IS NULL
 ```
 
-the exact truth triple is:
+the estimated truth triple is:
 
 ```text
 true_fraction    = n
@@ -16281,7 +16428,7 @@ For:
 column IS NOT NULL
 ```
 
-the exact truth triple is:
+the estimated truth triple is:
 
 ```text
 true_fraction    = 1 - n
@@ -16299,6 +16446,8 @@ IS NULL:
 IS NOT NULL:
     true = 1, false = 0, unknown = 0
 ```
+
+The trusted constraint, not `null_fraction`, supplies that semantic result. Without it, `null_fraction == 0` may estimate `IS NULL` at zero but cannot prove it impossible, and `null_fraction == 1` may estimate `IS NOT NULL` at zero but cannot prove it impossible.
 
 ## 35.12 IN-list predicates
 
@@ -16339,6 +16488,10 @@ Filter cardinality counts only TRUE rows.
 
 `NOT IN` obtains its semantics through the normal NOT transformation of this complete truth triple.
 
+Statistics-derived equality estimates within `t`, including numerical zero, do not prove an IN/NOT IN filter empty. Only exact evaluation/constraint reasoning over the complete predicate may do so under §35.2.
+
+For example, `x IN (NULL)` and `x NOT IN (NULL)` are exactly never TRUE for every `x` under the v1 3VL rules and therefore prove rejection in WHERE/HAVING/INNER JOIN contexts. This exact operator-semantic fact does not authorize collapsing FALSE and UNKNOWN in CASE, projection, or other scalar contexts.
+
 ## 35.13 NOT
 
 For predicate truth estimate:
@@ -16350,7 +16503,7 @@ NOT:
     unknown' = unknown
 ```
 
-The estimator MUST NOT blindly compute `1 - true_fraction` when UNKNOWN is possible.
+The estimator MUST NOT blindly compute `1 - true_fraction` when UNKNOWN is possible. The resulting numerical triple never creates semantic proof unless the semantic layer independently establishes an exact §35.2 fact.
 
 ## 35.14 AND
 
@@ -16372,6 +16525,8 @@ u = 1 - t - f
 ```
 
 equivalently, UNKNOWN covers the combinations where neither operand is FALSE and at least one is UNKNOWN.
+
+Numerical zero/one produced by this independence formula remains an estimate and cannot promote statistical operands to semantic proof.
 
 For simple same-column constraints such as:
 
@@ -16400,6 +16555,8 @@ u = 1 - t - f
 
 equivalently, UNKNOWN covers the combinations where neither operand is TRUE and at least one is UNKNOWN.
 
+Numerical zero/one produced by this independence formula remains an estimate and cannot promote statistical operands to semantic proof.
+
 For mutually exclusive/same-column ranges or MCVs, use the stronger union model rather than generic independence.
 
 ## 35.16 Same-column constraint sets
@@ -16424,6 +16581,8 @@ AND x < 5
 ```
 
 is provably empty.
+
+This contradiction proof uses exact typed predicate bounds and trusted enforced constraints only. Histograms/min/max/MCVs/NDV may estimate the intersected set's cardinality but cannot make the semantic constraint set contradictory.
 
 The same normalized constraint set feeds B+ access-bound construction in Chapter 36.
 
@@ -16490,6 +16649,8 @@ rows_out = rows_after_offset
 
 `LIMIT 0` is provably empty.
 
+This refers only to the query's actual bound SQL LIMIT. A `required_rows` objective of zero or any other optimizer costing target is not a logical LIMIT and cannot create semantic emptiness; §38.16 remains authoritative.
+
 ## 35.21 DISTINCT cardinality
 
 Estimate DISTINCT output from NDV of projected/grouping expressions when lineage/statistics permit.
@@ -16502,6 +16663,8 @@ distinct_groups
 ```
 
 capped by input rows.
+
+A zero result produced from NDV or `null_fraction` is an estimate only; semantic emptiness follows the child-proof rules in §20.17.10.
 
 For multiple columns without extended statistics use the damping rule in §35.23 rather than unrestricted NDV multiplication.
 
@@ -16524,6 +16687,8 @@ Global aggregation with no grouping columns produces:
 ```
 
 even for empty input, matching Chapter 29 aggregate semantics.
+
+Grouped aggregation over a provably empty child is provably empty. Global aggregation over that same child is not; it emits one row. Statistical `input_rows == 0` changes neither semantic conclusion.
 
 ## 35.23 Multi-column NDV damping
 
@@ -16578,6 +16743,8 @@ number of left rows with at least one match
 ```
 
 A simple bounded probabilistic approximation for unmatched-left rows is acceptable in v1.
+
+Statistics that estimate no right-side matches do not permit replacing the LEFT JOIN with empty output or dropping left preservation. Semantic simplification, if any, requires an approved exact proof and must preserve null extension.
 
 ## 35.25 Missing-statistics fallback
 
@@ -16635,6 +16802,8 @@ MISSING_STATISTICS
 STALE_STATISTICS
 ```
 
+These tags explain how a number was estimated. Even `PROVEN_CONSTRAINT` on an estimate is not the semantic-empty flag: the separate §35.2 proof record must identify the exact contradiction and operator context before execution may be eliminated. Statistical tags, alone or composed with exact estimate inputs, never become semantic proof provenance.
+
 Examples:
 
 ```text
@@ -16663,8 +16832,8 @@ A composite estimate carries the least-confident material assumption that substa
 ## 35.27 Estimation invariants
 
 
-1. Estimated rows are nonnegative finite values.
-2. Provably-empty state is explicit and not inferred solely from a tiny estimate.
+1. Estimated rows are nonnegative finite values and may be numerical zero without semantic proof.
+2. Provably-empty state is explicit, carries approved §35.2 semantic provenance, and is never inferred from estimated rows or truth fractions, whether tiny, zero, or one.
 3. Filter selectivity uses SQL TRUE probability, not TRUE+UNKNOWN.
 4. Primitive predicate estimators return complete finite TRUE/FALSE/UNKNOWN triples.
 5. Equality/range against non-NULL constants assigns column NULL mass to UNKNOWN.
@@ -16678,6 +16847,11 @@ A composite estimate carries the least-confident material assumption that substa
 13. Multi-column NDV multiplication is damped and capped by input rows.
 14. LEFT JOIN cardinality cannot fall below its preserved left input cardinality.
 15. Average row width is estimated alongside rows because memory/I/O costs depend on both.
+16. Only the semantic reasoning layer originates emptiness proof; predicate/cardinality estimators may preserve but cannot manufacture it.
+17. Table/column/index statistics, including values exact for an old ANALYZE snapshot, never establish relation, predicate, access-path, or join emptiness.
+18. Statistical min/max disjointness, MCV/histogram/HLL absence, `null_fraction` extremes, and zero row/index counts are cost evidence only.
+19. Composed NOT/AND/OR and join estimates do not convert numerical zero/one into logical impossibility.
+20. Operator proof propagation follows §20.17.10, including LEFT JOIN preservation and the one-row global aggregate over empty input.
 
 ---
 
@@ -17099,6 +17273,8 @@ one PhysicalSeqScan
 every semantically usable PhysicalIndexScan
 ```
 
+unless the logical subtree already carries an approved §35.2 semantic-empty proof and is replaced by a schema-equivalent empty implementation. A statistical zero estimate never suppresses the SeqScan, an otherwise usable IndexScan, runtime index cursor work, or required heap MVCC checks.
+
 Each alternative records:
 
 ```text
@@ -17176,6 +17352,7 @@ IndexScan still fetches heap tuples for visibility in v1, but required output/pr
 14. V1 uses at most one index per base relation occurrence.
 15. Index-versus-sequential break-even emerges from costs rather than a fixed selectivity threshold.
 16. Required-column width/decode work affects cost even when underlying heap-page I/O is similar.
+17. Row-count, key-domain, and index-entry statistics may estimate zero output rows or candidates where the numerical model permits, but normal access-path costs still apply and the estimate cannot remove all semantically valid runtime access paths or prove candidate absence.
 
 ---
 
@@ -17576,6 +17753,8 @@ startup behavior
 
 not logical row semantics.
 
+Likewise, `estimated_join_rows == 0` is algorithm-independent cost metadata, not semantic-empty state. Only an approved exact proof from §§20.17.10 and 35.2 may replace or eliminate the logical join.
+
 Cardinality is cached by logical relation/predicate identity where practical so alternative physical algorithms do not repeatedly invoke different estimators for the same subproblem.
 
 ## 37.17 Subquery physical planning
@@ -17677,6 +17856,7 @@ provided OrderingProperty
 required output slots
 estimated peak memory
 estimated spill bytes
+semantic-empty proof/provenance where applicable
 capability/feasibility state
 canonical structural tie key
 ```
@@ -17784,6 +17964,8 @@ For every base relation occurrence:
 5. attach its provided ordering,
 6. retain non-dominated alternatives for relevant interesting-order/search requirements.
 
+If the logical base subtree is not semantically proven empty, these runtime alternatives remain eligible even when its shared estimated cardinality is zero. Dominance and zero cost cannot reinterpret that estimate as an empty-result rewrite.
+
 The same logical base cardinality is shared by all physical access alternatives.
 
 A scan method never receives a different SQL row estimate merely to make its cost more attractive.
@@ -17809,6 +17991,8 @@ Cardinality is cached by logical relation/predicate identity when possible.
 Physical costs/properties remain alternative-specific.
 
 The transition does not mutate the logical plan or statistics snapshot.
+
+A zero logical join-cardinality estimate affects cost only. It does not skip construction of a semantically required join or create semantic proof in the memo.
 
 ## 38.8 Hash-join cost
 
@@ -18180,6 +18364,8 @@ Finite `required_rows` affects cost/search only.
 
 It never changes result semantics or becomes an executor row cap in a location where SQL does not permit one.
 
+This remains true when the objective is `FIRST_K_ROWS(0)`: only an actual `LogicalLimit` with SQL LIMIT 0 supplies the §35.2 semantic proof.
+
 ## 38.17 Predicate CPU ordering
 
 Bound/physical expressions carry an approximate evaluation-cost score.
@@ -18334,6 +18520,8 @@ Confidence/provenance from §35.26 is retained on estimates and exposed to diagn
 
 Statistics staleness may reduce diagnostic confidence and influence explicitly configured cost heuristics, but v1 does not automatically reject a plan or rewrite statistics because one query later observes a different actual row count.
 
+Old cache entries, concurrent committed DML after ANALYZE, transaction-local statistics, and newly committed statistics versions all obey the same rule: statistics can change estimates/search order but cannot produce semantic emptiness or remove required execution.
+
 One query's runtime cardinalities never directly rewrite persistent statistics in v1.
 
 ## 38.23 Optimizer trace and diagnostics
@@ -18343,6 +18531,7 @@ The optimizer can emit a debug trace containing at least:
 ```text
 normalized predicates
 estimate confidence/provenance
+semantic-empty flag and exact proof provenance, shown separately from estimates
 base cardinalities
 enumerated access paths
 cost components
@@ -18382,6 +18571,11 @@ predicates assigned only where semantically legal
 DML hidden target slots preserved
 every selected physical algorithm is capability-enabled
 memory/spill annotations are finite/nonnegative
+every empty-result/no-op replacement and semantic-empty annotation has an
+approved exact proof under §§20.17.10 and 35.2 rather than numerical or
+statistics provenance
+every non-proven base/join subtree retains a semantically valid executable
+path even when estimated rows are zero
 ```
 
 The result then passes to the execution-layer `PhysicalPlanValidator`.
@@ -18410,6 +18604,7 @@ A rewrite/legality mistake that changes results is a correctness failure.
 16. Optimizer diagnostics expose why estimates/alternatives were selected or pruned.
 17. The optimizer may choose a slow plan but may never change SQL meaning.
 18. Final plans pass optimizer semantic/property validation before execution.
+19. Memo insertion, dominance, and pruning never promote estimated zero to semantic emptiness or discard required execution on that basis.
 ---
 
 # Part VIII — Cross-Cutting Requirements
@@ -18760,7 +18955,7 @@ column null fraction / NDV / MCV / histogram availability
 index physical/live/invisible entry pressure
 index leaf occupancy / heap correlation when available
 predicate truth/selectivity estimate
-provably-empty flag
+provably-empty flag and approved semantic proof kind, distinct from estimate provenance
 estimated rows and row width
 SeqScan and candidate IndexScan cost components
 chosen search bounds / residual predicates
@@ -18779,6 +18974,8 @@ missing index/heap correlation
 ```
 
 These diagnostics explain optimizer behavior; they do not change semantics.
+
+When estimated rows or estimated TRUE fraction is zero, EXPLAIN/trace must remain able to show whether `is_provably_empty` is independently true or false. No mandatory user-facing text format is fixed, but the distinction and proof provenance must be observable enough for validation and regression tests.
 
 ## 40.8 Optimizer trace, plan fingerprint, and estimate error
 
@@ -18822,6 +19019,8 @@ exactly one of E/A is 0:
 ```
 
 Estimate-attribution output should make the earliest material divergence visible together with confidence/provenance, because an upper join-order failure may originate in one lower predicate estimate.
+
+Estimate provenance and semantic-empty proof provenance are displayed as separate concepts. An estimate of zero with no approved proof remains an executable plan subtree.
 
 Runtime actual rows are diagnostic only.
 
@@ -19015,6 +19214,8 @@ source/streaming/sink pipeline legality
 breaker dependency legality
 memory/spill capability declarations
 required transaction/query context
+empty-result/no-op operators carry approved semantic-empty proof provenance
+and are not justified by numerical estimate/statistics provenance
 ```
 
 Validation occurs before data-changing side effects.
@@ -19094,6 +19295,24 @@ LEFT JOIN lower bound
 
 Estimator quality is measured with q-error or an equivalent multiplicative error metric, while exact-zero/provably-empty cases are tested separately.
 
+Semantic-proof tests independently cover at least:
+
+```text
+estimated_rows == 0 while is_provably_empty == false
+estimated TRUE fraction == 0 from stale statistics without proof
+constant FALSE and constant UNKNOWN in WHERE/HAVING/INNER JOIN contexts
+LEFT JOIN with empty right or exact never-TRUE ON still preserving left rows
+zero-row LogicalValues and exact contradictory literal constraints
+NOT NULL proof versus null_fraction values of 0 and 1
+analyzed_live_row_count == 0 followed by committed visible insertion
+stale min/max equality and range values outside the analyzed domain
+MCV/histogram/HLL absence without semantic absence
+statistically disjoint join domains followed by visible overlap
+grouped versus global aggregate over a provably empty child
+actual LIMIT 0 versus required_rows/FIRST_K_ROWS(0)
+zero index live/physical-entry estimates without skipping runtime access
+```
+
 Base-access tests compare enumerated SeqScan/IndexScan alternatives across:
 
 ```text
@@ -19132,6 +19351,8 @@ required_rows / LIMIT startup objective
 missing-statistics fallback/confidence/provenance
 deterministic ties and plan fingerprints
 planning-memory fallback
+estimated-zero versus semantic-empty memo/plan behavior
+final validation rejection of statistics-derived empty replacement
 ```
 
 Synthetic join-estimation suites include:
