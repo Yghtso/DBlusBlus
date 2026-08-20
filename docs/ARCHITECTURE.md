@@ -466,7 +466,8 @@ Control-file lifecycle outcomes are exact:
 - a checksum-bad slot is simply not a valid candidate, but absence of any valid
   supported slot prevents open;
 - a control slot or immutable bootstrap root with the correct format-family
-  magic but an unsupported version returns `UNSUPPORTED_FORMAT` and forbids
+  magic but an unsupported version returns the family-specific
+  `UNSUPPORTED_DATABASE_FORMAT`/`UNSUPPORTED_CATALOG_SCHEMA` result and forbids
   fallback to an older supported slot; an unknown version is not treated as an
   ignorable torn update;
 - invalid magic/incomplete bootstrap returns
@@ -909,6 +910,8 @@ Future file kinds MUST receive new explicit numeric codes.
 
 Code `0` MUST be rejected when decoding a v1 random-access file superblock.
 
+Under §4.14.4, codes `1..5` are the complete v1 registry. Any other code in a superblock claiming format version 1 is `CORRUPT_FILE`; no unknown FileKind is opened through a known codec. A known kind that disagrees with the expected managed basename/catalog descriptor is likewise corruption. `BTREE` dispatches only to its specialized codec.
+
 WAL is not a random-access page-file kind. It uses its own append-only persistent log format.
 
 Every random-access database file reserves:
@@ -1189,7 +1192,7 @@ The v1 common page-header layout is:
 |---:|---:|---|
 | `0` | 2 | `page_type` |
 | `2` | 2 | `format_version` |
-| `4` | 4 | `flags` |
+| `4` | 4 | `flags = 0` |
 | `8` | 8 | `page_lsn` |
 | `16` | 4 | `checksum_crc32c` |
 | `20` | 2 | `header_size` |
@@ -1210,6 +1213,8 @@ flags = 0
 The encoder/initializer MUST write zero and the v1 decoder MUST reject nonzero common-header flags.
 
 Future ordinary-page flag meanings require an explicit compatible format rule; unassigned v1 bits are not silently preserved as unknown semantics.
+
+Every current ordinary page type supports `format_version=1` only. After identifying the expected page family, version zero is corruption and a positive greater version is `UNSUPPORTED_PAGE_FORMAT`; §4.14 forbids applying v1 checksum/layout semantics beyond that discriminator.
 
 ### 4.8.1 Embedded page number
 
@@ -1254,6 +1259,8 @@ These numeric codes are part of the persistent page-format contract.
 Existing values MUST NOT be renumbered because the source-language enum declaration changes.
 
 Future page types MUST receive new explicit numeric codes.
+
+Codes `0..7` are the complete v1 registry. In a page claiming format version 1, an unlisted code or a listed code incompatible with the owning FileKind/page position is `CORRUPT_PAGE`. An implementation cannot preserve or traverse an unknown PageType as opaque state.
 
 Page-type-specific parsing MUST validate that the persisted `page_type` is the expected type before interpreting type-specific bytes.
 
@@ -1350,7 +1357,7 @@ TXN_STATUS     -> 0
 
 `creation_epoch` is an opaque persisted 64-bit value in v1.
 
-Its generation procedure, time unit, or other semantic interpretation MAY be specified later without changing its field width or byte offset.
+Its generation procedure or time unit MAY be standardized later only while the field remains semantically opaque to v1 correctness. Assigning interpretation that changes identity, visibility, recovery, or durability requires a new owning format/version under §4.14; this field is not generic extension storage.
 
 ### 4.10.3 Superblock checksum
 
@@ -1368,12 +1375,12 @@ Changing only the stored checksum bytes does not change the logical checksum inp
 
 ### 4.10.4 Superblock validation
 
-A v1 superblock decoder MUST reject:
+Family/version dispatch precedes version-owned checksum/layout validation as §4.14.2 requires. Once `format_version=1` is selected, a v1 superblock decoder MUST reject:
 
 - input shorter than 8192 bytes,
 - CRC32C mismatch,
 - `page_type != SUPERBLOCK`,
-- unsupported `format_version`,
+- `format_version=0` as corruption or `format_version>1` as unsupported under §4.14,
 - a `header_size` inconsistent with the decoded `file_kind`,
 - `page_no != 0`,
 - magic different from `DBLUSBLS`,
@@ -1382,7 +1389,7 @@ A v1 superblock decoder MUST reject:
 - any nonzero reserved field required to be zero by the base or file-kind-specific format,
 - any nonzero byte in the file-kind-specific trailing reserved region.
 
-Unknown `flags` bits are preserved as raw bits unless a later format revision assigns semantics to them.
+V1 assigns no FileSuperblock flag bits. `flags` is RESERVED_ZERO: writers write zero and readers reject every nonzero value. No unknown superblock bit is preserved or round-tripped.
 
 A codec MAY accept an input buffer larger than one page, but only the leading 8192 bytes participate in the v1 superblock representation.
 
@@ -1697,7 +1704,7 @@ page_no * PAGE_SIZE
 
 is corruption. Validation order and result are deterministic for identical bytes plus identical descriptors; validity cannot depend on C++ padding, pointer values, unordered-container iteration, filesystem scan order, statistics, or optimizer state.
 
-Every field/byte already specified as reserved-zero is required-zero. Every known code has only its defined v1 semantics. Unknown PageType/FileKind/slot codes are invalid. The one narrow recognized-but-unsupported heap state is §4.13.3's `REDIRECT_RESERVED`; broader unknown-version/flag compatibility remains M-012.
+Every field/byte already specified as reserved-zero is required-zero. Every known code has only its defined v1 semantics. Unknown PageType/FileKind/slot codes are classified by §4.14.4. The one narrow recognized-but-unsupported heap state is §4.13.3's `REDIRECT_RESERVED`.
 
 The FileKind/PageType combinations are exact:
 
@@ -1710,7 +1717,7 @@ CATALOG     page 0 SUPERBLOCK; page 1 CATALOG_DATA only
 TXN_STATUS  page 0 SUPERBLOCK; page 1..N TXN_STATUS
 ```
 
-Self-hosted catalog relation files are ordinary `HEAP` files and therefore contain `HEAP_DATA`, not `CATALOG_DATA`. A generic 72-byte non-BTREE PageFile superblock codec MUST reject/dispatch `FileKind::BTREE`; only the specialized B+ validator accepts its 128-byte header and extension. Common superblock `flags` retain §4.10.4's existing M-012 boundary; this task does not assign or reject previously unspecified bits. Every specifically assigned zero flag/reserved field in ordinary pages and the B+ extension remains strict.
+Self-hosted catalog relation files are ordinary `HEAP` files and therefore contain `HEAP_DATA`, not `CATALOG_DATA`. A generic 72-byte non-BTREE PageFile superblock codec MUST reject/dispatch `FileKind::BTREE`; only the specialized B+ validator accepts its 128-byte header and extension. Every common superblock flag bit, ordinary-page unassigned flag bit, and specifically reserved field in v1 follows §4.14's strict known-mask/RESERVED_ZERO rule.
 
 An all-zero or otherwise uninitialized ordinary page inside an owning file's published range is corruption even if physical extension produced those bytes or a checksum happens to match. Every published ordinary page has a PAGE_INIT/BTREE_MTR-derived recognized header and owning format. Only M-003's unpublished contiguous append tail may contain zero/uninitialized bytes, and it is inaccessible to ordinary Fetch and reconciled before READY.
 
@@ -1951,7 +1958,192 @@ V1 specifically forbids:
 13. returning silent partial/duplicate/missing query results after detecting a malformed B+ sibling or route;
 14. making an expensive verifier the sole validator for any invariant needed to parse one page safely.
 
-## 4.14 Storage-foundation invariants
+## 4.14 V1 persisted-format compatibility and reserved-state policy
+
+V1 is strict by default. A reader may interpret, rewrite, or publish persisted bytes only under semantics explicitly defined by the owning v1 format. Field boundaries, a checksum, total length, or the ability to copy bytes do not make unknown semantics safe to ignore.
+
+This section is the canonical compatibility policy for every independently versioned page, file, control, WAL, catalog, scalar/default, and statistics grammar. Format-specific chapters supply exact codes and byte layouts; they may define a narrower safe fallback only when this section lists it.
+
+### 4.14.1 Terminology and default classification
+
+| Term | Canonical meaning |
+|---|---|
+| `KNOWN` | A value, bit, sentinel, or version whose complete v1 semantics are defined for this exact field. |
+| `RESERVED_ZERO` | Space reserved for possible future use but required to be zero in the owning version-1 grammar. It has no v1 payload semantics. |
+| `KNOWN_UNSUPPORTED` | A numeric value intentionally named by v1, but whose feature has no ordinary v1 execution semantics. The format-specific rule defines its controlled rejection. |
+| `UNKNOWN` | A value/code/bit not assigned by the v1 specification for that registry or field. |
+| `IGNORABLE_EXTENSION` | A field/value whose owning grammar explicitly proves that an older reader may omit it without changing framing, known-field meaning, query results, visibility, recovery, durability, or future rewrites. |
+| `UNSUPPORTED_FORMAT` | A recognizable owning format/version/state requires semantics beyond v1. The reader stops at the stable discriminator and does not parse version-owned fields as v1. |
+| `CORRUPTION` | Bytes claim a supported v1 grammar but violate its canonical values, masks, lengths, identities, checksums, or required-zero rules. |
+
+The exact default is:
+
+```text
+supported owning version + UNKNOWN enum/flag/nonzero RESERVED_ZERO
+    -> CORRUPTION unless an exact registry rule below classifies that field
+
+recognized owning family + newer unsupported version
+    -> UNSUPPORTED_FORMAT for that family
+
+explicit KNOWN_UNSUPPORTED state
+    -> its named unsupported-state result
+
+explicit IGNORABLE_EXTENSION
+    -> only the format-specific listed fallback
+```
+
+The only field-level departures from the first line are the exact unknown-WAL-type unsupported result in §4.14.4 and the rebuildable-statistics scope/payload fallback in §4.14.5. They create no generic inference rule for another enum.
+
+Implementations do not invent a different classification because one error is more convenient. The public/API layer may group these under a generic open/access failure while retaining the conceptual distinction and diagnostic; recovery and lifecycle decisions use the exact class.
+
+### 4.14.2 Version dispatch and framing
+
+Each version domain is independent. The database/control format, FileSuperblock/page format, catalog schema, B+ key schema, DefaultValueBlob, statistics payload, and WAL grammar do not inherit support from one global version number.
+
+For a structure with a v1-defined stable family discriminator and version field:
+
+1. read only the bytes needed to identify that family and version using checked fixed offsets;
+2. version `1` selects the exact v1 grammar and all of its checksum, length, mask, enum, and reserved-zero validation;
+3. version `0`, an invalid sentinel, or a value below the first defined version is corruption for a claimed member of that family;
+4. a positive version greater than `1` is unsupported for v1;
+5. do not apply v1 layout, checksum offsets/algorithm, flags, trailing-region, or rewrite rules after selecting an unsupported version.
+
+The stable discriminator is only a safe stop boundary; it is not proof that the newer object is intact. V1 need not and generally cannot validate a future version's checksum or remaining layout before returning unsupported. A reader MUST NOT treat `version != 1` as “parse as v1 and hope.”
+
+V1 is the first supported persisted format and has no earlier page/catalog/WAL/default format to read. A per-table `schema_version`, StatsVersion, control generation, bootstrap generation, root generation, creation epoch, or transaction identity is not automatically a format-version field; those values obey their own semantic domains.
+
+The current version domains are exact:
+
+| Domain | V1 dispatch and non-v1 result |
+|---|---|
+| Common ordinary page and FileSuperblock `format_version` | Expected PageType/FileSuperblock family plus `1`; `0` is corruption, `>1` is `UNSUPPORTED_PAGE_FORMAT` or `UNSUPPORTED_FILE_FORMAT`. Only the v1 CRC32C rule is applied to version 1. |
+| `database.control` slot | Exact `DBLUSCTL` plus version `1`; zero is an invalid/corrupt slot, while any exact-magic `>1` slot blocks v1 open as `UNSUPPORTED_DATABASE_FORMAT`. |
+| CATALOG_DATA bootstrap | Common page version, `bootstrap_version`, `catalog_schema_version`, and every built-in `relation_schema_version` are `1`; zero is corruption and a recognizable greater version is `UNSUPPORTED_CATALOG_SCHEMA`/format. |
+| BTREE/catalog `key_schema_version` | Exactly `1`; a catalog carrier value less than or equal to zero (the persisted BTREE field can represent only zero of these) is corruption, while a positive greater value makes the committed index unsupported and unusable by v1. |
+| DefaultValueBlob | Exact `DBLUSDEF`, version `1`; zero is malformed/corrupt required default metadata, greater values are an unsupported default format. |
+| StatisticsPayload | Exact `DBLUSSTA`, payload version `1`; zero/malformed v1 is an invalid statistics generation, and a well-framed greater version is unsupported advisory metadata. Both use statistics fallback. |
+| PersistedScalarV1 | No embedded version field exists. The enclosing supported grammar selects exactly the 16-byte v1 scalar codec; evolution requires a new enclosing grammar/version rather than guessing a hidden scalar version. |
+| WAL record grammar | No stream/record-header version field exists. The exact 48-byte v1 framing and record registry define v1; an unknown fully framed record type is `UNSUPPORTED_WAL_FORMAT`, while malformed required framing is corruption/torn-tail handling under Chapter 13. |
+
+Checksum algorithms are owned by these versions. V1 page, superblock, control, WAL-record, DefaultValueBlob, and statistics checksums use their specified CRC32C coverage; there is no persisted generic algorithm selector. A future algorithm requires a future owning version. V1 never verifies a newer object with the v1 checksum and continues.
+
+### 4.14.3 Flags, reserved bytes, padding, and trailing data
+
+For every v1 field or byte range described as reserved, reserved-zero, unassigned, padding, or “all other bits”:
+
+```text
+writer: write zero
+reader: require zero
+rewriter: do not preserve a nonzero input
+```
+
+Nonzero RESERVED_ZERO material in a structure claiming version 1 is corruption, not an ignorable extension and not an unsupported newer version. This applies to explicit serialized padding as well as named fields. In-memory C++/ABI padding has no persisted meaning and is never serialized; persisted objects are field codecs, not raw struct dumps.
+
+Every v1 flag field has an exact known mask. Writers set only semantically required known bits; readers require:
+
+```text
+flags & ~KNOWN_MASK == 0
+```
+
+and enforce every bidirectional canonical known-bit rule. A field with no assigned v1 bits has `KNOWN_MASK=0` and must equal zero. In particular, all common ordinary-page flags, FileSuperblock flags, control flags, WAL-header flags, FSM flags, B+ superblock/node/slot flags, catalog-entry flags, DefaultValueBlob flags, and statistics common flags are zero. Tuple flags have known mask `0x0003`; PersistedScalarV1 flags have known mask `0x00000001`; statistics COLUMN `value_flags` have known mask `0x00000003`.
+
+Length delimiting alone never authorizes unknown trailing bytes. A v1 object consumes exactly its grammar-defined length, including canonical zero alignment or fixed trailing reserved area. Extra/nonzero trailing bytes are corruption unless a specific grammar explicitly designates them as an IGNORABLE_EXTENSION. No current required v1 format does so.
+
+V1 has no generic preserve-and-round-trip capability. An old writer must understand every semantic field it rewrites. Known opaque or advisory fields—such as `creation_epoch`, `prune_hint`, and valid FSM category bytes—remain KNOWN v1 values under their documented semantics; they are not storage for unknown extensions. No arbitrary unknown bits/bytes may be copied forward merely because their positions are known.
+
+### 4.14.4 Numeric registries, sentinels, and exact outcomes
+
+The architecture's numeric registry tables are normative and never derive values from source enum order.
+
+| Registry/field | V1 outcome |
+|---|---|
+| FileKind | `1..5` are KNOWN and dispatched to their exact owner; `0` is the defined invalid value and is illegal in a persisted file; every other code in a version-1 superblock is `CORRUPT_FILE`. BTREE is supported only by the specialized 128-byte codec; the generic 72-byte codec rejects/dispatches it rather than parsing it generically. |
+| PageType | `0..7` are KNOWN only in their permitted FileKind/page-position contexts. A known wrong type or any other code in a version-1 page is `CORRUPT_PAGE`; a recognized expected page family with `format_version>1` is instead unsupported. |
+| Heap slot state | UNUSED, NORMAL, and DEAD are KNOWN. REDIRECT_RESERVED is KNOWN_UNSUPPORTED exactly as §4.13.3 defines: v1 writers never emit it and ordinary readers return `UNSUPPORTED_RESERVED_STATE`. Every other code is `CORRUPT_HEAP`. |
+| Tuple flags | `HAS_NULLS=0x0001` and `HAS_VARLEN=0x0002`; every other bit is corruption in the v1 tuple grammar. |
+| TXN_STATUS two-bit code | All four bit patterns are KNOWN: INVALID, COMMITTED, ABORTED, RESERVED. RESERVED has the established nonterminal §9.11.1 semantics and is not rejected as unknown. Contextually impossible status references remain corruption. |
+| WAL record type | Codes `0..9` are KNOWN. Any other type in an otherwise complete framed/CRC-valid required record is `UNSUPPORTED_WAL_FORMAT`; it is never skipped merely because `total_length` is known. |
+| Persisted TypeId | `1..7` are KNOWN stored scalar types; `0` is the known invalid/not-stored sentinel. Any other TypeId inside a required v1 descriptor/scalar is catalog/scalar corruption. In advisory statistics it invalidates that statistics generation. |
+| Catalog constraint kind | `1=UNIQUE`, `2=PRIMARY_KEY`; any other value in catalog schema version 1 is `CORRUPT_CATALOG` and prevents descriptor publication/READY. A newer catalog schema is rejected before its rows are interpreted. |
+| Statistics scope kind | `1=TABLE`, `2=COLUMN`, `3=INDEX`; any other value invalidates only the decodable statistics scope/version and uses the whitelist fallback in §4.14.5. |
+
+Canonical BOOLEAN fields accept only the ordinary BOOLEAN values. No catalog boolean or integer enum has spare truth values or implicit flag bits.
+
+An identifier sentinel is a KNOWN field-specific semantic value, not unassigned enum extension space. `INVALID_PAGE_NO`, `INVALID_FILE_ID`, `INVALID_SLOT_ID`, `INVALID_TXN_ID`, `INVALID_LSN`, and other exact zero/invalid object rules are legal only where the owning field explicitly permits that sentinel—for example an absent sibling/free link or no checkpoint. The same value is corruption where a real identity is required. Implementations do not globally reject or globally tolerate a sentinel independent of field context.
+
+### 4.14.5 Required state, rebuildable state, and the extension whitelist
+
+Required correctness state includes control/checkpoint/WAL, bootstrap and core catalog descriptors, table and index schemas, heap/B+ page formats, transaction status, defaults, visibility/version metadata, and every committed object's required file/superblock identity. Unknown or unsupported semantics in required state prevent that state's use and, when required during open/recovery, prevent READY.
+
+Rebuildable advisory state may fall back only where an existing architecture supplies a correctness-independent source. The complete v1 IGNORABLE_EXTENSION whitelist is:
+
+1. a decodable `sys_statistics` row/chunk identity whose scope/version is incomplete or invalid;
+2. a complete decodable catalog chunk set whose reassembled bytes contain the exact stable `DBLUSSTA` magic and a readable positive `payload_version>1`;
+3. a malformed known-version statistics payload, including malformed nested PersistedScalarV1 data.
+
+Each case rejects the entire affected statistics scope/version, records a diagnostic, and selects an older complete valid descriptor or missing-statistics fallback. V1 does not apply version-1 total-length, checksum-offset, flags, or payload parsing to the greater version; the already-decoded catalog chunk envelope is sufficient to discard it. Rows/versions are never mixed or partially salvaged. A-002 guarantees that this affects plan quality only, never semantic emptiness or query correctness.
+
+The whitelist does not include malformed ordinary heap-tuple/page encoding of the `sys_statistics` relation. The M-008 page/tuple decoder must first safely produce a decodable catalog tuple. Nor does it include malformed core catalog rows, unknown constraints/types, required defaults, FSM page formats, B+ key formats, or transaction status. Stale but structurally valid FSM categories and statistics estimates are KNOWN approximate values, not ignored extensions.
+
+Unknown unrelated filesystem names are left untouched under A-003. That namespace safety rule is not persisted-format acceptance: an unknown file is never opened as a database object, and a bootstrap/catalog-required file with unknown FileKind/version cannot be published merely because its directory entry is preserved.
+
+### 4.14.6 Control, open, index, and nested-version decisions
+
+Control-slot family dispatch occurs before normal dual-slot validity/fallback. If either 4096-byte slot has exact `DBLUSCTL` magic and a positive unsupported format version, v1 returns `UNSUPPORTED_DATABASE_FORMAT` and does not select an older v1 slot. This deliberately covers the generation-10-v1/generation-11-v2 case: v1 cannot validate or compare the v2 generation/checksum/layout safely and cannot time-travel to generation 10. A version-0, wrong-magic, checksum-bad, or otherwise corrupt v1 candidate remains governed by the existing independent-slot/torn-update fallback; it is not evidence of a supported newer format.
+
+Before M-014 READY, every deterministically reachable required control, bootstrap, WAL, catalog descriptor, FileSuperblock, B+ key descriptor, and transaction-status root uses supported semantics. An unsupported required object prevents READY. M-008 still does not require an exhaustive user-page L3 scan: an unsupported/corrupt user heap or B+ page not touched during open fails its later ordinary access without reinterpretation. If that failure renders a required semantic object unusable, existing M-008/M-005/M-014 escalation applies.
+
+Every committed catalog index is required state in v1. V1 defines neither an “unusable index” catalog state nor automatic rebuild-at-open. Therefore a `sys_indexes.key_schema_version` or BTREE superblock `key_schema_version` other than `1` prevents index descriptor publication and READY; a nonpositive catalog value is corruption and a positive greater value is unsupported. The index cannot be traversed with v1 comparison rules. For version `1`, a schema fingerprint mismatch is `CORRUPT_INDEX`, not a future extension.
+
+Nested failure follows semantic criticality, not depth. A supported catalog containing an unsupported DefaultValueBlob cannot reconstruct its required column descriptor and therefore prevents READY/required use. A supported catalog containing an unsupported statistics payload uses §4.14.5 fallback. A future scalar form must be selected by a future enclosing default/statistics/catalog grammar; v1 never reinterprets it as PersistedScalarV1.
+
+### 4.14.7 Recovery, writing, rewrites, and upgrade boundary
+
+Recovery is not best effort. An unknown complete WAL record type may carry required redo or transaction semantics, so recovery stops with `UNSUPPORTED_WAL_FORMAT` and cannot reach READY. A record with v1 framing/flags/reserved/CRC violations follows §13.11's torn-tail versus required-prefix corruption rules. Recovery cannot guess an unsupported page format required by redo; completed redo output must still pass M-008 under a supported owner format. Statistics fallback remains outside crash-correctness authority.
+
+Every v1 writer emits only supported versions, KNOWN enum/state values, semantically correct known flag bits, field-legal sentinels, exact lengths, and zero RESERVED_ZERO/padding/trailing bytes. A v1 writer does not copy unknown input material into a rewritten object.
+
+Vacuum, heap compaction, B+ rewrite/MTR, catalog update, checkpointing, recovery rewrite, and any other page/object rewrite first require supported readable input semantics. They refuse an unsupported source rather than normalize it to v1, clear unknown bits, or discard unknown trailing data. This rule prevents silent downgrade/information loss.
+
+V1 has no cross-version read-only compatibility mode, no format migration, and no online/offline upgrade machinery. A recognizable newer database is not opened for read or write and is never downgraded. A newer version number is an unsupported-format result, not an invitation to upgrade. Future compatibility requires an explicitly designed reader/migration and, where needed, a new owning version.
+
+Conceptual errors remain distinguishable as:
+
+```text
+UNSUPPORTED_DATABASE_FORMAT
+UNSUPPORTED_FILE_FORMAT
+UNSUPPORTED_PAGE_FORMAT
+UNSUPPORTED_WAL_FORMAT
+UNSUPPORTED_CATALOG_SCHEMA
+UNSUPPORTED_DEFAULT_FORMAT
+UNSUPPORTED_RESERVED_STATE
+CORRUPT_WAL / CORRUPT_PAGE / CORRUPT_HEAP / CORRUPT_INDEX / CORRUPT_CATALOG / CORRUPT_DATABASE
+```
+
+Exact source enum names are optional. Unsupported means recognizable semantics beyond v1; corruption means a claimed supported grammar is invalid. Either may surface as a generic failed open/access to a simple client, but diagnostics and lifecycle behavior retain the distinction.
+
+### 4.14.8 Forbidden compatibility shortcuts
+
+V1 specifically forbids:
+
+1. preserving unknown FileSuperblock/common-page flags and continuing;
+2. ignoring or round-tripping nonzero reserved/padding bytes;
+3. parsing any version-2 structure as version 1;
+4. selecting an older control slot because another exact-magic slot advertises a positive unsupported version;
+5. skipping an unknown complete WAL record because its length is known;
+6. interpreting REDIRECT_RESERVED as NORMAL or any invented forwarding state;
+7. treating an unknown PageType as an opaque traversable page;
+8. clearing/dropping unknown tuple flags during compaction and publishing the result;
+9. ignoring an unknown catalog constraint kind as if no constraint existed;
+10. using an unsupported B+ key schema with v1 comparator/key decoding;
+11. rejecting stale but structurally valid FSM categories as future-format corruption;
+12. failing the database solely for an unsupported/malformed advisory statistics payload when the exact fallback applies;
+13. treating preservation of an unknown filesystem name as evidence of file-format compatibility;
+14. rewriting or downgrading a newer-format database as v1;
+15. using host-struct padding or known reserved bytes as persisted extension storage;
+16. collapsing all unknown material into corruption without preserving the unsupported-versus-corrupt distinctions above.
+
+## 4.15 Storage-foundation invariants
 
 1. `FileId` is a database identity, never an operating-system file descriptor.
 2. `PageId` is a persistent logical identity, never a frame index or memory address.
@@ -1977,6 +2169,7 @@ V1 specifically forbids:
 22. Committed catalog ownership never names a private DDL basename and never precedes durable final-name publication of every required physical file.
 23. A required committed object file is never reconstructed from filename guesswork when its durable final entry is missing.
 24. A checksum-valid page is not ordinary state until §4.13's required structural layer accepts it; writers and recovery publish only locally valid completed results.
+25. V1 readers/writers follow §4.14's strict version, known-mask, reserved-zero, enum, trailing-byte, and no-downgrade rules; only the explicit statistics whitelist may ignore unsupported persisted metadata.
 
 ---
 
@@ -2453,7 +2646,7 @@ Every other bit is invalid in tuple-header v1.
 
 Encoding and decoding MUST reject unknown bits rather than silently preserving them.
 
-Existing bit assignments MUST NOT be renumbered. Future flags require explicit bit assignments plus compatibility consideration.
+Existing bit assignments MUST NOT be renumbered. Future flags require a new explicitly compatible owning tuple grammar/version under §4.14; v1 compaction/vacuum never clears an unknown bit and rewrites the tuple as known state.
 
 ### 5.8.1 HAS_VARLEN
 
@@ -4487,6 +4680,8 @@ All multi-byte fields are little-endian.
 
 `index_flags` has no assigned v1 bits. V1 encoders MUST write zero and v1 decoders MUST reject nonzero `index_flags`.
 
+`key_schema_version` is an independent required format domain under §4.14.6. V1 accepts only `1`; zero is corruption, a greater value makes the committed index unsupported, and a version-1 fingerprint mismatch is corruption rather than forward compatibility.
+
 The B+ tree does not duplicate `IndexId` in the extension; the common FileSuperblock `object_id` is the index identifier.
 
 `root_page_no`, `first_leaf_page_no`, and `last_leaf_page_no` MUST be valid non-sentinel page numbers in an initialized tree.
@@ -6404,6 +6599,8 @@ The persistent two-bit status codes are:
 
 `RESERVED` is a legal decoded v1 bit pattern but is **not emitted by the normal v1 transaction-begin path**.
 
+All four two-bit patterns are KNOWN under §4.14.4. `RESERVED` is therefore interpreted with this subsection's nonterminal semantics, not rejected as an unknown future enum and not confused with REDIRECT_RESERVED.
+
 The normal execution path uses:
 
 ```text
@@ -6419,7 +6616,7 @@ If `RESERVED` is encountered:
 - it MUST NOT be treated as COMMITTED,
 - it MUST NOT be treated as ABORTED,
 - while the referenced transaction is active, the active registry still wins,
-- after completed recovery, a persistent correctness object that references a normal TxnId whose only non-runtime status is `INVALID` or `RESERVED` indicates an invariant failure/corruption unless recovery has first classified and published the transaction's terminal outcome.
+- after completed recovery, a status-dependent persistent correctness object that references a normal TxnId whose only non-runtime status is `INVALID` or `RESERVED` indicates an invariant failure/corruption unless recovery has first classified and published the transaction's terminal outcome.
 
 Future architecture may assign an operational writer for the `RESERVED` code, but doing so must not change its v1 nonterminal meaning.
 
@@ -6568,7 +6765,7 @@ else:
 
 The runtime terminal-outcome cache dominates a stale/nonremoved active-registry entry.
 
-`RETIRED` is a runtime lookup result, not a persisted two-bit state. It means the architecture has durably proven that the old status range is no longer needed by any valid persistent correctness object.
+`RETIRED` is a runtime lookup result, not a persisted two-bit state. It means the architecture has durably proven that no valid persistent correctness object still requires the transaction outcome for that old status range.
 
 Persisted:
 
@@ -6581,7 +6778,8 @@ are nonterminal results and MUST NOT be promoted to committed/aborted by guesswo
 
 `SELF`, `IN_PROGRESS`, and `RETIRED` are lookup results, not additional persisted two-bit codes.
 
-A persistent tuple or other correctness object that references a normal TxnId which is:
+A persistent tuple field or other correctness object whose interpretation requires
+the status of a normal TxnId which is:
 
 ```text
 not active
@@ -6592,6 +6790,12 @@ and not legally replaceable by FROZEN_TXN_ID under the retained-status cutoff
 after completed recovery indicates corruption or an invariant failure.
 
 The engine MUST NOT silently treat unknown or retired history as committed.
+
+This rule applies to a field whose interpretation still requires `Status(txn_id)`.
+It does not turn every persisted numeric TxnId into a status-retention reference.
+In particular, a globally published §34.3.1 `StatsVersion.stats_txn_id` is opaque
+generation identity and is never passed to this lookup merely because it contains
+an old TxnId.
 
 ## 9.14 Terminal status publication boundary
 
@@ -7768,6 +7972,8 @@ All integer fields are explicit little-endian.
 
 V1 assigns no WAL-header flag bits. Encoders write zero and decoders reject nonzero `flags` or `reserved`.
 
+These fields are RESERVED_ZERO under §4.14; record length/framing never makes nonzero unknown semantics ignorable.
+
 A decoder requires:
 
 ```text
@@ -7841,6 +8047,8 @@ The v1 16-bit little-endian `record_type` codes are:
 | `9` | `CHECKPOINT_END` |
 
 Existing codes MUST NOT be renumbered.
+
+Codes `0..9` are the complete v1 registry. A different code in an otherwise complete, correctly framed and CRC-valid record is `UNSUPPORTED_WAL_FORMAT`: analysis/redo cannot skip it or continue to READY because its recovery/transaction effects are unknown. Malformed framing follows §13.11's required-prefix corruption versus incomplete-tail rule.
 
 ### 12.7.1 WAL_PAD
 
@@ -8042,6 +8250,14 @@ Encoding codes are:
 1 = FULL_IMAGE
 2 = PATCH_SET
 ```
+
+These are the complete v1 `BTREE_MTR` affected-page encoding registry. Encoding
+`0` or any other value in a record using the known v1 `BTREE_MTR` grammar is
+WAL corruption; it is not an ignorable nested extension. Likewise the entry
+`reserved8`, PATCH_SET `reserved32`, and every unassigned patch/header flag are
+RESERVED_ZERO under §4.14. A future affected-page encoding requires a new
+owning WAL grammar/record type that a v1 reader can reject before interpreting
+its entries.
 
 For `FULL_IMAGE`:
 
@@ -8780,10 +8996,7 @@ During ordinary open, choose the structurally valid slot with the highest `gener
 
 Falling back to an older structurally valid slot is legal only when every recovery object it references is still retained and valid.
 
-Lifecycle format dispatch applies before this fallback: a slot with the correct
-control-family magic but an unsupported `format_version` causes
-`UNSUPPORTED_FORMAT` under §3.3.3. V1 does not bypass a recognizable newer
-control format by selecting an older v1 slot.
+Lifecycle format dispatch applies before this fallback under §4.14.6. Exact control-family magic with `format_version>1` causes `UNSUPPORTED_DATABASE_FORMAT` and forbids selecting an older v1 slot; v1 cannot validate or compare the future generation/layout. Version zero is an invalid/corrupt slot and remains eligible only for the ordinary independent-slot fallback rules, never as a future format.
 
 Equal-generation valid slots with different contents are corruption.
 
@@ -9062,6 +9275,8 @@ The scan reconstructs the same contiguous no-hole valid prefix defined by §12.1
 A next-contiguous empty/short segment left by a failed creation attempt, containing no valid WAL record beyond the prior durable logical end, is an unacknowledged namespace artifact: recovery may unlink/synchronize and recreate it through §12.2.1. A malformed, short, or missing segment inside the required retained WAL range is corruption.
 
 Malformed required WAL before the valid-tail boundary is corruption, not ordinary crash-tail truncation.
+
+An otherwise complete, correctly framed and CRC-valid record with an unknown `record_type` is not a torn tail. It is `UNSUPPORTED_WAL_FORMAT` under §4.14/§12.7 and stops recovery before READY; recovery never skips it by using `total_length`.
 
 ## 13.12 Recovery phase 1: analysis
 
@@ -9738,7 +9953,16 @@ Future visibility then treats the creator as committed without requiring the ori
 
 ## 14.14 Transaction-status retention and physical reclamation
 
-After sufficiently complete vacuum/freezing proves a cutoff `X` such that no persistent correctness object references a normal TxnId below `X`, whole transaction-status pages below that cutoff may be retired.
+After sufficiently complete vacuum/freezing proves a cutoff `X` such that no persistent correctness object still requires transaction-outcome lookup for a normal TxnId below `X`, whole transaction-status pages below that cutoff may be retired.
+
+The proof concerns **status dependency**, not numerical occurrence. A heap/catalog
+tuple `xmin` or effective `xmax` normally remains status-dependent until the
+ordinary freezing/normalization rules make it independent. By contrast, a
+globally published §34.3.1 `StatsVersion.stats_txn_id` is an immutable opaque
+generation value and does not pin status history. Historical WAL `txn_id` fields
+remain governed by WAL retention/recycling and likewise are not, merely by
+occurring in retained WAL, status-page pins. This classification is field-specific
+and does not create a general exception for ordinary MVCC metadata.
 
 The absolute §9.12 TxnId-to-PageNo mapping is preserved permanently.
 
@@ -9822,7 +10046,13 @@ txn_id < txn_status_reclaim_before
 
 returns runtime result `RETIRED` without reading/validating a punched status page.
 
-Valid persistent tuple/catalog state must not reference such a TxnId; creators that still matter must have been rewritten to `FROZEN_TXN_ID` before the cutoff advanced.
+Valid persistent tuple/catalog MVCC metadata must not retain a status-dependent
+reference to such a TxnId; creators that still matter must have been rewritten to
+`FROZEN_TXN_ID` before the cutoff advanced. Persisted fields whose specified
+meaning is already status-independent may still numerically contain the value.
+In particular, neither `MIN(sys_statistics.stats_txn_id)` nor any other
+StatsVersion occurrence constrains the cutoff, and status reclamation requires no
+statistics rewrite, replacement version, deletion, or invalidation.
 
 Physical sparse reclamation therefore preserves the deterministic absolute mapping while bounding allocated disk blocks for old history.
 
@@ -9906,6 +10136,8 @@ The scheduling policy is operational, not part of tuple-reclamation correctness.
 20. Sparse status reclamation preserves absolute status PageNos and file length.
 21. B+ cleanup remains a B+ MTR system action.
 22. FSM/statistical maintenance cannot weaken reclamation correctness.
+23. Status retention is pinned by fields that still require transaction-outcome
+    lookup, not by opaque numeric occurrences such as a published StatsVersion.
 
 ---
 
@@ -10381,6 +10613,8 @@ The six relations use the ordinary tuple format and ordinary `SchemaDescriptor` 
 
 The bootstrap `catalog_schema_version` selects this built-in compatibility contract. It is distinct from `sys_tables.schema_version`, which selects the ordinary tuple-body `SchemaDescriptor` for one table. Both happen to be `1` for all six built-ins in v1; they are not interchangeable fields.
 
+Compatibility dispatch follows §4.14: `catalog_schema_version=1` uses only these descriptors; zero is corrupt, and a recognizable greater version is `UNSUPPORTED_CATALOG_SCHEMA`. V1 never decodes a newer catalog through the version-1 descriptors. Ordinary per-table `schema_version` remains a descriptor identity, not this catalog-format selector.
+
 All semantic fields in a catalog tuple version are immutable after that version is inserted. Catalog changes create/delete ordinary MVCC row versions; they do not update these fields in place. The tuple header's `xmin/cmin/xmax/cmax` remains owned by the ordinary heap/MVCC contract and is not duplicated as descriptor columns.
 
 ### 16.5.1 Built-in identities and scalar carriers
@@ -10486,6 +10720,8 @@ The fixed self-description contains one `sys_columns` row for every column liste
 
 `index_id` and `btree_file_id` are each semantically unique. Every row references one `sys_tables` row. The managed file is exactly `index_<index_id>.btree`, with matching FileId, `FileKind::BTREE`, FileSuperblock `object_id = index_id`, key-schema version/fingerprint, and the ordered columns reconstructed from `sys_index_columns`.
 
+Every committed v1 index row requires `key_schema_version=1`. A value less than or equal to zero is corrupt catalog metadata; a positive greater value is an unsupported required index format and prevents descriptor publication/READY under §4.14.6. V1 has no catalog state that permits silently ignoring or automatically rebuilding such an index.
+
 A non-NULL `index_name` must be nonempty, binder-canonical, and unique among visible named indexes in `main`; table and index names remain separate classes. A NULL name means the index is owned by exactly one UNIQUE or PRIMARY KEY row in `sys_constraints`. A non-NULL name means a standalone CREATE INDEX/CREATE UNIQUE INDEX object and no constraint row may own it. V1 does not generate a second persisted name for an implicit constraint index.
 
 `is_unique` is the direct semantic authority for whether the physical index uses M-004 enforcement. `sys_constraints` is the sole authority for whether that index also represents a table UNIQUE or PRIMARY KEY constraint. A constraint-owned backing index must have `is_unique=true`; neither the constraint row nor index bit alone is accepted when their required cross-check fails. A standalone `is_unique=true` row represents CREATE UNIQUE INDEX without a table-constraint row. There is no `primary` or flags column; primary-key semantics are never inferred from an index bit.
@@ -10523,7 +10759,7 @@ The only v1 constraint-kind codes represented by rows are:
 | `1` | `UNIQUE` table constraint |
 | `2` | `PRIMARY_KEY` table constraint |
 
-Unknown codes are catalog corruption/unsupported catalog schema and prevent READY. V1 CHECK and FOREIGN KEY are deferred. NOT NULL has no `sys_constraints` row: `sys_columns.nullable=false` is its sole catalog authority, including NOT NULL induced by PRIMARY KEY. Consequently every valid `sys_constraints` row has a backing `index_id`; there is no constraint payload and no payload grammar in schema version 1.
+Any other code in a catalog claiming schema version 1 is `CORRUPT_CATALOG` and prevents descriptor publication/READY; only a greater owning `catalog_schema_version` is unsupported rather than corrupt. V1 CHECK and FOREIGN KEY are deferred. NOT NULL has no `sys_constraints` row: `sys_columns.nullable=false` is its sole catalog authority, including NOT NULL induced by PRIMARY KEY. Consequently every valid `sys_constraints` row has a backing `index_id`; there is no constraint payload and no payload grammar in schema version 1.
 
 `constraint_id` and `index_id` are each semantically unique in this relation. A non-NULL constraint name must be nonempty and is unique within its owning table; unnamed constraints remain SQL NULL and no hidden generated name is persisted. Each row references an existing table and an existing `sys_indexes` row for that same table whose `index_name` is SQL NULL and `is_unique=true`. The ordered constrained columns are exactly that index's `sys_index_columns` rows; no duplicate column array exists.
 
@@ -10551,7 +10787,7 @@ The exact semantic row identity is:
  stats_txn_id, stats_command_id, chunk_index)
 ```
 
-and it is unique among visible rows. `(stats_txn_id, stats_command_id)` is exactly Chapter 34's `StatsVersion`; all rows with that version are created by that transaction/command and their payload headers repeat the same identity. At original insertion, each row's ordinary MVCC `xmin/cmin` equals its `stats_txn_id/stats_command_id`. Any later architecture-authorized tuple freezing changes only ordinary MVCC ownership metadata, never the immutable StatsVersion columns; whether/when status reclamation may do so remains the separate M-009 question.
+and it is unique among visible rows. `(stats_txn_id, stats_command_id)` is exactly Chapter 34's `StatsVersion`; all rows with that version are created by that transaction/command and their payload headers repeat the same identity. At original insertion, each row's ordinary MVCC `xmin/cmin` equals its `stats_txn_id/stats_command_id`. Any later architecture-authorized tuple freezing changes only ordinary MVCC ownership metadata, never the immutable StatsVersion columns. The outer tuple `xmin/cmin` follows ordinary catalog MVCC/freezing and may require creator-status lookup until made independent; after committed publication, the payload `stats_txn_id/stats_command_id` follows §34.3.1's opaque generation-identity rule and never pins transaction-status history.
 
 For one `(table_id, scope_kind, scope_id, StatsVersion)`, `chunk_count` is in `1..1,048,576`, every row has the same value, and `chunk_index` is exactly the contiguous set `0..chunk_count-1`. Every nonfinal fragment has exactly 4096 bytes and the final fragment has `1..4096` bytes. Reconstruction sorts by `chunk_index`, concatenates, and then applies every §34.14 total-length, checksum, header, identity, manifest, and payload validation rule. A duplicate/missing/noncontiguous chunk or mismatched count makes that scope/version incomplete; rows from versions are never mixed.
 
@@ -10897,6 +11133,8 @@ nonzero entry flags/reserved fields
 nonzero bytes 256..8191
 checksum mismatch
 ```
+
+The exact family/version classification is §4.14.2: zero version selectors are corruption, while an exact CATALOG bootstrap family advertising a greater bootstrap/catalog/relation format version is unsupported and is not parsed through these entries/descriptors.
 
 ### 16.9.4 Minimal interpretation rule
 
@@ -11366,6 +11604,8 @@ statistics histogram boundaries
 ```
 
 It is independent of the executor's in-memory `Value`, Vector, or StringRef representation.
+
+PersistedScalarV1 has no embedded version field. Its enclosing supported catalog/default/statistics grammar selects this exact codec. Unknown TypeIds, flags, lengths, reserved bytes, or padding are malformed v1 scalar data, not a future scalar version and not preserve-and-round-trip material. Under §4.14.6, required default/catalog ownership treats that as corruption; advisory statistics invalidate only the affected statistics generation.
 
 ### 17.13.1 Scalar header
 
@@ -13359,6 +13599,8 @@ scalar TypeId == target column TypeId
 ```
 
 before exposing the default to binding/execution.
+
+Default format dispatch is exact under §4.14.2. With `DBLUSDEF` magic, version zero or malformed version-1 bytes are corrupt required default metadata; a positive version greater than one is `UNSUPPORTED_DEFAULT_FORMAT`. Either prevents reconstruction of the owning required column descriptor. V1 does not parse a future expression-bearing blob as a scalar or ignore unknown trailing bytes.
 
 Original SQL text MAY additionally be retained for display/debugging, but it is not execution authority.
 
@@ -16292,7 +16534,9 @@ statement success
     ↓
 transaction-local descriptor available to own later statements
     ↓
-terminal COMMITTED -> publish global immutable descriptor/cache entry
+terminal COMMITTED C4 -> generation globally committed
+    ↓
+C5 -> install or safely invalidate/bypass the global descriptor/cache entry
 ```
 
 ANALYZE never mutates an existing published `StatsDescriptor` in place.
@@ -16885,10 +17129,12 @@ outside owning transaction:
     until owning transaction reaches terminal COMMITTED
 ```
 
-At COMMITTED publication:
+At terminal COMMITTED publication:
 
 ```text
-install one complete immutable descriptor/cache entry
+generation becomes eligible for global committed selection
+then C5 installs one complete immutable descriptor/cache entry
+or establishes the required safe cache fallback
 ```
 
 without mutating descriptors held by existing planners.
@@ -16898,6 +17144,110 @@ ABORT, cancellation, an incomplete chunk set, a missing manifest member, or payl
 After restart, the catalog/statistics loader selects the highest visible committed TABLE-manifest StatsVersion whose complete listed COLUMN/INDEX payload set validates.
 
 It may fall back to an older complete visible version or to missing-statistics behavior rather than combining fragments from different versions.
+
+### 34.3.1 StatsVersion publication and transaction-status lifetime
+
+`StatsVersion = (TxnId, CommandId)` has two deliberately separate lifetime
+roles:
+
+```text
+before global committed publication:
+    identify transaction-owned ANALYZE rows/candidate state while ordinary
+    transaction status and catalog MVCC determine whether those writes publish
+
+after global committed publication:
+    immutable opaque generation identity and deterministic freshness key among
+    catalog rows already admitted as committed
+```
+
+During live execution, the owning transaction and current command assign the
+pair. Other transactions cannot use its rows before ordinary terminal COMMITTED
+publication. The owning transaction may use its complete transaction-local
+descriptor after successful statement completion under the existing CommandId
+boundary; ABORT or crash without a surviving committed outcome prevents global
+selection.
+
+The runtime transition to globally published identity occurs at §15.5 C4's
+terminal COMMITTED publication after durable C3, with C5 installing or safely
+invalidating/bypassing the derived cache. After a crash, recovery's committed
+transaction classification plus ordinary catalog MVCC reconstruction establishes
+the equivalent boundary before statistics loading. Once a `sys_statistics` row
+has been admitted as visible committed catalog input, a loader MUST NOT re-prove
+its creator outcome by looking up the payload `stats_txn_id`.
+
+The authoritative complete-generation selection is:
+
+```text
+1. obtain rows through ordinary catalog MVCC for the caller; this step excludes
+   aborted/uncommitted outer tuple versions and may consult/freeze their tuple xmin
+2. retain only rows applicable to the current catalog object/schema rules
+3. decode and group by exact table/scope/StatsVersion identity
+4. validate identifier domains, row/payload StatsVersion equality, unique and
+   contiguous chunks, TABLE manifest, required COLUMN/INDEX members, object
+   identities, and the §34.14 payload grammar
+5. among complete visible committed generations for one table, select the
+   greatest StatsVersion under unsigned lexicographic (txn_id, command_id) order
+6. otherwise use an older complete generation or missing-statistics fallback
+```
+
+Step 1's **outer catalog tuple MVCC metadata** and step 3's **payload identity**
+are not interchangeable. Vacuum may later rewrite the outer tuple `xmin` to
+`FROZEN_TXN_ID`; it never rewrites payload `stats_txn_id`. The latter is not
+passed to the transaction-status store, does not retain a status page/cache entry,
+and remains directly comparable after its creator's status has been reclaimed.
+
+TxnIds are globally monotonically allocated and never reused under §9.2, so the
+unsigned TxnId component supplies the primary deterministic order while valid
+identifiers remain; this section does not alter the separate exhaustion boundary.
+CommandIds are monotonic and never reused within one transaction under §9.6, so
+the command component distinguishes and orders multiple ANALYZE statements by
+that transaction, including repeated analyses of one table. The ordering is only
+a freshness preference among otherwise usable generations. It does not prove
+object liveness, statistics accuracy, or semantic query facts.
+
+Status reclamation therefore ignores `MIN(sys_statistics.stats_txn_id)`. A very
+old complete generation remains structurally usable after its creator status is
+`RETIRED`; a missing/reclaimed status entry is neither ABORTED nor malformed
+StatsVersion evidence. Object/catalog applicability still decides whether a
+generation belongs to a currently usable table, and old-generation deletion is
+ordinary catalog MVCC/maintenance work. Those rules do not resolve M-011
+maintenance coordination.
+
+Process-local statistics cache keys compare the stored numeric pair directly.
+They retain no transaction-status object pointer, status-page pin, reclamation
+guard, or terminal-outcome-cache entry solely for StatsVersion, and loading old
+statistics never repopulates ancient terminal outcomes. Cache failure after
+durable commit remains the M-005 installed/invalidated/fallback case and cannot
+invalidate the committed catalog generation.
+
+Restart and crash outcomes are exact:
+
+| Point | Statistics outcome |
+|---|---|
+| crash before a surviving durable ANALYZE commit | transaction rows are loser/aborted catalog versions and are not selected |
+| durable COMMIT survives, crash precedes C4/C5 cache publication | recovery establishes COMMITTED; visible complete rows load normally without payload-status lookup |
+| status reclamation occurs much later | StatsVersion remains unchanged and usable; status pages may be sparsely reclaimed |
+| restart after that reclamation | catalog MVCC/frozen outer rows establish visibility; loader accepts the old complete generation without creator-status history |
+
+StatsVersion structural validation still rejects/falls back from an invalid
+normal-TxnId domain (`INVALID_TXN_ID`, `FROZEN_TXN_ID`, or outside the allocated
+identity contract), an invalid CommandId carrier/range, row/payload mismatch,
+cross-version chunks, or duplicate/malformed chunk identity under §§16.5.7 and
+34.14. Missing transaction status is not one of those conditions.
+
+V1 forbids:
+
+1. retaining status pages because statistics payloads contain their TxnIds;
+2. invalidating statistics because `stats_txn_id` is below the reclaim cutoff;
+3. interpreting missing/retired creator status as ABORTED;
+4. querying transaction status on statistics-cache load after catalog visibility;
+5. rewriting/deleting StatsVersion solely to advance status reclamation;
+6. treating payload `stats_txn_id` as the outer catalog tuple `xmin`;
+7. using StatsVersion to establish object liveness;
+8. selecting aborted/uncommitted ANALYZE rows because their pair compares newer;
+9. making valid statistics lifetime depend on status-history retention; and
+10. extending this opaque-identity exception to ordinary status-dependent heap or
+    catalog MVCC TxnIds.
 
 ## 34.4 TableStatistics
 
@@ -17373,7 +17723,7 @@ counts/fractions/order invariants
 TABLE manifest completeness
 ```
 
-A payload version unknown to the current engine, malformed statistics payload, or incomplete statistics version invalidates that statistics version.
+A payload version unknown to the current engine, malformed statistics payload, or incomplete statistics version invalidates that statistics version. After ordinary catalog rows/chunks reassemble safely, exact `DBLUSSTA` plus a readable positive `payload_version>1` is enough to classify unsupported advisory metadata without applying v1 checksum/layout parsing; version zero or malformed version-1 bytes are an invalid generation. Neither is parsed best-effort.
 
 Because statistics are rebuildable performance metadata, such a failure may produce:
 
@@ -17385,7 +17735,14 @@ rather than making otherwise valid user data unreadable.
 
 Neither a structurally valid descriptor nor a descriptor rejected as corrupt can produce semantic proof. Rejected statistics are ignored in favor of an older valid descriptor or missing-statistics fallback; the separate statistics-tolerance policy does not alter this rule.
 
+This is the narrow §4.14.5 IGNORABLE_EXTENSION/fallback whitelist. It begins only after ordinary M-008 heap/tuple decoding yields decodable `sys_statistics` rows. Malformed catalog-page/tuple physical framing remains corruption; unknown core catalog descriptors/defaults do not inherit statistics tolerance. M-013 continues to own numerical tolerance inside otherwise known payload version 1.
+
 The loader MUST NOT mix rows from different StatsVersions to repair an incomplete descriptor.
+
+Under §34.3.1, a reclaimed/missing terminal-status entry for
+`stats_txn_id` is not a payload-validation input and MUST NOT invalidate an
+otherwise complete generation. Structural validation checks the pair's numeric
+domains and consistency directly; it does not call transaction-status lookup.
 
 Arbitrary C++ object graphs, enum ordinals, process pointers, or native object dumps are never serialized.
 
@@ -17402,6 +17759,12 @@ A concurrent committed ANALYZE publishes a new immutable descriptor atomically.
 Existing planners may finish with the old descriptor.
 
 The catalog/statistics cache is an acceleration mechanism and preserves the caller's catalog visibility rules.
+
+StatsVersion cache keys obey §34.3.1: they compare the stored unsigned numeric
+pair directly and retain no transaction-status page/cache ownership solely for
+that identity. A cache miss reloads through catalog MVCC and complete-generation
+validation; it does not query or repopulate creator terminal status from the
+payload pair.
 
 Global cache publication is a commit-side effect; an aborted transaction never leaves its descriptor globally published.
 
@@ -17457,6 +17820,10 @@ A transaction-local or later-aborted ANALYZE does not reset globally visible mod
 16. Statistics rejected as corrupt and statistics accepted as structurally valid are both incapable of creating a semantic proof; they differ only in whether their estimates are used or fallback is selected.
 17. Partial transaction-owned ANALYZE rows require transaction abort on statement failure even though descriptor completeness rules prevent their global use.
 18. Post-commit statistics-cache installation failure retains COMMITTED and uses an older/missing descriptor fallback rather than redefining transaction outcome.
+19. Before global publication, ordinary transaction/catalog MVCC decides whether ANALYZE rows commit; after publication, StatsVersion is opaque status-independent identity.
+20. Complete-generation selection uses visible catalog rows, manifest/chunk/payload validation, and unsigned lexicographic StatsVersion ordering without payload creator-status lookup.
+21. Status reclamation does not invalidate, rewrite, delete, or retain status pages for old complete statistics generations.
+22. Outer `sys_statistics` tuple MVCC metadata remains subject to ordinary freezing/status rules independently of its payload `stats_txn_id`.
 
 ---
 
