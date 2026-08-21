@@ -6621,6 +6621,7 @@ Lsn last_wal_lsn
 bool has_persistent_writes
 bool current_statement_has_published_write
 held logical locks
+held SchemaLock/TableWriterGate/object-publication modes
 cancellation/deadlock flag
 ```
 
@@ -7173,7 +7174,9 @@ After this linearization point:
 - a newly captured snapshot does not place the transaction in `active`,
 - the terminal outcome cannot revert.
 
-Transaction-lifetime logical locks MUST NOT become acquirable by another transaction until this terminal publication point has completed.
+Transaction-lifetime logical locks and the transaction-owned SchemaLock,
+TableWriterGate, and object-publication modes MUST NOT become acquirable by
+another transaction until this terminal publication point has completed.
 
 Thus another writer observes either:
 
@@ -7246,7 +7249,7 @@ Durable TxnId block reservation prevents harmful TxnId reuse even when a read-on
 11. REPEATABLE READ reuses one transaction snapshot and changes only its command boundary for later statements.
 12. Runtime terminal outcome dominates nonterminal/active lookup.
 13. Terminal publication and snapshot-active removal have one synchronization linearization point.
-14. Logical transaction locks are not released before terminal publication has linearized.
+14. Logical transaction locks and transaction-owned SchemaLock/TableWriterGate/object-publication modes are not released before terminal publication has linearized.
 15. A transaction is not published COMMITTED before its commit WAL is durable.
 16. Read-only transactions may end without terminal persistent status because they create no persistent TxnId references.
 17. A referenced normal TxnId with no legal active/terminal/frozen/retired interpretation is an invariant failure, not implicitly committed.
@@ -7549,6 +7552,12 @@ KEY_RANGE
 ```
 
 The physical B+ tree/heap latch architecture is separate from these transaction-lifetime logical locks.
+
+`SchemaLock`, `TableWriterGate`, and the object-publication gate are separate
+coordination domains rather than additional LockManager key families. They
+nevertheless participate in §11.13's same transaction wait-for graph whenever
+one transaction blocks on another; separate storage does not permit separate
+deadlock visibility.
 
 ## 11.2 Tuple-write lock identity
 
@@ -8074,39 +8083,312 @@ The abstraction must allow later:
 
 A lock-free lock table is not required by the baseline architecture.
 
-## 11.13 Deadlock detection
+## 11.13 Unified transaction-level gates and deadlock detection
 
-When a transaction blocks on a logical lock owned by another transaction, the wait-for graph receives:
+This section is the canonical v1 coordination/deadlock contract for every
+transaction-owned blocking resource that can be retained across statements. It
+covers the existing `TUPLE_WRITE` and `UNIQUE_KEY` locks plus the DDL,
+writer-exclusion, and statistics-publication gates defined elsewhere. Those
+gates need not share one lock-table container, but every transaction-to-
+transaction blocking dependency among them shares one wait-for graph and one
+victim rule.
+
+### 11.13.1 Transaction-level synchronization domains
+
+The closed v1 domain registry is:
+
+| Domain | Scope and modes | Transaction ownership and release | Compatibility |
+|---|---|---|---|
+| `SchemaLock` | One database-global exclusive schema/catalog-DDL gate. Same-transaction acquisition is reentrant. | Attempt-owned while DDL remains pre-publication; after successful schema-changing DDL or the first transaction-owned catalog mutation, retained through §9.14 terminal publication and released in §15.5 C5 or §15.6 A3. | Conflicts with another transaction's `SchemaLock`. |
+| `TableWriterGate(TableId)` | Per-table `SHARED_WRITER` and `EXCLUSIVE_DDL` modes. | Persistent DML acquires shared before its first write to that table and, once granted for persistent DML, retains it through terminal publication. CREATE INDEX, DROP TABLE, and DROP INDEX acquire exclusive for their target table; a clean pre-publication DDL failure may release attempt-only exclusive ownership under §39.1.4. | Shared/shared is compatible. Exclusive conflicts with every mode held by another transaction. Same-transaction exclusive subsumes a later shared request. |
+| object-publication gate | `STATS_PUBLISH(TableId, schema_version, immutable manifest)` and `MANIFEST_CHANGE(TableId, affected IndexIds)` modes. `STATS_PUBLISH` claims are acquired for the table and then manifest IndexIds in ascending order. A DDL manifest-change scope overlaps every statistics claim whose table/manifest it can change. | A statistics claim that authorizes the first `sys_statistics` row and a manifest-change claim that authorizes RETIRING/catalog publication are retained through terminal publication. A failed operation may release them before that boundary only under the exact §14.17.1/§39.1.4 pre-publication rules. | Compatible `STATS_PUBLISH` claims are shared. An overlapping `MANIFEST_CHANGE` conflicts with every statistics or manifest-change claim owned by another transaction. |
+| `TUPLE_WRITE` / `UNIQUE_KEY` | Exact §11.2/§11.8 exclusive logical keys. | Strict transaction duration under §11.11. | Existing exclusive compatibility. |
+
+`MANIFEST_CHANGE` is a mode of the already-established object-publication gate,
+not a persisted object state or a new catalog field. CREATE INDEX uses the
+target table scope; DROP INDEX uses the owning table plus the dropped IndexId;
+DROP TABLE uses the table and its complete current index manifest. CREATE TABLE
+has no pre-existing TableId/manifest with which an ANALYZE can conflict and
+therefore needs only `SchemaLock` until its new catalog identities exist.
+
+`SchemaLock` remains intentionally database-global in v1. This section does not
+replace it with per-table schema locking. `TableWriterGate` remains distinct
+from `TUPLE_WRITE`/`UNIQUE_KEY`, and the object-publication gate remains distinct
+from object `LIVE/RETIRING/RETIRED` lifetime state.
+
+### 11.13.2 Per-statement order and cross-statement admission
+
+Within one statement, acquisition uses these canonical shapes:
 
 ```text
-waiter -> current owner
+persistent DML on T:
+    TableWriterGate(T) SHARED_WRITER
+        -> TUPLE_WRITE / UNIQUE_KEY in their existing orders
+        -> short physical latches
+
+schema-changing DDL:
+    SchemaLock
+        -> required TableWriterGate EXCLUSIVE_DDL targets by ascending TableId
+        -> optional private-file construction/build, with no short latch retained
+           across the next transaction-gate wait
+        -> MANIFEST_CHANGE scopes by TableId, then IndexId ascending
+        -> any required tuple/key locks
+        -> short live-object/catalog publication latches
+
+ANALYZE publication:
+    no page/B+ latch or read-epoch guard
+        -> STATS_PUBLISH table claim
+        -> STATS_PUBLISH IndexId claims ascending
+        -> current-object/manifest revalidation
+        -> statistics catalog publication
 ```
 
-dependency edges.
+No current v1 DDL statement has more than one target table. `DROP TABLE`'s
+dependent indexes remain one table scope. The ascending-TableId rule is locked
+for any already-supported operation that must acquire several table gates; it
+does not add a new multi-table DDL feature.
 
-Cycle detection may run:
+Per-statement order alone is not a deadlock proof because explicit transactions
+retain ownership across later statements. V1 therefore allows a later statement
+to request a resource earlier in the per-statement order and uses the unified
+wait-for graph below. It does **not** globally reject unrelated DDL after DML or
+ANALYZE merely to avoid a possible cycle.
 
-- when blocking edges are added,
-- through a lightweight detector thread,
-- or through a combination of both.
+Two same-transaction transitions are proactively rejected before waiting,
+durable ID/file allocation, or the current statement's first persistent
+publication:
 
-The initial victim policy is deterministic:
+1. `TableWriterGate(T) SHARED_WRITER -> EXCLUSIVE_DDL` for the same `T`. V1 has
+   no writer-gate upgrade protocol. A transaction that already owns exclusive
+   on `T` may perform later DML on `T`; the exclusive mode subsumes shared.
+2. A `MANIFEST_CHANGE` affecting a table/index manifest for which the same
+   transaction has already published rows under a retained `STATS_PUBLISH`.
+   Such DDL would invalidate that transaction's immutable generation before
+   commit. DDL on an unrelated manifest remains legal.
+
+The conceptual proactive error is
+`UNSUPPORTED_TRANSACTION_GATE_TRANSITION` (a more specific
+`DDL_NOT_ALLOWED_AFTER_WRITE` is permitted for case 1). It is not a deadlock
+victim or database corruption. Because admission occurs before this statement's
+publication boundary, an explicit transaction remains `ACTIVE` under §39.1;
+autocommit aborts its one-statement transaction normally. A same-transaction
+request already covered by a stronger or identical mode is reentrant/subsumed,
+not a wait.
+
+DDL followed by ANALYZE of the transaction's own final manifest remains legal.
+The statistics revalidation must see the exact transaction-local post-DDL
+manifest; the same owner may hold its `MANIFEST_CHANGE` and compatible
+`STATS_PUBLISH` modes together. Once those statistics rows publish, a later
+same-scope manifest change is case 2 above.
+
+### 11.13.3 Retained-ownership compatibility matrix
+
+The only cell classifications are `ALLOW`, `WAIT + DEADLOCK GRAPH`, and
+`REJECT BEFORE WAIT`; no listed combination is left implementation-defined.
+`ALLOW` includes an identical/reentrant or stronger same-owner mode that needs
+no sleep. `WAIT + DEADLOCK GRAPH` is a legal request that is granted immediately
+if no external owner or elected queue predecessor blocks it, otherwise §11.13.4
+applies. Mixed retained state uses the most restrictive applicable cell. Scope
+qualifiers are normative.
+
+| Transaction already retains | Later `SchemaLock` | Later shared `TableWriterGate(T)` | Later exclusive `TableWriterGate(T)` | Later `STATS_PUBLISH` | Later `MANIFEST_CHANGE` |
+|---|---|---|---|---|---|
+| `SchemaLock` | `ALLOW` (reentrant) | `WAIT + DEADLOCK GRAPH`; an already-owned same-T exclusive mode is `ALLOW` | `WAIT + DEADLOCK GRAPH`; owning shared on the same T instead makes it `REJECT BEFORE WAIT` | `WAIT + DEADLOCK GRAPH`; an overlapping same-owner manifest mode is compatible only after exact final-manifest revalidation | `WAIT + DEADLOCK GRAPH`; an identical already-owned scope is `ALLOW` |
+| shared `TableWriterGate(A)` | `WAIT + DEADLOCK GRAPH`, including DDL for unrelated B | same A: `ALLOW`; different B: `WAIT + DEADLOCK GRAPH` | same A: `REJECT BEFORE WAIT`; different B: `WAIT + DEADLOCK GRAPH` after SchemaLock | `WAIT + DEADLOCK GRAPH` | same A: `REJECT BEFORE WAIT`; unrelated B: `WAIT + DEADLOCK GRAPH` after SchemaLock |
+| exclusive `TableWriterGate(A)` | `ALLOW` because canonical acquisition already owns SchemaLock | same A: `ALLOW`; different B: `WAIT + DEADLOCK GRAPH` | same A: `ALLOW`; different B: `WAIT + DEADLOCK GRAPH` | `WAIT + DEADLOCK GRAPH`; overlapping same-owner manifest mode is compatible only after exact final-manifest revalidation | same already-owned scope: `ALLOW`; different scope: `WAIT + DEADLOCK GRAPH` |
+| `STATS_PUBLISH(A,manifest)` after row publication | unrelated DDL: `WAIT + DEADLOCK GRAPH`; same-scope manifest-changing DDL is rejected before requesting SchemaLock | `WAIT + DEADLOCK GRAPH` | same affected manifest: `REJECT BEFORE WAIT`; unrelated B: `WAIT + DEADLOCK GRAPH` after SchemaLock | same/overlapping claim: `ALLOW`; unrelated scope: `WAIT + DEADLOCK GRAPH` | same affected manifest: `REJECT BEFORE WAIT`; unrelated scope: `WAIT + DEADLOCK GRAPH` after SchemaLock |
+| `MANIFEST_CHANGE(A,scope)` | `ALLOW` because canonical acquisition already owns SchemaLock | same A: `ALLOW` because canonical acquisition already owns exclusive; different B: `WAIT + DEADLOCK GRAPH` | same A: `ALLOW`; different B: `WAIT + DEADLOCK GRAPH` | overlapping same-owner final manifest: `ALLOW` after exact revalidation; unrelated scope: `WAIT + DEADLOCK GRAPH` | same scope: `ALLOW` (reentrant); different scope: `WAIT + DEADLOCK GRAPH` |
+
+Requests for `TUPLE_WRITE` and `UNIQUE_KEY` after any gate in the table remain
+legal in their existing order and use the same graph if blocked. No transaction
+in `MUST_ABORT`, `COMMITTING`, or `ABORTING` may begin a later ordinary
+statement or acquire a new ordinary gate; it may only finish its required
+terminal protocol.
+
+The resulting explicit-transaction behavior is exact:
+
+| Sequence | V1 outcome |
+|---|---|
+| `UPDATE A; CREATE TABLE B` | Legal. The SchemaLock request may wait and participates in the graph. |
+| `UPDATE A; CREATE INDEX ON A` | Rejected before waiting by the same-table shared-to-exclusive rule; the explicit transaction remains ACTIVE because the DDL statement published nothing. |
+| `ANALYZE A; CREATE TABLE B` | Legal. The SchemaLock request may wait and participates in the graph. |
+| `ANALYZE A; CREATE/DROP INDEX A` or `DROP TABLE A` after statistics rows published | Rejected before waiting because it would invalidate the retained immutable manifest. |
+| `CREATE TABLE/INDEX;` then DML | Legal. A same-target exclusive writer gate subsumes the transaction's shared DML request; other target gates use the graph. |
+| several supported DDL statements | Legal under the reentrant global SchemaLock and per-target gates, except the two proactive rejection cases above. |
+
+Autocommit uses the same gates, graph, victim policy, and revalidation. Its
+single statement simply cannot create a later-statement inversion in the same
+transaction.
+
+### 11.13.4 Unified wait-for graph and deterministic victim
+
+Every transaction-level sleep caused by another transaction creates edges in
+one database-local graph. Before the waiter can sleep, under synchronization
+that is atomic with observing the incompatible owners/queue dependencies, it
+installs:
 
 ```text
-abort the youngest transaction in the detected cycle
-=
-highest TxnId in that cycle
+waiter TxnId -> every transaction whose ownership or earlier queued request
+                currently prevents this grant
 ```
 
-The chosen victim receives a cancellation/deadlock flag.
+The mandatory edge registry is:
 
-Blocked waits affected by the victim decision are awakened.
+| Wait request | Edge target(s) | Recheck after wake |
+|---|---|---|
+| `SchemaLock` exclusive | Current SchemaLock owner | Catalog/name state and every bound DDL identity/precondition |
+| shared `TableWriterGate(T)` | Exclusive owner, if any | Target descriptor, transaction-local schema/index set, and DML target/candidate state |
+| exclusive `TableWriterGate(T)` | Every other shared or exclusive owner | Table identity/liveness, descriptor, writer drain, and DDL preconditions |
+| `STATS_PUBLISH` | Every overlapping `MANIFEST_CHANGE` owner or queue dependency | Complete §14.17.1 table/schema/index manifest and non-RETIRING state |
+| `MANIFEST_CHANGE` | Every overlapping statistics/manifest owner or queue dependency | Current manifest, object liveness, DDL name/identity state, and RETIRING eligibility |
+| `TUPLE_WRITE` / `UNIQUE_KEY` | Existing conflicting owner(s) | Existing §11.3/§11.10 full target/candidate/status recheck |
+| optional fairness/queue delay | Every earlier transaction request whose ordering alone prevents grant | The resource-specific recheck above |
+| new claim observes already-published RETIRING | No edge and no sleep; reject/cancel through object revalidation | Not applicable |
+| post-commit physical retirement drain | No transaction edge; terminal DROP no longer waits on a gate held by an ACTIVE transaction | Exact descriptor/guard/frame/file-owner drain before unlink |
 
-The victim follows the ordinary transaction abort/status-publication path.
+An implementation may grant compatible requests without FIFO fairness. If it
+chooses to make a compatible request sleep behind an earlier incompatible
+waiter, that predecessor is a real graph dependency; queue policy must not
+create an unrepresented wait.
 
-Timeouts MAY exist for diagnostics or fallback behavior.
+For a shared writer-gate wake, physical write authority is revalidated against
+the **current object-publication state**, not only the statement's older catalog
+snapshot. If the table is RETIRING/dropped, the DML attempt fails before
+publication. If CREATE/DROP INDEX changed only the current index manifest, the
+pre-write attempt replaces its physical index-maintenance/UNIQUE-enforcement set
+with the current committed plus transaction-local applicable manifest before
+any heap/index mutation. This does not change SQL row visibility or add ALTER
+schema translation; it prevents a writer that bound before an offline index
+build from omitting the newly authoritative index after it wakes.
 
-Timeout expiration is not the primary deadlock-correctness mechanism.
+Adding or replacing wait edges performs synchronous cycle detection before the
+new waiter sleeps. Conceptually, for every cyclic strongly connected component
+in the resulting finite transaction graph, the victim is:
+
+```text
+the highest normal TxnId in that cyclic component
+```
+
+This is the existing youngest-transaction policy, now applied across every
+registered resource family. The graph algorithm/data structure is not fixed,
+but an implementation may not defer detection such that a known cycle can wait
+indefinitely. A detector thread may perform additional diagnostics or catch
+stale bookkeeping, but is not the only correctness mechanism. Timeouts may
+diagnose starvation or I/O delay; they do not choose an arbitrary deadlock
+victim.
+
+The selected victim receives `DEADLOCK_DETECTED`, atomically enters
+`MUST_ABORT`, and is driven through the ordinary §15.6 abort path regardless of
+whether its current statement crossed the publication boundary. This is the
+transaction-fatal M-005 matrix row, not `DATABASE_NONCONTINUABLE`. Its outgoing
+wait edges are canceled so it can abort, but all resources it owns remain
+protected until ABORTED terminal publication and are released only at A3.
+Waiters wake on actual release, remove/rebuild their edges, and perform the full
+resource-specific revalidation before continuing. An internal inability to
+maintain graph/ownership coherence is an invariant failure and may be
+noncontinuable; an ordinary detected cycle is not.
+
+### 11.13.5 Nontransaction owners, retirement, and lifecycle
+
+VACUUM's `TableVacuumOwner`, `OBJECT_USE`, `StatusHistoryGuard`, page/read-epoch
+guards, physical latches, file-retirement drain, checkpoint, and shutdown gates
+are not transaction-lifetime lock owners in this graph. Their canonical
+protocols prevent cross-graph cycles:
+
+- VACUUM/ANALYZE scan ownership never waits for SchemaLock, TableWriterGate,
+  object-publication, tuple, or unique ownership while holding a page latch or
+  read-epoch guard;
+- DROP may mark RETIRING and commit before `OBJECT_USE`/descriptor/physical
+  owners drain, so the DDL transaction does not wait for those owners while
+  retaining transaction gates;
+- RETIRING rejects a new use/statistics claim or causes its current
+  revalidation to fail; it is not an indefinite wait on a maintenance worker;
+- physical unlink runs only after terminal DROP and drains/cancels maintenance
+  ownership outside the transaction graph;
+- an internal maintenance action that actually uses a transaction-owned gate
+  or catalog transaction is represented by its real TxnId and follows this
+  graph exactly; it may not be an anonymous blocker.
+
+Selecting a deadlock victim does not itself release object, descriptor,
+BufferPool, guard, or frame ownership. If a DROP victim had marked RETIRING,
+its ABORT restores LIVE only through the existing object-gate protocol. If DROP
+commits, physical unlink still waits for all owners to drain. No victim decision
+is physical-retirement authorization.
+
+On `READY -> DRAINING`, no new ordinary statement or gate request is admitted;
+existing victims and other nonterminal transactions complete the canonical
+COMMIT/ABORT handling in §3.3.6. At `DATABASE_NONCONTINUABLE`, no new ordinary
+acquisition begins, retained ownership is not guessed away, and only the
+existing controlled teardown/recovery rules apply. Connection loss likewise
+drives ACTIVE/MUST_ABORT transactions through §39.1.7 and cannot remove their
+gate ownership before terminal cleanup.
+
+### 11.13.6 Operation gate-order table
+
+| Operation | Transaction/maintenance gates in order | Lifetime | Can block / graph | Mandatory wake/revalidation |
+|---|---|---|---|---|
+| SELECT | No SchemaLock/TableWriterGate/publication claim; ordinary snapshot/descriptors | Statement/transaction snapshot rules | No transaction gate wait from this registry | Ordinary descriptor/page validation |
+| INSERT/UPDATE/DELETE on T | shared `TableWriterGate(T)` -> existing tuple/unique locks | Through terminal publication after acquisition for persistent DML | Yes; every transaction blocker is in the unified graph | Descriptor/target/key/visibility recheck appropriate to the wait |
+| ANALYZE scan | `OBJECT_USE` table then IndexIds; page/read-epoch guards only while scanning | Scan/safe-point lifetime | Nontransaction cancellation protocol, not graph | Object still LIVE/current before each protected continuation |
+| ANALYZE publication | `STATS_PUBLISH` table then IndexIds ascending | Through terminal after first statistics-row publication | Yes; unified graph | Complete current manifest and object-state revalidation |
+| CREATE TABLE | global `SchemaLock` | Through terminal after catalog publication; attempt-only before it | Yes; unified graph | Name/catalog allocator and DDL prerequisites |
+| CREATE INDEX on T | `SchemaLock` -> exclusive `TableWriterGate(T)` -> `MANIFEST_CHANGE(T)` | Through terminal after catalog publication; attempt-only before it | Yes; unified graph | Table/name/descriptor/writer drain/manifest and file-publication prerequisites |
+| DROP TABLE T | `SchemaLock` -> exclusive `TableWriterGate(T)` -> `MANIFEST_CHANGE(T,all current indexes)` -> RETIRING | Through terminal; physical drain may outlive transaction | Yes for transaction gates; RETIRING/use drain follows maintenance protocol | Current table/manifest, no-new-publication winner, and retirement state |
+| DROP INDEX I on T | `SchemaLock` -> exclusive `TableWriterGate(T)` -> `MANIFEST_CHANGE(T,I)` -> RETIRING(I) | Through terminal; physical drain may outlive transaction | Yes for transaction gates | Current index ownership/manifest and retirement state |
+| VACUUM publication unit | `OBJECT_USE` -> TableVacuumOwner -> status/read-epoch/page ownership | Per pass/unit as §14.17.1 | No transaction gate wait while short ownership is retained | Existing vacuum/object/status rechecks |
+| COMMIT | No new ordinary gate; terminal protocol C0-C6 | Release all retained transaction gates at C5 after C4 COMMITTED publication | Terminal WAL/durability waits are separately owned | Commit prerequisites and cache/ownership coherence |
+| ABORT / deadlock victim | No new ordinary gate; terminal protocol A0-A4 | Release all retained transaction gates at A3 after A2 ABORTED publication | Victim wait is canceled; owned gates remain until A3 | Abort/status publication and cleanup coherence |
+
+### 11.13.7 Adversarial outcomes and completeness argument
+
+The required outcomes are:
+
+1. T1 `UPDATE A`; T2 `CREATE INDEX A`; T1 `CREATE TABLE B`: T2 waits on
+   T1's shared writer gate; T1 then waits on T2's SchemaLock. Both edges are in
+   one cyclic component. The higher TxnId is the victim; after its ABORTED
+   publication/releases, the survivor wakes, revalidates, and continues.
+2. T1 publishes `ANALYZE A`; T2 obtains SchemaLock/writer ownership and waits
+   for the A publication claim; T1 requests SchemaLock for unrelated B: the
+   publication and SchemaLock edges form one cycle and the higher TxnId aborts.
+   A same-scope DDL by T1 itself would instead be rejected before waiting.
+3. T1 `UPDATE A`; T2 `UPDATE B`; T1 requests DDL on B; T2 requests DDL on A:
+   the first SchemaLock owner can wait on the other's shared writer gate while
+   the second waits on SchemaLock. The unified graph selects the higher TxnId.
+4. T1 publishes `ANALYZE A`; T2 publishes `ANALYZE B`; both later request
+   cross-object DDL: any SchemaLock/publication cycle uses the same victim rule.
+   A transaction's own DDL affecting its already-published statistics scope is
+   rejected before waiting.
+5. Same-table shared-to-exclusive writer upgrade is rejected before waiting and
+   creates no self-edge.
+6. Autocommit UPDATE competing with autocommit CREATE INDEX has one writer-gate
+   dependency but no same-transaction later-statement inversion; UPDATE reaches
+   terminal outcome, then DDL wakes and revalidates. Any additional transaction
+   cycle is still detected normally.
+
+Completeness follows from the wait rule: every live transaction-to-transaction
+sleep on SchemaLock, either TableWriterGate mode, either object-publication
+mode, TUPLE_WRITE, UNIQUE_KEY, or queue ordering has an edge to every
+transaction preventing grant. Therefore any cycle composed of those resources
+is a cycle in the one finite graph and synchronously selects the deterministic
+highest-TxnId victim. The only excluded waits are either proactively rejected
+self-transitions or nontransaction physical/maintenance drains whose protocols
+do not wait back on transaction gates. Starvation remains a scheduling concern;
+it cannot be justified as an undetected cycle.
+
+V1 forbids:
+
+1. tracking object-publication waits but omitting SchemaLock/TableWriterGate waits;
+2. detecting deadlocks only among tuple/key locks or in separate graphs that cannot see cross-resource cycles;
+3. treating per-statement acquisition order as protection from retained cross-statement cycles;
+4. allowing a transaction-level sleep or fairness queue dependency without its complete graph edges;
+5. treating only same-table upgrade as dangerous while leaving other cycles unobserved;
+6. choosing victims by timeout, thread scheduling, or a policy other than highest TxnId in the cyclic component;
+7. releasing writer, schema, logical-lock, or publication ownership before terminal publication merely to break a cycle;
+8. granting a woken waiter without resource-specific current-state revalidation;
+9. treating an ordinary deadlock as database corruption/noncontinuability;
+10. waiting for any transaction gate while retaining a page/B+ latch, BufferPool frame transition, or read-epoch guard;
+11. using deadlock-victim selection as permission to unlink a RETIRING object's files before every owner drains;
+12. removing a disconnected transaction from the registry or leaking its gates without completing the existing terminal cleanup protocol.
 
 ## 11.14 Physical latches are not LockManager locks
 
@@ -8126,7 +8408,8 @@ Tuple logical locks MUST NOT be used to protect B+ page structure.
 
 Unique-key logical locks MUST NOT replace B+ structural latching.
 
-Logical-lock wait-for-graph edges are transaction-conflict edges, not page-latch dependency edges.
+Unified transaction wait-for-graph edges are transaction-conflict edges, not
+page-latch dependency edges.
 
 ## 11.15 Logical-locking invariants
 
@@ -8152,6 +8435,9 @@ Logical-lock wait-for-graph edges are transaction-conflict edges, not page-latch
 20. Deadlock correctness uses a wait-for graph; the initial victim is the highest TxnId in the cycle.
 21. Page/B+ latches never become LockManager locks.
 22. Logical transaction locks never substitute for physical B+ page-structure protection.
+23. SchemaLock, both TableWriterGate modes, both object-publication modes, TUPLE_WRITE, and UNIQUE_KEY share §11.13's one cross-resource wait-for graph.
+24. A transaction-level waiter installs every owner/queue dependency before sleeping and cannot leave a detected cycle waiting indefinitely.
+25. Deadlock victims retain all owned transaction gates through ABORTED publication and release them only during canonical abort cleanup.
 ---
 
 # 12. Write-Ahead Logging and Commit Durability
@@ -10525,7 +10811,7 @@ LIVE -> RETIRING -> RETIRED
 These are runtime/catalog-lifecycle concepts, not persisted catalog flags.
 `DROP` owns the `LIVE -> RETIRING` transition; aborting that DROP restores LIVE,
 while terminal COMMITTED makes retirement semantic and permanent. The object
-gate provides two distinct claim kinds:
+gate provides three distinct claim/mode kinds:
 
 ```text
 OBJECT_USE(TableId/IndexId)
@@ -10540,7 +10826,20 @@ STATS_PUBLISH(TableId, schema_version, immutable manifest identities)
     that changes the table/schema/index manifest
     once it authorizes a statistics-row publication, retained through COMMITTED
     or ABORTED terminal publication
+
+MANIFEST_CHANGE(TableId, affected IndexIds)
+    transaction-owned exclusive mode on the same object-publication gate
+    acquired by CREATE INDEX, DROP INDEX, or DROP TABLE before it may change
+    the applicable manifest or mark an affected identity RETIRING
+    conflicts with overlapping STATS_PUBLISH/MANIFEST_CHANGE claims
+    retained through terminal publication once it authorizes RETIRING or a
+    catalog manifest mutation
 ```
+
+The exact modes, same-transaction admission rules, release points, and unified
+wait-for-graph behavior are canonical in §11.13. In particular, DDL waiting on
+statistics and ANALYZE/later statements waiting on SchemaLock cannot form an
+unobserved cross-statement cycle.
 
 `VACUUM` and the expensive scan phase of `ANALYZE` hold `OBJECT_USE` claims on
 the table and every required index. Index claims are acquired in increasing
@@ -10666,6 +10965,12 @@ DROP marks any required identity RETIRING first:
     ANALYZE cannot acquire/revalidate its complete claim set and publishes no
     generation
 ```
+
+DROP obtains the overlapping `MANIFEST_CHANGE` mode before it may publish the
+RETIRING transition. If ANALYZE owns `STATS_PUBLISH`, DROP waits through the
+unified §11.13 graph; if DROP owns `MANIFEST_CHANGE` first, a new statistics
+claim cannot pass current-object revalidation. CREATE INDEX and DROP INDEX use
+the same winner rule for their table/index manifest scope.
 
 The same rule covers `DROP TABLE` and `DROP INDEX`. It does not use the object
 name, so DROP/recreate under the same name cannot capture stale statistics.
@@ -10818,13 +11123,15 @@ ANALYZE final publication:
 DROP:
     existing SchemaLock
     -> existing TableWriterGate exclusive where required
+    -> MANIFEST_CHANGE table/index scope
     -> object RETIRING transition/publication ordering
 ```
 
-`STATS_PUBLISH` waits are transaction-logical waits and participate in the
-existing wait-for graph/deadlock-victim rules. No operation waits for a long
-schema/object/maintenance/status/logical lock while holding a heap/B+ page latch,
-BufferPool frame transition, or read-epoch guard. Maintenance is best-effort:
+Every transaction-owned SchemaLock, TableWriterGate, STATS_PUBLISH, and
+MANIFEST_CHANGE wait follows §11.13's one graph and deterministic victim rule.
+No operation waits for a long schema/object/maintenance/status/logical lock
+while holding a heap/B+ page latch, BufferPool frame transition, or read-epoch
+guard. Maintenance is best-effort:
 v1 promises no starvation-free scheduler. Delay may retain disk/status history
 or degrade plans, but correctness never depends on prompt VACUUM or ANALYZE.
 
@@ -10869,6 +11176,8 @@ V1 explicitly forbids:
 12. running normal maintenance during recovery or continuing mutation after noncontinuable publication;
 13. waiting for maintenance/schema/status/logical ownership while retaining short page/B+ latches;
 14. physically deleting old statistics without ordinary catalog MVCC/snapshot safety.
+15. placing STATS_PUBLISH waits in a graph that cannot see SchemaLock, TableWriterGate, manifest-change, tuple-lock, or unique-key dependencies;
+16. treating a deadlock victim as permission to release publication/retirement ownership before §9.14 terminal publication.
 
 ## 14.18 Vacuum/reclamation invariants
 
@@ -10930,11 +11239,19 @@ Schema-changing DDL follows the global ordering:
 ```text
 SchemaLock
     -> target TableWriterGate exclusive, when required
+    -> private construction/build, with all short latches released before a
+       later transaction-gate wait
+    -> MANIFEST_CHANGE on affected table/index identities, when required
     -> logical tuple/unique locks, when required
-    -> physical page/B+ latches
+    -> live-object/catalog publication latches
 ```
 
 V1 does not perform an exclusive TableWriterGate upgrade while the same transaction already holds that table's shared gate. A schema-changing DDL statement that would require such an upgrade after prior persistent DML in the same explicit transaction is rejected rather than risking an upgrade deadlock.
+
+Section 11.13 is authoritative for cross-statement retained ownership. In
+particular, a shared writer gate does not globally prohibit later unrelated DDL:
+its SchemaLock wait is legal and enters the same graph as the writer-gate wait.
+The same-table upgrade remains the explicit proactive rejection.
 
 ## 15.2 INSERT
 
@@ -11069,7 +11386,8 @@ C3. submit commit_lsn to CommitCoordinator and do not leave COMMITTING until
 C4. execute the §9.14 runtime terminal-publication linearization, including
     runtime outcome cache COMMITTED, state COMMITTED, and active removal
 C5. put catalog/statistics caches in a coherent installed-or-invalidated state,
-    release TUPLE_WRITE/UNIQUE_KEY locks and TableWriterGate/SchemaLock holdings,
+    release TUPLE_WRITE/UNIQUE_KEY locks and
+    TableWriterGate/SchemaLock/STATS_PUBLISH/MANIFEST_CHANGE holdings,
     unregister snapshots, and finish required transaction cleanup
 C6. only now return/send successful COMMIT acknowledgement
 ```
@@ -11096,7 +11414,8 @@ A1. if persistent WAL-visible state exists:
            install ABORTED and status-page page_lsn = abort_lsn
 A2. execute the §9.14 runtime terminal-publication linearization, including
     runtime outcome cache ABORTED, state ABORTED, and active removal
-A3. release logical locks and TableWriterGate/SchemaLock holdings, unregister
+A3. release logical locks and
+    TableWriterGate/SchemaLock/STATS_PUBLISH/MANIFEST_CHANGE holdings, unregister
     snapshots, transfer private/orphan cleanup ownership, and finish cleanup
 A4. only then acknowledge explicit ROLLBACK or return the transaction-fatal
     statement's original error with transaction outcome ABORTED
@@ -14787,6 +15106,12 @@ SchemaLock
 
 or equivalent exclusive catalog-DDL mutex.
 
+It is a transaction-owned gate with the exact mode, reentrancy, wait-for
+membership, and release rules in §11.13. It is not table-scoped. A transaction
+that requests it after retaining a writer or statistics-publication gate does
+not rely on per-statement order or timeout: the request is either one of
+§11.13's two proactive rejections or a represented unified-graph wait.
+
 A transaction that successfully completes schema-changing DDL or publishes its first transaction-owned catalog mutation holds this exclusivity through its terminal publication/abort boundary. A recoverable failed attempt that remains pre-catalog under §39.1.4 transfers every physical survivor to orphan cleanup and releases attempt-only DDL exclusivity before leaving the transaction `ACTIVE`.
 
 Ordinary read-only queries do not hold this lock for their execution lifetime.
@@ -14803,7 +15128,7 @@ TableWriterGate(T) shared
 
 before the first persistent write to `T` and holds it until transaction end.
 
-CREATE INDEX / DROP TABLE on `T` acquire:
+CREATE INDEX / DROP TABLE / DROP INDEX on `T` acquire:
 
 ```text
 TableWriterGate(T) exclusive
@@ -14822,12 +15147,22 @@ DDL lock order is:
 ```text
 SchemaLock
     -> TableWriterGate exclusive when required
-    -> lower logical/page locks
+    -> optional private-file construction with no short latch retained across
+       a later transaction-gate wait
+    -> MANIFEST_CHANGE when the table/index manifest changes or retires
+    -> live-object/catalog publication locks/latches
 ```
 
 V1 does not support lock upgrade from a transaction's already-held shared TableWriterGate to exclusive DDL ownership. If an explicit transaction has already performed persistent DML on the target table, a later schema-changing DDL statement requiring that exclusive gate is rejected.
 
 This deliberately coarse baseline prevents an offline index build from missing concurrent writes and avoids an implicit lock-upgrade deadlock protocol.
+
+The rejection is target-specific. `UPDATE A` followed by `CREATE TABLE B` is
+otherwise legal and deadlock-managed; `UPDATE A` followed by `CREATE INDEX A`
+is rejected before waiting. DDL acquired first may be followed by DML: its own
+exclusive gate subsumes a shared request on the same table, and a different
+table's shared request follows §11.13. Several supported DDL statements reuse
+the global SchemaLock and acquire each new target gate normally.
 
 ## 21.3 Catalog visibility during binding
 
@@ -15026,15 +15361,18 @@ V1 builds indexes offline with conservative writer exclusion:
 10. validate uniqueness when requested
 11. flush/synchronize and durably rename the private B+ file to its exact
     final name through §4.7.4
-12. only then install transaction-owned catalog index rows/constraint links
-13. finish the DDL statement while retaining target-writer/DDL exclusivity
-14. before COMMIT, reverify that the required B+ file remains durably
+12. acquire MANIFEST_CHANGE(TableId) through §11.13's unified graph and
+    revalidate the complete current table/index manifest
+13. only then install transaction-owned catalog index rows/constraint links
+14. finish the DDL statement while retaining target-writer/DDL/publication ownership
+15. before COMMIT, reverify that the required B+ file remains durably
     final-name-published
-15. if/when the owning transaction reaches terminal COMMITTED publication:
+16. if/when the owning transaction reaches terminal COMMITTED publication:
         publish the index descriptor/name entry
-16. on ABORT:
+17. on ABORT:
         keep catalog rows invisible and retire the private/final-uncommitted index file later
-17. release target writer gate and SchemaLock only at the terminal boundary
+18. release target writer gate, MANIFEST_CHANGE, and SchemaLock only after the
+    terminal boundary according to §15.5 C5 / §15.6 A3
 ```
 
 Step 7 is a DDL maintenance/current-state scan after target writers have drained; it is not allowed to omit rows merely because the DDL transaction has an older REPEATABLE READ snapshot. For a UNIQUE build, step 10 applies §11.10.9: fully non-NULL duplicate groups use the canonical encoded equality/current-owner rules, while any-NULL keys do not conflict. The exclusive writer gate permits a bulk sorted/grouped duplicate check instead of per-row UNIQUE_KEY locks.
@@ -15058,10 +15396,23 @@ the catalog/physical retirement sequence after that coordination point.
 Under DDL exclusivity:
 
 ```text
+acquire SchemaLock
+acquire the owning table's TableWriterGate exclusive
+acquire MANIFEST_CHANGE for the table/index scope
+revalidate current object identity, manifest, and LIVE state
+only then publish LIVE -> RETIRING for the affected identity
 mark the relevant catalog rows deleted by the DDL transaction
 do not unlink physical files immediately
 commit/abort normally
 ```
+
+`DROP TABLE` uses the table plus all current dependent IndexIds as one manifest
+scope. `DROP INDEX` uses its owning TableId and that IndexId. All transaction
+waits in the sequence use §11.13's graph; a DROP in the same transaction after
+published ANALYZE statistics for the affected scope is rejected before waiting.
+Once RETIRING publishes, no new object/statistics claim is admitted. Aborting
+the DROP restores LIVE only through the object-publication protocol, and gate
+release still waits for ABORTED publication.
 
 On abort, the deletion `xmax` is ineffective and the object remains.
 
@@ -15366,6 +15717,15 @@ successful ANALYZE statement
     -> COMMIT publishes the descriptor globally
     -> ABORT discards it
 ```
+
+After statistics rows publish, the transaction retains their `STATS_PUBLISH`
+claims through terminal publication. A later `CREATE TABLE` or other DDL on an
+unrelated manifest remains legal and any SchemaLock wait uses §11.13's unified
+graph. A later DDL that would change/drop the analyzed table or one of its
+manifest indexes is rejected before waiting because it would invalidate the
+same transaction's immutable generation. DDL completed first may be followed by
+ANALYZE only when final revalidation observes the exact transaction-local
+post-DDL manifest.
 
 For autocommit, global publication occurs only after the statement's owning transaction reaches terminal COMMITTED.
 
@@ -22640,7 +23000,7 @@ AB = semantic ABORT requested/completed through §15.6
 | expression evaluation, arithmetic, division, or cast error | FA | MA | includes errors in later rows/batches |
 | NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | §11.10 decides UNIQUE/PRIMARY KEY conflict membership; this table decides its transaction effect |
 | READ COMMITTED write conflict or stale-target revalidation | retry/FA | MA | transparent retry is permitted only while the flag is false |
-| REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; deadlock resolution cannot retain victim locks |
+| REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; victim ownership remains protective through ABORTED publication and cannot remain held after canonical A3 cleanup |
 | cancellation/lock cancellation | FA | MA | unless deadlock/other transaction-fatal cause applies |
 | `OutOfMemory` | FA | MA | temporary allocation itself is not persistent state |
 | `SpillIOError`, temp disk full, or spill corruption | FA | MA | spill files remain temporary |
@@ -22789,7 +23149,22 @@ For example, a UNIQUE violation followed by fatal abort I/O remains “UNIQUE vi
 
 ### 39.1.8 Locks, terminal cache, derived caches, and observability
 
-Transaction-lifetime locks, TableWriterGate, SchemaLock, and transaction snapshots remain owned through §9.14 terminal publication. `MUST_ABORT` alone does not release them. COMMIT releases only after COMMITTED publication; ABORT releases only after ABORTED publication. Another transaction therefore never observes released conflict protection while status lookup still says IN_PROGRESS.
+Transaction-lifetime locks, both TableWriterGate modes, SchemaLock,
+STATS_PUBLISH/MANIFEST_CHANGE modes, and transaction snapshots remain owned
+through §9.14 terminal publication. `MUST_ABORT` alone does not release them.
+COMMIT releases only after COMMITTED publication; ABORT releases only after
+ABORTED publication. Another transaction therefore never observes released
+conflict protection while status lookup still says IN_PROGRESS. Every blocking
+transaction dependency among those gates and TUPLE_WRITE/UNIQUE_KEY is visible
+to §11.13's one graph.
+
+`UNSUPPORTED_TRANSACTION_GATE_TRANSITION` is a proactive, pre-publication
+statement admission error and follows the ordinary FA rule for an explicit
+transaction. `DEADLOCK_DETECTED` is independently transaction-fatal and follows
+the existing deadlock-victim MA row regardless of the current statement's write
+boundary. Object RETIRING/revalidation failure retains its owning operation's
+ordinary pre/post-publication classification. Only synchronization bookkeeping
+incoherence, not a normal cycle, may escalate to database noncontinuability.
 
 The globally observable terminal-outcome cache updates in the same §9.14 linearization that changes runtime state and active-registry membership. A BufferPool-resident `TXN_STATUS` page is not that cache and cannot independently make a transaction publicly terminal.
 
@@ -22818,7 +23193,9 @@ The following implementations are forbidden:
 9. making an ordinary effect-free SELECT user error transaction-fatal without an independent fatal cause,
 10. treating every OOM/spill/disk-full failure identically without checking the statement boundary,
 11. exposing a successful partial RETURNING prefix from a statement that later fails, or exposing autocommit RETURNING before implicit COMMIT C4–C5,
-12. allowing cache publication failure to redefine durable transaction outcome.
+12. allowing cache publication failure to redefine durable transaction outcome,
+13. excluding SchemaLock/TableWriterGate/object-publication dependencies from the tuple/unique wait-for graph,
+14. releasing a deadlock victim's transaction-owned gates before ABORTED terminal publication.
 
 ## 39.2 SQL front-end and logical-planning errors
 
@@ -23402,7 +23779,14 @@ Table-driven MVCC verification covers creator/deleter committed, active, too-new
 
 Isolation verification establishes READ COMMITTED stable-per-statement snapshots and retry re-evaluation, REPEATABLE READ fixed-snapshot behavior and serialization failure on conflicting post-snapshot writes, and the fact that snapshot-isolation write skew remains possible.
 
-Logical-lock verification establishes same-target serialization, disjoint-target concurrency, unique-key serialization, no physical-latch retention during logical waits, deterministic deadlock victim behavior, and safe waiter cleanup.
+Logical/gate verification establishes same-target serialization, disjoint-target
+concurrency, unique-key serialization, no physical-latch retention during any
+transaction-level wait, complete unified-graph edges for SchemaLock, both
+TableWriterGate modes, both object-publication modes, TUPLE_WRITE, and
+UNIQUE_KEY, deterministic cross-resource deadlock victims, terminal-only gate
+release, wakeup revalidation, and safe waiter cleanup. It includes every
+§11.13.7 adversarial timeline and synthetic cycles spanning three or more
+resource families.
 
 Table-driven §11.10 verification covers ordinary UNIQUE and PRIMARY KEY across NULL/composite/FLOAT64 canonical keys; committed/frozen/aborted/nonterminal creators; absent/committed/aborted/nonterminal deleters; same-transaction earlier/current-command creators; earlier-command self-delete reuse versus current-command other-row conflict; same-statement INSERT duplicates; exact same-key UPDATE exclusion; order-independent another-row current-command UPDATE collision; immediate key-swap rejection; post-wait full recheck; stale physical entries; protected RID identity; M-005 before/after-write violation outcomes; and COMMIT/ABORT lock release only after terminal publication.
 
