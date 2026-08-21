@@ -12601,9 +12601,10 @@ otherwise                                   -> FALSE
 NOT IN                                      -> 3VL NOT of IN
 ```
 
-Subquery IN/EXISTS/scalar forms remain owned by unresolved M-007 and are not
-decided here. `BETWEEN`, `LIKE`, `COALESCE`, `NULLIF`, `IS TRUE/FALSE/UNKNOWN`,
-and every other scalar predicate/convenience expression are unsupported in v1.
+Subquery IN/EXISTS/scalar forms use the separate closed §20.14 registry; they do
+not add scalar comparison or coercion rules. `BETWEEN`, `LIKE`, `COALESCE`,
+`NULLIF`, `IS TRUE/FALSE/UNKNOWN`, and every other scalar predicate/convenience
+expression are unsupported in v1.
 
 ### 17.9.3 Closed scalar-function registry
 
@@ -12668,6 +12669,19 @@ is constant. Root `1/0` raises during binding/folding, while
 mandatory for v1 persisted defaults and for these ordinary fully constant
 subtrees; an unfolded nonconstant expression must behave identically when
 reached.
+
+An expression in §20.14.5's EXISTS-only SELECT projection/ORDER BY value is not
+a demanded scalar-control-flow path. It is name/type checked but its constant
+error is not raised merely to establish row existence.
+
+More generally, a constant-error expression inside a relational subquery is
+raised eagerly only when exact §20.14/§20.17.10 reasoning proves both that the
+outer control flow demands that subquery occurrence and that the inner
+relational execution demands that expression for at least one row. Estimated
+or possible row production is insufficient. Otherwise the expression may fold
+to an error-producing bound node, but the error occurs only if lazy runtime
+execution reaches it. This preserves, for example, a skipped subquery branch
+and an empty inner relation.
 
 FLOAT64 folding uses binary64 round-to-nearest-ties-to-even at each bound
 operator, forbids observable extended precision/contraction, preserves signed
@@ -13104,20 +13118,24 @@ set operations
 
 ## 18.12 Subquery syntax
 
-Parser/AST structures support subqueries from the beginning.
-
-Initial semantic targets are:
+Parser/AST structures support exactly these v1 subquery syntax classes:
 
 ```text
-scalar uncorrelated subquery
-EXISTS uncorrelated subquery
-IN uncorrelated subquery
-derived table in FROM
+(SELECT ...)
+EXISTS (SELECT ...)
+NOT EXISTS (SELECT ...)
+scalar_expr [NOT] IN (SELECT ...)
+FROM (SELECT ...) [AS] required_alias
 ```
 
-Correlated subqueries are deferred.
+Their closed semantic/execution matrix is §20.14. Parser recognition does not
+make row-valued subqueries, multi-column scalar/IN forms, ANY/SOME/ALL,
+LATERAL, CTEs, set operations, data-modifying subqueries, or correlation v1
+features. Those forms are rejected as syntax or during binding according to
+where recognition occurs.
 
-AST/binding structures MUST NOT make future correlation impossible.
+The optional `AS` keyword does not make the derived-table alias optional. V1
+does not support a derived-column alias list after that relation alias.
 
 ## 18.13 AST contract
 
@@ -13242,9 +13260,9 @@ Every visible relation occurrence receives a query-local `BindingId` distinct fr
 
 A self-join therefore has the same TableId but different BindingIds.
 
-The parent-scope structure is retained for future correlation, even though correlated subqueries are deferred from the initial target.
-
-A v1 uncorrelated subquery MUST NOT silently capture a parent-column reference.
+The parent-scope structure is retained only for §19.18's correlation diagnostic
+and a future architecture. V1 resolution never searches it for a subquery
+column and never emits executable OuterRef state.
 
 ## 19.3 Bound column references
 
@@ -13358,6 +13376,9 @@ x = y -> nullable if either input nullable
 IS NULL(x) -> non-nullable BOOLEAN
 COUNT(*) -> non-nullable INT64
 SUM(nullable input) -> nullable
+scalar subquery -> nullable even when its output expression is NOT NULL
+EXISTS / NOT EXISTS -> non-nullable BOOLEAN
+IN / NOT IN subquery -> conservatively nullable BOOLEAN
 ```
 
 ## 19.7 Expression immutability and ownership
@@ -13532,13 +13553,21 @@ permission to evaluate dynamic/erroring list expressions in another order.
 
 ## 19.18 Subquery binding boundary
 
-The binder supports the initial uncorrelated forms defined by Chapter 18.
+The binder supports only §20.14's closed uncorrelated forms. Every SELECT
+subquery is a new query block with its own local FROM bindings, aliases,
+aggregate/GROUP BY namespace, output names, and ORDER BY namespace under the
+ordinary rules of this chapter.
 
-A scalar/EXISTS/IN/derived-table subquery receives its own binding scope.
+Column lookup inside that block searches the local block only. It never falls
+through to an enclosing query block. If a locally unresolved reference would
+resolve in an enclosing block, binding reports `UnsupportedCorrelation`; if it
+would not, it reports the ordinary unknown/ambiguous-name error. No executable
+v1 `OuterRef`/correlated-column expression is produced.
 
-Structures preserve a parent-scope relationship for future correlation, but v1 rejects outer-column capture for forms whose supported semantics are explicitly uncorrelated.
-
-Detailed logical/execution semantics are completed in later chapters.
+The bound expression records a stable query-local subquery identity, exact
+subquery kind, typed logical child plan, result type/nullability, and source
+span. Name lookup never occurs during optimization or execution. Derived-table
+binding and output-name rules are §20.14.3.
 
 ## 19.19 Parameters
 
@@ -13951,62 +13980,440 @@ It does not choose the physical statistics algorithms, mutate catalog descriptor
 
 The resolved descriptor/schema version is fixed at binding/planning time for that statement attempt.
 
-## 20.14 Subquery logical semantics
+## 20.14 V1 subquery semantics and support
 
-Every subquery has its own bound scope and later its own logical subplan.
+This section is the canonical closed v1 subquery contract. Parser recognition,
+generic AST capacity, or an optimizer rewrite does not add another form. V1
+uses **uncorrelated query blocks only** and has no executable OuterRef, Apply,
+parameterized-rescan, LATERAL, or decorrelation requirement.
 
-A future correlated reference is represented distinctly, conceptually:
+### 20.14.1 Closed support matrix
 
-```text
-BoundCorrelatedColumnRef(
-    depth,
-    BindingId,
-    ColumnId,
-    type,
-    nullable
-)
+`lazy side plan` below means the statement-attempt-scoped physical fallback in
+§20.14.7; it is not a promise that an optimizer rewrite succeeds.
+
+| Subquery form | V1 | Correlation | Required output arity | Bound result | Zero rows | More rows | Canonical logical form | Required physical fallback |
+|---|---|---|---:|---|---|---|---|---|
+| scalar `(SELECT ...)` | supported | forbidden | exactly 1 column | that column's TypeId, always nullable | typed NULL | second successfully produced row raises `CardinalityViolation` | `BoundScalarSubquery` plus independent logical child | lazy scalar side plan, consume at most two final rows |
+| `EXISTS (SELECT ...)` | supported | forbidden | any arity, including zero demanded value columns | non-null BOOLEAN | FALSE | TRUE after first row; later rows not demanded | `BoundExistsSubquery` plus independent logical child | lazy existence side plan |
+| `NOT EXISTS (SELECT ...)` | supported | forbidden | as EXISTS | non-null BOOLEAN | TRUE | FALSE | `NOT(BoundExistsSubquery)` | EXISTS fallback then 3VL NOT (never UNKNOWN) |
+| scalar `x IN (SELECT y ...)` | supported | forbidden | exactly 1 column | nullable BOOLEAN | FALSE | set/NULL-marker semantics below | `BoundInSubquery` plus independent logical child | lazy complete IN-build side plan |
+| scalar `x NOT IN (SELECT y ...)` | supported | forbidden | exactly 1 column | nullable BOOLEAN | TRUE | 3VL NOT of IN | `NOT(BoundInSubquery)` | IN-build fallback then 3VL NOT |
+| `FROM (SELECT ...) [AS] alias` | supported | forbidden | any positive relation arity | relation binding | empty relation | ordinary relation rows | `LogicalSubqueryScan` slot/name boundary over child | ordinary relational child; no mandatory materialization |
+| correlated scalar/EXISTS/IN/NOT IN | unsupported | not applicable | — | bind-time `UnsupportedCorrelation` | — | — | no executable node | none |
+| row-valued left operand, row-valued IN, or multi-column scalar subquery | unsupported | forbidden | — | bind-time unsupported feature/type error | — | — | none | none |
+| `ANY`, `SOME`, `ALL`, or another quantified comparison | unsupported | forbidden | — | unsupported feature | — | — | none | none |
+| `LATERAL` or any FROM-item outer reference | unsupported | forbidden | — | unsupported feature/correlation error | — | — | none | none |
+| CTE, recursive CTE, UNION/INTERSECT/EXCEPT subquery, or data-modifying subquery | unsupported | forbidden | — | unsupported feature | — | — | none | none |
+
+`NOT EXISTS` and `NOT IN` are canonical Boolean NOT wrappers rather than
+separate truth systems. A parser may use dedicated AST spelling, but binding
+normalizes to the forms in the table.
+
+### 20.14.2 Query blocks, scopes, and correlation rejection
+
+Every SELECT, including a nested SELECT, creates one lexical query block. Its
+local FROM namespace, aliases, wildcard expansion, aggregation/GROUP BY/HAVING,
+SELECT outputs, and ORDER BY aliases/ordinals follow Chapter 19. The local block
+does not inherit enclosing relation bindings. Inner aliases shadow nothing in
+the parent because parent lookup is not attempted; inner names also never leak
+out except through a derived table's named output columns.
+
+Parent links may remain in parser/binder data structures for diagnostics and a
+future architecture, but v1 binding uses them only to distinguish an attempted
+outer capture from an ordinary unknown name. It MUST NOT emit an executable
+`BoundCorrelatedColumnRef`, infer correlation from a matching name at runtime,
+or accept syntax on the assumption that the optimizer will decorrelate it.
+Nested subqueries are legal only when each nested block is independently
+uncorrelated from every lexical ancestor.
+
+### 20.14.3 Derived tables
+
+The v1 syntax is:
+
+```sql
+FROM (SELECT ...) [AS] alias
 ```
 
-so correlation is never confused with a local column reference.
+The relation alias is mandatory; `AS` is optional. A v1 derived-column alias
+list such as `d(a,b)` is unsupported. The child output columns become exactly
+one relation binding under that alias. A child output has a usable derived
+column name only when §19.5 gives it an explicit SELECT alias or it is a direct
+column reference with its source-column name. An expression with only a
+generated presentation name must be explicitly aliased before it can define a
+derived table. Derived output names must be unique; duplicates are a bind error
+at the derived-table boundary rather than an implementation-chosen reference.
 
-V1 may detect such a correlated reference and reject execution because correlated subqueries remain deferred.
+The boundary maps each child output `LogicalSlotId` to one derived relation
+`BindingId`/output slot/name. Child table aliases and hidden columns are not
+visible outside. `SELECT d.*` expands the unique named outputs in child
+projection order.
 
-### 20.14.1 Scalar subquery
+`LogicalSubqueryScan` expresses that namespace/slot boundary. It is not a
+materialization barrier. The optimizer may inline it, push safe predicates, or
+reorder its relational child exactly when ordinary slot, outer-join,
+aggregation, LIMIT/OFFSET, ordering, and error semantics remain equivalent. If
+the boundary survives physical planning, its fallback is a streaming slot-map/
+projection over the independently planned child.
 
-A scalar subquery must expose exactly one output column.
+A derived table is not a scalar once-result cache. It has no outer parameters
+and is planned as one ordinary relation occurrence. A physical join may
+materialize or rewind that child when its normal algorithm requires, but may
+not parameterize the rescan by an outer row or obtain another snapshot.
 
-Runtime cardinality semantics are:
+### 20.14.4 Scalar subquery semantics
+
+A scalar subquery binds only after its final SELECT output has exactly one
+column. Its result TypeId is that column's bound type. V1 conservatively marks
+every scalar-subquery expression nullable even when the selected expression is
+NOT NULL, because zero final rows produce one typed NULL scalar value.
+The resulting typed expression participates in surrounding M-006 operators,
+CASE common-type resolution, assignment coercion, and aggregate signatures
+without any special subquery cast.
+
+Runtime consumes the subquery's **final** rows after its WHERE, aggregation,
+HAVING, projection, DISTINCT, ORDER BY, OFFSET, and LIMIT semantics:
 
 ```text
-0 rows -> NULL
-1 row  -> that value
->1 row -> SQL cardinality error
+0 final rows -> typed NULL
+1 final row  -> that row's selected scalar, including SQL NULL
+2nd final row -> CardinalityViolation / SQL CardinalityError
 ```
 
-### 20.14.2 EXISTS
+The empty subquery does not remove an outer row. For example, the no-FROM outer
+query `SELECT (SELECT x FROM t WHERE FALSE)` emits its normal one row containing
+NULL.
 
-`EXISTS(subquery)` returns non-null BOOLEAN:
+The scalar consumer has a semantic final-row demand of two, independent of the
+optimizer's costing-only `required_rows`. Blocking child operators may consume
+all input needed to establish their final rows, but once two final output rows
+have been successfully constructed no third final projection row or later
+streaming work is evaluated. Producing a final row includes evaluation of its
+selected expression. Therefore an error while constructing the first or second
+final selected value precedes cardinality failure; after two successfully
+constructed rows, cardinality failure precedes every later-row error. No first,
+last, or arbitrary row is returned.
+
+An optimizer may remove the cardinality check only from exact logical proof that
+the final subquery cardinality is at most one. `LIMIT 1` supplies such a cap;
+estimated cardinality, `required_rows=1`, uniqueness statistics, or a plan that
+happens to stop early do not.
+
+### 20.14.5 EXISTS and NOT EXISTS
+
+EXISTS returns non-null BOOLEAN TRUE iff the subquery has at least one final
+relational row after WHERE/grouping/HAVING/OFFSET/LIMIT; otherwise it returns
+FALSE. NOT EXISTS is ordinary Boolean NOT and is also never UNKNOWN. The
+existence consumer stops at the first demanded row and does not evaluate later
+rows.
+
+SELECT projection values inside EXISTS are bound for valid names/types and for
+determining query-block aggregation shape, but are not value-evaluated merely
+to decide existence. Projection-only expressions, projection-only aggregate
+arguments/results, DISTINCT value construction, and ORDER BY key expressions
+may be removed for existence and their runtime/constant errors are not
+semantically demanded. The binder must not eagerly fold such an irrelevant
+projection to an error. FROM, WHERE, grouping keys, HAVING, and OFFSET/LIMIT
+work that determines whether a row exists remains demanded and propagates its
+errors until existence is known. V1 conservatively executes a global
+aggregate's ordinary FROM/WHERE child work before that aggregate emits its one
+row, even though row existence is known from the aggregate shape; an optimizer
+may skip that work only with an exact proof that doing so suppresses no demanded
+error.
+
+Consequently:
 
 ```text
-TRUE  if the subquery produces at least one row
-FALSE otherwise
+EXISTS(SELECT 1 / 0 FROM t)
+    -> no division error; TRUE iff t's relational input yields a row
+
+EXISTS(SELECT COUNT(*) FROM t)
+    -> after successful ordinary child evaluation, TRUE even when t is empty,
+       because a global aggregate emits one row
 ```
 
-Its semantic node remains EXISTS; it is not rewritten prematurely into arbitrary projected subquery values.
+An aggregate referenced by HAVING remains demanded. A grouped aggregate may
+produce zero or more groups. `LIMIT 0` makes EXISTS FALSE; a positive LIMIT does
+not prevent first-row early stop after OFFSET has been satisfied.
 
-### 20.14.3 IN subquery
+### 20.14.6 IN and NOT IN
 
-`x IN (subquery)` requires exactly one compatible subquery output column and preserves SQL NULL semantics.
+The left operand and subquery output are scalar only. Binding resolves exactly
+one M-006 equality overload/common numeric type and inserts only the casts that
+registry permits. There is no subquery-specific coercion. Failure to resolve
+ordinary `=` is a bind-time TYPE_ERROR.
 
-Later optimization may implement the semantics with a semi-join, mark join, hash set, or another proven equivalent.
+For left value `x` and every final subquery value `y_i`, IN has repeated-equality
+3VL semantics:
 
-### 20.14.4 CTEs
+```text
+any (x = y_i) is TRUE                         -> TRUE
+no TRUE and at least one comparison UNKNOWN   -> UNKNOWN
+otherwise                                     -> FALSE
+```
 
-Non-recursive CTEs are deferred.
+Equivalently, after the canonical build records its non-NULL values,
+`build_has_null`, and `build_is_empty`:
 
-When added, they are logical named subplans rather than mandatory materialization barriers.
+| Build state / probe | `x IN build` | `x NOT IN build` |
+|---|---|---|
+| empty, including `x IS NULL` | FALSE | TRUE |
+| nonempty and `x IS NULL` | UNKNOWN | UNKNOWN |
+| equal non-NULL value exists | TRUE | FALSE |
+| no equal value, `build_has_null=true` | UNKNOWN | UNKNOWN |
+| no equal value, no NULL | FALSE | TRUE |
 
-Recursive CTEs remain later work.
+NOT IN is exactly 3VL NOT of IN. WHERE/HAVING/ON retain only TRUE, but UNKNOWN
+remains observable in projection and CASE. Subquery duplicates do not change
+truth and may be deduplicated. Any number of NULL rows is one Boolean marker.
+Equality/hash normalization is exactly §17.10.3, including signed-zero, NaN,
+VARCHAR, and promoted numeric semantics.
+
+Unlike M-006's source-ordered expression-list IN, an uncorrelated IN subquery is
+an unordered relational build. On first demand, it consumes and validates the
+entire limited/final subquery result before any probe result is returned. A
+subquery output-expression, memory, or spill error anywhere in that build
+therefore precedes a possible matching probe value. Once build succeeds, left
+values probe it vectorized.
+
+For the occurrence's first demanded outer selection, M-006 child order first
+evaluates the left scalar expression. If that evaluation fails, the still-
+dormant build does not start. If at least one active row reaches the IN
+operation, the complete build initializes once before any of those rows is
+probed. Later selections reuse it.
+
+### 20.14.7 Canonical logical and physical fallback
+
+Each bound expression-subquery occurrence has one stable query-local identity
+and an independent logical child. The initial logical representation preserves
+one of three semantic modes:
+
+```text
+SCALAR_ONE_VALUE
+EXISTS_BOOLEAN
+IN_VALUE_SET
+```
+
+NOT wrappers remain ordinary bound Boolean nodes. The representation does not
+pretend the child is an ordinary local column expression, merge it with a
+different textual occurrence, or require a semi/anti join rewrite.
+
+Every executable v1 physical plan has a fallback side-plan role for each mode:
+
+```text
+PhysicalScalarSubquery
+    lazily execute child
+    observe at most two final rows
+    own/copy the one result scalar, including VARCHAR bytes
+
+PhysicalExistsSubquery
+    lazily execute only existence-demanded child work
+    stop after first final row
+    store one BOOLEAN
+
+PhysicalInSubqueryBuild
+    lazily consume complete final child result
+    build/deduplicate non-NULL values
+    record empty + has-NULL markers
+    expose vectorized probes
+```
+
+These names are conceptual algorithm roles, not required C++ class names. Their
+children are ordinary vectorized physical subplans. Runtime state is held in
+the existing `QueryExecutionContext`/pipeline dependency graph and uses the
+ordinary query arena, memory manager, spill manager, cancellation, snapshot,
+and error channels. No row-at-a-time production executor or parameterized Apply
+subsystem is introduced.
+
+The IN build is query-memory accounted and spill-capable. It may reuse exact
+hash/DISTINCT equality plus partition spill or external sort/dedup machinery;
+either implementation must produce the same values/markers. Spill failure is
+`SpillIOError`; inability to obtain non-spillable control memory is
+`OutOfMemory`. Scalar/EXISTS retain only bounded own state, although their child
+operators may use ordinary blocking memory/spill.
+
+Every retained IN value/key owns its variable-length bytes in build/spill
+storage; no cached key may point into a recycled child DataChunk or unpinned
+page.
+
+After build/evaluation, scalar and EXISTS results are constant-like side inputs;
+IN is an immutable build side plus vectorized probe. A CONSTANT vector or
+equivalent side-input view may repeat scalar/BOOLEAN results over the currently
+demanded outer selection. Result VARCHAR bytes remain owned for the statement
+attempt. Derived tables remain ordinary DataChunk-producing relational plans.
+
+### 20.14.8 Lazy statement-attempt ownership, snapshot, and CommandId
+
+An uncorrelated expression subquery is evaluated **at most once per bound
+occurrence per statement attempt, when first semantically demanded**. It is not
+globally hoisted to statement start. If no row/control-flow path demands it, it
+does not execute. Once successfully evaluated, its value/build state is cached
+for all later outer rows in that attempt. A failed side plan fails the statement;
+it is never re-executed to seek a different outcome.
+
+M-006 evaluation order remains authoritative:
+
+- a subquery in an unselected CASE arm does not run;
+- a subquery in a skipped AND/OR right operand does not run;
+- a subquery predicate over an empty outer input may remain undemanded;
+- when a vector selection contains at least one row that demands the occurrence,
+  it initializes once and serves exactly that demanded selection.
+
+An internal READ COMMITTED whole-statement retry discards every prior attempt's
+subquery state and reevaluates under the retry's fresh statement snapshot. It
+does not share stale side state merely because the logical statement retains
+its CommandId.
+
+Every subquery and derived child uses the containing attempt's one effective
+snapshot and ReadEpochGuard. It never captures a fresh snapshot. It consumes no
+new CommandId: tuple visibility uses the containing statement's CommandId and
+the ordinary Chapter-10 current-command rules. Query-local subquery execution
+does not create a nested transaction or independently own logical locks.
+
+### 20.14.9 Legal expression/statement contexts
+
+Supported uncorrelated expression subqueries use the ordinary surrounding
+M-006 type rules in these v1 contexts:
+
+| Context | V1 rule |
+|---|---|
+| SELECT projection, WHERE, HAVING, JOIN ON | scalar/EXISTS/IN/NOT forms supported; predicates still require BOOLEAN |
+| searched CASE and AND/OR | supported with §17.7.3 short-circuit/lazy demand |
+| GROUP BY expression | supported when the resulting scalar is groupable under Chapter 20; it remains one uncorrelated once-result expression |
+| outer ORDER BY expression | supported when the result is SQL-orderable under M-006; BOOLEAN EXISTS/IN results are therefore not orderable without explicit legal cast |
+| aggregate argument | supported when the resulting scalar TypeId matches an exact §29.3 signature; the subquery is a separate inner query block |
+| nested subquery | supported only when independently uncorrelated at every boundary |
+| UPDATE/DELETE WHERE | supported during the ordinary read/target-spool phase |
+| UPDATE assignment, INSERT VALUES, INSERT SELECT expression, DML RETURNING | supported; assignment coercion and row-image scope remain Chapter 21 |
+| default, generated/catalog expression, CREATE INDEX key, constraint definition | subqueries forbidden; defaults remain closed folded scalars |
+| LIMIT/OFFSET expression | subqueries forbidden in v1; Chapter 19's bound integral execution-start constant does not include a runtime side plan |
+| CHECK/foreign-key expression | not applicable because those constraints are not v1 |
+
+Only SELECT query blocks may appear as subqueries. INSERT/UPDATE/DELETE/DDL,
+data-modifying CTEs, and DML RETURNING used as a subquery source are unsupported.
+Subquery errors in DML follow §39.1: before that statement's first published
+write they may be statement-only; after publication they require MUST_ABORT.
+Target spooling/retry and buffered RETURNING behavior are unchanged.
+
+### 20.14.10 Aggregation, DISTINCT, ORDER BY, LIMIT, and OFFSET
+
+A subquery may use the ordinary v1 SELECT aggregation, DISTINCT, ORDER BY,
+LIMIT, and OFFSET clauses. Global aggregate over empty input emits one row;
+therefore `(SELECT COUNT(*) FROM empty)` returns `0`, while
+`EXISTS(SELECT COUNT(*) FROM empty)` is TRUE. Grouped scalar subqueries remain
+subject to zero/one/many final-row cardinality.
+
+DISTINCT is applied before scalar cardinality checking and may legitimately
+reduce duplicate final rows to one. No implementation may deduplicate scalar
+rows without an explicit DISTINCT or exact equivalence proof. IN may deduplicate
+because multiplicity never changes its result.
+
+ORDER BY inside a subquery is accepted under the ordinary grammar. LIMIT/OFFSET
+uses that order when present, but a derived table advertises no outer ordering
+unless an ordinary physical property is explicitly preserved and consumed.
+Without a consumer-visible order effect, an optimizer may remove the sort only
+when removing ORDER BY-key evaluation cannot suppress a semantically demanded
+error. EXISTS projection-irrelevance follows §20.14.5 instead.
+
+The bound nonnegative constant LIMIT/OFFSET semantics are ordinary:
+
+- actual `LIMIT 0` proves the subquery empty;
+- scalar `LIMIT 1` proves at most one final row, including after OFFSET;
+- EXISTS skips OFFSET rows and stops at the first remaining row unless LIMIT 0;
+- IN/NOT IN uses exactly the post-OFFSET/LIMIT result;
+- OFFSET alone does not cap scalar cardinality.
+
+LIMIT/OFFSET without ORDER BY does not create an ordering guarantee. Thus a
+scalar subquery capped by `LIMIT 1` without ORDER BY may select any row allowed
+by the ordinary unordered child relation, exactly like top-level SELECT; it
+does not acquire a hidden heap/index/implementation “first row” contract.
+
+Optimizer `required_rows` remains a cost/search objective, never a semantic
+LIMIT. Scalar's two-row cardinality probe and EXISTS's one-row existence demand
+are consumer semantics, not exact-emptiness proof for the child.
+
+### 20.14.11 Rewrite and proof boundary
+
+Semantic support never depends on decorrelation or join conversion. Rewrites
+must preserve lazy demand, snapshot/CommandId, 3VL, duplicate behavior,
+cardinality checks, and observable error precedence.
+
+For a row-rejecting filter context, `x IN (subquery)` may become a semi-join
+because both FALSE and UNKNOWN reject the outer row, provided equality casts,
+subquery errors, and first-demand execution are preserved. Expression-valued IN
+requires the equivalent of three marks—match, build_has_null, and build_empty—
+or the canonical side build; a plain semi-join cannot produce UNKNOWN.
+
+NOT EXISTS may become an anti-join/existence guard when the same demand/error
+semantics are preserved. NOT IN may become an ordinary anti-semi join only in a
+row-rejecting context after exact trusted facts prove the subquery comparison
+value NOT NULL and prove the left value NOT NULL or add an equivalent left
+`IS NOT NULL` rejection. Otherwise it requires a NULL-aware marker/build.
+Statistics, estimated zero NULL fraction, sampled values, and required_rows are
+not proof under A-002.
+
+Exact `is_provably_empty` consequences are:
+
+| Form | Exact empty-child rewrite |
+|---|---|
+| scalar | typed NULL |
+| EXISTS | FALSE |
+| NOT EXISTS | TRUE |
+| IN | evaluate left once, then FALSE, even for NULL left |
+| NOT IN | evaluate left once, then TRUE, even for NULL left |
+| derived table | empty relation with the same output schema |
+
+Only §§20.17.10/35.2 proof provenance authorizes these rewrites. A numerical
+estimate of zero never does. The IN/NOT IN left evaluation may itself be
+removed only when exact M-006 reasoning proves it cannot raise or carry another
+observable demand; empty-build truth alone is not permission to suppress it.
+
+### 20.14.12 Error precedence, EXPLAIN, and persistence
+
+Observable precedence is limited and exact:
+
+- scalar propagates errors required to produce its first/second final row; a
+  successfully produced second row then raises cardinality before later work;
+- EXISTS propagates demanded work until the first row, then suppresses later
+  rows and irrelevant projection/ORDER BY value errors;
+- IN/NOT IN completes the whole lazy build before a probe result, so any build
+  error precedes a possible match; on first demand the left/probe expression
+  error precedes initialization of a still-dormant build, and after READY each
+  later left-expression error precedes that row's probe;
+- M-006 skipped branches suppress the entire undemanded side plan;
+- ordinary lower-layer fatal errors retain §39 precedence.
+
+EXPLAIN exposes enough identity to distinguish scalar, EXISTS, IN-build, lazy
+one-time state, and a surviving derived-table boundary, plus whether a proven
+semi/anti/marker rewrite replaced the fallback. Exact output strings are not
+part of the contract.
+
+Subquery plans, cached values, sets, and spill files are query-local runtime
+state. They add no WAL, page, catalog, TypeId, or long-lived persisted format;
+spill state is disposable after error/crash.
+
+### 20.14.13 Forbidden subquery implementations
+
+V1 forbids:
+
+1. returning the first/last/arbitrary row of a multirow scalar subquery;
+2. removing an outer row when a scalar subquery is empty;
+3. reexecuting one uncorrelated expression-subquery occurrence for every outer row;
+4. eagerly running an uncorrelated subquery in an M-006 skipped or never-demanded path;
+5. implementing nullable NOT IN as an ordinary anti-join;
+6. converting IN UNKNOWN to FALSE in projection/CASE;
+7. obtaining a new READ COMMITTED snapshot or CommandId for a subquery;
+8. capturing an outer column or accepting arbitrary correlation in v1;
+9. depending on successful decorrelation for executable semantics;
+10. using estimated zero rows, NULL fraction, or required_rows as an empty/NOT-NULL proof;
+11. evaluating EXISTS projection values or later rows after existence is known;
+12. treating global aggregate over empty input as an empty scalar/EXISTS subquery;
+13. allowing subqueries in defaults, constraints, or data-modifying subqueries;
+14. treating parser/AST capacity as permission to execute an unsupported form;
+15. removing scalar cardinality checking without exact at-most-one proof;
+16. letting vector batch size change scalar/EXISTS/IN error precedence;
+17. leaking derived child aliases/unnamed generated columns into the outer namespace;
+18. applying a rewrite that changes lazy demand, 3VL, snapshot, cardinality, or errors.
 
 ## 20.15 Canonical SELECT logical shape
 
@@ -14308,6 +14715,10 @@ hidden DML RID/system slots survive when required
 catalog descriptor/schema-version references are internally consistent
 every provably-empty annotation or empty-result replacement has approved
 semantic provenance under §§20.17.10 and 35.2
+every expression subquery is one supported §20.14 mode with exactly one
+independent child and no OuterRef/correlated slot
+scalar/IN child arity, subquery result TypeId/nullability, derived-table output
+names/slot maps, and NOT wrappers agree with §20.14
 ```
 
 Malformed logical plans are architecture errors detected before execution, not conditions left for executor crashes.
@@ -14345,12 +14756,14 @@ The logical EXPLAIN representation does not depend on reparsing or pretty-printi
 9. Hidden DML RID slots are not user-visible and are preserved while required.
 10. SELECT planning begins from one deterministic canonical logical shape.
 11. Rewrites preserve NULL, FLOAT64, volatility, and outer-join semantics.
-12. Correlated references are represented distinctly even when their execution is deferred.
+12. Attempted correlated references are detected distinctly and rejected; no executable v1 logical plan contains OuterRef/Apply state.
 13. Logical validation occurs before execution/physical planning consumes a plan.
 14. `LogicalAnalyze` carries a resolved table/schema/index set and does not perform name lookup during execution.
 15. EXPLAIN consumes the bound/logical representation rather than AST syntax alone.
 16. Semantic emptiness is derived only from §35.2 exact facts and propagates by §20.17.10; estimated zero is not a rewrite proof.
 17. Literal/operator/cast/predicate/scalar-function binding uses only the closed §§17.2–17.10 registry.
+18. Every accepted subquery is one closed §20.14 uncorrelated form with its required logical child, cardinality/3VL contract, and physical fallback.
+19. Subquery rewrites preserve lazy demand, error precedence, snapshot/CommandId, and exact A-002 proof provenance.
 
 ---
 
@@ -14709,6 +15122,10 @@ Execution never resolves target column names again.
 
 `INSERT ... SELECT` uses the same canonical target-column contract after binding the source relation.
 
+INSERT VALUES/SELECT expressions may contain only §20.14's supported
+uncorrelated expression subqueries. Each occurrence retains lazy once-per-
+attempt ownership; it is not reevaluated for every inserted row.
+
 ## 21.12 Default expressions
 
 V1 column-default syntax may contain:
@@ -14806,6 +15223,11 @@ Every assignment uses only §17.8.5's closed automatic assignment coercions;
 narrowing/string/temporal conversions require an explicit CAST in the SQL
 expression.
 
+UPDATE WHERE, assignment, and RETURNING expressions may use §20.14's supported
+uncorrelated forms. WHERE evaluation remains in target materialization; a later
+assignment/RETURNING subquery error follows the ordinary first-published-write
+boundary rather than receiving special rollback semantics.
+
 Each assignment becomes:
 
 ```text
@@ -14821,6 +15243,8 @@ The resulting `LogicalUpdate` feeds Chapter 15's update protocol.
 ## 21.14 DELETE binding/planning
 
 Binder resolves the target table and BOOLEAN WHERE predicate.
+
+DELETE WHERE and RETURNING may use only §20.14's supported uncorrelated forms.
 
 The logical child produces target RID plus old values needed by RETURNING or semantic evaluation.
 
@@ -14847,6 +15271,10 @@ INSERT -> inserted/new row
 UPDATE -> updated/new row
 DELETE -> deleted/old row
 ```
+
+An uncorrelated subquery inside RETURNING cannot capture that row image; only
+ordinary local RETURNING column references can. The side plan remains an
+independent query block under §20.14.2.
 
 The exact physical buffering mechanism is defined by the execution stage.
 
@@ -14973,7 +15401,9 @@ EXPLAIN
 EXPLAIN ANALYZE
 ```
 
-The front end remains architecturally capable of the initial uncorrelated scalar/EXISTS/IN/derived-table subquery forms.
+V1 executes the exact uncorrelated scalar, EXISTS/NOT EXISTS, single-column
+IN/NOT IN, and derived-table forms in §20.14. That matrix—not generic parser or
+IR capacity—is the complete subquery surface.
 
 The purpose of this surface is to exercise the real relational engine, not to claim broad SQL-standard compatibility.
 
@@ -15009,6 +15439,11 @@ user-defined types
 prepared-statement parameters
 SQL privileges / roles
 correlated-subquery execution/decorrelation
+row-valued or multi-column subqueries
+ANY / SOME / ALL quantified comparisons
+derived-column alias lists
+CTEs and SQL set operations
+data-modifying subqueries
 ```
 
 These are future architecture-compatible features, not hidden requirements of the initial engine.
@@ -15040,6 +15475,7 @@ These are future architecture-compatible features, not hidden requirements of th
 23. Logical-plan validation detects broken slot/schema references before execution.
 24. Unsupported SQL fails explicitly rather than being partially reinterpreted.
 25. CREATE catalog commitment is forbidden until every required physical file has completed durable final-name publication under §4.7.
+26. DML accepts only §20.14's uncorrelated expression subqueries; defaults/DDL expressions reject every subquery, and M-005 alone owns any runtime error consequence.
 ---
 
 # Part VI — Physical Execution
@@ -15156,6 +15592,10 @@ PhysicalSort
 PhysicalTopN
 PhysicalLimit
 
+PhysicalScalarSubquery
+PhysicalExistsSubquery
+PhysicalInSubqueryBuild
+
 PhysicalInsert
 PhysicalUpdate
 PhysicalDelete
@@ -15172,7 +15612,9 @@ PhysicalResultSink
 
 An operator is added when it represents a distinct physical execution algorithm or statement execution role.
 
-Detailed join/aggregate/sort/DML execution algorithms are specified in Chapters 28–31.
+The three subquery entries are the mandatory lazy side-plan roles in §20.14.7,
+not parameterized/correlated operators. Detailed join/aggregate/sort/DML
+execution algorithms are specified in Chapters 28–31.
 
 ### 22.4.1 Physical implementation availability
 
@@ -15191,9 +15633,14 @@ PhysicalIndexNestedLoopJoin
 PhysicalHashAggregate
 PhysicalSort
 PhysicalTopN
+PhysicalScalarSubquery
+PhysicalExistsSubquery
+PhysicalInSubqueryBuild
 ```
 
-are baseline physical implementations.
+are baseline physical implementations. The subquery roles may reuse any
+capability-enabled child algorithms, but a final v1 plan cannot depend on a
+semi/anti rewrite in place of their fallback.
 
 Algorithms described as later/conditional in their execution chapters, including:
 
@@ -15225,6 +15672,7 @@ QueryMemoryManager
 SpillManager
 query cancellation state
 pipeline-local early-stop state
+lazy statement-attempt subquery-state registry keyed by bound occurrence
 profiling state
 query-scoped arena
 ```
@@ -15260,6 +15708,7 @@ memory reservations
 spill runs
 counters
 continuation state
+subquery NOT_STARTED/RUNNING/READY/FAILED state and owned scalar/set payload
 ```
 
 No runtime pointer may be persisted or placed into a catalog/storage format.
@@ -15990,6 +16439,13 @@ The executor does not construct one generic `Value` object per active cell in ho
 
 Physical expression state is query-execution state and does not mutate the immutable bound/logical expression meaning.
 
+An expression-subquery node dispatches through §20.14.7's occurrence-keyed
+side-plan state rather than recursively running its child once per vector row.
+If the active selection first demands an uninitialized occurrence, execution
+runs/finalizes that side plan once, then supplies a CONSTANT result vector or
+vectorized IN probe for precisely the demanded rows. Empty/skipped selections
+do not initialize it.
+
 ## 25.2 Input normalization
 
 A fixed-width/vector kernel:
@@ -16129,7 +16585,14 @@ hash probe waits for hash-build Finalize
 sort output waits for input/run Finalize
 aggregate output waits for aggregate Finalize
 DML write waits for target-spool Finalize
+an initialized IN-subquery probe waits for its lazy build Finalize
 ```
+
+Scalar/EXISTS/IN side-plan dependencies are dormant until M-006 control flow
+first demands their occurrence. The scheduler may then run the independent
+child pipelines to completion/early-stop and resume the suspended outer
+pipeline. It MUST NOT execute every dormant side plan eagerly merely because
+the dependency DAG is known.
 
 A dependent pipeline becomes runnable only after every required predecessor has reached its successful finalization state.
 
@@ -18189,6 +18652,7 @@ containing or making inspectable at every relevant node:
 ```text
 chosen physical operator
 child relationships
+lazy subquery side-plan relationships and semantic mode
 chosen access path
 chosen join order
 chosen join algorithm
@@ -20790,21 +21254,33 @@ Cardinality is cached by logical relation/predicate identity where practical so 
 
 ## 37.17 Subquery physical planning
 
-Supported uncorrelated scalar/EXISTS/IN subqueries are optimized once as independent physical subplans.
+Every supported expression subquery lowers to the mandatory independent lazy
+fallback in §20.14.7 unless an exact §20.14.11 rewrite replaces it. Each child
+is optimized as an ordinary physical subplan, but its runtime state is keyed by
+the bound occurrence and initialized at most once per statement attempt.
 
-Their cost includes applicable:
+Costing includes applicable:
 
 ```text
 startup
 materialization
 hash-set / comparison work
+spill I/O
 ```
 
-and uses their ordinary output/cardinality contracts.
+and uses scalar's at-most-two final-row consumption, EXISTS first-row demand,
+IN's complete build, and derived-table ordinary relational cardinality. Lazy
+once cost may be modeled as startup/conditional-on-demand cost, but a probability
+estimate cannot alter whether runtime demand occurs.
 
-Correlated execution remains deferred.
+Semi/anti/marker alternatives enter search only with the exact context/NULL/error
+proofs in §20.14.11 and with runtime capability. A costing objective such as
+`required_rows=1` never removes scalar cardinality checking or becomes an
+existence/emptiness fact.
 
-A correlated form MUST NOT be costed as if it executes once when its semantics would require repeated execution.
+Correlated forms have no bound/logical/physical v1 alternative and are rejected
+before costing. The optimizer therefore never costs them as one-time work and
+never assumes decorrelation succeeds.
 
 Without prepared-statement parameters, v1 optimization sees literal constants directly and may use MCV/histogram information for those literals.
 
@@ -20823,7 +21299,7 @@ Without prepared-statement parameters, v1 optimization sees literal constants di
 11. LEFT JOIN semantic boundaries and supported hash orientation are preserved.
 12. Logical join cardinality is independent of the physical join algorithm.
 13. Only capability-enabled physical algorithms enter the plan search.
-14. Correlated subqueries are never mis-costed as one-time uncorrelated execution.
+14. Correlated subqueries are rejected before physical search; every accepted expression subquery has the once-per-attempt fallback/costing contract in §37.17.
 
 ---
 
@@ -22019,6 +22495,10 @@ That command-layer decision is exactly §39.1's statement-write matrix; an execu
 
 No partially active pipeline/task graph remains runnable after a terminal query execution failure.
 
+Scalar-subquery `CardinalityViolation` and every subquery child/build error use
+§20.14.12's observable precedence and this same §39.1 statement-write matrix.
+There is no subquery-local transaction rollback or retry policy.
+
 ### 39.3.1 Checked integer arithmetic
 
 The exact unary/binary overloads, result types, quotient, remainder, and errors
@@ -22556,6 +23036,14 @@ Parser verification includes positive syntax/AST-shape cases, negative syntax/er
 
 Binder/type verification includes unknown/ambiguous names, aliases/self-joins, qualified references, wildcard expansion, type promotion/casts, NULL typing/3VL, aggregate/GROUP BY legality, ORDER BY alias/ordinal, LEFT JOIN nullability, DML target binding, and subquery scopes.
 
+Subquery verification is table-driven over every §20.14.1 support-matrix row
+and includes local-only name lookup; derived aliases/names; scalar 0/1/2-row
+behavior and second-row error precedence; EXISTS projection irrelevance and
+early stop; IN/NOT IN empty/NULL/duplicate/NaN cases; lazy skipped branches;
+same snapshot/CommandId; global/grouped aggregate, DISTINCT, LIMIT/OFFSET;
+DML before/after-write errors; exact-empty rewrites; and rejection of every
+correlated/row/quantified/LATERAL/set/data-modifying form.
+
 Type property tests MUST compare binder semantics with constant evaluation, future vectorized execution, and index-key comparison where the same type participates.
 
 Catalog verification includes:
@@ -22607,6 +23095,10 @@ memory/spill capability declarations
 required transaction/query context
 empty-result/no-op operators carry approved semantic-empty proof provenance
 and are not justified by numerical estimate/statistics provenance
+every accepted expression subquery has one supported semantic mode, no
+OuterRef, one occurrence-keyed lazy side plan or a proven §20.14.11 rewrite,
+and declared scalar-two-row/EXISTS-one-row/IN-complete-build behavior
+derived-table slot/name boundaries and any removal preserve the exact mapping
 ```
 
 Validation occurs before data-changing side effects.
