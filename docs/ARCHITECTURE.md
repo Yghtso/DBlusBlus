@@ -344,7 +344,7 @@ The normative transition table is:
 | `RECOVERING` | known recovery/corruption failure and complete non-live cleanup | `CLOSED` | no handle is published; future open may retry/re-report the persistent failure |
 | `RECOVERING` | uncertain mutation/publication state or incomplete quiescence/cleanup | `NONCONTINUABLE` | ordinary work remains forbidden and the lock stays held |
 | `READY` | controlled close wins the admission gate | `DRAINING` | lock remains held; only already-admitted completion/cancellation and shutdown work continue |
-| `READY` | §12.12.4/§39.1 database-fatal transition | `NONCONTINUABLE` | admission closes immediately; durable transaction outcomes are preserved |
+| `READY` | database-fatal transition under §§12.12.4 and 39.1 | `NONCONTINUABLE` | admission closes immediately; durable transaction outcomes are preserved |
 | `DRAINING` | admitted work and producer services have quiesced | `CLOSING` | normal durability sequence continues with the lock held |
 | `DRAINING` | shutdown invariant/durability failure | `NONCONTINUABLE` | successful close is forbidden |
 | `NONCONTINUABLE` | owner starts non-clean quiescence/resource destruction | `CLOSING` | no final-checkpoint/clean-state claim; lock remains held until teardown's last step |
@@ -455,7 +455,8 @@ The immutable catalog locator and bootstrap-required identities are pre-recovery
 addressing roots, not ordinary catalog state. The self-hosted catalog rows become
 semantic authority only after their physical pages have been recovered and the
 post-recovery cross-check succeeds. Likewise, `txn_status.dat` may contain a
-torn/corrupt recoverable page before A-001 redo; ordinary snapshot/visibility
+torn/corrupt recoverable page before the recovery protocols in §§12.10.5,
+13.13.2, and 13.17; ordinary snapshot/visibility
 lookup is enabled only after recovery status repair and loser resolution.
 
 Control-file lifecycle outcomes are exact:
@@ -536,13 +537,13 @@ or a worker/guard/manager cannot be proven stopped, the temporary owner enters
 An orphan unlink/sync failure alone does not prevent READY when the entry has
 already been authoritatively classified unowned and remains catalog-inaccessible;
 after §4.7.2 reconciliation, every possible namespace outcome remains that same
-unowned cleanup input and its A-003 cleanup task is retained/retried. Failure of a synchronization required
+unowned cleanup input and its §4.7 cleanup task is retained/retried. Failure of a synchronization required
 for WAL, status repair, checkpoint/control installation, or a required namespace
 does prevent READY.
 
 ### 3.3.5 Database-noncontinuable behavior
 
-Any §12.12.4/§39.1 `DATABASE_NONCONTINUABLE` transition atomically closes the
+Any `DATABASE_NONCONTINUABLE` transition under §§12.12.4 and 39.1 atomically closes the
 database admission gate. No new transaction, statement, maintenance operation,
 ordinary page/file load, WAL append, page writeback, checkpoint, or ordinary
 mutation may start. In-flight work is canceled/failed at safe ownership
@@ -576,7 +577,7 @@ until the later BufferPool quiesce in step 4. Exact shutdown ordering is:
 | Step | Required action and dependency |
 |---:|---|
 | 1 | Publish `DRAINING`; stop admission and prevent new maintenance/checkpoint work from starting. |
-| 2 | Request cancellation of admitted ordinary statements/maintenance at safe points and wait for their operation-local ownership to unwind. Drive every `ACTIVE` or `MUST_ABORT` transaction through §15.6 ABORT. Allow already-`COMMITTING` and already-`ABORTING` terminal protocols to complete under M-005; a commit past its publication-authorizing append remains uncancellable. Wait for terminal publication, snapshots, logical locks, writer gates, and statement resources to release. |
+| 2 | Request cancellation of admitted ordinary statements/maintenance at safe points and wait for their operation-local ownership to unwind. Drive every `ACTIVE` or `MUST_ABORT` transaction through §15.6 ABORT. Allow already-`COMMITTING` and already-`ABORTING` terminal protocols to complete under §39.1; a commit past its publication-authorizing append remains uncancellable. Wait for terminal publication, snapshots, logical locks, writer gates, and statement resources to release. |
 | 3 | Stop/join vacuum, ANALYZE/statistics, status-reclamation/cleanup, scheduler/query workers, and ordinary checkpoint production under §14.17.1 after their admitted transaction work reaches step 2's terminal boundary. Keep BufferPool writeback and WAL writer/group-commit durability services alive. |
 | 4 | Quiesce BufferPool external Fetch/new-page admission, drain loads/evictions/writebacks and every guard/pin/latch owner, and stably flush every dirty non-retired page required for normal close under WAL-before-data. A frame belonging to a proven retired/orphan object may use §7.12.5's discard rule; no other dirty frame may be discarded. |
 | 5 | With no active writer and an empty DPT, append, durably flush, and install one final checkpoint through §13.5, including the alternating control-slot `fdatasync`. This checkpoint is mandatory for a successful controlled close but is an optimization, not a clean marker or a prerequisite for later recovery correctness. |
@@ -620,13 +621,13 @@ success without an open handle may stop after durable root publication.
 Whole-database DROP/removal is not a v1 online operation. External/offline root
 removal is supported only while the database is `CLOSED` and the remover has
 acquired the same exclusive control-file lock, so removal cannot race open or
-recovery. It follows A-003 durability for every namespace deletion it chooses to
+recovery. It follows §4.7 durability for every namespace deletion it chooses to
 acknowledge.
 
 Process crash releases the process-associated lock and all runtime state. Machine
 crash likewise removes OS lock state. Neither requires a stale-lock-file cleanup,
 because no lock file exists and control-file existence alone is not ownership.
-The next opener acquires exclusivity and always runs recovery; A-003 determines
+The next opener acquires exclusivity and always runs recovery; §4.7 determines
 which namespace mutations survived, while control/WAL/page protocols determine
 database state.
 
@@ -669,7 +670,7 @@ The following v1 implementations are forbidden:
 3. treating a stale filename or control-file existence as proof of a live owner;
 4. creating two independent owner/BufferPool/WAL-manager instances for one actual root in one process;
 5. admitting normal work before recovery, status repair, catalog reconstruction, file validation, and READY publication complete;
-6. trusting a torn transaction-status page before A-001 recovery;
+6. trusting a torn transaction-status page before recovery under §§12.10.5, 13.13.2, and 13.17;
 7. ignoring or recreating a missing bootstrap/committed catalog-owned file;
 8. deleting unknown root entries as presumed orphans;
 9. shutting down WAL durability before transaction completion, dirty-page drain, and final checkpoint;
@@ -799,7 +800,7 @@ The canonical advancing-domain inventory is:
 |---|---|---|---:|---:|---|---|
 | `FileId` | uint32 | `0` invalid | `1` | `UINT32_MAX-1 = 4,294,967,294` | never | `FILE_ID_EXHAUSTED`; fail the file/object creation before semantic publication |
 | `PageNo` identity | uint64 | `UINT64_MAX` invalid; page `0` is the superblock | `0`; ordinary pages begin `1` | representable ordinary domain ends at `UINT64_MAX-1`; the v1 physical-I/O cap below makes `1,125,899,906,842,622` the last allocatable ordinary page | unpublished serialized tail number may be retried; published reuse only through the owning free/reclamation protocol | `PAGE_NUMBER_EXHAUSTED` for that file |
-| `published_page_count` / physical page count | process-local uint64 exclusive bound reconstructed from aligned file length | `0` cannot describe an initialized managed file | `1` | `1,125,899,906,842,623` | may return from `N+1` to `N` only during proven unpublished M-003 tail rollback | same per-file `PAGE_NUMBER_EXHAUSTED`/I/O boundary |
+| `published_page_count` / physical page count | process-local uint64 exclusive bound reconstructed from aligned file length | `0` cannot describe an initialized managed file | `1` | `1,125,899,906,842,623` | may return from `N+1` to `N` only during proven unpublished §12.12 tail rollback | same per-file `PAGE_NUMBER_EXHAUSTED`/I/O boundary |
 | `SlotId` | uint16 | `UINT16_MAX` invalid; `0` legal | `0` | representable `UINT16_MAX-1`; heap geometry currently limits an allocated slot to `1017` | only `DEAD -> UNUSED` after §14.6 grace | page-local `NO_SPACE`, not global ID exhaustion |
 | `TxnId` | uint64 | `0` invalid, `1` frozen | `2` | `18,446,744,073,708,503,041` under the exact fixed-block reservation rule below | never | `TXN_ID_EXHAUSTED`; reject new transaction admission |
 | `CommandId` | uint32 | no sentinel; `0` legal | `0` | `UINT32_MAX = 4,294,967,295` | never within a transaction | no later ordinary statement in that transaction; COMMIT/ROLLBACK remain legal |
@@ -829,7 +830,7 @@ marks. Their allocator must durably store `candidate + 1` before returning
 last values are the `MAX-1` values in the table. A dropped or aborted object does
 not return a FileId/TableId/IndexId/ConstraintId to its allocator. Once the
 durable next value passed it, the ID is consumed even if only a private/orphan
-A-003 artifact ever used it.
+namespace artifact governed by §4.7 ever used it.
 
 TxnId reservation remains in exact blocks of `2^20 = 1,048,576`, starting at
 `2`. The greatest representable exclusive reservation end reachable by that
@@ -849,7 +850,8 @@ permanently skip the unused suffix of an already durable block; restart advances
 from the durable/recovered high-water authority and never hands a possibly
 reserved ID to a different transaction.
 
-The first six shared catalog-object allocations are the fixed M-002 TableIds.
+The first six shared catalog-object allocations are the fixed built-in TableIds
+defined in §16.5.
 Thereafter the common allocator hands out one globally increasing sequence to
 TableId, IndexId, and ConstraintId wrappers. `ColumnId` is separately table-local:
 v1 CREATE TABLE assigns `1..N` in declaration order and rejects an unencodable
@@ -890,10 +892,10 @@ this architecture maximum is `RESOURCE_FULL`/I/O failure, not numeric exhaustion
 
 V1 FileSuperblocks contain no independently advancing persisted page-count
 field. `published_page_count` is reconstructed from aligned physical length plus
-the M-003/WAL publication reconciliation, then maintained as the process-local
+the WAL publication/recovery reconciliation in §12.12, then maintained as the process-local
 exclusive bound. It cannot outrun either authority.
 
-An M-003 page number whose physical extension and publication never completed may
+A page number governed by §12.12 whose physical extension and publication never completed may
 be retried only after exact serialized tail restoration proves it was never
 published. A published PageNo is not implicitly reusable because a relation or
 transaction later disappears; only an already-defined heap/B+ reclamation rule
@@ -930,14 +932,14 @@ MAX_WAL_PAYLOAD       = 67,108,816
 
 `physical_span = align_up(total_length,8)` must also fit one segment. Every
 builder computes exact size before narrowing; it never truncates uint32. An
-oversized `BTREE_MTR` fails as one operation under M-003 before publication and
+oversized `BTREE_MTR` fails as one operation under §12.12 before publication and
 restores any provisional state. V1 does not split one atomic MTR into independent
 WAL records to evade this bound.
 
-Numeric WAL capacity uses a **terminal headroom credit**, distinct from M-003 LSN
-reservation. Before a transaction may append its first user-chain/persistent-write
+Numeric WAL capacity uses a **terminal headroom credit**, distinct from the LSN
+reservation in §12.12. Before a transaction may append its first user-chain/persistent-write
 WAL record, it must acquire and retain enough unconsumed numeric address space for
-the worst M-005 terminal closure. V1 reserves exactly `33,128` bytes per such
+the worst terminal closure under §39.1. V1 reserves exactly `33,128` bytes per such
 nonterminal transaction. From an arbitrary aligned append end, one 8,264-byte
 status `PAGE_INIT`/`PAGE_IMAGE` can advance at most `16,520` bytes including a
 segment tail, and one 48-byte terminal record can advance at most `88` bytes.
@@ -949,7 +951,8 @@ A read-only transaction with no persistent WAL needs no credit and elides
 terminal WAL under §39.1.5.
 
 After a terminal attempt's preparatory image validly appends, an immediate retry
-under retained A-001/M-003 ownership reuses that image/record position as the
+under the retained status-page/WAL publication ownership in §§12.10.5, 12.12,
+and 13.13.2 reuses that image/record position as the
 physical base and retries the terminal append; it does not append an unbounded
 series of redundant images. The one allowed COMMIT-failure-to-ABORT transition
 may reevaluate and append the second accounted image. Inability to retain/reuse
@@ -967,7 +970,7 @@ guaranteed before crash remains available for their required status image and
 `TXN_ABORT` sequence.
 
 A credit acquired speculatively for a transaction's first persistent append may
-be released after a known no-append/M-003 exact rollback only if the transaction
+be released after a known no-append exact rollback under §12.12 only if the transaction
 still has no valid user-chain/persistent WAL record. Once any such record validly
 appends, the credit remains through terminal closure. Append uncertainty follows
 the noncontinuable rule and never releases capacity on a guess.
@@ -987,9 +990,9 @@ boundary result, and enters the existing noncontinuable path. Near exhaustion:
 
 The credit guarantees numeric address space, not memory, disk blocks, segment
 namespace durability, or successful I/O. Those independent failures retain
-M-003/M-005 behavior. A final/recovery checkpoint can itself report
+the behavior in §§12.12 and 39.1. A final/recovery checkpoint can itself report
 `WAL_POSITION_EXHAUSTED`; it cannot cure numeric exhaustion. Controlled close
-therefore cannot report success if its required M-014 checkpoint cannot be
+therefore cannot report success if its required checkpoint under Chapter 3 cannot be
 encoded, while already durable transaction outcomes remain unchanged.
 
 #### 4.3.2.5 Other advancing counts, lengths, and runtime tokens
@@ -1055,7 +1058,7 @@ The conceptual deterministic boundary errors are `ID_EXHAUSTED`,
 may differ, but diagnostics must preserve the exhausted domain and must not report
 these outcomes as `CORRUPT_*` or generic disk-full.
 
-M-005 applies after the lower layer returns exhaustion. Before a statement's first
+§39.1 applies after the lower layer returns exhaustion. Before a statement's first
 published persistent write, a local exhaustion may be a statement-only failure.
 After earlier statement writes, the transaction follows `MUST_ABORT`. TxnId
 exhaustion gates new transactions database-wide; CommandId exhaustion gates one
@@ -1070,7 +1073,7 @@ free list. WAL-position exhaustion alone still permits a newly admitted
 transaction to remain read-only and use the no-terminal-WAL path; its first
 WAL-backed mutation fails before publication if no closure credit is available.
 TxnId exhaustion still prevents a new transaction because v1 has no anonymous
-transaction identity. A fresh M-014 open performs normal validation and
+transaction identity. A fresh open under Chapter 3 performs normal validation and
 recovery; if mandatory recovery/checkpoint WAL cannot fit, it returns the
 exhaustion/open failure and does not claim READY. V1 adds no separate future-proof
 read-only open mode through this rule.
@@ -1769,7 +1772,7 @@ MUST be serialized against concurrent extensions of the same managed file so two
 The existing raw append primitive is a lower-layer storage mechanism. Once WAL/recovery is active, a newly extended ordinary page is not database-visible merely because the file grew.
 
 Before any physical extension, allocation applies §4.3.2.3's exact PageNo,
-page-count, signed-64-bit offset, and file-length checks. M-003 tail rollback is
+page-count, signed-64-bit offset, and file-length checks. §12.12 tail rollback is
 not permission to begin an extension whose candidate is already exhausted.
 
 ### 4.11.1 WAL-mode page publication
@@ -1850,7 +1853,7 @@ For a file initially containing/publishing `N` pages, the canonical outcomes are
 | during page write | write failure leaves the resident page dirty; do not truncate | durable PAGE_INIT repairs a missing/torn page |
 | after stable page write | page is durably published; normal generation reconciliation applies | valid page or PAGE_INIT redo supplies the same initialized state |
 
-Physical extension by itself is never semantic publication. This content/length protocol concerns an already managed file and does not alter the A-003 filesystem-name publication rules in §4.7.
+Physical extension by itself is never semantic publication. This content/length protocol concerns an already managed file and does not alter the filesystem-name publication rules in §4.7.
 
 ### 4.11.2 Runtime visibility and heap/FSM growth
 
@@ -2010,7 +2013,7 @@ V1 uses four exact conceptual layers:
 | `L0_RAW_PHYSICAL` | Exact transfer/size, whole-page checksum where applicable, universal common-header decoding, embedded PageId identity, and expected FileKind/PageType compatibility. No page-specific offset is dereferenced here. |
 | `L1_PAGE_LOCAL` | Complete bounded validation of one page using its bytes, owning file metadata, and already-available immutable descriptor: header/count/offset geometry, canonical slot/entry encoding, local payload non-overlap, local key order, tuple/key codec validity, and every v1 required-zero/reserved rule. |
 | `L2_BOUNDED_REFERENCE` | Nonrecursive reference-domain checks plus checks made while following one actual reference: allocated/published PageNo domain, same-file/object identity, expected target type/level/state, sibling reciprocity/boundary order, RID target state, and bounded progress. |
-| `L3_GLOBAL_GRAPH` | Exhaustive graph/object checks: complete B+ reachability and acyclicity, unique parentage, all-leaf depth, global separator/sibling consistency, complete free-list cycle/duplicate/disjointness, orphan detection, exhaustive heap/version-chain checks, and M-002 catalog fixed-point validation. |
+| `L3_GLOBAL_GRAPH` | Exhaustive graph/object checks: complete B+ reachability and acyclicity, unique parentage, all-leaf depth, global separator/sibling consistency, complete free-list cycle/duplicate/disjointness, orphan detection, exhaustive heap/version-chain checks, and §16.5 catalog fixed-point validation. |
 
 The required timing is:
 
@@ -2019,7 +2022,7 @@ The required timing is:
 | Existing-page BufferPool load | BufferPool completes L0, then invokes the registered owner for complete L1 and every nonfetching L2 domain check available from registered context before `LOADING -> RESIDENT`. |
 | Page-controller construction | Only over a pinned, guarded `RESIDENT` page that passed the preceding checks. Construction does not weaken them; a controller additionally applies operation-specific L2 checks before following a reference. |
 | Ordinary scan/search/update | L0/L1 are already established for each page; every followed RID/child/sibling/free-list reference receives the L2 checks below. |
-| New or mutated writer state | The final page-local after-image passes L1 and nonfetching L2 before M-003 WAL-backed publication and before exclusive mutation ownership is released. Dirty resident checksum bytes may be stale under §4.12.1, so this check excludes only recomputation of that checksum. |
+| New or mutated writer state | The final page-local after-image passes L1 and nonfetching L2 before §12.12 WAL-backed publication and before exclusive mutation ownership is released. Dirty resident checksum bytes may be stale under §4.12.1, so this check excludes only recomputation of that checksum. |
 | Recovery | Untrusted/torn bytes remain recovery-private. Complete redo results pass normal L0/L1 and applicable L2 publication checks before ordinary use; an atomic B+ MTR is validated as its complete reconstructed result. |
 | Database open | Validates every control/bootstrap/superblock/root/catalog/status page it consumes. It does not run an implicit full user-heap/index L3 scan. Required startup objects that fail their required checks prevent READY. |
 | Explicit verifier | Performs L0/L1/L2 exhaustively over the selected object and all applicable L3 checks. |
@@ -2054,7 +2057,7 @@ TXN_STATUS  page 0 SUPERBLOCK; page 1..N TXN_STATUS
 
 Self-hosted catalog relation files are ordinary `HEAP` files and therefore contain `HEAP_DATA`, not `CATALOG_DATA`. A generic 72-byte non-BTREE PageFile superblock codec MUST reject/dispatch `FileKind::BTREE`; only the specialized B+ validator accepts its 128-byte header and extension. Every common superblock flag bit, ordinary-page unassigned flag bit, and specifically reserved field in v1 follows §4.14's strict known-mask/RESERVED_ZERO rule.
 
-An all-zero or otherwise uninitialized ordinary page inside an owning file's published range is corruption even if physical extension produced those bytes or a checksum happens to match. Every published ordinary page has a PAGE_INIT/BTREE_MTR-derived recognized header and owning format. Only M-003's unpublished contiguous append tail may contain zero/uninitialized bytes, and it is inaccessible to ordinary Fetch and reconciled before READY.
+An all-zero or otherwise uninitialized ordinary page inside an owning file's published range is corruption even if physical extension produced those bytes or a checksum happens to match. Every published ordinary page has a PAGE_INIT/BTREE_MTR-derived recognized header and owning format. Only the unpublished contiguous append tail permitted by §12.12 may contain zero/uninitialized bytes, and it is inaccessible to ordinary Fetch and reconciled before READY.
 
 ### 4.13.3 HEAP_DATA local validity
 
@@ -2114,7 +2117,7 @@ An INVALID head with any UNUSED slot, an unlisted UNUSED slot, duplicate members
 
 Tuple-header transaction fields receive their existing structural domain checks without performing status lookup: `xmin` is `FROZEN_TXN_ID` or a normal TxnId, `xmax` is `INVALID_TXN_ID` or a normal TxnId, and `FROZEN_TXN_ID` is not a deleter. The previous-version sentinel pair must be both invalid or both present. A present previous PageNo is an ordinary published page `>=1` in the same heap file and its SlotId is non-sentinel; an obvious self-reference to the current RID is invalid. Same-page targets can be bounded-checked immediately. Cross-page target state/version-chain acyclicity is L2/L3 and is checked when traversed or by the verifier.
 
-RID dereference always occurs under the existing ReadEpochGuard/reuse protocol and checks expected heap FileId, published PageNo domain, embedded PageId, `slot < slot_count`, and caller-permitted state before exposing bytes. Query/index lookup requires NORMAL; vacuum/diagnostic operations may explicitly accept retained DEAD. UNUSED, reclaimed DEAD, REDIRECT_RESERVED, wrong-relation, or out-of-range targets return controlled stale/corruption classification according to the caller's settled protocol, never undefined access.
+RID dereference always occurs under the existing ReadEpochGuard/reuse protocol and checks expected heap FileId, published PageNo domain, embedded PageId, `slot < slot_count`, and caller-permitted state before exposing bytes. Query/index lookup requires NORMAL; vacuum/diagnostic operations may explicitly accept retained DEAD. UNUSED, reclaimed DEAD, REDIRECT_RESERVED, wrong-relation, or out-of-range targets return controlled stale/corruption classification according to the caller-specific protocol, never undefined access.
 
 ### 4.13.4 B+ local, superblock, and free-page validity
 
@@ -2137,7 +2140,7 @@ free_page_head
 free_page_head is not root_page_no, first_leaf_page_no, or last_leaf_page_no
 ```
 
-The FileId from the safely opened managed file and its deterministic A-003 name must agree with the catalog IndexId/FileId mapping and FileSuperblock identity. Before an IndexDescriptor becomes usable, bounded root/endpoint loads additionally establish that the root belongs to this file, has `level = tree_height - 1`, and that both endpoints are leaves. If `tree_height = 1`, root/first/last are the same leaf; if `tree_height > 1`, the root is internal and `first_leaf_page_no != last_leaf_page_no`. The root has no persisted parent field. A published internal root with zero separators is invalid because §8.15.2 requires contraction before publication; the initialized empty tree is exactly the one empty root leaf. Non-root low/zero occupancy remains governed by §8.16's soft occupancy rule and is not by itself corruption.
+The FileId from the safely opened managed file and its deterministic name defined by §4.7 must agree with the catalog IndexId/FileId mapping and FileSuperblock identity. Before an IndexDescriptor becomes usable, bounded root/endpoint loads additionally establish that the root belongs to this file, has `level = tree_height - 1`, and that both endpoints are leaves. If `tree_height = 1`, root/first/last are the same leaf; if `tree_height > 1`, the root is internal and `first_leaf_page_no != last_leaf_page_no`. The root has no persisted parent field. A published internal root with zero separators is invalid because §8.15.2 requires contraction before publication; the initialized empty tree is exactly the one empty root leaf. Non-root low/zero occupancy remains governed by §8.16's soft occupancy rule and is not by itself corruption.
 
 Every BTREE_LEAF or BTREE_INTERNAL page receives the following complete L1 checks:
 
@@ -2160,7 +2163,7 @@ For every slot, checked arithmetic establishes that `[entry_offset, entry_offset
 
 Each `user_key_length` is in `1..1024` and the exact bytes decode as one complete canonical §8.5 key for the registered key schema. A leaf has `entry_length = user_key_length + 16` and a valid reserved-zero RID belonging to the indexed heap FileId. An internal entry has `entry_length = user_key_length + 24`, comprising that key, a valid reserved-zero separator RID belonging to the same indexed heap FileId, and one child PageNo. Trailing, truncated, noncanonical, wrong-schema, or overlong key bytes are corruption.
 
-The slot sequence MUST be strictly increasing under canonical `(encoded_user_key,RID)` order on every ordinary load, not only in debug/verifier builds. Equal user-key bytes with different RIDs are structurally legal in all indexes, including UNIQUE indexes whose logical ownership is resolved by M-004. Two exact physical `(user_key,RID)` entries in one page are corruption; the full L3 verifier also rejects the same physical key across pages. Recovery's proven replay of an already-present exact entry is an idempotent operation result, not authorization for duplicate stored copies.
+The slot sequence MUST be strictly increasing under canonical `(encoded_user_key,RID)` order on every ordinary load, not only in debug/verifier builds. Equal user-key bytes with different RIDs are structurally legal in all indexes, including UNIQUE indexes whose logical ownership is resolved by §11.10. Two exact physical `(user_key,RID)` entries in one page are corruption; the full L3 verifier also rejects the same physical key across pages. Recovery's proven replay of an already-present exact entry is an idempotent operation result, not authorization for duplicate stored copies.
 
 An internal page has exactly `slot_count + 1` child references: the leftmost child plus one right child per entry. Every local child reference is in `[1, published_page_count)`, is not this page, is not the current root, and is distinct from every other child reference in that same parent. These are local/domain checks; target type, identity, level, and route checks occur when the child is fetched under §4.13.5. Full child-graph acyclicity and unique parentage are L3.
 
@@ -2218,11 +2221,11 @@ represented initialized range =
 
 The initialized range cannot contain `INVALID_PAGE_NO` or extend beyond the paired heap file's published page range available to the registered FSM owner. Every category is an arbitrary valid uint8 estimate; it need not equal current heap free space. Bytes in `[48 + entry_count, 8192)` are zero. A short initialized prefix may be repaired/rebuilt under §6.10; it cannot be indexed outside its current bound. Ordinary insertion still validates authoritative heap free space, so stale but structurally valid categories cannot cause unsafe access.
 
-CATALOG_DATA page 1 receives the exact immutable §16.9 bootstrap-header and six-entry validation, including CRC/header/count/version/identity/reserved-zero rules. Self-hosted catalog relation pages receive ordinary HEAP L0/L1 validation under the canonical M-002 built-in/user SchemaDescriptors. M-002 scalar, cross-row, foreign-reference, fixed-point, and cache-reconstruction checks are catalog L3 and must complete during M-014 open before catalog authority is published; they are not recursively performed by a heap-page owner validator.
+CATALOG_DATA page 1 receives the exact immutable §16.9 bootstrap-header and six-entry validation, including CRC/header/count/version/identity/reserved-zero rules. Self-hosted catalog relation pages receive ordinary HEAP L0/L1 validation under the canonical §16.5 built-in/user SchemaDescriptors. Section 16.5 scalar, cross-row, foreign-reference, fixed-point, and cache-reconstruction checks are catalog L3 and must complete during the open protocol in Chapter 3 before catalog authority is published; they are not recursively performed by a heap-page owner validator.
 
-TXN_STATUS pages require the exact §9.12 32-byte header, PageId/type/version/zero fields, checksum, and 8160-byte two-bit array. All four assigned two-bit patterns decode structurally: INVALID, COMMITTED, ABORTED, and recognized nonterminal RESERVED. RESERVED retains §9.11.1 semantics and is not an unsupported unknown state. Given the durable transaction-allocation high-water mark, every represented entry for an unallocated TxnId at or above `reserved_txn_id_end` must be INVALID; entries in the allocated range may structurally be any assigned pattern, with terminal/reference semantics resolved by recovery and transaction-status logic. A required status page is not exposed to ordinary lookup until A-001 recovery has repaired it and L0/L1 have succeeded.
+TXN_STATUS pages require the exact §9.12 32-byte header, PageId/type/version/zero fields, checksum, and 8160-byte two-bit array. All four assigned two-bit patterns decode structurally: INVALID, COMMITTED, ABORTED, and recognized nonterminal RESERVED. RESERVED retains §9.11.1 semantics and is not an unsupported unknown state. Given the durable transaction-allocation high-water mark, every represented entry for an unallocated TxnId at or above `reserved_txn_id_end` must be INVALID; entries in the allocated range may structurally be any assigned pattern, with terminal/reference semantics resolved by recovery and transaction-status logic. A required status page is not exposed to ordinary lookup until recovery under §§12.10.5, 13.13.2, and 13.17 has repaired it and L0/L1 have succeeded.
 
-Every HEAP/FSM/CATALOG/TXN_STATUS FileSuperblock receives the exact §4.10 72-byte codec checks: singleton/object identity appropriate to FileKind, page size, format, header size, initialized FileId, checksum, required-zero reserved fields and trailing bytes, and file-kind/page-0 identity. The BTREE superblock receives the specialized checks in §4.13.4. File size, M-003 published-page boundary, deterministic A-003 name, catalog descriptor, and superblock FileId/object identity are bounded L2 cross-checks. A mismatch is corruption or missing-required-object failure, not filename-based inference.
+Every HEAP/FSM/CATALOG/TXN_STATUS FileSuperblock receives the exact §4.10 72-byte codec checks: singleton/object identity appropriate to FileKind, page size, format, header size, initialized FileId, checksum, required-zero reserved fields and trailing bytes, and file-kind/page-0 identity. The BTREE superblock receives the specialized checks in §4.13.4. File size, §12.12 published-page boundary, deterministic §4.7 name, catalog descriptor, and superblock FileId/object identity are bounded L2 cross-checks. A mismatch is corruption or missing-required-object failure, not filename-based inference.
 
 Control slots use §13.2's own framing/CRC/generation validation rather than the common page header. The immutable bootstrap page uses its §16.9 codec. Neither is exempt from deterministic checked arithmetic merely because it is not an ordinary page type.
 
@@ -2236,19 +2239,19 @@ Control slots use §13.2's own framing/CRC/generation validation rather than the
 | BTREE_INTERNAL | Yes | §4.13.4 ranges, codecs, strict order, children | §4.13.5 on each followed child | No. |
 | BTREE_LEAF | Yes | §4.13.4 ranges, codecs, strict order, sibling domains | §4.13.5 on sibling handoff; RID L2 on heap recheck | No. |
 | BTREE_FREE | Yes | §4.13.4 exact free format/link domain | Serialized head/pop recheck and bounded chain progress | No, but allocator never ignores a detected violation. |
-| CATALOG_DATA bootstrap | Exact bootstrap framing/checksum/identity | Exact §16.9 header and six entries | Bootstrap/superblock/system-root identity cross-check | Yes: M-002 fixed point before READY. |
-| Catalog relation HEAP_DATA | Yes | Ordinary HEAP under canonical catalog descriptor | M-002 scalar/reference checks during reconstruction | Yes for committed catalog authority before READY. |
-| TXN_STATUS | Yes | §4.13.6 two-bit/header/high-water rules | A-001 WAL/status reconciliation before lookup | No independent full status-file scan beyond recovery/open requirements. |
-| HEAP/FSM/CATALOG/TXN_STATUS superblock | Exact §4.10 page-0 codec | File-kind-specific local fields | File registry/name/catalog/published-length identity | Only where required by M-014 startup ownership. |
+| CATALOG_DATA bootstrap | Exact bootstrap framing/checksum/identity | Exact §16.9 header and six entries | Bootstrap/superblock/system-root identity cross-check | Yes: §16.5 fixed point before READY. |
+| Catalog relation HEAP_DATA | Yes | Ordinary HEAP under canonical catalog descriptor | §16.5 scalar/reference checks during reconstruction | Yes for committed catalog authority before READY. |
+| TXN_STATUS | Yes | §4.13.6 two-bit/header/high-water rules | WAL/status reconciliation under §§12.10.5, 13.13.2, and 13.17 before lookup | No independent full status-file scan beyond recovery/open requirements. |
+| HEAP/FSM/CATALOG/TXN_STATUS superblock | Exact §4.10 page-0 codec | File-kind-specific local fields | File registry/name/catalog/published-length identity | Only where required by Chapter 3 startup ownership. |
 | database.control | Its own exact dual-slot CRC/framing | §13.2 field/range/reserved rules | Selected checkpoint/WAL availability | Both slots are evaluated before recovery entry. |
 
 “No L3 before page use” never means an L3 invariant is optional. It means ordinary bounded operation detects violations it encounters and the explicit verifier provides exhaustive detection without imposing an O(database-size) fetch path or open scan.
 
 ### 4.13.8 Writer, redo, and failure contract
 
-A writer holds the page's exclusive mutation/no-flush ownership while constructing its final bytes. Before M-003 publication, every affected after-image must pass its complete L1 and available nonfetching L2 checks under the same descriptor that future readers use. For a multi-page B+ MTR, all final pages and changed superblock/root/free-list metadata validate as one provisional set before WAL append/publication. A writer MUST NOT knowingly publish a page the canonical reader would reject; failure restores the exact prior runtime state under M-003 or escalates to DATABASE_NONCONTINUABLE if restoration/invariants cannot be established.
+A writer holds the page's exclusive mutation/no-flush ownership while constructing its final bytes. Before §12.12 publication, every affected after-image must pass its complete L1 and available nonfetching L2 checks under the same descriptor that future readers use. For a multi-page B+ MTR, all final pages and changed superblock/root/free-list metadata validate as one provisional set before WAL append/publication. A writer MUST NOT knowingly publish a page the canonical reader would reject; failure restores the exact prior runtime state under §12.12 or escalates to DATABASE_NONCONTINUABLE if restoration/invariants cannot be established.
 
-Recovery may safely identify a target and install PAGE_IMAGE/PAGE_INIT/redo bytes under recovery-private ownership even when the old data page fails checksum. It does not perform ordinary field parsing on torn bytes before an applicable full image establishes trusted framing. Individual redo actions may have private intermediate forms, but a complete page result—and the complete result set of an atomic BTREE_MTR—passes normal L0/L1 and applicable L2 before ordinary BufferPool publication or M-014 READY. A valid WAL action whose complete result remains structurally invalid is `RECOVERY_FAILED`/persisted corruption; recovery never grants a permanent validation waiver.
+Recovery may safely identify a target and install PAGE_IMAGE/PAGE_INIT/redo bytes under recovery-private ownership even when the old data page fails checksum. It does not perform ordinary field parsing on torn bytes before an applicable full image establishes trusted framing. Individual redo actions may have private intermediate forms, but a complete page result—and the complete result set of an atomic BTREE_MTR—passes normal L0/L1 and applicable L2 before ordinary BufferPool publication or Chapter 3 READY. A valid WAL action whose complete result remains structurally invalid is `RECOVERY_FAILED`/persisted corruption; recovery never grants a permanent validation waiver.
 
 Validation failures have these conceptual classifications:
 
@@ -2257,8 +2260,8 @@ Validation failures have these conceptual classifications:
 | Checksum/header/PageId/type/range/local codec failure on one data page | `CORRUPT_PAGE`, refined to `CORRUPT_HEAP` or `CORRUPT_INDEX`; ordinary publication/access fails. |
 | `REDIRECT_RESERVED` in a heap page | `UNSUPPORTED_RESERVED_STATE`; no ordinary publication. It is not guessed as another slot form. |
 | B+ traversal/free-list/global structural failure | `CORRUPT_INDEX`; the operation/verifier fails and no known-malformed route is used. |
-| Required control/bootstrap/catalog/status/root object invalid during open or after recovery | `CORRUPT_DATABASE` or `RECOVERY_FAILED`; M-014 cannot publish READY. |
-| Failure to restore a provisional writer state or uncertainty about installed runtime ownership | M-003 `DATABASE_NONCONTINUABLE`. |
+| Required control/bootstrap/catalog/status/root object invalid during open or after recovery | `CORRUPT_DATABASE` or `RECOVERY_FAILED`; Chapter 3 cannot publish READY. |
+| Failure to restore a provisional writer state or uncertainty about installed runtime ownership | §12.12 `DATABASE_NONCONTINUABLE`. |
 
 A malformed non-required user heap/index page may be reported only when accessed; open need not pre-scan it. Once detected, there is no automatic repair except an already-defined WAL/FPI recovery action or authoritative FSM rebuild. Structurally valid stale MVCC/index entries, DEAD tuples, and safely retired pages are not corruption merely because vacuum has not removed them.
 
@@ -2269,7 +2272,7 @@ The explicit verifier performs deterministic stable-view checks beyond ordinary 
 - HEAP: L0/L1 for every published page; exhaustive SlotId/RID and previous-version-link domain/acyclicity checks available under the selected verification scope; no overlapping retained payloads;
 - FSM: all local mappings/prefixes plus optional exact comparison of categories with authoritative heap free space, reporting stale estimates separately from malformed structure;
 - B+: the complete §4.13.5 root, child, leaf, free, and allocated-page graphs, including strict global order, all-leaf depth, separator bounds, sibling coherence, cycles, duplicate membership, free/live disjointness, and orphans;
-- CATALOG: the M-002 cross-row/self-description fixed point;
+- CATALOG: the §16.5 cross-row/self-description fixed point;
 - TXN_STATUS: all present local pages plus transaction-reference/status consistency available under the recovery horizon.
 
 Every persisted-chain traversal has a finite architecture-derived progress bound. Heap free slots visit at most `slot_count`; B+ root descent uses declared `tree_height` and rejects repeated pages; sibling and free-list walks visit at most `published_page_count - 1` ordinary pages and reject repeats; version/RID verification uses a visited RID set and cannot exceed the selected heap's finite published slot population. An implementation may use an equivalent lower bound, but it cannot omit duplicate/cycle detection or rely on eventual integer wraparound.
@@ -2416,17 +2419,17 @@ Rebuildable advisory state may fall back only where an existing architecture sup
 2. a complete decodable catalog chunk set whose reassembled bytes contain the exact stable `DBLUSSTA` magic and a readable positive `payload_version>1`;
 3. a malformed known-version statistics payload, including malformed nested PersistedScalarV1 data.
 
-Each case rejects the entire affected statistics scope/version, records a diagnostic, and selects an older complete valid descriptor or missing-statistics fallback. V1 does not apply version-1 total-length, checksum-offset, flags, or payload parsing to the greater version; the already-decoded catalog chunk envelope is sufficient to discard it. Rows/versions are never mixed or partially salvaged. A-002 guarantees that this affects plan quality only, never semantic emptiness or query correctness.
+Each case rejects the entire affected statistics scope/version, records a diagnostic, and selects an older complete valid descriptor or missing-statistics fallback. V1 does not apply version-1 total-length, checksum-offset, flags, or payload parsing to the greater version; the already-decoded catalog chunk envelope is sufficient to discard it. Rows/versions are never mixed or partially salvaged. Sections 34.1 and 35.2 guarantee that this affects plan quality only, never semantic emptiness or query correctness.
 
-The whitelist does not include malformed ordinary heap-tuple/page encoding of the `sys_statistics` relation. The M-008 page/tuple decoder must first safely produce a decodable catalog tuple. Nor does it include malformed core catalog rows, unknown constraints/types, required defaults, FSM page formats, B+ key formats, or transaction status. Stale but structurally valid FSM categories and statistics estimates are KNOWN approximate values, not ignored extensions.
+The whitelist does not include malformed ordinary heap-tuple/page encoding of the `sys_statistics` relation. The §§4.13–4.14 page/tuple decoder must first safely produce a decodable catalog tuple. Nor does it include malformed core catalog rows, unknown constraints/types, required defaults, FSM page formats, B+ key formats, or transaction status. Stale but structurally valid FSM categories and statistics estimates are KNOWN approximate values, not ignored extensions.
 
-Unknown unrelated filesystem names are left untouched under A-003. That namespace safety rule is not persisted-format acceptance: an unknown file is never opened as a database object, and a bootstrap/catalog-required file with unknown FileKind/version cannot be published merely because its directory entry is preserved.
+Unknown unrelated filesystem names are left untouched under §4.7. That namespace safety rule is not persisted-format acceptance: an unknown file is never opened as a database object, and a bootstrap/catalog-required file with unknown FileKind/version cannot be published merely because its directory entry is preserved.
 
 ### 4.14.6 Control, open, index, and nested-version decisions
 
 Control-slot family dispatch occurs before normal dual-slot validity/fallback. If either 4096-byte slot has exact `DBLUSCTL` magic and a positive unsupported format version, v1 returns `UNSUPPORTED_DATABASE_FORMAT` and does not select an older v1 slot. This deliberately covers the generation-10-v1/generation-11-v2 case: v1 cannot validate or compare the v2 generation/checksum/layout safely and cannot time-travel to generation 10. A version-0, wrong-magic, checksum-bad, or otherwise corrupt v1 candidate remains governed by the existing independent-slot/torn-update fallback; it is not evidence of a supported newer format.
 
-Before M-014 READY, every deterministically reachable required control, bootstrap, WAL, catalog descriptor, FileSuperblock, B+ key descriptor, and transaction-status root uses supported semantics. An unsupported required object prevents READY. M-008 still does not require an exhaustive user-page L3 scan: an unsupported/corrupt user heap or B+ page not touched during open fails its later ordinary access without reinterpretation. If that failure renders a required semantic object unusable, existing M-008/M-005/M-014 escalation applies.
+Before READY publication under Chapter 3, every deterministically reachable required control, bootstrap, WAL, catalog descriptor, FileSuperblock, B+ key descriptor, and transaction-status root uses supported semantics. An unsupported required object prevents READY. Sections 4.13–4.14 still do not require an exhaustive user-page L3 scan: an unsupported/corrupt user heap or B+ page not touched during open fails its later ordinary access without reinterpretation. If that failure renders a required semantic object unusable, the escalation rules in §§4.13–4.14, §39.1, and Chapter 3 apply.
 
 Every committed catalog index is required state in v1. V1 defines neither an “unusable index” catalog state nor automatic rebuild-at-open. Therefore a `sys_indexes.key_schema_version` or BTREE superblock `key_schema_version` other than `1` prevents index descriptor publication and READY; a nonpositive catalog value is corruption and a positive greater value is unsupported. The index cannot be traversed with v1 comparison rules. For version `1`, a schema fingerprint mismatch is `CORRUPT_INDEX`, not a future extension.
 
@@ -2434,7 +2437,7 @@ Nested failure follows semantic criticality, not depth. A supported catalog cont
 
 ### 4.14.7 Recovery, writing, rewrites, and upgrade boundary
 
-Recovery is not best effort. An unknown complete WAL record type may carry required redo or transaction semantics, so recovery stops with `UNSUPPORTED_WAL_FORMAT` and cannot reach READY. A record with v1 framing/flags/reserved/CRC violations follows §13.11's torn-tail versus required-prefix corruption rules. Recovery cannot guess an unsupported page format required by redo; completed redo output must still pass M-008 under a supported owner format. Statistics fallback remains outside crash-correctness authority.
+Recovery is not best effort. An unknown complete WAL record type may carry required redo or transaction semantics, so recovery stops with `UNSUPPORTED_WAL_FORMAT` and cannot reach READY. A record with v1 framing/flags/reserved/CRC violations follows §13.11's torn-tail versus required-prefix corruption rules. Recovery cannot guess an unsupported page format required by redo; completed redo output must still pass §§4.13–4.14 under a supported owner format. Statistics fallback remains outside crash-correctness authority.
 
 Every v1 writer emits only supported versions, KNOWN enum/state values, semantically correct known flag bits, field-legal sentinels, exact lengths, and zero RESERVED_ZERO/padding/trailing bytes. A v1 writer does not copy unknown input material into a rewritten object.
 
@@ -3761,7 +3764,7 @@ category 255 -> 8135
 
 A runtime candidate search MAY use this represented lower bound when locating a category capable of satisfying an insertion request.
 
-The source contract in this pass does not prescribe a specific runtime tie-breaker, exact bucket-search algorithm, or in-memory candidate-index representation.
+V1 does not prescribe a specific runtime tie-breaker, exact bucket-search algorithm, or in-memory candidate-index representation.
 
 Regardless of candidate-search policy, the selected heap page MUST still be fetched and checked because persisted/runtime FSM information may be stale.
 
@@ -7082,7 +7085,7 @@ A v1 TXN_STATUS decoder MUST reject:
 - mismatched embedded `page_no`,
 - checksum failure when ordinary-page checksum verification is active.
 
-The complete status-page L1/high-water and recovery-publication requirements are §4.13.6. In particular, all assigned two-bit codes are structurally decodable, while A-001 and transaction-status semantics—not raw page decoding—decide whether a nonterminal code is valid for an authoritative transaction reference.
+The complete status-page L1/high-water and recovery-publication requirements are §4.13.6. In particular, all assigned two-bit codes are structurally decodable, while the protocols in §§12.10.5 and 13.13.2 together with transaction-status semantics—not raw page decoding—decide whether a nonterminal code is valid for an authoritative transaction reference.
 
 The page's common `page_lsn` records the newest WAL record physically reflected in the page. After a successful terminal update this is that update's `TXN_COMMIT`/`TXN_ABORT` LSN. During recovery it may temporarily be a system `PAGE_INIT`/`PAGE_IMAGE` LSN before the later semantic terminal record is applied, as defined by §12.10.5.
 
@@ -7508,7 +7511,7 @@ They do not change the logical history that made the cleanup safe.
 
 Because they modify persistent page bytes, they participate in WAL/page-LSN rules once WAL is active.
 
-The exact freeze horizon and status-page truncation rules belong to the later vacuum/reclamation pass.
+The exact freeze horizon and status-page truncation rules are defined in Chapter 14.
 
 ## 10.6 MVCC invariants
 
@@ -7911,7 +7914,7 @@ For each distinct physical candidate `(K,RID)`, in this order:
    - another transaction nonterminal: return `WAIT_THEN_RECHECK`; an uncommitted delete never frees the key;
    - `FROZEN_TXN_ID` as `xmax`, a future self `cmin/cmax`, or invalid/unknown status evidence: return `CORRUPTION_OR_INTERNAL_ERROR`.
 
-Provisional M-003 bytes are not ordinary candidates. They are either unpublished/inaccessible or exactly restored; only §12.12-published tuple/header/index state participates.
+Provisional §12.12 bytes are not ordinary candidates. They are either unpublished/inaccessible or exactly restored; only §12.12-published tuple/header/index state participates.
 
 The complete physical range is enumerated even after finding a semantic owner so an exact duplicate physical key or dangling/mismatched RID cannot be hidden by early exit. Aggregate outcome precedence is:
 
@@ -8006,9 +8009,9 @@ Vacuum may remove aborted or terminally stale candidates only under Chapter 14. 
 
 The offline §21.8 build uses the same canonical encoded equality, any-NULL non-conflict rule, creator/deleter current-state classification, and corruption checks. Because SchemaLock plus exclusive TableWriterGate drains and excludes target-table writers, the private bulk build may detect duplicate fully non-NULL live owners by sorted/grouped encoded keys rather than acquiring one transaction UNIQUE_KEY lock per row. It must still reject more than one current logical owner and must not use the DDL statement's historical snapshot to omit a current committed owner.
 
-### 11.10.10 M-005 and autocommit boundary
+### 11.10.10 §39.1 and autocommit boundary
 
-`UNIQUE_CONFLICT` determines only that the constraint reports `UniqueViolation`; it publishes no mutation for the rejected candidate. Section §39.1 then applies the unchanged M-005 boundary: before this statement's first published write an explicit transaction may remain `ACTIVE`, while an earlier write from this statement requires `MUST_ABORT` and automatic ABORT. Autocommit uses the same predicate/locks and aborts its implicit transaction on violation. A successful check is not a commit, and every acquired UNIQUE_KEY lock remains held through the implicit or explicit transaction's terminal publication.
+`UNIQUE_CONFLICT` determines only that the constraint reports `UniqueViolation`; it publishes no mutation for the rejected candidate. Section 39.1 then applies its unchanged publication boundary: before this statement's first published write an explicit transaction may remain `ACTIVE`, while an earlier write from this statement requires `MUST_ABORT` and automatic ABORT. Autocommit uses the same predicate/locks and aborts its implicit transaction on violation. A successful check is not a commit, and every acquired UNIQUE_KEY lock remains held through the implicit or explicit transaction's terminal publication.
 
 ### 11.10.11 Forbidden UNIQUE implementations
 
@@ -8280,7 +8283,7 @@ victim.
 The selected victim receives `DEADLOCK_DETECTED`, atomically enters
 `MUST_ABORT`, and is driven through the ordinary §15.6 abort path regardless of
 whether its current statement crossed the publication boundary. This is the
-transaction-fatal M-005 matrix row, not `DATABASE_NONCONTINUABLE`. Its outgoing
+transaction-fatal §39.1 matrix row, not `DATABASE_NONCONTINUABLE`. Its outgoing
 wait edges are canceled so it can abort, but all resources it owns remain
 protected until ABORTED terminal publication and are released only at A3.
 Waiters wake on actual release, remove/rebuild their edges, and perform the full
@@ -9178,7 +9181,7 @@ published page mutation:
 
 Append success and WAL durability are deliberately different publication points.
 
-An owning protocol may require more than one ordered record. It MUST identify which complete record is the final **publication-authorizing record** for the page mutation. Earlier validly appended preparatory records remain in WAL if a later required append fails, but they must be redo-safe in the exact pre-operation semantic state and do not authorize ordinary page publication by themselves. A-001's pre-terminal status-page `PAGE_IMAGE` followed by the terminal semantic record is the canonical example. For single-record PAGE_INIT/PAGE_IMAGE/PAGE_DELTA/BTREE_MTR operations, that record is itself publication-authorizing.
+An owning protocol may require more than one ordered record. It MUST identify which complete record is the final **publication-authorizing record** for the page mutation. Earlier validly appended preparatory records remain in WAL if a later required append fails, but they must be redo-safe in the exact pre-operation semantic state and do not authorize ordinary page publication by themselves. The pre-terminal status-page `PAGE_IMAGE` followed by the terminal semantic record in §§12.10.5 and 13.13.2 is the canonical example. For single-record PAGE_INIT/PAGE_IMAGE/PAGE_DELTA/BTREE_MTR operations, that record is itself publication-authorizing.
 
 ### 12.12.1 LSN reservation and no-hole rule
 
@@ -9196,7 +9199,7 @@ credit. Capacity credit is not an LSN reservation and cannot make a hole.
 
 The reservation includes any required preceding `WAL_PAD` or all-zero short segment tail. That padding and the target record become part of the valid logical prefix only when the target append publishes successfully; failure leaves the valid append end unchanged even if private buffer bytes or an empty next segment were prepared.
 
-If reservation prepared an exact next segment through §12.2.1 but the record never appends, that namespace-durable empty segment is only the permitted next-contiguous artifact described in §13.11. It neither consumes an LSN nor extends the valid logical WAL stream, and startup may retain/reconcile it under the existing A-003 rules.
+If reservation prepared an exact next segment through §12.2.1 but the record never appends, that namespace-durable empty segment is only the permitted next-contiguous artifact described in §13.11. It neither consumes an LSN nor extends the valid logical WAL stream, and startup may retain/reconcile it under the existing §4.7 rules.
 
 A reserved candidate LSN may appear only in private record-construction buffers and canonical full-image copies that remain inaccessible under §12.12.3 ownership. A resident page's published `page_lsn`, dirty generation, DPT entry, checkpoint metadata, or user transaction's published `last_wal_lsn` MUST NOT advertise a merely reserved LSN. The transaction WAL-chain tail advances only after the complete user record validly appends; canceling a reservation leaves the prior chain tail unchanged.
 
@@ -10791,8 +10794,8 @@ state or format field.
 | `VACUUM(TableId)` | One table plus the exact `IndexId` set in its retained descriptor. It performs independently WAL-backed heap/index/FSM/freezing maintenance units; the pass is not an ordinary user transaction and is not all-or-nothing. | Online with SELECT/INSERT/UPDATE/DELETE under §§14.2–14.12. | At most one mutating pass per TableId. A second request waits, then rechecks object liveness and starts a new pass or fails if the object retired. |
 | `ANALYZE(TableId)` | One transaction-owned statement, one snapshot, one immutable table/schema/index manifest, and transactional `sys_statistics` rows. | Online with user work and VACUUM. | Concurrent ANALYZE statements are allowed, including on the same table; StatsVersion selection resolves publication order. |
 | `TXN_STATUS_RECLAIM` | Database-global proof/cutoff publication and sparse physical retirement under §14.14. | Concurrent with ordinary work and table vacuum only through the status-history protocol below. | Exactly one global reclaimer owns cutoff publication at a time. A second request waits and recomputes after the owner finishes. |
-| object/file retirement cleanup | One catalog-retired TableId or IndexId and its exact managed files. It drains runtime owners and performs A-003 unlink/directory durability. | Unrelated live objects continue. The retired object admits no new work. | Serialized per object; a duplicate request waits and then observes completed or still-pending cleanup. |
-| orphan cleanup | Database namespace, but only exact A-003 entries already proven unowned. | May coexist with READY work because classified entries are semantically inaccessible. | One database-global namespace-cleanup owner at a time; a second request waits. |
+| object/file retirement cleanup | One catalog-retired TableId or IndexId and its exact managed files. It drains runtime owners and performs §4.7 unlink/directory durability. | Unrelated live objects continue. The retired object admits no new work. | Serialized per object; a duplicate request waits and then observes completed or still-pending cleanup. |
+| orphan cleanup | Database namespace, but only exact §4.7 entries already proven unowned. | May coexist with READY work because classified entries are semantically inaccessible. | One database-global namespace-cleanup owner at a time; a second request waits. |
 
 Fuzzy checkpointing remains separately coordinated. VACUUM/status/retirement
 mutations use ordinary WAL, DPT, WAL-before-data, and checkpoint rules; a
@@ -10851,7 +10854,7 @@ use claim, descriptor/query handle, BufferPool/file owner, guard, and frame to
 drain under §§7.12.5, 21.9, and 4.7.7.
 
 An admitted VACUUM that observes RETIRING finishes or exactly rolls back its
-current M-003 publication unit, begins no next mutation unit, releases its
+current publication unit under §12.12, begins no next mutation unit, releases its
 claims, and ends canceled. An admitted ANALYZE scan likewise releases its
 current page/read-epoch ownership and cancels collection unless it already owns
 the applicable `STATS_PUBLISH` claims. DROP may commit catalog deletion before
@@ -10873,7 +10876,7 @@ the §14.11 recheck before each mutation and never waits for transaction,
 maintenance, schema, or unique-key ownership while holding a page/B+ latch.
 It does not need every `UNIQUE_KEY` lock to erase a terminally stale exact
 `(key,RID)` entry: B+ mutation ownership plus the ReadEpoch protocol protect the
-physical operation, while M-004 current-owner recheck protects logical UNIQUE
+physical operation, while §11.10 current-owner recheck protects logical UNIQUE
 correctness.
 
 Concurrent workers MUST preserve this existing order for each RID:
@@ -10949,9 +10952,9 @@ Failure of any check discards the **entire** generation, including when only one
 manifest IndexId was dropped. V1 never edits/recomputes a generation manifest
 during publication and never publishes a table generation lacking a formerly
 required index member. Because revalidation precedes the first persistent stats
-row, a recoverable failure may leave an explicit transaction ACTIVE under M-005;
+row, a recoverable failure may leave an explicit transaction ACTIVE under §39.1;
 autocommit aborts its implicit transaction. If a later failure occurs after any
-row publication, M-005 requires abort and completeness filtering keeps the
+row publication, §39.1 requires abort and completeness filtering keeps the
 generation globally unusable.
 
 The ANALYZE/DROP linearization is the object publication gate:
@@ -10993,7 +10996,7 @@ delayed ANALYZE cache callback rechecks current object/schema applicability
 under the same cache/publication ordering before install. If DROP has won, the
 callback is discarded and cannot reinstall the entry. Nonreused IDs ensure a
 same-name replacement cannot inherit it. A commit-side cache failure still
-follows M-005: committed `sys_statistics` rows remain authoritative rebuildable
+follows §39.1: committed `sys_statistics` rows remain authoritative rebuildable
 metadata, and safe older/missing-statistics fallback is allowed.
 
 Older generations become statistics-GC candidates only after a newer committed
@@ -11084,8 +11087,8 @@ admission.
 
 On `READY -> DRAINING`, no new maintenance is admitted. VACUUM, status reclaim,
 statistics GC, and cleanup finish or restore their current publication unit and
-quiesce; an ACTIVE ANALYZE is canceled and follows ordinary M-005/M-014 abort
-handling, while already-COMMITTING or ABORTING ANALYZE transactions complete
+quiesce; an ACTIVE ANALYZE is canceled and follows the ordinary abort handling
+in §39.1 and Chapter 3, while already-COMMITTING or ABORTING ANALYZE transactions complete
 terminal publication. Namespace cleanup already initiated by shutdown completes
 under §3.3.6. During `RECOVERING` no normal maintenance exists. At
 `DATABASE_NONCONTINUABLE`, all new maintenance mutation and publication stops;
@@ -11095,12 +11098,12 @@ cleanup write continues.
 
 A VACUUM pass is a sequence of system-maintenance publication units. An exactly
 restored provisional unit may fail the pass safely; earlier successful WAL-backed
-units remain valid and idempotent. Storage uncertainty escalates under M-003.
-ANALYZE is transactional and follows M-005. A status cutoff durable at
+units remain valid and idempotent. Storage uncertainty escalates under §12.12.
+ANALYZE is transactional and follows §39.1. A status cutoff durable at
 §14.14.2 step 2 never moves backward; failure before durable publication leaves
 the old cutoff, while inability to establish matching runtime state after it is
 durable is noncontinuable. Retirement unlink/sync failure leaves semantic DROP
-committed and cleanup pending under A-003.
+committed and cleanup pending under §4.7.
 
 Conceptual acquisition/order rules are:
 
@@ -11394,7 +11397,7 @@ C6. only now return/send successful COMMIT acknowledgement
 
 Commit does **not** force dirty heap/index pages.
 
-The C2 status-page installation intentionally precedes C3 durability under A-001; the status page remains NO-FORCE and cannot itself reach disk before WAL-before-data. C3 is the irreversible durable-commit point: once `TXN_COMMIT` is durable, recovery necessarily establishes COMMITTED and no later runtime, cache, cleanup, or client failure may change that outcome to ABORTED.
+The C2 status-page installation intentionally precedes C3 durability under §§12.10.5 and 13.13.2; the status page remains NO-FORCE and cannot itself reach disk before WAL-before-data. C3 is the irreversible durable-commit point: once `TXN_COMMIT` is durable, recovery necessarily establishes COMMITTED and no later runtime, cache, cleanup, or client failure may change that outcome to ABORTED.
 
 After the publication-authorizing `TXN_COMMIT` append within C2, commit is uncancellable. A connection loss or cancellation request cannot redirect it to ABORT. Exact failure outcomes for every C0–C6 boundary are canonical in §39.1.5.
 
@@ -11746,9 +11749,9 @@ Every column below is system-managed. Ordinary user `SELECT` may read system rel
 | `4` | `5` | `fsm_file_id` | `INT64` | no | Required nonzero FileId encoded as zero-extended uint32. |
 | `5` | `6` | `schema_version` | `INT64` | no | Current required SchemaVer, encoded as zero-extended uint32; `0` is invalid and CREATE TABLE begins at `1`. |
 
-Semantic uniqueness is required for `table_id`, `(namespace, table_name)`, `heap_file_id`, and `fsm_file_id`. A FileId cannot occupy both heap and FSM roles or belong to two tables. The two files must be the managed `table_<table_id>.heap` and `table_<table_id>.fsm` entries required by A-003, with matching FileSuperblock FileId, kind, and `object_id = table_id`.
+Semantic uniqueness is required for `table_id`, `(namespace, table_name)`, `heap_file_id`, and `fsm_file_id`. A FileId cannot occupy both heap and FSM roles or belong to two tables. The two files must be the managed `table_<table_id>.heap` and `table_<table_id>.fsm` entries required by §4.7, with matching FileSuperblock FileId, kind, and `object_id = table_id`.
 
-The six built-in rows use their exact TableIds/names above, `namespace = main`, `schema_version = 1`, and the heap/FSM FileIds from the corresponding bootstrap entries. Built-ins use ordinary separate HEAP and FSM files; their tuples do not live in `catalog.dat`. No `flags`, `is_system`, or `is_dropped` column exists. Built-in identity follows the reserved TableId/name set; DROP is represented by ordinary MVCC/catalog visibility and delayed A-003 retirement, not a mutable dropped bit.
+The six built-in rows use their exact TableIds/names above, `namespace = main`, `schema_version = 1`, and the heap/FSM FileIds from the corresponding bootstrap entries. Built-ins use ordinary separate HEAP and FSM files; their tuples do not live in `catalog.dat`. No `flags`, `is_system`, or `is_dropped` column exists. Built-in identity follows the reserved TableId/name set; DROP is represented by ordinary MVCC/catalog visibility and delayed §4.7 retirement, not a mutable dropped bit.
 
 ### 16.5.3 `sys_columns` — TableId `2`
 
@@ -11800,7 +11803,7 @@ The fixed self-description contains one `sys_columns` row for every column liste
 | `1` | `2` | `table_id` | `INT64` | no | Nonzero TableId of the indexed relation. |
 | `2` | `3` | `index_name` | `VARCHAR` | yes | Binder-canonical name for a standalone CREATE [UNIQUE] INDEX; SQL NULL for a constraint-owned backing index. |
 | `3` | `4` | `btree_file_id` | `INT64` | no | Required nonzero FileId encoded as zero-extended uint32. |
-| `4` | `5` | `is_unique` | `BOOLEAN` | no | Whether normal execution enforces the M-004 UNIQUE owner protocol for this index. |
+| `4` | `5` | `is_unique` | `BOOLEAN` | no | Whether normal execution enforces the §11.10 UNIQUE owner protocol for this index. |
 | `5` | `6` | `key_schema_version` | `INT32` | no | Exact B+ key encoding schema version; v1 requires `1`. |
 
 `index_id` and `btree_file_id` are each semantically unique. Every row references one `sys_tables` row. The managed file is exactly `index_<index_id>.btree`, with matching FileId, `FileKind::BTREE`, FileSuperblock `object_id = index_id`, key-schema version/fingerprint, and the ordered columns reconstructed from `sys_index_columns`.
@@ -11809,7 +11812,7 @@ Every committed v1 index row requires `key_schema_version=1`. A value less than 
 
 A non-NULL `index_name` must be nonempty, binder-canonical, and unique among visible named indexes in `main`; table and index names remain separate classes. A NULL name means the index is owned by exactly one UNIQUE or PRIMARY KEY row in `sys_constraints`. A non-NULL name means a standalone CREATE INDEX/CREATE UNIQUE INDEX object and no constraint row may own it. V1 does not generate a second persisted name for an implicit constraint index.
 
-`is_unique` is the direct semantic authority for whether the physical index uses M-004 enforcement. `sys_constraints` is the sole authority for whether that index also represents a table UNIQUE or PRIMARY KEY constraint. A constraint-owned backing index must have `is_unique=true`; neither the constraint row nor index bit alone is accepted when their required cross-check fails. A standalone `is_unique=true` row represents CREATE UNIQUE INDEX without a table-constraint row. There is no `primary` or flags column; primary-key semantics are never inferred from an index bit.
+`is_unique` is the direct semantic authority for whether the physical index uses §11.10 enforcement. `sys_constraints` is the sole authority for whether that index also represents a table UNIQUE or PRIMARY KEY constraint. A constraint-owned backing index must have `is_unique=true`; neither the constraint row nor index bit alone is accepted when their required cross-check fails. A standalone `is_unique=true` row represents CREATE UNIQUE INDEX without a table-constraint row. There is no `primary` or flags column; primary-key semantics are never inferred from an index bit.
 
 ### 16.5.5 `sys_index_columns` — TableId `4`
 
@@ -11848,7 +11851,7 @@ Any other code in a catalog claiming schema version 1 is `CORRUPT_CATALOG` and p
 
 `constraint_id` and `index_id` are each semantically unique in this relation. A non-NULL constraint name must be nonempty and is unique within its owning table; unnamed constraints remain SQL NULL and no hidden generated name is persisted. Each row references an existing table and an existing `sys_indexes` row for that same table whose `index_name` is SQL NULL and `is_unique=true`. The ordered constrained columns are exactly that index's `sys_index_columns` rows; no duplicate column array exists.
 
-For `UNIQUE`, those columns use the complete M-004 key equality, NULL, current-owner, wait/recheck, and lock-lifetime semantics. For `PRIMARY_KEY`, exactly one such row may exist per table, every backing key column's current `sys_columns.nullable` is `false`, and enforcement is PRIMARY KEY = NOT NULL on every component plus the same M-004 UNIQUE predicate. A standalone unique index has `sys_indexes.is_unique=true`, a non-NULL name, and no `sys_constraints` row.
+For `UNIQUE`, those columns use the complete §11.10 key equality, NULL, current-owner, wait/recheck, and lock-lifetime semantics. For `PRIMARY_KEY`, exactly one such row may exist per table, every backing key column's current `sys_columns.nullable` is `false`, and enforcement is PRIMARY KEY = NOT NULL on every component plus the same §11.10 UNIQUE predicate. A standalone unique index has `sys_indexes.is_unique=true`, a non-NULL name, and no `sys_constraints` row.
 
 ### 16.5.7 `sys_statistics` — TableId `6`
 
@@ -11916,7 +11919,7 @@ bootstrap locator + built-in schema-v1 decoder
 
 For each bootstrap entry, open cross-checks the exact relation code/TableId mapping, `relation_schema_version=1`, heap/FSM FileIds against the matching `sys_tables` row, and each opened file's managed basename, FileId, FileKind, and `object_id`. The `sys_tables` and `sys_columns` self-description must reconstruct every listed column with the exact count, ColumnId, ordinal, name, TypeId, NULLability, and no-default state. `sys_indexes`, `sys_index_columns`, and `sys_constraints` contain no bootstrap-only rows or hidden catalog indexes. Initial `sys_statistics` is empty.
 
-A database cannot redefine a built-in relation by changing its self-hosted rows while retaining catalog schema version 1. Any fixed-point or bootstrap cross-check mismatch is committed catalog corruption and prevents M-014 READY.
+A database cannot redefine a built-in relation by changing its self-hosted rows while retaining catalog schema version 1. Any fixed-point or bootstrap cross-check mismatch is committed catalog corruption and prevents Chapter 3 READY.
 
 ### 16.5.10 Validation and cache reconstruction
 
@@ -11926,7 +11929,7 @@ Open/catalog publication validates in this order:
 2. scalar/catalog-field validity, including carrier ranges, sentinels, names, enum codes, BOOLEAN canonicality, NULL/default combinations, and opaque-blob structure where applicable,
 3. cross-row uniqueness, references, contiguous ordinals/chunks, index/constraint agreement, one PRIMARY KEY per table, complete descriptor reconstruction, and bootstrap fixed-point equality.
 
-Except for the explicit rebuildable-statistics tolerance in §16.5.7, duplicate active identities/names, duplicate or missing ordinals, unknown TypeIds/codes, wrong-table references, missing required associated indexes/files, two primary keys, impossible default/nullability combinations, or bootstrap/self-description mismatches are catalog corruption. Required committed catalog corruption prevents READY; implementations do not select an arbitrary duplicate row. Internal writers perform the same validation before descriptor/cache publication. Discovering invalid required committed catalog state after READY is `CORRUPT_DATABASE`/database-noncontinuable under M-014; no partial replacement cache is published.
+Except for the explicit rebuildable-statistics tolerance in §16.5.7, duplicate active identities/names, duplicate or missing ordinals, unknown TypeIds/codes, wrong-table references, missing required associated indexes/files, two primary keys, impossible default/nullability combinations, or bootstrap/self-description mismatches are catalog corruption. Required committed catalog corruption prevents READY; implementations do not select an arbitrary duplicate row. Internal writers perform the same validation before descriptor/cache publication. Discovering invalid required committed catalog state after READY is `CORRUPT_DATABASE`/database-noncontinuable under Chapter 3; no partial replacement cache is published.
 
 Catalog cache reconstruction is deterministic:
 
@@ -11941,7 +11944,7 @@ cross-check all built-ins and physical file identities
 publish the complete cache only after all required checks succeed
 ```
 
-Catalog rows use ordinary heap-version MVCC. CREATE inserts rows transactionally. DROP makes rows invisible through ordinary catalog MVCC and sends owned files through A-003 retirement; old row versions may remain physically. No catalog `is_dropped` bit exists. Cache publication follows M-005 terminal publication and M-014 READY rules.
+Catalog rows use ordinary heap-version MVCC. CREATE inserts rows transactionally. DROP makes rows invisible through ordinary catalog MVCC and sends owned files through §4.7 retirement; old row versions may remain physically. No catalog `is_dropped` bit exists. Cache publication follows §39.1 terminal publication and Chapter 3 READY rules.
 
 ### 16.5.11 Canonical creation traces
 
@@ -11954,15 +11957,15 @@ CREATE TABLE t (
 );
 ```
 
-the internal DDL path allocates one TableId and two FileIds, durably publishes the managed HEAP/FSM files under A-003, then inserts one `sys_tables` row `(id, main, t, heap, fsm, 1)` and two `sys_columns` rows. Column `a` is `(column_id=1, physical_ordinal=0, logical_ordinal=0, type_id=2, nullable=false, has_default=false, default_value=NULL)`. Column `b` is `(column_id=2, physical_ordinal=1, logical_ordinal=1, type_id=7, nullable=true, has_default=true, default_value=<valid VARCHAR-typed DefaultValueBlob for x>)`. No hidden field is required.
+the internal DDL path allocates one TableId and two FileIds, durably publishes the managed HEAP/FSM files under §4.7, then inserts one `sys_tables` row `(id, main, t, heap, fsm, 1)` and two `sys_columns` rows. Column `a` is `(column_id=1, physical_ordinal=0, logical_ordinal=0, type_id=2, nullable=false, has_default=false, default_value=NULL)`. Column `b` is `(column_id=2, physical_ordinal=1, logical_ordinal=1, type_id=7, nullable=true, has_default=true, default_value=<valid VARCHAR-typed DefaultValueBlob for x>)`. No hidden field is required.
 
 For `UNIQUE(a,b)`, DDL allocates an IndexId, ConstraintId, and B+ FileId; inserts one unnamed `sys_indexes` row with `is_unique=true`; inserts key rows `(index_id,0,column_id(a))` and `(index_id,1,column_id(b))`; and inserts one `sys_constraints` row `(constraint_id,table_id,1,NULL,index_id)`. For `PRIMARY KEY(a)`, the same shape uses kind `2`, the backing key has ordinal `0`, and the `sys_columns` row for `a` has `nullable=false`. Those four normalized facts—constraint kind, unique index, ordered index columns, and column nullability—are the complete authority and must cross-check.
 
-For a standalone `CREATE INDEX i ON t(a,b)`, DDL inserts one `sys_indexes` row with `index_name=i`, `is_unique=false`, and its B+ FileId, plus two ordered `sys_index_columns` rows; there is no `sys_constraints` row. `CREATE UNIQUE INDEX` differs only by `is_unique=true` and uses M-004 enforcement.
+For a standalone `CREATE INDEX i ON t(a,b)`, DDL inserts one `sys_indexes` row with `index_name=i`, `is_unique=false`, and its B+ FileId, plus two ordered `sys_index_columns` rows; there is no `sys_constraints` row. `CREATE UNIQUE INDEX` differs only by `is_unique=true` and uses §11.10 enforcement.
 
 One ANALYZE StatsVersion inserts one TABLE scope chunk set with `scope_id=0`, one COLUMN chunk set for each manifest ColumnId with `scope_id=ColumnId`, and one INDEX chunk set for each manifest IndexId with `scope_id=IndexId`. Every set repeats the same `(table_id,stats_txn_id,stats_command_id)`, uses zero-based contiguous chunk indexes, and carries the already-defined §34.14 payload kind/header. No payload bytes are inferred from catalog row order.
 
-DROP TABLE/INDEX deletes the applicable catalog row versions transactionally under ordinary MVCC. DROP TABLE removes its current table, column, index-column, index, and constraint authority as one DDL transaction; statistics become inapplicable/rebuildable metadata. A-003 retires physical files only after the existing visibility/read-epoch/file-retirement gates. No ID or catalog row is rewritten into a dropped state.
+DROP TABLE/INDEX deletes the applicable catalog row versions transactionally under ordinary MVCC. DROP TABLE removes its current table, column, index-column, index, and constraint authority as one DDL transaction; statistics become inapplicable/rebuildable metadata. §4.7 retires physical files only after the existing visibility/read-epoch/file-retirement gates. No ID or catalog row is rewritten into a dropped state.
 
 ### 16.5.12 Forbidden schema-v1 interpretations
 
@@ -12968,7 +12971,7 @@ binding/folding when §17.10.2 permits; row-dependent parse, overflow, and
 division failures are runtime expression errors. `NUMERIC_OVERFLOW` and
 `DIVISION_BY_ZERO` are conceptual SQL-expression subcategories of the existing
 runtime `ArithmeticError`; this registry does not require new source enums.
-M-005 alone determines whether such a runtime error leaves the statement
+§39.1 alone determines whether such a runtime error leaves the statement
 transaction ACTIVE or requires abort after published effects.
 
 ### 17.10.2 Constant folding and errors
@@ -13035,17 +13038,17 @@ physical order. SQL FLOAT64 and every SQL-orderable non-NULL type use the same
 value order, but ordinary comparison with NULL remains UNKNOWN and BOOLEAN SQL
 ordering is unsupported. Index-bound construction must preserve those predicate
 rules and retain a residual recheck whenever a physical bound alone is broader.
-M-004 UNIQUE bypasses any NULL-containing key and uses exactly this normalized
+§11.10 UNIQUE bypasses any NULL-containing key and uses exactly this normalized
 non-NULL equality for every component.
 
-A-002/§35.2 may derive a semantic proof from a scalar fact only when all literals,
+Sections 34.1 and 35.2 may derive a semantic proof from a scalar fact only when all literals,
 overloads, casts, and predicates are entries in this closed registry and exact
 evaluation is error-safe. `1=2` is exact FALSE and `NULL=1` exact UNKNOWN;
 unsupported/implementation-defined operations and statistics/required_rows are
 never scalar semantic proof.
 
 This registry changes no TypeId, PersistedScalarV1 byte, heap scalar payload, or
-B+ key encoding. Those settled codecs remain the representation owners.
+B+ key encoding. Those codecs are the representation owners.
 
 ### 17.10.4 Forbidden scalar implementations
 
@@ -13469,7 +13472,7 @@ Required examples are:
 SELECT 1;                    -> one row containing INT32 1
 SELECT TRUE;                 -> one row containing TRUE
 SELECT NULL;                 -> bind-time TYPE_ERROR because standalone NULL
-                               still lacks a concrete M-006 type context
+                               still lacks a concrete Chapter 17 type context
 SELECT 1 WHERE TRUE;         -> one row
 SELECT 1 WHERE FALSE;        -> zero rows
 SELECT 1 WHERE NULL;         -> zero rows because WHERE retains only TRUE
@@ -13509,7 +13512,7 @@ V1 forbids:
 4. returning `0` for `SELECT COUNT(*)` without an intervening filter;
 5. resolving column references or wildcards without a visible relation binding;
 6. using no-FROM syntax to capture an outer subquery column;
-7. assigning no-FROM expressions different M-006 scalar semantics;
+7. assigning no-FROM expressions different Chapter 17 scalar semantics;
 8. enabling another clause or SQL feature while accepting optional FROM;
 9. changing §20.14 scalar/EXISTS/IN/derived-table behavior; or
 10. consulting estimates/statistics to decide whether the conceptual row exists.
@@ -14484,7 +14487,7 @@ A scalar subquery binds only after its final SELECT output has exactly one
 column. Its result TypeId is that column's bound type. V1 conservatively marks
 every scalar-subquery expression nullable even when the selected expression is
 NOT NULL, because zero final rows produce one typed NULL scalar value.
-The resulting typed expression participates in surrounding M-006 operators,
+The resulting typed expression participates in surrounding Chapter 17 operators,
 CASE common-type resolution, assignment coercion, and aggregate signatures
 without any special subquery cast.
 
@@ -14556,7 +14559,7 @@ not prevent first-row early stop after OFFSET has been satisfied.
 ### 20.14.6 IN and NOT IN
 
 The left operand and subquery output are scalar only. Binding resolves exactly
-one M-006 equality overload/common numeric type and inserts only the casts that
+one Chapter 17 equality overload/common numeric type and inserts only the casts that
 registry permits. There is no subquery-specific coercion. Failure to resolve
 ordinary `=` is a bind-time TYPE_ERROR.
 
@@ -14586,14 +14589,14 @@ truth and may be deduplicated. Any number of NULL rows is one Boolean marker.
 Equality/hash normalization is exactly §17.10.3, including signed-zero, NaN,
 VARCHAR, and promoted numeric semantics.
 
-Unlike M-006's source-ordered expression-list IN, an uncorrelated IN subquery is
+Unlike Chapter 17's source-ordered expression-list IN, an uncorrelated IN subquery is
 an unordered relational build. On first demand, it consumes and validates the
 entire limited/final subquery result before any probe result is returned. A
 subquery output-expression, memory, or spill error anywhere in that build
 therefore precedes a possible matching probe value. Once build succeeds, left
 values probe it vectorized.
 
-For the occurrence's first demanded outer selection, M-006 child order first
+For the occurrence's first demanded outer selection, Chapter 17's child-evaluation order first
 evaluates the left scalar expression. If that evaluation fails, the still-
 dormant build does not start. If at least one active row reaches the IN
 operation, the complete build initializes once before any of those rows is
@@ -14668,7 +14671,7 @@ does not execute. Once successfully evaluated, its value/build state is cached
 for all later outer rows in that attempt. A failed side plan fails the statement;
 it is never re-executed to seek a different outcome.
 
-M-006 evaluation order remains authoritative:
+Chapter 17 evaluation order remains authoritative:
 
 - a subquery in an unselected CASE arm does not run;
 - a subquery in a skipped AND/OR right operand does not run;
@@ -14690,14 +14693,14 @@ does not create a nested transaction or independently own logical locks.
 ### 20.14.9 Legal expression/statement contexts
 
 Supported uncorrelated expression subqueries use the ordinary surrounding
-M-006 type rules in these v1 contexts:
+Chapter 17 type rules in these v1 contexts:
 
 | Context | V1 rule |
 |---|---|
 | SELECT projection, WHERE, HAVING, JOIN ON | scalar/EXISTS/IN/NOT forms supported; predicates still require BOOLEAN |
 | searched CASE and AND/OR | supported with §17.7.3 short-circuit/lazy demand |
 | GROUP BY expression | supported when the resulting scalar is groupable under Chapter 20; it remains one uncorrelated once-result expression |
-| outer ORDER BY expression | supported when the result is SQL-orderable under M-006; BOOLEAN EXISTS/IN results are therefore not orderable without explicit legal cast |
+| outer ORDER BY expression | supported when the result is SQL-orderable under Chapter 17; BOOLEAN EXISTS/IN results are therefore not orderable without explicit legal cast |
 | aggregate argument | supported when the resulting scalar TypeId matches an exact §29.3 signature; the subquery is a separate inner query block |
 | nested subquery | supported only when independently uncorrelated at every boundary |
 | UPDATE/DELETE WHERE | supported during the ordinary read/target-spool phase |
@@ -14767,7 +14770,7 @@ row-rejecting context after exact trusted facts prove the subquery comparison
 value NOT NULL and prove the left value NOT NULL or add an equivalent left
 `IS NOT NULL` rejection. Otherwise it requires a NULL-aware marker/build.
 Statistics, estimated zero NULL fraction, sampled values, and required_rows are
-not proof under A-002.
+not proof under §§34.1 and 35.2.
 
 Exact `is_provably_empty` consequences are:
 
@@ -14782,7 +14785,7 @@ Exact `is_provably_empty` consequences are:
 
 Only §§20.17.10/35.2 proof provenance authorizes these rewrites. A numerical
 estimate of zero never does. The IN/NOT IN left evaluation may itself be
-removed only when exact M-006 reasoning proves it cannot raise or carry another
+removed only when exact reasoning under Chapter 17 proves it cannot raise or carry another
 observable demand; empty-build truth alone is not permission to suppress it.
 
 ### 20.14.12 Error precedence, EXPLAIN, and persistence
@@ -14797,7 +14800,7 @@ Observable precedence is limited and exact:
   error precedes a possible match; on first demand the left/probe expression
   error precedes initialization of a still-dormant build, and after READY each
   later left-expression error precedes that row's probe;
-- M-006 skipped branches suppress the entire undemanded side plan;
+- branches skipped under Chapter 17 suppress the entire undemanded side plan;
 - ordinary lower-layer fatal errors retain §39 precedence.
 
 EXPLAIN exposes enough identity to distinguish scalar, EXISTS, IN-build, lazy
@@ -14816,7 +14819,7 @@ V1 forbids:
 1. returning the first/last/arbitrary row of a multirow scalar subquery;
 2. removing an outer row when a scalar subquery is empty;
 3. reexecuting one uncorrelated expression-subquery occurrence for every outer row;
-4. eagerly running an uncorrelated subquery in an M-006 skipped or never-demanded path;
+4. eagerly running an uncorrelated subquery in a path skipped or never demanded under Chapter 17;
 5. implementing nullable NOT IN as an ordinary anti-join;
 6. converting IN UNKNOWN to FALSE in projection/CASE;
 7. obtaining a new READ COMMITTED snapshot or CommandId for a subquery;
@@ -15176,7 +15179,7 @@ The logical EXPLAIN representation does not depend on reparsing or pretty-printi
 16. Semantic emptiness is derived only from §35.2 exact facts and propagates by §20.17.10; estimated zero is not a rewrite proof.
 17. Literal/operator/cast/predicate/scalar-function binding uses only the closed §§17.2–17.10 registry.
 18. Every accepted subquery is one closed §20.14 uncorrelated form with its required logical child, cardinality/3VL contract, and physical fallback.
-19. Subquery rewrites preserve lazy demand, error precedence, snapshot/CommandId, and exact A-002 proof provenance.
+19. Subquery rewrites preserve lazy demand, error precedence, snapshot/CommandId, and exact proof provenance defined by §§34.1 and 35.2.
 
 ---
 
@@ -15280,7 +15283,7 @@ A cached descriptor is usable only if it is visible to the binding snapshot.
 
 ## 21.4 Durable catalog-object IDs
 
-R-037 is resolved by the allocator in §13.2.6.
+The durable catalog-object allocator is defined in §13.2.6.
 
 V1 uses one durable uint64 catalog-object ID namespace for:
 
@@ -15929,7 +15932,7 @@ These are future architecture-compatible features, not hidden requirements of th
 23. Logical-plan validation detects broken slot/schema references before execution.
 24. Unsupported SQL fails explicitly rather than being partially reinterpreted.
 25. CREATE catalog commitment is forbidden until every required physical file has completed durable final-name publication under §4.7.
-26. DML accepts only §20.14's uncorrelated expression subqueries; defaults/DDL expressions reject every subquery, and M-005 alone owns any runtime error consequence.
+26. DML accepts only §20.14's uncorrelated expression subqueries; defaults/DDL expressions reject every subquery, and §39.1 alone owns any runtime error consequence.
 ---
 
 # Part VI — Physical Execution
@@ -16816,7 +16819,7 @@ A checksum or structural mismatch is a `SpillIOError` and aborts query execution
 
 Because spill data is query-temporary and never crash-recovered, the architecture does not assign it a long-lived database persistent-format compatibility promise.
 
-Specialized join/aggregate/sort spill payloads are completed by their owning Pass-13 operator contracts.
+Specialized join, aggregate, and sort spill payloads are defined by their owning operator contracts in Chapters 28–30.
 
 ## 24.9 Spill I/O
 
@@ -17043,8 +17046,8 @@ DML write waits for target-spool Finalize
 an initialized IN-subquery probe waits for its lazy build Finalize
 ```
 
-Scalar/EXISTS/IN side-plan dependencies are dormant until M-006 control flow
-first demands their occurrence. The scheduler may then run the independent
+Scalar/EXISTS/IN side-plan dependencies are dormant until Chapter 17's
+control-flow rules first demand their occurrence. The scheduler may then run the independent
 child pipelines to completion/early-stop and resume the suspended outer
 pipeline. It MUST NOT execute every dormant side plan eagerly merely because
 the dependency DAG is known.
@@ -17979,8 +17982,8 @@ floating-point variation” is not a conforming result.
 
 Aggregate argument expressions are evaluated under the closed Chapter-17
 scalar registry. An argument expression error occurs before that row supplies
-an aggregate value and retains its M-006/M-005 behavior. This section begins
-only after an argument value has been produced successfully; it does not alter
+an aggregate value and retains the behavior defined by Chapter 17 and §39.1.
+This section begins only after an argument value has been produced successfully; it does not alter
 scalar expression trees or their rounding points.
 
 V1 aggregate syntax is exactly `COUNT(*)`, `COUNT(expr)`, `SUM(expr)`,
@@ -18211,7 +18214,7 @@ the diagnostic. The binder assigns that ordinal by first aggregate occurrence
 in ascending source-byte position within the query block and carries it through
 rewrites; repeated shared occurrences retain the first ordinal. Group identity
 and hash/finalization order are not part of the error. Resource failures remain
-their existing operational categories. M-005 alone determines the transaction
+their existing operational categories. §39.1 alone determines the transaction
 effect, including aggregate errors inside DML subqueries after published writes.
 If any group has a failing numeric finalization, the whole query fails and no
 successful aggregate-row prefix is exposed.
@@ -19604,14 +19607,14 @@ old complete generation remains structurally usable after its creator status is
 `RETIRED`; a missing/reclaimed status entry is neither ABORTED nor malformed
 StatsVersion evidence. Object/catalog applicability still decides whether a
 generation belongs to a currently usable table, and old-generation deletion is
-ordinary catalog MVCC/maintenance work under §14.17.1's resolved maintenance
-coordination protocol.
+ordinary catalog MVCC/maintenance work under the maintenance coordination
+protocol in §14.17.1.
 
 Process-local statistics cache keys compare the stored numeric pair directly.
 They retain no transaction-status object pointer, status-page pin, reclamation
 guard, or terminal-outcome-cache entry solely for StatsVersion, and loading old
 statistics never repopulates ancient terminal outcomes. Cache failure after
-durable commit remains the M-005 installed/invalidated/fallback case and cannot
+durable commit remains governed by the installed/invalidated/fallback rule in §39.1.8 and cannot
 invalidate the committed catalog generation.
 
 Restart and crash outcomes are exact:
@@ -20132,7 +20135,7 @@ rather than making otherwise valid user data unreadable.
 
 Neither a structurally valid descriptor nor a descriptor rejected as invalid can produce semantic proof. Rejected statistics are ignored in favor of an older valid descriptor or missing-statistics fallback; the exact §34.14.6 tolerance does not alter this rule.
 
-This is the narrow §4.14.5 IGNORABLE_EXTENSION/fallback whitelist. It begins only after ordinary M-008 heap/tuple decoding yields decodable `sys_statistics` rows. Malformed catalog-page/tuple physical framing remains corruption; unknown core catalog descriptors/defaults do not inherit statistics tolerance. Section 34.14.6 owns numerical validation inside otherwise known payload version 1.
+This is the narrow §4.14.5 IGNORABLE_EXTENSION/fallback whitelist. It begins only after ordinary §§4.13–4.14 heap/tuple decoding yields decodable `sys_statistics` rows. Malformed catalog-page/tuple physical framing remains corruption; unknown core catalog descriptors/defaults do not inherit statistics tolerance. Section 34.14.6 owns numerical validation inside otherwise known payload version 1.
 
 The loader MUST NOT mix rows from different StatsVersions to repair an incomplete descriptor.
 
@@ -20162,7 +20165,7 @@ statistical accuracy:
 
 Structural and numerical validity are mandatory and deterministic. Accuracy may
 degrade through approximation or staleness without invalidating a generation.
-Even a fully valid descriptor remains costing-only under §34.1 and A-002.
+Even a fully valid descriptor remains costing-only under §§34.1 and 35.2.
 
 #### 34.14.6.1 Binary64 domain, exact sum, and tolerance
 
@@ -20457,7 +20460,7 @@ scope fails structural or numerical validation, the entire StatsVersion is
 generation or missing-statistics fallback. It MUST NOT mix scopes from different
 StatsVersions, merge duplicate MCVs, drop a bad bin/member, clamp an individually
 illegal field, or salvage only the valid columns. A well-framed unsupported
-payload version remains `UNSUPPORTED_STATS_VERSION` under §34.14.5/M-012;
+payload version remains `UNSUPPORTED_STATS_VERSION` under §34.14.5;
 missing statistics is distinct from both. Malformed outer catalog tuple framing
 remains catalog/page corruption rather than advisory-payload fallback.
 
@@ -23308,13 +23311,13 @@ The following do **not** cross the boundary:
 - parsing, binding, planning, expression evaluation, locks, snapshots, and query memory,
 - temporary RowCollections/spill files/result spools,
 - candidate LSN reservation or WAL-record construction alone,
-- an M-003 provisional mutation restored before its publication-authorizing append,
+- a §12.12 provisional mutation restored before its publication-authorizing append,
 - durable TxnId/FileId/catalog-object-ID reservation/allocation gaps,
 - publication of an empty ordinary page/PageNo or pure B+ allocation/shape/FSM maintenance state that is architecture-valid independently of the user transaction and carries no transaction-owned tuple/index/catalog/statistics effect,
 - private DDL file construction and `PRIVATE_DURABLE`/`FINAL_DURABLE_UNCOMMITTED` orphan-capable files before transaction-owned catalog mutation,
 - read-only work and system maintenance effects not logically owned by the user statement.
 
-A WAL LSN or valid preparatory/structural record alone is insufficient; the transaction-owned logical mutation publication boundary matters. A record/MTR that also publishes a tuple version, `xmax`, logical index entry, catalog row, or statistics row does cross the boundary even if it simultaneously performs structural allocation. Once this per-statement flag becomes true it never becomes false for that attempt. V1 has no savepoint, subtransaction, or complete physical statement-undo mechanism that can erase a crossed boundary. M-003 rollback prevents one failing primitive from crossing it; it does not undo an earlier published effect from the same statement.
+A WAL LSN or valid preparatory/structural record alone is insufficient; the transaction-owned logical mutation publication boundary matters. A record/MTR that also publishes a tuple version, `xmax`, logical index entry, catalog row, or statistics row does cross the boundary even if it simultaneously performs structural allocation. Once this per-statement flag becomes true it never becomes false for that attempt. V1 has no savepoint, subtransaction, or complete physical statement-undo mechanism that can erase a crossed boundary. §12.12 rollback prevents one failing primitive from crossing it; it does not undo an earlier published effect from the same statement.
 
 The normative rule is:
 
@@ -23364,7 +23367,7 @@ AB = semantic ABORT requested/completed through §15.6
 | `SpillIOError`, temp disk full, or spill corruption | FA | MA | spill files remain temporary |
 | BufferPool fetch/load persistent-page corruption | NC | NC | ordinary online execution stops; controlled recovery/repair is required |
 | known BufferPool flush or WAL-durability failure during ordinary execution | FA | MA | the lower layer preserves dirty state; COMMIT/ABORT use §§39.1.5–39.1.6 |
-| known WAL append failure with exact M-003 restoration | FA | MA | the failed primitive adds no published write; earlier statement writes still govern |
+| known WAL append failure with exact §12.12 restoration | FA | MA | the failed primitive adds no published write; earlier statement writes still govern |
 | MTR provisional failure with exact restoration | FA | MA | exact pre-MTR state is not transaction garbage |
 | MTR/append/restoration state reported noncontinuable | NC | NC | lower-layer fatal classification cannot be downgraded |
 | known raw page/file I/O failure with coherent retained state | FA | MA | uncertain ownership/bytes/length instead yields NC |
@@ -23399,7 +23402,7 @@ rows 1..4         = physically retained, logically aborted garbage
 
 Vacuum/recovery handles those versions under the existing no-physical-undo rules. The same result applies to UPDATE after any new version/old `xmax`/index effect publishes and to DELETE after any `xmax/cmax` publishes. UPDATE/DELETE target-spool, assignment, or spill failure before the first mutation is FA.
 
-Constraint checking may be ordered early for efficiency, but the transaction result depends only on where the reported violation falls relative to the boundary. Exact UNIQUE/PRIMARY KEY conflict membership is §11.10 and does not alter this M-005 error policy.
+Constraint checking may be ordered early for efficiency, but the transaction result depends only on where the reported violation falls relative to the boundary. Exact UNIQUE/PRIMARY KEY conflict membership is §11.10 and does not alter this §39.1 error policy.
 
 DML `RETURNING` remains buffered through successful statement completion. If any row/write/result-spool step fails, no prefix is emitted; after a crossed write boundary the transaction aborts. Returned rows are not durability or commit acknowledgements. After a successful statement in an explicit transaction, consuming its RETURNING spool remains legal even though a later explicit ROLLBACK may abort the transaction. In autocommit, the request-owned spool remains unexposed through implicit COMMIT C5 and is released only as part of the successful post-commit response; a pre-C3 commit failure therefore exposes no rows, while transport failure during/after post-C5 delivery means the transaction is COMMITTED and client observation may be incomplete/uncertain.
 
@@ -23407,20 +23410,20 @@ OOM and spill failures follow the same boundary rather than a uniform “disk fu
 
 ANALYZE in-memory collection/finalization failure is FA. Once any `sys_statistics` row publishes, later failure is MA even though incomplete-generation rules prevent global use. A successful ANALYZE remains transaction-local until commit. Failure to install a committed descriptor in the global cache follows §39.1.8 and does not reopen the transaction.
 
-For CREATE, consumed nonreusable IDs, private construction, and durable final-name publication are allocator/cleanup-owned artifacts and do not cross the transaction statement-write boundary before catalog rows publish. A recoverable pre-catalog failure may therefore be FA after transferring every survivor to deterministic orphan cleanup and releasing attempt-only DDL ownership; allocated IDs remain consumed. CREATE catalog publication and DROP catalog `xmax` publication cross the boundary; later failure is MA. Namespace uncertainty that A-003 can conservatively classify as an orphan is not WAL append uncertainty; inability to establish that ownership is NC.
+For CREATE, consumed nonreusable IDs, private construction, and durable final-name publication are allocator/cleanup-owned artifacts and do not cross the transaction statement-write boundary before catalog rows publish. A recoverable pre-catalog failure may therefore be FA after transferring every survivor to deterministic orphan cleanup and releasing attempt-only DDL ownership; allocated IDs remain consumed. CREATE catalog publication and DROP catalog `xmax` publication cross the boundary; later failure is MA. Namespace uncertainty that §4.7 can conservatively classify as an orphan is not WAL append uncertainty; inability to establish that ownership is NC.
 
 V1 supports autocommit. A one-statement implicit transaction applies the same classification, but it has no later statement continuation: statement success enters COMMIT, while either FA or MA statement failure drives ABORT. Post-commit-record and post-durable acknowledgement uncertainty remains exactly §39.1.5.
 
 ### 39.1.5 COMMIT failure, durability, and client acknowledgement
 
-The exact successful stages are §15.5 C0–C6. For persistent transactions, C3 (`durable_lsn >= commit_lsn`) is the irreversible durable semantic point. The resident status-page update in C2 is required A-001 runtime state but remains NO-FORCE; the globally observable runtime terminal cache is published only at C4.
+The exact successful stages are §15.5 C0–C6. For persistent transactions, C3 (`durable_lsn >= commit_lsn`) is the irreversible durable semantic point. The resident status-page update in C2 is required runtime state under §§12.10.5 and 13.13.2 but remains NO-FORCE; the globally observable runtime terminal cache is published only at C4.
 
 | Failure point | Transaction/storage outcome | Client/API outcome |
 |---|---|---|
 | C0/C1 precondition or resource failure, before terminal protocol | no commit record; `ACTIVE -> MUST_ABORT`, then automatic ABORT | COMMIT failed; never success |
-| C2 preparatory image/reservation/construction or known commit-record no-append failure | A-001/M-003 restores exact pre-terminal status state; any inert preparatory image may remain; automatic ABORT | COMMIT failed and transaction aborts; no external COMMIT retry |
+| C2 preparatory image/reservation/construction or known commit-record no-append failure | §§12.10.5, 12.12, and 13.13.2 restore exact pre-terminal status state; any inert preparatory image may remain; automatic ABORT | COMMIT failed and transaction aborts; no external COMMIT retry |
 | C2 append outcome uncertain | storage noncontinuable; do not append ABORT, publish terminal state, or release locks | `CommitOutcomeUncertain`/connection-fatal; recovery inspects the valid persisted prefix |
-| C2 commit record appended but status-page/frame publication cannot complete | M-003 noncontinuable; COMMIT cannot be redirected to ABORT | `CommitOutcomeUncertain`/connection-fatal; recovery may commit if the record survived |
+| C2 commit record appended but status-page/frame publication cannot complete | §12.12 noncontinuable; COMMIT cannot be redirected to ABORT | `CommitOutcomeUncertain`/connection-fatal; recovery may commit if the record survived |
 | C3 WAL write/`fdatasync` failure with exact append bytes retained | remain COMMITTING and retry durability under retained ownership; do not abort or acknowledge | request remains pending; no ordinary failure result authorizes retry/cancellation |
 | C3 durability cannot be established while safe continuation/retry is impossible | storage noncontinuable; recovery decides from the surviving complete WAL prefix | `CommitOutcomeUncertain`/connection-fatal |
 | after C3, before/during C4 runtime terminal publication | durable outcome is irrevocably COMMITTED; publication failure makes runtime/database noncontinuable | never ABORTED; without C6 acknowledgement report/observe commit outcome uncertainty |
@@ -23440,7 +23443,7 @@ COMMIT eligibility or strand an admitted writer deliberately.
 
 A group-commit flush failure applies this same rule to every waiting transaction whose commit record already validly appended. They remain COMMITTING while the exact shared WAL prefix is retried; none may be selectively converted to ABORTED because its individual waiter has not yet been acknowledged.
 
-Under A-001, resident status-page installation is a C2 prerequisite and may not be intentionally deferred until after durability. If C3 has nevertheless completed and a latent failure proves that required installation/runtime state was not completed, the transaction remains COMMITTED and the database is noncontinuable. Ordinary post-C3 runtime cache publication, logical-lock release bookkeeping, catalog/statistics cache publication, or client transport failure likewise cannot change the outcome. No error path may append/publish ABORTED for that TxnId. A nonrequired background status-page flush scheduling failure may leave the page dirty/retryable under M-001 and does not by itself fail an otherwise complete COMMIT.
+Under §§12.10.5 and 13.13.2, resident status-page installation is a C2 prerequisite and may not be intentionally deferred until after durability. If C3 has nevertheless completed and a latent failure proves that required installation/runtime state was not completed, the transaction remains COMMITTED and the database is noncontinuable. Ordinary post-C3 runtime cache publication, logical-lock release bookkeeping, catalog/statistics cache publication, or client transport failure likewise cannot change the outcome. No error path may append/publish ABORTED for that TxnId. A nonrequired background status-page flush scheduling failure may leave the page dirty/retryable under §7.10 and does not by itself fail an otherwise complete COMMIT.
 
 Successful COMMIT is sent only after C4 terminal publication and C5's required coherent installed-or-invalidated cache/ownership state. V1 does not acknowledge at WAL durability and finish runtime publication asynchronously.
 
@@ -23543,7 +23546,7 @@ The following implementations are forbidden:
 1. committing rows 1–4 after row 5 made their multirow DML statement fail,
 2. transparently retrying a statement after any transaction-owned write published,
 3. reusing a failed statement's CommandId or READ COMMITTED snapshot,
-4. treating an exactly restored M-003 provisional mutation as published garbage,
+4. treating an exactly restored §12.12 provisional mutation as published garbage,
 5. changing durable COMMITTED to ABORTED or reporting ABORTED after durable commit,
 6. acknowledging COMMIT before C4/C5 required runtime completion,
 7. releasing transaction locks before terminal publication,
@@ -24134,7 +24137,7 @@ NONCONTINUABLE preventing ordinary work while retaining exclusivity through tear
 durable COMMIT survival across failed open/shutdown and next recovery
 ```
 
-Statement/transaction error verification MUST cover every §39.1.3 matrix row on both sides of the first-published-write boundary where reachable. Required scenarios include multirow INSERT row-5 failure after four published rows, partial UPDATE/DELETE, pre-write read-only/cast/constraint/OOM/spill failure, M-003 exact local rollback with and without an earlier statement write, empty-page/structural publication without a transaction-owned logical row effect, CommandId nonreuse, fresh READ COMMITTED snapshot after FA, rejection of same-TxnId retry after publication, explicit-transaction RETURNING failure before exposure, and autocommit RETURNING held through implicit COMMIT.
+Statement/transaction error verification MUST cover every §39.1.3 matrix row on both sides of the first-published-write boundary where reachable. Required scenarios include multirow INSERT row-5 failure after four published rows, partial UPDATE/DELETE, pre-write read-only/cast/constraint/OOM/spill failure, §12.12 exact local rollback with and without an earlier statement write, empty-page/structural publication without a transaction-owned logical row effect, CommandId nonreuse, fresh READ COMMITTED snapshot after FA, rejection of same-TxnId retry after publication, explicit-transaction RETURNING failure before exposure, and autocommit RETURNING held through implicit COMMIT.
 
 COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
 
@@ -24153,7 +24156,7 @@ release, wakeup revalidation, and safe waiter cleanup. It includes every
 §11.13.7 adversarial timeline and synthetic cycles spanning three or more
 resource families.
 
-Table-driven §11.10 verification covers ordinary UNIQUE and PRIMARY KEY across NULL/composite/FLOAT64 canonical keys; committed/frozen/aborted/nonterminal creators; absent/committed/aborted/nonterminal deleters; same-transaction earlier/current-command creators; earlier-command self-delete reuse versus current-command other-row conflict; same-statement INSERT duplicates; exact same-key UPDATE exclusion; order-independent another-row current-command UPDATE collision; immediate key-swap rejection; post-wait full recheck; stale physical entries; protected RID identity; M-005 before/after-write violation outcomes; and COMMIT/ABORT lock release only after terminal publication.
+Table-driven §11.10 verification covers ordinary UNIQUE and PRIMARY KEY across NULL/composite/FLOAT64 canonical keys; committed/frozen/aborted/nonterminal creators; absent/committed/aborted/nonterminal deleters; same-transaction earlier/current-command creators; earlier-command self-delete reuse versus current-command other-row conflict; same-statement INSERT duplicates; exact same-key UPDATE exclusion; order-independent another-row current-command UPDATE collision; immediate key-swap rejection; post-wait full recheck; stale physical entries; protected RID identity; §39.1 before/after-write violation outcomes; and COMMIT/ABORT lock release only after terminal publication.
 
 Vacuum/reclamation verification includes exact index cleanup before retirement, persistent DEAD restart behavior, grace-delayed RID reuse, version-chain splicing, and long-running snapshot interaction.
 
@@ -24793,7 +24796,7 @@ This appendix indexes canonical persistent-format definitions. It does not repla
 | Checkpoint writer entry | 16 bytes | §13.7 |
 | CHECKPOINT_END payload | 32 bytes | §13.8 |
 
-Catalog, spill, and other persistent formats are added as their canonical chapters are migrated.
+This appendix summarizes formats whose canonical contracts are defined in their owning chapters.
 
 ---
 
@@ -24993,18 +24996,12 @@ Items listed here are future possibilities or staged functionality, not requirem
 
 ---
 
-# Appendix D. Open Architecture Questions
+# Appendix D. Architecture Status and Revision
 
-## D.1 V1 architecture status
+## D.1 V1 scope authority
 
-No unresolved v1 core-architecture question remains in the current v1 contract.
-
-Every identified architecture gap affecting v1 semantics or persistent formats is either:
-
-- resolved explicitly and integrated into its owning chapter, or
-- classified as intentionally deferred functionality in Appendix C.
-
-Deferred features are not unresolved v1 questions.
+The owning chapters define all required v1 semantics and persistent formats.
+Appendix C lists functionality intentionally outside the required v1 scope.
 
 ## D.2 Architecture revision rule
 
