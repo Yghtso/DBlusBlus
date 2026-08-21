@@ -11561,7 +11561,7 @@ TABLE scope requires `scope_id=0`. COLUMN scope requires a nonzero ColumnId belo
 
 An unknown `scope_kind` is never interpreted as a future scope. It makes the affected statistics row/version unusable under the statistics fallback rule below; unlike an unknown required constraint kind, it cannot redefine a core catalog descriptor.
 
-Statistics are rebuildable planning metadata. A decodable catalog tuple whose statistics identity/chunk/payload metadata is malformed invalidates that statistics scope/version and selects an older complete version or missing-statistics fallback with a diagnostic under §34.14; it does not by itself make otherwise valid user data or the six core descriptors unreadable. This narrow tolerance does not permit a malformed tuple physical encoding to bypass the ordinary tuple decoder, does not repair cross-version chunks, and does not resolve the general statistics-tolerance policy.
+Statistics are rebuildable planning metadata. A decodable catalog tuple whose statistics identity/chunk/payload metadata is malformed invalidates that statistics scope/version and selects an older complete version or missing-statistics fallback with a diagnostic under §34.14; it does not by itself make otherwise valid user data or the six core descriptors unreadable. This narrow tolerance does not permit a malformed tuple physical encoding to bypass the ordinary tuple decoder, does not repair cross-version chunks, and applies the exact §34.14.6 numerical acceptance policy rather than an implementation-local tolerance.
 
 ### 16.5.8 Logical keys, references, and physical catalog indexes
 
@@ -19082,6 +19082,11 @@ A full heap scan is intentionally preferred to a complex initial page sampler.
 
 Large-table heap sampling is a future performance optimization.
 
+The ANALYZE writer applies the canonical numerical construction and validation
+rules in §34.14.6 before encoding any scope payload. Approximation affects the
+quality of an accepted value, not the byte-domain, ordering, mass, or
+generation-consistency rules that the writer must satisfy.
+
 ## 34.8 Small-table exact mode
 
 For tables with at most approximately:
@@ -19120,6 +19125,10 @@ Version 1 persists the resulting NDV estimate, not necessarily the complete HLL 
 
 Persisting sketches for incremental statistics is deferred.
 
+The process-local register domain, canonical output bounds, and persisted-NDV
+reader checks are §34.14.6.5. Because no v1 HLL sketch bytes are persisted,
+payload validation never invents a register grammar.
+
 ## 34.10 Most-common values
 
 For large inputs use a bounded heavy-hitter method such as:
@@ -19143,7 +19152,9 @@ estimated frequency fraction
 
 in descending frequency order.
 
-The MCV frequency fraction is relative to all visible rows, so the total MCV mass plus NULL mass and residual non-NULL mass cannot exceed 1 except for bounded estimator rounding.
+The MCV frequency fraction is relative to all visible rows. Its exact persisted
+domain, aggregate-mass tolerance, and residual normalization are owned by
+§34.14.6; no implementation-local floating tolerance applies.
 
 An unbounded exact value->count map is forbidden for large relations.
 
@@ -19171,6 +19182,10 @@ After scanning:
 
 Histogram mass conceptually represents the residual non-NULL, non-MCV distribution.
 
+The canonical maximum bin count, boundary order/equality, MCV disjointness,
+aggregate coverage check, and deterministic normalized masses are
+§§34.14.6.4 and 34.14.6.6.
+
 ## 34.12 Equi-depth rationale
 
 Equi-depth bins target approximately equal row mass per bin.
@@ -19188,7 +19203,9 @@ without requiring an enormous bucket count.
 
 ## 34.13 Histogram value semantics
 
-Histogram sorting/comparison uses the same logical ordering as execution and index-key semantics for the supported type/collation mode.
+Histogram sorting/comparison uses §34.14.6.3's statistics scalar order, which is
+the canonical non-NULL execution/index-key value order without adding a SQL
+comparison overload (notably, BOOLEAN remains SQL-unordered).
 
 In particular:
 
@@ -19265,7 +19282,7 @@ For `scope_kind = TABLE`, bytes `40..103` are:
 | `88` | 8 | average_logical_row_width as binary64 |
 | `96` | 8 | average_stored_tuple_width as binary64 |
 
-Both width fields MUST decode to finite binary64 values numerically greater than or equal to zero. Zero is valid, including for an empty relation. A NaN, positive or negative infinity, or value numerically less than zero in either field is corruption and invalidates the persisted statistics payload.
+Both width fields MUST decode to finite binary64 values numerically greater than or equal to zero. Zero is valid, including for an empty relation. A NaN, positive or negative infinity, or value numerically less than zero makes the statistics generation numerically invalid under §34.14.6.
 
 Starting at byte `104`, the manifest contains:
 
@@ -19342,20 +19359,10 @@ Every scalar TypeId must equal the column TypeId.
 
 MCV entries are in descending frequency order with deterministic scalar-order tie breaking.
 
-Histogram boundaries are nondecreasing in the Chapter-17 semantic order.
-
-All stored fractions/estimates are finite.
-
-Required bounds include:
-
-```text
-0 <= null_fraction <= 1
-NDV >= 0
-0 <= every MCV frequency <= 1
-0 <= every histogram residual_mass <= 1
-```
-
-MCV mass, NULL mass, and histogram residual mass must not exceed `1` except for explicitly tolerated small floating rounding.
+Histogram boundaries are nondecreasing in the §34.14.6 statistics scalar
+order. The complete finite/range, MCV uniqueness/order, histogram, mass,
+degenerate-column, and normalization rules are §34.14.6; this byte grammar does
+not define a second looser acceptance policy.
 
 ### 34.14.4 INDEX payload
 
@@ -19373,13 +19380,8 @@ For `scope_kind = INDEX`, the v1 payload length is exactly `112` bytes:
 | `96` | 8 | leading_key_heap_correlation as binary64 |
 | `104` | 8 | reserved64 = `0` |
 
-`average_entries_per_leaf` is finite and nonnegative.
-
-Correlation is finite and lies in:
-
-```text
-[-1, +1]
-```
+`average_entries_per_leaf` and `leading_key_heap_correlation` obey the exact
+§34.14.6 domains and signed-zero normalization.
 
 The three entry-count fields keep physical B+ work separate from SQL-visible live-row cardinality.
 
@@ -19397,6 +19399,7 @@ StatsVersion equality
 TableId/ColumnId/IndexId identity
 scalar codecs
 counts/fractions/order invariants
+the complete §34.14.6 numerical and generation-consistency contract
 TABLE manifest completeness
 ```
 
@@ -19410,9 +19413,9 @@ missing statistics + diagnostic
 
 rather than making otherwise valid user data unreadable.
 
-Neither a structurally valid descriptor nor a descriptor rejected as corrupt can produce semantic proof. Rejected statistics are ignored in favor of an older valid descriptor or missing-statistics fallback; the separate statistics-tolerance policy does not alter this rule.
+Neither a structurally valid descriptor nor a descriptor rejected as invalid can produce semantic proof. Rejected statistics are ignored in favor of an older valid descriptor or missing-statistics fallback; the exact §34.14.6 tolerance does not alter this rule.
 
-This is the narrow §4.14.5 IGNORABLE_EXTENSION/fallback whitelist. It begins only after ordinary M-008 heap/tuple decoding yields decodable `sys_statistics` rows. Malformed catalog-page/tuple physical framing remains corruption; unknown core catalog descriptors/defaults do not inherit statistics tolerance. M-013 continues to own numerical tolerance inside otherwise known payload version 1.
+This is the narrow §4.14.5 IGNORABLE_EXTENSION/fallback whitelist. It begins only after ordinary M-008 heap/tuple decoding yields decodable `sys_statistics` rows. Malformed catalog-page/tuple physical framing remains corruption; unknown core catalog descriptors/defaults do not inherit statistics tolerance. Section 34.14.6 owns numerical validation inside otherwise known payload version 1.
 
 The loader MUST NOT mix rows from different StatsVersions to repair an incomplete descriptor.
 
@@ -19423,9 +19426,378 @@ domains and consistency directly; it does not call transaction-status lookup.
 
 Arbitrary C++ object graphs, enum ordinals, process pointers, or native object dumps are never serialized.
 
+### 34.14.6 V1 statistics validation and normalization
+
+This section is the sole owner of numerical acceptance for known
+`StatisticsPayloadV1` payloads. The validation layers are distinct:
+
+```text
+structural validity:
+    chunk/header/length/checksum/scalar grammar and manifest completeness
+
+numerical validity:
+    deterministic finite domains, ordering, uniqueness, probability mass,
+    cross-field relationships, and normalized descriptor state in this section
+
+statistical accuracy:
+    resemblance to current data or to the original sampled population
+```
+
+Structural and numerical validity are mandatory and deterministic. Accuracy may
+degrade through approximation or staleness without invalidating a generation.
+Even a fully valid descriptor remains costing-only under §34.1 and A-002.
+
+#### 34.14.6.1 Binary64 domain, exact sum, and tolerance
+
+The one v1 aggregate probability tolerance is the exact dyadic value:
+
+```text
+STATS_PROBABILITY_SUM_EPSILON
+    = 2^-40
+    = 1 / 1,099,511,627,776
+    = binary64 bits 0x3d70000000000000
+    = 0.0000000000009094947017729282379150390625
+```
+
+For a correctly rounded exact fraction in `[0,1]`, the absolute conversion error
+is at most `2^-53`; even conservatively charging all 165 v1 fraction fields gives
+`165 * 2^-53 < 2^-45 < 2^-40`. The constant therefore exceeds ordinary final
+fraction-conversion accumulation while remaining far below a meaningful
+probability. It is not
+`numeric_limits<double>::epsilon()`, a relative tolerance, or a configurable
+value.
+
+Every aggregate probability sum and tolerance comparison in this section uses
+**exact dyadic summation**. Decode each finite binary64 operand as its exact
+mathematical value `significand * 2^exponent`, sum those dyadic rationals without
+rounding, and compare the exact result with exact `0`, `1`, and the epsilon
+above. Stored order remains the diagnostic order, but acceptance cannot depend
+on floating evaluation order, an unordered container, extended precision, or a
+process rounding mode. A process-local binary64 derived from an exact dyadic or
+rational result is rounded once using §17.4.3 round-to-nearest, ties-to-even.
+
+For any field whose domain includes numerical zero, persisted `-0.0` is accepted
+as the same numerical value and normalized to `+0.0` in the materialized
+statistics descriptor. A canonical ANALYZE writer emits `+0.0`. This rule does
+not permit a negative nonzero value. NaN and either infinity are invalid in
+every statistics binary64 field in v1.
+
+Tolerance applies only to the two aggregate mass relationships explicitly
+defined in §34.14.6.4. It never expands an individual field domain, correlation
+bound, width bound, NDV bound, or ordering test. Values below `0` or above `1`
+are rejected, not clamped, even when their distance from the endpoint is less
+than epsilon.
+
+#### 34.14.6.2 Persisted-field numerical registry
+
+All unsigned integer carriers accept their full already-defined field domain;
+identifier/count geometry and checked decoding remain §§4.3.2.5, 16.5.7, and
+34.14. The numerical fields have this closed registry:
+
+| Scope / field | Persisted type | Accepted numerical domain | NaN / infinity | `-0.0` | Exact cross-field rule | Aggregate tolerance | Failure |
+|---|---|---|---|---|---|---|---|
+| TABLE `analyzed_live_row_count` | uint64 | `0..2^64-1` | n/a | n/a | Exact generation row-count basis | none | invalid generation |
+| TABLE `physical_heap_pages` | uint64 | `0..2^64-1` | n/a | n/a | No equality to current storage is required | none | invalid generation only for malformed carrier |
+| TABLE `dead_version_estimate` | uint64 | `0..2^64-1` | n/a | n/a | Approximate; no exact relation to live rows/pages is required | none | invalid generation only for malformed carrier |
+| TABLE `average_logical_row_width`, `average_stored_tuple_width` | binary64 | finite `>= 0` | forbidden | accept, normalize `+0` | Both are numerical zero when live-row count is zero | none | invalid generation |
+| COLUMN `null_fraction` | binary64 | finite `[0,1]` | forbidden | accept, normalize `+0` | Participates in §34.14.6.4 | aggregate only | invalid generation |
+| COLUMN `NDV` | binary64 | finite `>= 0` | forbidden | accept, normalize `+0` | §34.14.6.5; excludes NULL | none | invalid generation |
+| COLUMN `average_width` | binary64 | finite `>= 0` | forbidden | accept, normalize `+0` | With non-NULL observations, no greater than exact uint64 `maximum_observed_width`; otherwise zero | none | invalid generation |
+| COLUMN `maximum_observed_width` | uint64 | `0..2^64-1` | n/a | n/a | Zero when there is no non-NULL observation | none | invalid generation only for malformed carrier |
+| COLUMN MCV `frequency_fraction` | binary64 | finite `[0,1]` | forbidden | accept, normalize `+0` | §34.14.6.3–.4 | aggregate only | invalid generation |
+| COLUMN histogram `residual_mass` | binary64 | finite `[0,1]` | forbidden | accept, normalize `+0` | §34.14.6.4 and .6 | aggregate only | invalid generation |
+| INDEX `physical_entry_count` | uint64 | `0..2^64-1` | n/a | n/a | Approximate physical observation; §34.14.6.8 | none | invalid generation only for malformed carrier |
+| INDEX `logical_live_entry_count` | uint64 | `0..2^64-1` | n/a | n/a | Equals TABLE live-row basis; §34.14.6.8 | none | invalid generation |
+| INDEX `invisible_entry_count_estimate` | uint64 | `0..2^64-1` | n/a | n/a | Approximate; need not equal physical minus logical | none | invalid generation only for malformed carrier |
+| INDEX `leaf_page_count` | uint64 | `0..2^64-1` | n/a | n/a | Approximate physical observation; no current-tree equality | none | invalid generation only for malformed carrier |
+| INDEX `average_entries_per_leaf` | binary64 | finite `>= 0` | forbidden | accept, normalize `+0` | No exact count ratio is required because collection may sample | none | invalid generation |
+| INDEX `leading_key_heap_correlation` | binary64 | finite `[-1,1]` | forbidden | accept, normalize `+0` | Undefined/fewer-than-two-sample writer output is canonical `+0`; reader need not infer sample size | none | invalid generation |
+
+Comparing a binary64 field with a uint64 bound means comparing its exact dyadic
+value with the exact integer, not first rounding that integer to binary64.
+Estimator-output clamping in Chapter 35 is downstream arithmetic and cannot make
+an input outside this table valid.
+
+#### 34.14.6.3 MCV identity and canonical order
+
+For one COLUMN payload:
+
+```text
+0 <= mcv_count <= 64
+```
+
+Each MCV scalar is non-NULL, uses the payload TypeId, and is a canonical
+`PersistedScalarV1`. MCV values are pairwise unique under §17.10.3 non-NULL
+canonical equality. Thus `-0.0` and `+0.0` are one FLOAT64 identity, and all
+canonical-equivalent NaNs are one identity; exact VARCHAR bytes and the ordinary
+BOOLEAN/integer/DATE/TIMESTAMP equality apply. A duplicate invalidates the
+complete StatsVersion. Readers do not merge duplicate frequencies.
+
+Materialized min/max, MCV, and histogram scalar identities use the same
+§17.10.3 key normalization: FLOAT64 signed zeros become one `+0.0` identity and
+NaN is the canonical NaN identity. This process-local normalization does not
+rewrite the persisted scalar payload.
+
+Statistics scalar order is the canonical non-NULL Chapter-8/Chapter-17 storage
+order without adding SQL operator overloads: `FALSE < TRUE`, signed numeric/date/
+timestamp order, unsigned-byte lexicographic VARCHAR order, and the §17.4.3
+FLOAT64 total order with equal signed zeros and one NaN class. MCV entries are
+ordered by:
+
+```text
+frequency_fraction numerically nonincreasing;
+for equal binary64 numerical frequencies, statistics scalar value strictly increasing
+```
+
+The strict tie break plus pairwise uniqueness makes MCV order canonical. Zero
+frequency remains in the already-specified `[0,1]` domain, although canonical
+writers omit zero-frequency candidates when constructing the bounded top-64
+list.
+
+#### 34.14.6.4 Probability mass and normalized residual
+
+When TABLE `analyzed_live_row_count=0`, §34.14.6.7's empty-column form is
+mandatory, `R_exact=0`, and the ordinary mass formula below is not applied. This
+prevents an empty table's canonical `null_fraction=0` from being mistaken for a
+unit non-NULL population.
+
+For a nonempty analyzed table, let exact dyadic sums be:
+
+```text
+M = sum of MCV frequency_fraction values in persisted order
+P = exact(null_fraction) + M
+D = 1 - P
+```
+
+The MCV/NULL base mass is accepted only when `P <= 1 + epsilon`. The canonical
+residual non-NULL, non-MCV mass is:
+
+```text
+if abs(D) <= epsilon: R_exact = 0
+else if D > epsilon: R_exact = D
+else:                 invalid generation
+
+residual_nonnull_nonmcv_mass = round_binary64_ties_even(R_exact)
+```
+
+This is the only clamping-like normalization: a base-mass excess or deficit no
+larger than epsilon becomes exact residual `+0.0`. The persisted NULL/MCV values
+are not rewritten. If `R_exact=0`, `histogram_bin_count` MUST be zero.
+
+Let `H` be the exact dyadic sum of histogram `residual_mass` values. When
+`histogram_bin_count=0`, no histogram coverage relationship is asserted and
+estimators use the ordinary residual/NDV fallback. When it is nonzero, all of
+these are required:
+
+```text
+R_exact > 0
+H > 0
+abs(H - R_exact) <= epsilon
+```
+
+The materialized descriptor exposes the normalized values:
+
+```text
+normalized null/MCV/bin inputs: persisted values with numerical -0 changed to +0
+residual_nonnull_nonmcv_mass:   the binary64 value defined above
+normalized mass of bin i:       round_binary64_ties_even(
+                                    R_exact * exact(bin_i.residual_mass) / H)
+```
+
+The per-bin expression is evaluated as an exact rational and rounded once; it
+does not perform an overflowing/intermediately rounded host division. Range
+estimation consumes bins in persisted order, caps accumulated histogram contribution at
+`residual_nonnull_nonmcv_mass`, and applies the existing estimator finalization;
+it cannot reselect a local epsilon. This deterministic scale reconciles accepted
+aggregate drift without changing payload bytes. Aggregate mismatch beyond
+epsilon invalidates the generation.
+
+#### 34.14.6.5 NDV, HLL, and observed-value constraints
+
+`NDV` is an approximate binary64 estimate of non-NULL distinct values, not a
+semantic integer fact. Reader validation requires:
+
+```text
+NDV <= exact TABLE analyzed_live_row_count
+NDV >= exact mcv_count
+HAS_MIN/HAS_MAX present -> NDV >= 1
+HAS_MIN/HAS_MAX absent  -> NDV = 0, mcv_count = 0, histogram_bin_count = 0
+nonempty table and R_exact > 0 -> NDV >= exact(mcv_count + 1)
+```
+
+An approximate HLL result is not rejected merely for differing from current
+data. During canonical construction, ANALYZE bounds its raw estimate below by
+the number of directly observed distinct MCV values (and by one when any
+non-NULL value was observed) and above by the exact non-NULL count from its full
+snapshot scan. If an exact uint64 upper bound is not exactly representable, the
+encoded cap is the greatest binary64 value not greater than that integer. This
+writer cap makes an above-row-count persisted NDV invalid rather than reader-
+dependent approximation tolerance.
+
+The v1 payload persists only the resulting NDV, not HLL registers. The
+process-local v1 HLL collection state is fixed at `p=14`, exactly 16,384
+registers, each initialized to zero and in `0..51` for a 64-bit hash (50 suffix
+bits plus the all-zero suffix rank). Wrong precision/register count, an
+out-of-domain register, or a nonfinite/negative estimate is an ANALYZE candidate
+failure before persistence; no HLL byte grammar or new payload field is implied.
+Reservoir/HLL sample cardinality is not persisted in payload v1 and therefore
+has no reader-side field relationship to validate.
+
+#### 34.14.6.6 Min/max and histogram invariants
+
+`HAS_MIN` and `HAS_MAX` are either both set or both clear. If set, both scalars
+are non-NULL canonical values of the COLUMN TypeId and:
+
+```text
+min_value <= max_value under statistics scalar order
+every MCV value lies in [min_value, max_value]
+every histogram boundary lies in [min_value, max_value]
+```
+
+If both flags are clear, MCV and histogram arrays MUST be empty. Any MCV or
+histogram entry requires both flags set. Min/max may remain present when both
+arrays are empty. These are exact relationships among statistics produced from
+one analyzed snapshot; they do not compare against current table contents.
+
+For one COLUMN payload:
+
+```text
+0 <= histogram_bin_count <= 100
+```
+
+V1 is a one-dimensional equi-depth residual histogram. NULLs and MCV value
+identities are excluded from its population. Each entry stores an upper
+boundary plus that bin's probability mass relative to all visible analyzed
+rows; no implicit equal-mass value replaces the persisted `residual_mass`.
+
+Each boundary is non-NULL, has the COLUMN TypeId, and boundaries are
+nondecreasing under statistics scalar order. Equal adjacent boundaries remain
+legal: they represent adjacent equi-depth residual bins ending at the same
+semantic value and are consumed in stored order; a reader neither rejects nor
+silently merges them. Histogram population excludes MCV identities, so no
+boundary may equal any MCV value under canonical equality. This prevents MCV and
+residual histogram accounting from representing the same value class.
+
+For range estimation, an upper boundary is inclusive. A run of equal boundaries
+is one comparison boundary group: `< b` excludes all mass in the run ending at
+`b`, while `<= b` includes all of it; interpolation is only across distinct
+adjacent boundary values. This gives duplicate quantile endpoints one exact
+meaning without changing their persisted order or masses.
+
+FLOAT64 boundaries use the full §17.4.3 total order, not raw IEEE unordered
+predicates. Signed zeros compare equal, all NaNs form one greatest class, and
+infinities retain their defined positions. Canonical persisted NaN requirements
+remain §17.13. VARCHAR boundaries use unsigned-byte lexicographic order with no
+locale or normalization.
+
+#### 34.14.6.7 Degenerate canonical representations
+
+Given the TABLE payload and each required COLUMN payload, canonical generation
+states are:
+
+| Analyzed state | Required COLUMN representation |
+|---|---|
+| `analyzed_live_row_count=0` | `null_fraction=+0`, `NDV=+0`, both value flags clear, empty MCV/histogram, `average_width=+0`, `maximum_observed_width=0` |
+| live rows exist and all values are NULL | `null_fraction=1`, `NDV=+0`, both value flags clear, empty MCV/histogram, `average_width=+0`, `maximum_observed_width=0` |
+| at least one non-NULL value | both min/max flags set, `NDV>=1`; min may equal max; average/maximum width obey §34.14.6.2 |
+| one distinct non-NULL value / all non-NULL values equal | `min_value=max_value`, `NDV=1`; that value may be represented once as an MCV, by legal equal-boundary residual bins, or by the no-histogram residual fallback |
+| NULL plus MCV base mass is tolerance-equivalent to one | normalized residual is `+0` and histogram is empty |
+
+Because a binary64 fraction can round to an endpoint for extremely large uint64
+row counts, `null_fraction=1` alone is not the non-NULL-observation discriminator;
+the min/max flags and NDV constraints are. A canonical writer computes the
+fraction from exact counts with one ties-to-even conversion and emits the table
+above whenever the exact non-NULL count is zero.
+
+TABLE average widths are numerical `+0` for zero live rows. INDEX observations
+remain allowed for an empty live table because stale physical entries/pages may
+exist; its `logical_live_entry_count` is nevertheless zero under the next
+subsection.
+
+#### 34.14.6.8 Counts and generation-wide consistency
+
+The TABLE manifest, every required scope identity, TypeId, and object/schema
+fingerprint or descriptor fact already present in v1 must agree exactly under
+§§16.5.7 and 34.14. In addition, every v1 non-partial INDEX payload in the
+generation has:
+
+```text
+logical_live_entry_count = TABLE analyzed_live_row_count
+```
+
+because both describe one logical index entry per visible live heap tuple in the
+same ANALYZE snapshot. No exact equality is required among
+`physical_entry_count`, `invisible_entry_count_estimate`, `leaf_page_count`, or
+`average_entries_per_leaf`: §34.7 permits physical index observation to overlap
+concurrent DML and sampling. Likewise no current-storage comparison validates
+TABLE page/dead estimates. Staleness is never numerical corruption.
+
+#### 34.14.6.9 Generation acceptance, cache state, and writer rule
+
+Validation is generation-atomic. If any manifest-required TABLE/COLUMN/INDEX
+scope fails structural or numerical validation, the entire StatsVersion is
+`INVALID_STATS_GENERATION`; a loader selects the next older complete valid
+generation or missing-statistics fallback. It MUST NOT mix scopes from different
+StatsVersions, merge duplicate MCVs, drop a bad bin/member, clamp an individually
+illegal field, or salvage only the valid columns. A well-framed unsupported
+payload version remains `UNSUPPORTED_STATS_VERSION` under §34.14.5/M-012;
+missing statistics is distinct from both. Malformed outer catalog tuple framing
+remains catalog/page corruption rather than advisory-payload fallback.
+
+The cache contains only descriptors that passed the complete generation check.
+It stores the normalized scalar identities, `+0` numerical zeros, exact-derived
+residual value, and normalized histogram masses defined above. Cache hits do not
+bypass that materialization validation, and §14.17.1 prevents a delayed
+invalid/older install from replacing a newer applicable generation.
+
+ANALYZE MUST emit only values satisfying this section and validate its complete
+candidate through the same rules before the first `sys_statistics` publication.
+Reader epsilon is solely a final binary64 aggregate-rounding allowance; writers
+MUST NOT intentionally emit out-of-range probabilities or aggregate discrepancy
+larger than the unavoidable construction drift. A canonical serialize/decode
+round trip of an ANALYZE candidate must accept and produce the same normalized
+semantic descriptor. No normalized value is written back merely because a
+reader accepted it.
+
+#### 34.14.6.10 Forbidden interpretations and boundary vectors
+
+V1 forbids:
+
+1. choosing machine epsilon, a relative epsilon, or a local configurable tolerance;
+2. accepting NaN/infinity because ordinary comparisons happened to return false;
+3. clamping an individual negative probability or a value above one;
+4. summing through unordered iteration or environment-dependent floating arithmetic;
+5. merging duplicate MCV identities or treating signed zeros/NaN payloads as distinct MCVs;
+6. using raw IEEE unordered comparison for FLOAT64 histogram order;
+7. rejecting legal equal adjacent histogram boundaries or accepting decreasing ones;
+8. double-counting a value in MCV and histogram boundary identity;
+9. rejecting a stale-but-internally-valid descriptor because current storage differs;
+10. mixing StatsVersions or retaining only selected valid members of a failed generation;
+11. using estimator output clamping to legalize malformed persisted input;
+12. allowing accepted statistics, including exact-looking zero, to prove semantic emptiness;
+13. treating the persisted NDV as exact or requiring unbounded HLL accuracy;
+14. rejecting the canonical empty/all-NULL/one-value representations;
+15. preserving `-0.0` as a distinct process-local probability/correlation identity; or
+16. letting compiler, libc, locale, host precision, or container iteration change acceptance.
+
+Verification includes exact binary64 fixtures for `+0`, `-0`, `1`, the adjacent
+representable values below zero and above one, sums exactly one, both sides of
+the `2^-40` boundary, and sums just beyond it. It also covers duplicate MCVs,
+`+0/-0` duplicate identities, two canonical-NaN duplicate identities,
+noncanonical persisted NaN rejection, MCV tie order,
+decreasing/equal histogram boundaries, MCV/histogram overlap, empty/all-NULL/
+one-value columns, MCV-exhausted residual, nonfinite/negative widths, NDV bounds,
+and correlation endpoints plus their adjacent out-of-range values. Synthetic
+near-boundary payloads must yield the same accept/reject and normalized
+descriptor on every supported platform.
+
 ## 34.15 Statistics snapshots and cache
 
 Planning obtains one immutable `StatsDescriptor` for the required table/index statistics.
+
+Materialization first applies the complete §34.14.6 generation validation and
+normalization. Cache publication never exposes raw, partially validated, or
+implementation-locally normalized payload values.
 
 For ordinary cross-transaction planning, the descriptor must come from a complete visible committed StatsVersion.
 
@@ -19505,6 +19877,7 @@ A transaction-local or later-aborted ANALYZE does not reset globally visible mod
 20. Complete-generation selection uses visible catalog rows, manifest/chunk/payload validation, and unsigned lexicographic StatsVersion ordering without payload creator-status lookup.
 21. Status reclamation does not invalidate, rewrite, delete, or retain status pages for old complete statistics generations.
 22. Outer `sys_statistics` tuple MVCC metadata remains subject to ordinary freezing/status rules independently of its payload `stats_txn_id`.
+23. Known v1 payloads are accepted only by the exact §34.14.6 numerical registry; one failed required member invalidates the whole generation, and every accepted descriptor has one deterministic normalized process-local form.
 
 ---
 
@@ -19671,6 +20044,11 @@ normalize small floating drift so t + f + u = 1
 ```
 
 Large logical inconsistencies are estimator bugs, not values to hide through normalization.
+
+This estimator-intermediate finalization is not persisted-statistics validation
+and does not reuse or broaden `STATS_PROBABILITY_SUM_EPSILON`. Persisted inputs
+must already have passed §34.14.6; Chapter 35 clamping cannot legalize a rejected
+payload.
 
 Filter cardinality uses only:
 
@@ -23158,6 +23536,9 @@ aborted ANALYZE does not publish globally
 statistics chunk missing/duplicate/reordered corruption
 statistics payload CRC/version/scalar-codec validation
 physical index entry pressure versus live-row baseline
+the exact §34.14.6 probability endpoints/epsilon boundary, dyadic summation,
+MCV uniqueness/order, histogram order/mass, degenerate representations, and
+generation-atomic fallback vectors
 ```
 
 Cardinality-estimator tests use synthetic distributions with analytically known answers or reference counts for:
