@@ -7,7 +7,6 @@ model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 
 # Keep approval behavior conservative.
-approval_policy = "untrusted"
 approvals_reviewer = "user"
 
 # The build/test process should not need network access.
