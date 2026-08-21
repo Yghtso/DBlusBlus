@@ -4,33 +4,32 @@ target_sources(
     dblusblus_core
     PRIVATE
         common/crc32c.cpp
-        common/file_superblock.cpp
-        common/types.cpp
-        storage/disk_manager.cpp
-        storage/fsm_candidate_index.cpp
-        storage/fsm_page.cpp
-        storage/heap_page.cpp
-        storage/page.cpp
-        storage/page_file.cpp
-        storage/tuple_codec.cpp
-        storage/tuple_header.cpp
-        storage/tuple_layout.cpp
-
-    PUBLIC
         common/crc32c.h
         common/encoding.h
-        common/file_superblock.h
-        common/page_header.h
         common/types.h
-        storage/disk_manager.h
-        storage/fsm_candidate_index.h
-        storage/fsm_page.h
-        storage/heap_page.h
-        storage/page.h
-        storage/page_file.h
-        storage/tuple_codec.h
-        storage/tuple_header.h
-        storage/tuple_layout.h
+        storage/disk/disk_manager.cpp
+        storage/disk/disk_manager.h
+        storage/file/file_superblock.cpp
+        storage/file/file_superblock.h
+        storage/file/page_file.cpp
+        storage/file/page_file.h
+        storage/page/page.cpp
+        storage/page/page.h
+        storage/page/page_header.h
+        storage/heap/fsm_candidate_index.cpp
+        storage/heap/fsm_candidate_index.h
+        storage/heap/fsm_page.cpp
+        storage/heap/fsm_page.h
+        storage/heap/heap_page.cpp
+        storage/heap/heap_page.h
+        storage/heap/heap_page_format.cpp
+        storage/heap/heap_page_format.h
+        storage/tuple/tuple_codec.cpp
+        storage/tuple/tuple_codec.h
+        storage/tuple/tuple_header.cpp
+        storage/tuple/tuple_header.h
+        storage/tuple/tuple_layout.cpp
+        storage/tuple/tuple_layout.h
 )
 
 target_include_directories(
