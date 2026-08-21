@@ -12481,6 +12481,11 @@ is preserved. Overflow produces signed infinity and underflow produces the
 correctly rounded subnormal or signed zero. No floating exception trap is part
 of SQL semantics.
 
+These scalar operator boundaries do not define aggregate reduction order.
+`SUM(FLOAT64)` and `AVG(FLOAT64)` are the separate n-ary operations in §29.3:
+they accumulate finite inputs exactly and round only at aggregate Finalize so
+worker/chunk/spill shape cannot change the result.
+
 Execution, constant folding, hashing/grouping support, and B+ ordering MUST NOT silently use incompatible equality/order rules.
 
 ### 17.4.4 DATE
@@ -13007,6 +13012,10 @@ operator, forbids observable extended precision/contraction, preserves signed
 zero, and normalizes NaN results exactly as runtime. Process floating environment,
 compiler fast-math, locale, timezone, machine architecture, and libc formatting
 defaults cannot change SQL results.
+
+If an optimizer evaluates an aggregate over an exactly known constant relation,
+it uses §29.3's aggregate state and finalization rather than treating the input
+as an arbitrary left fold of scalar operators.
 
 ### 17.10.3 Equality modes, keys, and semantic proof
 
@@ -13775,6 +13784,10 @@ A bound aggregate is semantically distinct from a scalar function call.
 The Binder resolves aggregate argument coercions, return type, and nullability from the same aggregate registry semantics executed by Chapter 29.
 
 The initial COUNT/SUM/MIN/MAX/AVG signatures and empty-input/nullability rules in §29.3 are therefore semantic binding rules as well as execution rules; execution does not choose a different return type later.
+
+Aggregate DISTINCT and FILTER syntax are not v1 registry entries; parser
+recognition, generic function-call AST support, or a physical deduplication
+operator does not make those aggregate forms legal.
 
 Aggregate calls at one SELECT level are illegal inside that same level's WHERE or JOIN ON.
 
@@ -16910,6 +16923,7 @@ A simple column reference may produce a borrowed/reference vector when the pipel
 8. Vectorized short-circuiting does not eagerly execute skippable volatile/error-producing branches.
 9. VARCHAR/FLOAT64 comparison semantics agree with the type/index contracts.
 10. Computed varlen results own bytes for their required lifetime.
+11. Aggregate argument vectors supply successfully evaluated typed values to §29.3; vector size and representation never select a different aggregate reduction semantic.
 
 ---
 
@@ -16955,6 +16969,11 @@ pipeline. It MUST NOT execute every dormant side plan eagerly merely because
 the dependency DAG is known.
 
 A dependent pipeline becomes runnable only after every required predecessor has reached its successful finalization state.
+
+For aggregation, successful Finalize includes §29.3's complete numerical
+validation of every group/aggregate state. No dependent result pipeline exposes
+an aggregate row before that validation succeeds, even if a hash partition or
+ordered group happened to finish earlier.
 
 The immutable physical operator tree remains useful for optimizer output, EXPLAIN, and plan validation.
 
@@ -17857,85 +17876,326 @@ parallel combine
 spill/repartition processing
 ```
 
+`Update`, `Combine`, and `Finalize` must implement the exact semantic states and
+Merge laws in §29.3. They are not permission to choose host-width integer
+accumulators or physical-order FLOAT64 reduction. A descriptor unable to
+preserve that state cannot be capability-enabled for serial, parallel, or spill
+execution.
+
 The executor does not invoke one virtual aggregate callback per input row.
 
 Function/operator dispatch is resolved per aggregate/vector batch.
 
-## 29.3 Initial aggregate signatures and NULL behavior
+## 29.3 V1 aggregate semantics registry
 
-The v1 aggregate registry has these baseline semantics.
+This section is the canonical closed v1 aggregate-value contract. It fixes the
+observable state, Merge, finalization, and numerical errors independently of
+the physical aggregate implementation. The same logical input to one group
+MUST produce the same aggregate value or aggregate numerical error regardless
+of worker count, vector boundaries, input partitioning, hash iteration order,
+spill/repartition decisions, Merge tree, or thread scheduling. “Usual
+floating-point variation” is not a conforming result.
 
-### COUNT(*)
+Aggregate argument expressions are evaluated under the closed Chapter-17
+scalar registry. An argument expression error occurs before that row supplies
+an aggregate value and retains its M-006/M-005 behavior. This section begins
+only after an argument value has been produced successfully; it does not alter
+scalar expression trees or their rounding points.
 
-```text
-result type: INT64 NOT NULL
-empty input: 0
-```
+V1 aggregate syntax is exactly `COUNT(*)`, `COUNT(expr)`, `SUM(expr)`,
+`AVG(expr)`, `MIN(expr)`, and `MAX(expr)` with the overloads below. Aggregate
+`DISTINCT` forms and aggregate `FILTER` clauses are unsupported in v1 and are
+rejected during parsing/binding; this registry does not add them.
 
-Counts every input row.
+### 29.3.1 Semantic state domains
 
-### COUNT(expr)
-
-```text
-result type: INT64 NOT NULL
-empty/all-NULL input: 0
-```
-
-Counts non-NULL argument values.
-
-### SUM
-
-NULL inputs are ignored.
-
-No non-NULL input yields NULL.
-
-Initial signatures are:
+The following are conceptual query-local semantic domains, not TypeIds or
+persisted database formats:
 
 ```text
-SUM(INT32)   -> INT64 nullable
-SUM(INT64)   -> INT64 nullable
-SUM(FLOAT64) -> FLOAT64 nullable
+ExactSignedInteger:
+    an exact mathematical signed integer with enough logical range for every
+    subtotal admitted by this query
+
+ExactNonnegativeCount:
+    an exact mathematical integer >= 0
+
+ExactFiniteDyadic:
+    an exact signed integer coefficient multiplied by 2^-1074
+
+FloatAggregateState:
+    saw_nonnull
+    exact sum of every finite input as ExactFiniteDyadic
+    saw_nan
+    saw_positive_infinity
+    saw_negative_infinity
+
+OrderedCandidate<T>:
+    EMPTY or one canonically represented non-NULL scalar T
 ```
 
-Integer SUM uses a wider checked internal accumulator where available (for example a host/compiler 128-bit integer) and raises `ArithmeticError` if the declared INT64 result cannot be represented.
+Every finite binary64 input is exactly an integer multiple of `2^-1074`, so
+`ExactFiniteDyadic` loses no input bit. Its coefficient and the exact integer
+states are logically variable-range and never wrap. An implementation may use
+multiword integers, exponent bins/superaccumulators, or another exact
+representation; host `long double`, compiler excess precision, optional
+`__int128`, and result-width checked accumulation are not semantic substitutes.
+State storage is charged to query memory and may use the existing spill
+contract. Failure to preserve an exact state is an ordinary query
+memory/resource error, never permission to return an approximation.
+The descriptor's fixed `StateSize` may contain an inline state or an owned
+handle to variable backing; any such backing is aggregate-state memory covered
+by `Destroy`, query accounting, spill, and cancellation cleanup. This semantic
+range requirement does not require one heap allocation per input value.
 
-FLOAT64 SUM follows the database's binary64 arithmetic semantics.
+### 29.3.2 Closed overload table
 
-### MIN / MAX
+`IGNORE NULL` means NULL arguments do not enter the state. `Canonical scalar`
+means §29.3.6 normalization before comparison or retention.
 
-NULL inputs are ignored.
+| Aggregate | Input TypeId | Result | NULL / empty behavior | Semantic state | Merge | Finalization and numerical error |
+|---|---|---|---|---|---|---|
+| `COUNT(*)` | no argument | `INT64 NOT NULL` | every child row counts; empty = `0` | exact nonnegative row count, or the equivalent absorbing `COUNT_OVERFLOWED` state after the count is known greater than `INT64_MAX` | exact nonnegative addition; overflowed is absorbing | exact count `0..INT64_MAX` -> INT64; greater -> `NUMERIC_OVERFLOW` |
+| `COUNT(expr)` | any concrete v1 scalar TypeId | `INT64 NOT NULL` | count only non-NULL values; empty/all-NULL = `0` | exact nonnegative non-NULL count, with the same permitted overflow marker | same as `COUNT(*)` | same as `COUNT(*)` |
+| `SUM` | `INT32` | nullable `INT64` | IGNORE NULL; no non-NULL = NULL | `saw_nonnull` + `ExactSignedInteger` | exact integer addition | exact final sum in `[-2^63,2^63-1]` -> INT64; otherwise `NUMERIC_OVERFLOW` |
+| `SUM` | `INT64` | nullable `INT64` | IGNORE NULL; no non-NULL = NULL | `saw_nonnull` + `ExactSignedInteger` | exact integer addition | exact final sum in `[-2^63,2^63-1]` -> INT64; otherwise `NUMERIC_OVERFLOW` |
+| `SUM` | `FLOAT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `FloatAggregateState` | exact dyadic addition plus commutative OR of special-value flags | §29.3.5 special-value rule; otherwise one correctly rounded binary64 conversion |
+| `AVG` | `INT32` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `ExactSignedInteger` sum + `ExactNonnegativeCount` | exact componentwise addition | correctly round exact rational `sum/count` once to binary64, nearest/ties-even |
+| `AVG` | `INT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `ExactSignedInteger` sum + `ExactNonnegativeCount` | exact componentwise addition | correctly round exact rational `sum/count` once to binary64, nearest/ties-even |
+| `AVG` | `FLOAT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `FloatAggregateState` + `ExactNonnegativeCount` | exact componentwise addition plus special flags | §29.3.5 special-value rule; finite case rounds exact rational `dyadic_sum/count` once |
+| `MIN` | `INT32`, `INT64`, `FLOAT64`, `VARCHAR`, `DATE`, or `TIMESTAMP` | nullable input TypeId | IGNORE NULL; no non-NULL = NULL | `OrderedCandidate<T>` | retain canonical lesser value under Chapter-17 order | canonical candidate; no arithmetic overflow |
+| `MAX` | `INT32`, `INT64`, `FLOAT64`, `VARCHAR`, `DATE`, or `TIMESTAMP` | nullable input TypeId | IGNORE NULL; no non-NULL = NULL | `OrderedCandidate<T>` | retain canonical greater value under Chapter-17 order | canonical candidate; no arithmetic overflow |
 
-No non-NULL input yields NULL.
+BOOLEAN remains absent from MIN/MAX because it is not SQL-orderable in v1.
+No aggregate overload performs an unlisted implicit string, Boolean, temporal,
+or numeric conversion. The binder and every executor use this same table.
 
-For every initially registered orderable scalar type, result type equals input type and comparison uses the Chapter-17 semantic ordering, including binary VARCHAR and FLOAT64 edge semantics.
+### 29.3.3 COUNT and integer SUM
 
-BOOLEAN is equality/hashable but not SQL-orderable in v1, so MIN/MAX BOOLEAN has
-no registered signature.
+COUNT's conceptual count never wraps. Because it never decreases, a partial
+state proven greater than `INT64_MAX` may be represented by an absorbing
+`COUNT_OVERFLOWED` marker. That marker is not surfaced as an error during
+Update/Merge: the aggregate continues consuming all semantically required
+child rows and evaluating required `COUNT(expr)` arguments. Finalize then
+returns `NUMERIC_OVERFLOW`. This prevents batch size or worker scheduling from
+using early COUNT termination to suppress a later demanded input-expression or
+child-operator error.
 
-### AVG
+Integer SUM is the exact mathematical sum of every non-NULL input. A subtotal
+outside the INT64 result range is not itself an SQL error because later values
+may cancel it. Only Finalize applies the declared INT64 range check. In
+particular, no physical partition is allowed to fail merely because its local
+subtotal is outside INT64 while the complete exact sum is representable.
 
-NULL inputs are ignored.
-
-No non-NULL input yields NULL.
-
-Initial numeric signatures are:
+The exact boundaries are:
 
 ```text
-AVG(INT32)   -> FLOAT64 nullable
-AVG(INT64)   -> FLOAT64 nullable
-AVG(FLOAT64) -> FLOAT64 nullable
+INT64 result minimum = -9223372036854775808
+INT64 result maximum =  9223372036854775807
 ```
 
-State contains at least:
+`SUM(INT32)` deliberately retains its existing INT64 result, so values outside
+INT32 but inside this INT64 domain are valid. Combine adds exact subtotals and
+is mathematically associative and commutative. It never narrows, wraps, or
+depends on compiler integer extensions.
+
+Integer AVG uses the same exact sum plus an exact non-NULL count, but does not
+materialize or range-check a SUM result first. It converts the exact rational
+`sum/count` directly to binary64 with one round-to-nearest, ties-to-even
+operation. Since a nonempty average lies within the finite integer input
+domain, valid integer AVG inputs cannot create FLOAT64 infinity; resource
+failure while preserving the exact state remains separately possible. AVG's
+internal count has no INT64 result-width limit and remains exact even when a
+separate COUNT over the same input would overflow.
+
+### 29.3.4 FLOAT64 exact finite accumulation and rounding
+
+For SUM/AVG FLOAT64, every finite input contributes its exact IEEE-754 dyadic
+value to `ExactFiniteDyadic`. Update and Combine perform exact coefficient
+addition; they do not round partial states. For a finite SUM, Finalize rounds
+the complete exact dyadic sum exactly once to IEEE-754 binary64 using
+round-to-nearest, ties-to-even. Overflow produces signed infinity. A nonzero
+exact binary64 sum is an integer multiple of the smallest subnormal and is
+therefore representable at least as a subnormal; an exact zero finalizes as
+`+0.0`.
+
+For finite AVG, Finalize divides the exact dyadic sum by the exact positive
+count as a mathematical rational and correctly rounds that rational exactly
+once to binary64, nearest/ties-even. It does not first round SUM and then divide,
+and it never averages worker-local averages. Underflow yields the correctly
+rounded subnormal or `+0.0`; every exact-zero AVG also yields `+0.0`.
+The AVG count increments for every non-NULL input, including NaN, infinity, and
+signed zero; the special-value flags determine the result before finite
+rational division where applicable.
+
+These n-ary aggregate semantics are intentionally distinct from repeated
+scalar FLOAT64 `+`. Chapter 17 rounds each operator in the bound scalar
+expression tree, so scalar `(a+b)+c` retains two operator rounding boundaries.
+`SUM(a)` and AVG use the exact aggregate states above specifically so physical
+reduction shape is not observable.
+
+### 29.3.5 FLOAT64 special values
+
+Special-value finalization is closed and order-independent for both SUM and
+AVG after at least one non-NULL input:
 
 ```text
-sum
-count
+if saw_nan:
+    canonical quiet NaN
+else if saw_positive_infinity and saw_negative_infinity:
+    canonical quiet NaN
+else if saw_positive_infinity:
+    +Infinity
+else if saw_negative_infinity:
+    -Infinity
+else:
+    finite exact SUM/AVG finalization from §29.3.4
 ```
 
-Integer-input AVG uses a checked wider integer sum where available before conversion/division into the FLOAT64 result.
+The canonical NaN is the Chapter-17 semantic NaN and persisted bit pattern
+`0x7ff8000000000000` when materialized by a canonical scalar codec. NaN payload
+or encounter order is never retained. Finite values cannot cancel an infinity.
+All combinations whose exact finite result is zero—including only `-0.0`
+inputs, mixed signed zeros, or exact cancellation—finalize as `+0.0` for SUM
+and AVG.
 
-More precise DECIMAL-style accumulation belongs to future DECIMAL/NUMERIC support rather than an implicit hidden type.
+### 29.3.6 MIN/MAX canonical representation
+
+MIN/MAX use the Chapter-17 SQL total order and canonical equality, not raw host
+comparisons. Before a FLOAT64 candidate enters an ordered aggregate state:
+
+```text
+any NaN  -> canonical quiet NaN
+-0.0 or +0.0 -> +0.0
+```
+
+Other scalar candidates retain their canonical owned representation; VARCHAR
+uses exact bytes. Merge selects the lower/higher semantic class, and equal
+classes retain the same canonical representative. Consequently:
+
+```text
+MIN(+0.0,-0.0) = +0.0
+MAX(+0.0,-0.0) = +0.0
+MIN(NaN,1.0)   = 1.0
+MAX(NaN,1.0)   = canonical NaN
+```
+
+Multiple NaN payloads cannot make output bytes depend on encounter order.
+
+### 29.3.7 Merge, execution shape, spill, and errors
+
+Every aggregate Merge is a semantic monoid operation over partial states with
+the aggregate's initialized empty state as identity: exact
+integer/dyadic/count addition, commutative OR of `saw_nonnull` and every
+special-value flag, or canonical MIN/MAX selection. For any
+states derived from the same logical input multiset, every legal Merge tree has
+the same Finalize value/error. In-memory state bytes need not be identical when
+that difference is not semantically observable.
+
+The rule applies independently to the single global state and to every grouped
+state. Vector Update may batch work, parallel workers may own local states, and
+hash/sorted aggregation may visit groups in different orders, but none may use
+rounded FLOAT64 subtotals or result-width integer subtotals in place of the
+semantic state. Hash output group order remains unspecified; group values do
+not. Capability-enabled `PhysicalSortAggregate` has exactly the same aggregate
+semantics as `PhysicalHashAggregate`.
+
+Spill/repartition must preserve every semantic component. It may serialize an
+explicit query-temporary exact state, spill/replay qualifying argument values,
+or use another exact equivalent. It may not serialize only an already-rounded
+FLOAT64 subtotal. Temporary encoding remains query-local under Chapter 24 and
+changes no database persisted format.
+
+Aggregate constant evaluation over an exactly known relational input uses this
+same registry; host loops with different reduction behavior are forbidden.
+Exact state memory is ordinary query-accounted memory. If memory/spill needed
+to preserve exactness fails, execution reports the existing `OutOfMemory` or
+`SpillIOError`; it never substitutes an approximate result.
+
+The value/numerical-error invariance assumes successful demanded argument/child
+evaluation and availability of the execution resources already admitted by the
+query-memory/spill contracts. External OOM, disk-full, cancellation, or spill
+I/O failure remains an operational query failure and may prevent any aggregate
+value from being produced; it cannot legalize a different numeric result or an
+inexact fallback.
+
+Input-expression/child errors occur before aggregate finalization when their
+relational path is semantically demanded. COUNT overflow is not raised early,
+and integer SUM cannot raise from an intermediate subtotal. After complete
+input consumption, every group's aggregate states are numerically validated
+before the first aggregate result row is externally exposed. All v1 aggregate
+range failures are `NUMERIC_OVERFLOW`; if more than one aggregate descriptor
+would fail, the descriptor with the lowest semantic aggregate ordinal supplies
+the diagnostic. The binder assigns that ordinal by first aggregate occurrence
+in ascending source-byte position within the query block and carries it through
+rewrites; repeated shared occurrences retain the first ordinal. Group identity
+and hash/finalization order are not part of the error. Resource failures remain
+their existing operational categories. M-005 alone determines the transaction
+effect, including aggregate errors inside DML subqueries after published writes.
+If any group has a failing numeric finalization, the whole query fails and no
+successful aggregate-row prefix is exposed.
+
+### 29.3.8 Normative boundary vectors
+
+The following use already-decoded input values; every permutation has the same
+result:
+
+| Inputs | Required result |
+|---|---|
+| `SUM(FLOAT64: 1e16, -1e16, 1)` | exactly `1.0` |
+| `SUM(+0.0)` | `+0.0` |
+| `SUM(-0.0)` | `+0.0` |
+| `SUM(+0.0,-0.0)` | `+0.0` |
+| `SUM(+Infinity, finite...)` | `+Infinity` unless a rule above produces NaN |
+| `SUM(-Infinity, finite...)` | `-Infinity` unless a rule above produces NaN |
+| `SUM(+Infinity,-Infinity)` | canonical NaN |
+| `SUM(any NaN, finite...)` | canonical NaN |
+| `SUM(max_finite,max_finite)` | `+Infinity` |
+| `SUM(smallest_positive_subnormal)` | that exact subnormal (`2^-1074`) |
+| `SUM(1.0,2^-53)` | `1.0` by halfway ties-to-even |
+| `SUM(INT64_MAX)` | `INT64_MAX` |
+| `SUM(INT64_MAX,1)` | `NUMERIC_OVERFLOW` |
+| `SUM(INT64_MAX,1,-1)` | `INT64_MAX` |
+| `SUM(INT64_MIN)` | `INT64_MIN` |
+| `SUM(INT64_MIN,-1)` | `NUMERIC_OVERFLOW` |
+| `SUM(INT64_MIN,-1,1)` | `INT64_MIN` |
+| `SUM(INT32_MAX,1)` | INT64 `2147483648` |
+| `COUNT = INT64_MAX` | `INT64_MAX` |
+| `COUNT = INT64_MAX+1` | `NUMERIC_OVERFLOW` at Finalize |
+| `AVG(empty)` or `AVG(all NULL)` | typed NULL |
+| `AVG(INT: 1,2)` | exactly `1.5` |
+| `AVG(INT64_MAX,INT64_MIN)` | exactly `-0.5` |
+| `AVG(FLOAT64: 1e16,-1e16,1)` | correctly rounded `1/3`, bits `0x3fd5555555555555` |
+| `AVG(+Infinity)` | `+Infinity` |
+| `AVG(+Infinity,-Infinity)` | canonical NaN |
+| `AVG(any NaN,1.0)` | canonical NaN |
+| `AVG(-0.0)` / `AVG(+0.0,-0.0)` | `+0.0` |
+| `AVG(smallest_positive_subnormal,+0.0)` | `+0.0`; exact `2^-1075` is halfway and ties to even zero |
+
+The empty-input COUNT/SUM/MIN/MAX cases remain exactly those in the registry
+table. Boundary verification may inject synthetic partial states rather than
+materialize `INT64_MAX` rows.
+
+### 29.3.9 Forbidden aggregate implementations
+
+V1 explicitly forbids:
+
+1. worker-local repeated binary64 SUM followed by arbitrary binary64 partial merging;
+2. allowing worker scheduling, vector size, or hash iteration to change SUM/AVG;
+3. allowing spill partitioning or replay order to change an aggregate value/error;
+4. treating host `long double` or compiler excess precision as the aggregate semantic state;
+5. using `__int128` only when available and silently using INT64 accumulation elsewhere;
+6. reporting integer SUM overflow from an order-specific partial subtotal when the exact final sum fits;
+7. wrapping/saturating COUNT to an INT64 value instead of final `NUMERIC_OVERFLOW`;
+8. averaging worker-local averages, weighted or unweighted, instead of merging exact sum/count states;
+9. computing AVG from an already-rounded SUM result;
+10. retaining an encountered NaN payload or signed-zero sign according to encounter order;
+11. spilling only rounded FLOAT64 or narrowed integer partial results;
+12. making hash and ordered aggregation use different numerical semantics;
+13. returning one group's rows before another group's aggregate overflow is validated;
+14. using physical group order to choose a different aggregate error category/ordinal;
+15. folding a constant aggregate with a host reduction that differs from runtime;
+16. falling back to an approximate accumulator after exact-state memory/spill failure.
 
 ## 29.4 Group hash table
 
@@ -18003,6 +18263,11 @@ It does **not** require opaque in-memory aggregate state bytes to be a stable sp
 
 A later aggregate descriptor may opt into serialized partial-state spilling only after that aggregate defines safe temporary serialization plus Combine semantics.
 
+For every current v1 aggregate, either path must preserve §29.3's exact
+integer/count/dyadic state and special-value/canonical-candidate components.
+Rounded FLOAT64 partial sums and result-width integer partial sums are not safe
+spill states.
+
 Recursive repartition is bounded in the same spirit as Grace hash join.
 
 Aggregate spill MUST produce exactly the same groups and finalized values as an unlimited-memory execution.
@@ -18042,16 +18307,18 @@ The physical optimizer must insert/use Sort when SQL requires an ordering not ot
 
 1. Aggregate updates are vectorized/batch-oriented.
 2. Aggregate state size/alignment are descriptor-owned and respected by group storage.
-3. COUNT results are INT64 NOT NULL and return zero on empty input.
+3. COUNT results are INT64 NOT NULL, return zero on empty input, and raise NUMERIC_OVERFLOW rather than wrap above INT64_MAX.
 4. SUM/MIN/MAX/AVG return NULL when no non-NULL input exists.
-5. Integer SUM never relies on signed-overflow undefined behavior.
+5. Integer SUM/AVG use exact mathematical integer states; only SUM Finalize applies the INT64 result range.
 6. GROUP BY/DISTINCT use grouping equality, not ordinary NULL comparison.
 7. Hashing and grouping equality agree.
 8. Group keys/varlen data retained by a group table are deep-copied into group-owned storage.
 9. Global aggregation avoids a hash table.
 10. Spill does not require raw in-memory aggregate-state bytes to become a compatibility format.
-11. Spilled and in-memory aggregation produce semantically identical results.
-12. Hash aggregate/DISTINCT advertise no ordering.
+11. Spilled, serial, parallel, hash, and capability-enabled ordered aggregation produce identical §29.3 values/errors.
+12. FLOAT64 SUM/AVG use exact finite accumulation, commutative special flags, and one final correctly rounded conversion rather than arbitrary repeated addition.
+13. MIN/MAX retain canonical representatives for FLOAT64 zero/NaN equality classes.
+14. Hash aggregate/DISTINCT advertise no ordering.
 
 ## 29.10 Ordered aggregation and streaming DISTINCT
 
@@ -18072,6 +18339,10 @@ against `PhysicalHashAggregate`.
 An ordered/streaming DISTINCT similarly requires input ordered compatibly by every DISTINCT key and can emit one row per adjacent duplicate class.
 
 These implementations use the same grouping equality as §20.9/§29.7.
+
+They also use the same §29.3 aggregate state and Finalize rules. Input ordering
+may reduce memory or change unspecified group-row order; it cannot define a
+different numeric SUM/AVG or MIN/MAX representative.
 
 Until the runtime capability exists, the planner does not enumerate them.
 
@@ -18741,6 +19012,11 @@ For global aggregation, each worker may maintain one local aggregate state block
 
 Aggregate descriptors' `Combine` contract is therefore mandatory for aggregates that participate in parallel execution.
 
+Every local state and Combine implements §29.3's exact semantic state. Worker
+count, partition ownership, final worker order, and Merge-tree shape are not SQL
+semantics. In particular, worker-local rounded FLOAT64 sums/averages and
+result-width integer subtotals are forbidden even when they would be faster.
+
 ## 32.7 Parallel sort
 
 Workers generate sorted local runs independently.
@@ -18858,7 +19134,7 @@ Explicit prefetch is added only when profiles show benefit and it does not exten
 5. Parallel SeqScan advertises no ordering.
 6. Hash build is fully finalized before probe workers consume it.
 7. Finalized hash probe state is immutable/read-only.
-8. Aggregate parallelism uses local states plus Combine rather than one lock per row.
+8. Aggregate parallelism uses §29.3 exact local states plus Combine rather than one lock per row, and is value/error-equivalent to serial execution.
 9. Parallel sort produces required order through merge/finalized ordered output.
 10. Dependency counters prevent consumers from observing unfinalized breaker state.
 11. DML mutation, DDL, and VACUUM remain single-coordinator/single-write-phase in the v1 baseline unless separately specified.
@@ -22998,6 +23274,7 @@ AB = semantic ABORT requested/completed through §15.6
 | bind/name/type/catalog error | FA | MA | unsupported feature is the same |
 | planner/optimizer resource failure | FA | MA | final-plan invariant failure is NC, not a user/resource error |
 | expression evaluation, arithmetic, division, or cast error | FA | MA | includes errors in later rows/batches |
+| aggregate COUNT/SUM final `NUMERIC_OVERFLOW` | FA | MA | §29.3 defers numerical range failure to deterministic Finalize after complete demanded input; physical reduction shape cannot change the outcome |
 | NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | §11.10 decides UNIQUE/PRIMARY KEY conflict membership; this table decides its transaction effect |
 | READ COMMITTED write conflict or stale-target revalidation | retry/FA | MA | transparent retry is permitted only while the flag is false |
 | REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; victim ownership remains protective through ABORTED publication and cannot remain held after canonical A3 cleanup |
@@ -23269,10 +23546,13 @@ Operations that can overflow use checked arithmetic for:
 *
 unary minus
 MIN_INT / -1
-aggregate integer accumulation/finalization
+aggregate integer SUM/COUNT final result conversion
 ```
 
-Overflow raises `ArithmeticError`.
+Scalar overflow and §29.3 final aggregate range failure raise
+`ArithmeticError`/`NUMERIC_OVERFLOW`. Exact aggregate Update/Combine itself
+does not raise merely because a subtotal leaves the result domain; inability to
+allocate/preserve its exact state is instead the existing query resource error.
 
 Integer division or remainder by zero raises `ArithmeticError`.
 
@@ -23280,6 +23560,10 @@ Integer division or remainder by zero raises `ArithmeticError`.
 
 FLOAT64 arithmetic follows the exact §17.4.3 binary64 rounding/NaN/signed-zero
 semantics and §17.6.2 overload registry.
+
+FLOAT64 aggregate SUM/AVG are not repeated uses of that scalar operator: their
+exact n-ary accumulation, one final rounding, canonical NaN/infinity flags, and
+`+0.0` exact-zero result are authoritative in §29.3.
 
 In particular, v1 FLOAT64 division by zero follows IEEE results rather than the integer division rule:
 
@@ -23895,7 +24179,15 @@ skew/repartition fallback
 
 Randomized small join results are compared with the nested-loop reference algorithm.
 
-Aggregate tests cover empty input, global/grouped aggregation, NULL grouping keys, all-NULL inputs, composite/VARCHAR/FLOAT64 keys, partial Combine, and forced spill.
+Aggregate verification covers empty input, global/grouped aggregation, NULL
+grouping keys, all-NULL inputs, composite/VARCHAR/FLOAT64 keys, exact partial
+Combine, canonical MIN/MAX representatives, and every §29.3.8 boundary vector.
+For each one logical input it compares one/two/many workers, one-row and large
+vectors, serial and varied Merge trees, no spill and forced spill, different
+spill partition counts, hash aggregation, and capability-enabled ordered
+aggregation. Values and numerical errors must be identical; tests may inject
+synthetic near-boundary exact states instead of materializing impossible row
+counts.
 
 Sort tests cover ASC/DESC, NULL order, multi-key ties, VARCHAR/FLOAT64 edges, in-memory/external runs, and multi-pass merge using the semantic comparator as oracle.
 
