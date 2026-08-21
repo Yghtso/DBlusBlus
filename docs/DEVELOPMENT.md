@@ -103,76 +103,65 @@ This order intentionally follows dependency direction and maximizes learning.
 
 ---
 
-## Initial Module Layout
+## Module Layout Guidance
 
-The C++ code may initially be organized approximately as:
+### Current implemented layout
+
+The implemented Phase 1 source tree is organized by current subsystem ownership:
 
 ```text
 src/
   common/
+    crc32c.*
+    encoding.h
     types.h
-    status.h
-    endian.h
-    crc32c.h
 
   storage/
-    page_id.h
-    page_layout.h
-
     disk/
-      disk_manager.h
-      disk_manager.cpp
-      file_registry.h
+      disk_manager.*
 
-    buffer/
-      buffer_pool.h
-      buffer_pool.cpp
-      buffer_frame.h
-      page_guard.h
-      clock_replacer.h
-      clock_replacer.cpp
+    file/
+      file_superblock.*
+      page_file.*
 
-    tuple/
-      schema.h
-      physical_layout.h
-      tuple_codec.h
-      tuple_codec.cpp
-      tuple_view.h
+    page/
+      page.*
+      page_header.h
 
     heap/
-      heap_page.h
-      heap_page.cpp
-      heap_file.h
-      heap_file.cpp
-      free_space_map.h
-      free_space_map.cpp
+      fsm_candidate_index.*
+      fsm_page.*
+      heap_page.*
+      heap_page_format.*
 
-    index/
-      btree_page.h
-      btree.h
-
-  txn/
-    transaction.h
-    snapshot.h
-    visibility.h
-
-  wal/
-    wal_manager.h
-    wal_record.h
-
-  catalog/
-
-  execution/
-
-  optimizer/
-
-tests/
-benchmarks/
+    tuple/
+      tuple_codec.*
+      tuple_header.*
+      tuple_layout.*
 ```
 
-The exact filenames may evolve.
+Tests mirror these implemented ownership groups under `tests/common/` and `tests/storage/`, while
+cross-project smoke coverage remains at the test root.
 
-The subsystem boundaries should not.
+### Future expansion guidance
+
+As authorized milestones begin, new implemented subsystems should gain ownership-oriented modules
+such as:
+
+```text
+storage/buffer/
+storage/index/
+txn/
+wal/
+catalog/
+execution/
+optimizer/
+```
+
+These are future organization guidance, not present source directories or authorization to create
+placeholder classes. A directory or abstraction is added only when its dependency prerequisites
+are met and its implementation milestone has been explicitly authorized. Exact filenames may
+evolve; the subsystem responsibility boundaries defined by `ARCHITECTURE.md` remain authoritative.
 
 ---
 

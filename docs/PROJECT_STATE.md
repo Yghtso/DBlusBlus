@@ -1,7 +1,7 @@
 # DBlusBlus — Project State
 
 Last updated: 2026-08-21
-Current checkpoint: Milestone `0028` — V1 Architecture Freeze
+Current checkpoint: Milestone `0029` — Phase-1 codebase structural refactor
 Architecture checkpoint: `ARCHITECTURE.md` passed final semantic acceptance and is frozen as the authoritative v1 implementation contract
 
 ---
@@ -461,6 +461,26 @@ Rid persisted size                   16 bytes
 
 ## 9. Current storage-layer boundaries
 
+### Phase-1 source organization — `0029`
+
+Production source and tests are organized by implemented ownership under:
+
+```text
+common
+storage/disk
+storage/file
+storage/page
+storage/heap
+storage/tuple
+```
+
+Persisted heap-page constants and codecs reside in `heap_page_format.*`; the mutable `HeapPage`
+controller remains in `heap_page.*`. The former empty `types.cpp` translation unit is absent, and
+the header-only identifier definitions remain in `common/types.h`.
+
+This organization change preserves public behavior, validation, and persisted bytes. It does not
+introduce BufferPool, HeapFile, or any Phase 2 component.
+
 ### DiskManager
 
 Owns low-level positional file I/O and process-local file descriptor registration.
@@ -641,6 +661,7 @@ are introduced. BufferPool is not in progress.
 0026  Concurrent DiskManager file-extension verification
 0027  PageFile non-owning lifetime contract documentation
 0028  V1 architecture semantic acceptance and freeze
+0029  Phase-1 codebase structural refactor
 ```
 
 Detailed milestone history remains in `devlog/`.
