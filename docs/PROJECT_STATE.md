@@ -1,8 +1,8 @@
 # DBlusBlus — Project State
 
-Last updated: 2026-08-15  
-Current checkpoint: Milestone `0027` — PageFile Lifetime Contract Documentation
-Architecture checkpoint: `ARCHITECTURE.md` is the authoritative v1 architecture contract
+Last updated: 2026-08-21
+Current checkpoint: Milestone `0028` — V1 Architecture Freeze
+Architecture checkpoint: `ARCHITECTURE.md` passed final semantic acceptance and is frozen as the authoritative v1 implementation contract
 
 ---
 
@@ -14,7 +14,28 @@ All currently required BufferPool-independent storage primitives are present, an
 
 The pre-Phase-2 sanity findings F1, F2, and F3 are closed.
 
-Phase 2 buffer management has not started.
+The final comprehensive semantic acceptance audit of `docs/ARCHITECTURE.md` passed with:
+
+```text
+BLOCKING   0
+MAJOR      0
+MINOR      0
+EDITORIAL  0
+```
+
+`docs/ARCHITECTURE.md` is frozen as the sole current technical architecture authority and the v1
+implementation contract. Implementations must conform to it rather than reopen settled decisions
+ad hoc. Future semantic changes remain possible only through an explicit architecture-change
+decision; a defect discovered during implementation may reopen the architecture explicitly, but
+implementation convenience is not authorization to deviate silently. Archived architecture
+versions, rewrite material, audit reports, SOLVED reports, and devlogs remain historical
+provenance rather than technical authority.
+
+No known correctness-relevant architecture question remains.
+
+Implementation Phase 2 has not started. Architecture freeze satisfies its architectural
+prerequisite but does not authorize entry into Phase 2. Phase 2 may begin only after separate
+explicit user authorization.
 
 `HeapFile` is intentionally not implemented yet because its relation-wide page access and page-lifetime model depend on the future BufferPool.
 
@@ -32,7 +53,7 @@ Phase 2 buffer management has not started.
 | Execution engine | Not started |
 | Optimizer / statistics | Not started |
 
-The next architectural dependency is Phase 2 buffer management.
+The next implementation boundary, if separately authorized, is Phase 2 buffer management.
 
 ---
 
@@ -512,6 +533,10 @@ No Phase 1 storage benchmark suite exists yet beyond the generic benchmark smoke
 
 Currently implemented Phase 1 functionality has no known architecture mismatches.
 
+The accepted v1 architecture has no known correctness-relevant open questions. Its freeze records
+the current implementation contract; it does not prevent a later explicit architecture revision
+when implementation evidence demonstrates a defect or necessary change.
+
 The generic 72-byte `FileSuperblock` codec explicitly rejects `FileKind::BTREE`; this is an
 unsupported current capability rather than acceptance of a noncanonical BTREE representation.
 The settled 128-byte BTREE superblock and bytes `72..127` extension remain deferred to the future
@@ -576,7 +601,12 @@ Phase 2 — Buffer Management
 
 Phase 2 has not started.
 
-The first work in that phase will establish buffered page ownership and lifetime management before relation-wide `HeapFile` operations are introduced.
+Architecture freeze does not authorize this transition. Entering Implementation Phase 2 requires
+separate explicit user authorization.
+
+If authorized later, the first Phase 2 implementation boundary is BufferPool: buffered page
+ownership and lifetime management must be established before relation-wide `HeapFile` operations
+are introduced. BufferPool is not in progress.
 
 ---
 
@@ -610,6 +640,7 @@ The first work in that phase will establish buffered page ownership and lifetime
 0025  HEAP_DATA ordinary page-number validation
 0026  Concurrent DiskManager file-extension verification
 0027  PageFile non-owning lifetime contract documentation
+0028  V1 architecture semantic acceptance and freeze
 ```
 
 Detailed milestone history remains in `devlog/`.
