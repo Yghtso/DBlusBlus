@@ -13414,7 +13414,7 @@ The baseline SELECT surface is:
 
 ```sql
 SELECT [DISTINCT] select_list
-FROM table_reference [joins...]
+[FROM table_reference [joins...]]
 [WHERE predicate]
 [GROUP BY expressions]
 [HAVING predicate]
@@ -13422,6 +13422,10 @@ FROM table_reference [joins...]
 [LIMIT integer]
 [OFFSET integer]
 ```
+
+`FROM` is optional in every v1 SELECT query specification, including a
+supported nested SELECT. Omitting it does not remove or add any other clause in
+this grammar.
 
 Initial FROM supports:
 
@@ -13443,6 +13447,72 @@ recursive CTEs
 window functions
 set operations
 ```
+
+### 18.11.1 SELECT without FROM
+
+A query block with no FROM has exactly one conceptual input row containing zero
+relation columns. Its local relation namespace is empty. Binding/planning uses
+the existing §20.5 source:
+
+```text
+LogicalValues(rows = { one zero-column row })
+```
+
+and then applies every present WHERE, aggregate/GROUP BY, HAVING, projection,
+DISTINCT, ORDER BY, LIMIT, and OFFSET operation in the ordinary §20.15 order.
+This is an exact semantic fact, not a statistics estimate or an implicit
+catalog relation.
+
+Required examples are:
+
+```text
+SELECT 1;                    -> one row containing INT32 1
+SELECT TRUE;                 -> one row containing TRUE
+SELECT NULL;                 -> bind-time TYPE_ERROR because standalone NULL
+                               still lacks a concrete M-006 type context
+SELECT 1 WHERE TRUE;         -> one row
+SELECT 1 WHERE FALSE;        -> zero rows
+SELECT 1 WHERE NULL;         -> zero rows because WHERE retains only TRUE
+SELECT COUNT(*);             -> one row containing INT64 1
+SELECT 1 LIMIT 0;            -> zero rows
+SELECT 1 LIMIT 1;            -> one row
+```
+
+OFFSET, ORDER BY, DISTINCT, GROUP BY, HAVING, scalar typing, aggregate
+legality, and error/short-circuit behavior are unchanged. A constant GROUP BY
+sees the one input row; a no-group global aggregate sees one row after WHERE,
+so a false/UNKNOWN WHERE produces an empty aggregate input while the global
+aggregate itself still emits its ordinary one result row. Ordinary scalar
+expressions such as arithmetic, CAST, and CASE use Chapter 17 without a
+no-FROM-specific registry.
+
+Because the namespace is empty, an unqualified or qualified column reference
+is an ordinary unknown-column/unknown-qualifier bind error. Unqualified `*`
+also requires at least one visible FROM relation and is a bind error here; v1
+does not expose a zero-column `SELECT *` result. Qualified `t.*` fails because
+`t` is not bound.
+
+Each supported uncorrelated subquery applies this rule independently. Thus
+`SELECT (SELECT 1)` is valid; `EXISTS(SELECT 1)` is TRUE;
+`EXISTS(SELECT 1/0)` remains TRUE without evaluating its projection under
+§20.14.5; `x IN (SELECT 1)` uses the ordinary one-row IN build; and
+`FROM (SELECT 1 AS x) AS q` uses the existing derived-table rules. No enclosing
+column becomes visible, and no correlated, LATERAL, CTE, set-operation,
+table-function, VALUES-in-FROM, DUAL, pseudo-column, or data-modifying-subquery
+feature is added.
+
+V1 forbids:
+
+1. rejecting `SELECT 1` merely because FROM is absent;
+2. inventing a catalog/system `DUAL` relation or implicit pseudo-table;
+3. treating omitted FROM as zero input rows;
+4. returning `0` for `SELECT COUNT(*)` without an intervening filter;
+5. resolving column references or wildcards without a visible relation binding;
+6. using no-FROM syntax to capture an outer subquery column;
+7. assigning no-FROM expressions different M-006 scalar semantics;
+8. enabling another clause or SQL feature while accepting optional FROM;
+9. changing §20.14 scalar/EXISTS/IN/derived-table behavior; or
+10. consulting estimates/statistics to decide whether the conceptual row exists.
 
 ## 18.12 Subquery syntax
 
@@ -13541,6 +13611,7 @@ Thus `a < b < c` is rejected rather than assigned accidental host-language seman
 11. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
 12. Unsupported syntax fails explicitly rather than being half-interpreted.
 13. Constructing a generic AST operator/function node does not imply semantic support; binding accepts only the closed Chapter-17 registry.
+14. FROM is optional in a SELECT query specification and omission has the exact §18.11.1 one-row semantics.
 
 ---
 
@@ -13634,6 +13705,11 @@ Unknown qualifier and unknown column are distinct semantic errors.
 `SELECT *` expands during binding into explicit bound column references in visible FROM-relation order and each relation's logical presentation order.
 
 `SELECT u.*` expands one relation binding.
+
+Unqualified `*` requires at least one visible FROM relation; in a no-FROM
+query block it is a bind error rather than an empty expansion. Qualified
+`u.*` with no matching visible relation, including every no-FROM query block,
+is an unknown-qualifier bind error.
 
 Execution never performs wildcard expansion.
 
@@ -13929,6 +14005,7 @@ The type system/binder remains compatible with future parameter typing through `
 18. Runtime function/operator implementation IDs are not persisted as v1 default metadata.
 19. The closed §§17.2–17.10 registry alone determines literal types, overloads, casts, CASE/IN common types, and the empty scalar-function set.
 20. Future parameter typing can reuse UNKNOWN/contextual inference.
+21. A no-FROM query block has an empty local relation namespace; omission never creates an implicit relation, column, qualifier, or outer reference.
 ---
 
 # 20. Logical Plans, Properties, and Rewrites
@@ -14061,7 +14138,11 @@ SELECT 1;
 
 Every row contains typed bound expressions.
 
-A constant SELECT without FROM uses one logical empty input row followed by projection rather than a special executor path.
+Every SELECT query block without FROM uses exactly one zero-column logical
+input row. Ordinary filtering, aggregation, projection, ordering, and limiting
+then apply; `SELECT 1` is the simplest
+`LogicalValues(single zero-column row) -> LogicalProject` instance. §18.11.1
+owns the complete observable semantics.
 
 ## 20.6 `LogicalFilter`
 
@@ -14358,6 +14439,10 @@ outer capture from an ordinary unknown name. It MUST NOT emit an executable
 or accept syntax on the assumption that the optimizer will decorrelate it.
 Nested subqueries are legal only when each nested block is independently
 uncorrelated from every lexical ancestor.
+
+A nested SELECT may omit FROM. It then receives its own §18.11.1 one-row,
+zero-column source and empty local relation namespace; no enclosing relation
+binding becomes visible.
 
 ### 20.14.3 Derived tables
 
@@ -14752,9 +14837,8 @@ V1 forbids:
 Before optimization, SELECT planning uses the canonical shape:
 
 ```text
-FROM
-    ↓
-JOINs
+explicit FROM/JOIN tree
+    or LogicalValues(one zero-column row) when FROM is omitted
     ↓
 WHERE Filter
     ↓
@@ -14773,13 +14857,10 @@ Limit/Offset
 
 The optimizer may transform this only when it proves semantic equivalence.
 
-SELECT without FROM uses:
-
-```text
-LogicalValues(single empty row)
-    ↓
-LogicalProject
-```
+The no-FROM source and its edge cases are canonical in §18.11.1. EXPLAIN
+exposes that Values source and ordinary operators, or an optimizer-equivalent
+shape with identical semantics; no dedicated no-FROM executor or user-visible
+pseudo-relation exists.
 
 ## 20.16 Logical properties
 
