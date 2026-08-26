@@ -5,9 +5,13 @@
 This document defines development-environment setup, build and tooling workflow,
 implementation sequencing, milestone targets, and recommended module-layout guidance. It
 is planning and development guidance, not part of the technical architecture contract or
-a record of current implementation state.
+a record of implementation state.
 
-`ARCHITECTURE.md` defines intended system behavior and persistent/concurrency contracts. `PROJECT_STATE.md` records what is currently implemented and which phase is active. This guide does **not** authorize crossing a project phase gate; current project status and explicit project decisions remain authoritative for sequencing.
+`ARCHITECTURE.md` defines intended system behavior and persistent/concurrency contracts.
+`PROJECT_STATE.md` describes implementation reality and active authorization boundaries.
+`VERIFICATION.md` defines detailed verification methodology. This guide defines durable
+development procedures and dependency-driven sequencing; it does **not** authorize
+crossing a project phase or subsystem gate.
 
 Exact filenames and directory organization may evolve. The subsystem responsibility boundaries defined by `ARCHITECTURE.md` do not.
 
@@ -22,9 +26,8 @@ differ on intended behavior, `ARCHITECTURE.md` is authoritative.
 ## Development baseline
 
 The architecture's initial platform baseline is Linux on x86-64 or ARM64 with POSIX file
-APIs. The current implementation uses C++20 without compiler extensions. Clang is the
-primary development compiler, and production code is expected to compile with both Clang
-and GCC.
+APIs. Production code uses C++20 without compiler extensions. Clang is the primary
+development compiler, and production code is expected to compile with both Clang and GCC.
 
 The repository declares these exact minimums or language requirements:
 
@@ -33,8 +36,8 @@ The repository declares these exact minimums or language requirements:
 - C++20, required, with compiler extensions disabled;
 - Ninja as the generator for every repository preset.
 
-No project-specific minimum compiler, Ninja, GTest, Google Benchmark, clang-tidy, or
-clang-format version is currently declared beyond requiring a tool or library compatible
+The repository declares no project-specific minimum compiler, Ninja, GTest, Google
+Benchmark, clang-tidy, or clang-format version beyond requiring a tool or library compatible
 with the configuration above. A compiler must provide the C++20 features used by the
 source and standard library.
 
@@ -45,7 +48,7 @@ otherwise download GoogleTest or Google Benchmark.
 
 | Tool or dependency | Purpose | Required for | Repository requirement |
 |---|---|---|---|
-| Linux/POSIX environment | Runs the current storage implementation and tests | Build and runtime baseline | Linux; x86-64 or ARM64; POSIX file APIs |
+| Linux/POSIX environment | Runs storage code and tests | Build and runtime baseline | Linux; x86-64 or ARM64; POSIX file APIs |
 | Git | Clone and contributor checks | Obtaining the source; `git diff --check`; formatting file discovery | No project-specific minimum |
 | CMake and CTest | Configure, generate, and run tests | All configurations; test execution | 3.25 or newer |
 | Ninja | Build preset generator | Every repository build preset | Required by presets; no project-specific version minimum |
@@ -70,10 +73,10 @@ checks.
 ## Linux package installation
 
 Package names vary by distribution. Install packages that provide the conceptual
-requirements in the table above. The package names here are examples for the Arch-derived
-environment used for validation, not project or architecture requirements.
+requirements in the table above. The names below are an Arch-family example, not project
+or architecture requirements.
 
-Read-only `pacman` package metadata verified these package names:
+On Arch-family distributions, the corresponding package names are:
 
 | Capability | Arch-family package |
 |---|---|
@@ -86,15 +89,15 @@ Read-only `pacman` package metadata verified these package names:
 | Google Benchmark CMake package and libraries | `benchmark` |
 | Git | `git` |
 
-For an Arch-family machine intended to run the complete current matrix, the user may
-install the verified packages explicitly:
+For an Arch-family machine intended to run the full local matrix, the user may install the
+example package set explicitly:
 
 ```sh
 sudo pacman -S --needed git cmake ninja clang gcc gtest benchmark
 ```
 
-This is an installation example only. It was not executed during validation; the project
-does not run privileged or package-changing commands automatically.
+This is an installation example only. The project does not install system packages
+automatically; package installation is a user-controlled system-administration action.
 
 ## Clone the repository
 
@@ -119,7 +122,7 @@ ctest --preset clang-debug
 The preset creates `build/clang-debug`, selects `clang++`, uses `Debug`, enables tests,
 and exports `build/clang-debug/compile_commands.json`.
 
-## Current CMake presets
+## CMake presets
 
 | Preset | Purpose | Configure and build | Test command |
 |---|---|---|---|
@@ -165,9 +168,9 @@ cmake --build --preset gcc-debug
 ctest --preset gcc-debug
 ```
 
-This is part of the full local matrix rather than the fastest per-edit loop. In the dated
-environment validation below, GCC 16.2.1 configured and built the tree and passed all
-209 tests. That result does not claim support for every GCC version.
+This is part of the full local matrix rather than the fastest per-edit loop. Production
+code is expected to compile with both Clang and GCC; individual compiler-run results
+belong in CI artifacts, task reports, or `devlog/`.
 
 ## Sanitizers
 
@@ -180,13 +183,13 @@ cmake --build --preset clang-asan
 ctest --preset clang-asan
 ```
 
-Do not disable leak detection by default. If LeakSanitizer works in the current
+Do not disable leak detection by default. If LeakSanitizer works in the execution
 environment, run it normally with the commands above.
 
-In the 2026-08-26 validation execution environment, LeakSanitizer could not initialize
-because the process ran under ptrace. The failure occurred during GoogleTest discovery
-after the test binary linked, with `LeakSanitizer does not work under ptrace`. Only in
-that situation, rerun the build/discovery and tests with leak detection disabled:
+Environments that execute the test process under `ptrace` may cause LeakSanitizer to reject
+execution with `LeakSanitizer does not work under ptrace`, including during GoogleTest
+discovery after the test binary links. Only when that restriction occurs, rerun the
+build/discovery and tests with leak detection disabled:
 
 ```sh
 ASAN_OPTIONS=detect_leaks=0 cmake --build --preset clang-asan
@@ -194,8 +197,7 @@ ASAN_OPTIONS=detect_leaks=0 ctest --preset clang-asan
 ```
 
 This workaround disables LeakSanitizer only. ASan and UBSan remain compiled and linked
-into the targets. The complete 209-test suite passed under ASan and UBSan in the verified
-environment with no findings.
+into the targets.
 
 ## clang-tidy
 
@@ -281,9 +283,9 @@ A developer need not run the entire sanitizer, GCC, analysis, and formatting mat
 every tiny edit. Use the broader matrix below before declaring a non-trivial milestone
 complete, in proportion to the change.
 
-## Full local milestone verification
+## Full local verification workflow
 
-The following is the complete current local toolchain matrix. The LeakSanitizer fallback
+The following is the full local toolchain verification matrix. The LeakSanitizer fallback
 is conditional and should be used only when the default sanitizer commands fail with the
 ptrace initialization message.
 
@@ -372,68 +374,23 @@ Do not remove the repository root or arbitrary paths. Recreate the root
   version, and inspect diagnostics. Do not silently rewrite the repository merely to
   accommodate an unreviewed version difference.
 - **Sanitizer symbols or runtimes are missing:** install the compiler's matching sanitizer
-  runtime. For Clang on the verified distribution this is `compiler-rt`. A ptrace-only
-  LeakSanitizer failure is handled by the conditional workaround in the Sanitizers
-  section; it is not a reason to disable ASan or UBSan.
+  runtime. On Arch-family distributions, Clang's runtime is provided by `compiler-rt`. A
+  ptrace-only LeakSanitizer failure is handled by the conditional workaround in the
+  Sanitizers section; it is not a reason to disable ASan or UBSan.
 - **A package is unavailable on another distribution:** use that distribution's package
   search or repository documentation to locate a package providing the required
   executable or CMake imported target. Do not add an automatic dependency download to
   the project.
 
-## Verified development environment
-
-This is one dated portability-validation environment, not a set of mandatory exact project
-versions. DBlusBlus does not require Omarchy or Arch Linux.
-
-Validation date: 2026-08-26.
-
-| Item | Verified value |
-|---|---|
-| Distribution | Omarchy 4.0.1 (`ID_LIKE=arch`) |
-| Kernel | Linux 7.1.9-arch1-2 |
-| Architecture | x86_64 |
-| libc | glibc 2.44 |
-| Command shell | GNU Bash 5.3.15 |
-| CMake / CTest | 4.4.2 |
-| Ninja | 1.13.2 |
-| Clang / Clang++ | 22.1.8, target `x86_64-pc-linux-gnu` |
-| GCC / G++ | 16.2.1 |
-| GTest | 1.17.0 |
-| Google Benchmark | 1.9.5 |
-| clang-format | 22.1.8 |
-| clang-tidy | 22.1.8 |
-| Clang sanitizer runtime | compiler-rt 22.1.8 |
-| Git | 2.55.0 |
-
-Fresh build results on this environment:
-
-- Clang Debug: configured, built, 209 tests discovered, 209/209 passed;
-- GCC Debug: configured, built, 209/209 passed;
-- Clang ASan + UBSan: configured and instrumented, 209/209 passed with no findings;
-- LeakSanitizer: ptrace initialization failure; `detect_leaks=0` workaround required only
-  for LSan in that environment;
-- clang-tidy: built cleanly with no diagnostics;
-- clang-format: project-wide dry run passed;
-- warnings-as-errors: Clang build passed;
-- Clang Release: configured, built, 209/209 passed;
-- benchmark preset: configured and built; benchmark executable and `BM_Smoke` were
-  present;
-- compile database: generated in the primary build tree and root ignored symlink verified.
-
-The current Phase-1 source uses expected Linux/POSIX calls including `open`, `pread`,
-`pwrite`, `fstat`, `ftruncate`, and `fdatasync`. It uses explicit fixed-width
-little-endian codecs rather than host object layout and compile-time checks the required
-IEEE-754 binary64 representation. Clang, GCC, sanitizer, filesystem/I/O tests, and tooling
-checks exposed no project portability defect on this supported Linux environment.
-
 ---
 
 # Part II — Implementation Sequencing and Module Layout
 
-`PROJECT_STATE.md` currently records Phase 1 complete and Phase 2 — Buffer Management not
-started. BufferPool is the first Phase 2 implementation boundary if separately authorized;
-nothing in this guide grants that authorization. Future module and milestone guidance
-below is planning guidance only.
+The sequence below defines dependency-driven implementation order and capability targets.
+It does not report active project status or authorize crossing an implementation gate.
+`PROJECT_STATE.md` describes implementation reality, and explicit authorization
+requirements remain controlling. The BufferPool implementation boundary requires explicit
+authorization.
 
 ## Suggested Implementation Order
 
@@ -528,9 +485,9 @@ This order intentionally follows dependency direction and maximizes learning.
 
 ## Module Layout Guidance
 
-### Current implemented layout
+### Foundational storage layout
 
-The implemented Phase 1 source tree is organized by current subsystem ownership:
+The raw-storage foundation uses ownership-oriented modules:
 
 ```text
 src/
@@ -563,13 +520,13 @@ src/
       tuple_layout.*
 ```
 
-Tests mirror these implemented ownership groups under `tests/common/` and `tests/storage/`, while
-cross-project smoke coverage remains at the test root.
+Tests should mirror these responsibility groups under `tests/common/` and `tests/storage/`,
+with cross-project smoke coverage at the test root.
 
-### Future expansion guidance
+### Subsystem expansion guidance
 
-As authorized milestones begin, new implemented subsystems should gain ownership-oriented modules
-such as:
+When a subsystem is authorized for implementation, introduce ownership-oriented modules
+according to its dependency boundary, such as:
 
 ```text
 storage/buffer/
@@ -581,16 +538,18 @@ execution/
 optimizer/
 ```
 
-These are future organization guidance, not present source directories or authorization to create
-placeholder classes. A directory or abstraction is added only when its dependency prerequisites
-are met and its implementation milestone has been explicitly authorized. Exact filenames may
-evolve; the subsystem responsibility boundaries defined by `ARCHITECTURE.md` remain authoritative.
+These are organization guidance, not authorization to create placeholder classes. Add a
+directory or abstraction only when its dependency prerequisites are met and its
+implementation milestone has been explicitly authorized. Exact filenames may evolve; the
+subsystem responsibility boundaries defined by `ARCHITECTURE.md` remain authoritative.
 
 ---
 
 ## Storage Milestone 1
 
-This end-to-end buffered-storage milestone follows implementation of BufferPool, page guards, and HeapFile. It is not part of the pre-BufferPool Phase 1 foundation and does not itself authorize crossing the current phase gate.
+This end-to-end buffered-storage milestone depends on BufferPool, page guards, and
+HeapFile. It is separate from the raw-storage primitives and does not authorize crossing
+the BufferPool implementation gate.
 
 Before implementing B+ trees or SQL, the storage layer should be able to pass the following end-to-end scenario:
 
@@ -630,11 +589,14 @@ The purpose is to validate:
 
 ---
 
-## Next Development Stage — B+ Tree
+## B+ Tree Development
 
 Before implementing the B+ tree, read and follow the canonical B+ tree contract in `ARCHITECTURE.md` Chapter 8.
 
-Chapter 8 has already settled the persisted layouts, page formats, physical-key and RID identity, FLOAT64 key encoding, separator and duplicate ordering, free-page format, root publication protocol, cursor lifetime, and latch/publication semantics. Implementation must conform to those contracts rather than selecting alternatives.
+Chapter 8 defines the persisted layouts, page formats, physical-key and RID identity,
+FLOAT64 key encoding, separator and duplicate ordering, free-page format, root publication
+protocol, cursor lifetime, and latch/publication semantics. Implementation must conform to
+those contracts rather than selecting alternatives.
 
 Implement in dependency order:
 
@@ -649,7 +611,7 @@ Implement in dependency order:
 
 This checklist controls implementation order only. Any proposed change to a settled Chapter 8 contract requires an explicit architecture revision before implementation.
 
-After the B+ tree implementation reaches its required milestone, the next major development dependency is:
+The transaction/durability core depends on the persistent B+ tree capability together with:
 
 ```text
 transaction manager
@@ -716,11 +678,12 @@ WAL
 crash recovery
 ```
 
-Only after this development stage does the B+ tree implementation satisfy the transaction/durability integration expected by the architecture.
+This milestone defines the transaction/durability-integrated B+ tree capability expected
+by the architecture.
 
 ---
 
-## Next Development Stage — Transactions and Durability
+## Transaction and Durability Development
 
 The transaction and durability core should be implemented as one coordinated dependency group, following `ARCHITECTURE.md` Chapters 9–15:
 
@@ -942,7 +905,8 @@ version-chain splicing
 freezing
 ```
 
-At this point the engine has a coherent persistent transactional storage core rather than a collection of isolated features.
+This milestone defines a coherent persistent transactional storage core rather than a
+collection of isolated features.
 
 ---
 
@@ -1740,3 +1704,12 @@ heuristic/beam/local improvement above threshold
 ```
 
 Planning time and plan quality must be benchmarked.
+
+---
+
+## Document Maintenance
+
+Update this guide when stable development requirements, tooling workflows, dependency
+sequencing, milestone capability definitions, or module-layout guidance change. Replace
+stale guidance rather than appending historical notes. Task-specific validation evidence
+belongs in `devlog/`, CI artifacts, or task reports.
