@@ -439,13 +439,13 @@ This order intentionally follows dependency direction and maximizes learning.
 
 ## Phase 5 — Catalog and SQL
 
-30. bootstrap catalog,
-31. system tables,
-32. lexer,
-33. parser,
-34. AST,
-35. binder,
-36. type system.
+30. type system,
+31. bootstrap catalog,
+32. system tables,
+33. lexer,
+34. parser,
+35. AST,
+36. binder.
 
 ## Phase 6 — Query execution
 
