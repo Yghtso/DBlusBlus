@@ -1124,17 +1124,34 @@ Use workloads with:
 
 ### SQL Grammar Testing
 
-Use:
-
 #### Positive parser tests
 
-Valid SQL -> expected AST shape.
+For every supported statement and clause family in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §§18.10–18.12, parse representative minimal,
+composed, and parenthesized forms and compare the complete syntax-relevant AST shape:
+
+```text
+node and token kinds
+clause nesting and list order
+textual identifier spelling/quoting state
+decoded literal payload
+operator tree
+half-open source spans
+```
+
+Include SELECT with and without FROM, joins, aggregation, DML, supported DDL/control
+statements, and each supported subquery spelling. Parser tests inspect syntax only: AST
+names remain textual and contain no catalog IDs or resolved types.
 
 #### Negative parser tests
 
-Invalid SQL -> expected syntax error and source span.
+For each unsupported or malformed syntax family, assert the architecture-defined
+`LexerError`, `ParserError`, or later `UnsupportedFeature` boundary rather than a generic
+failure bit. Check the smallest useful half-open source-byte span, no accepted malformed
+AST, no arbitrary consumption beyond the synchronization boundary, and bounded work on
+truncated/repeated delimiters.
 
-#### Precedence tests
+#### Precedence and associativity tests
 
 Verify:
 
@@ -1142,9 +1159,58 @@ Verify:
 1 + 2 * 3
 NOT a AND b
 a OR b AND c
+a - b - c
+a / b / c
+-a * b + c
+NOT a = b OR c AND d
 ```
 
-parse correctly.
+against the exact §18.15 AST. Binary arithmetic and Boolean infix operators are
+left-associative, unary operators bind at their declared levels, parentheses override the
+table, and comparisons such as `a < b < c` are rejected rather than chained.
+
+#### Identifier tests
+
+Tokenize and parse mixed-case unquoted identifiers, exact-case quoted identifiers,
+case-insensitive keywords, keywords used as quoted identifiers, qualified names, and
+delimiter/error boundaries. Assert unquoted names normalize to lowercase while quoted
+names preserve exact bytes/case through the AST. Exercise quoted-delimiter escaping only
+if it is registered by the grammar; §18.4 does not authorize an implementation-local
+escape convention.
+
+Pass the resulting AST names to binder/catalog fixtures separately. Unquoted aliases and
+qualified names use normalized lookup; quoted names use exact binary lookup. Lexical
+normalization must not pre-resolve ambiguity or catalog identity.
+
+#### String and comment termination tests
+
+For strings, cover empty and ordinary literals, doubled single quotes, embedded zero bytes
+under §17.5.3, quote/comment marker text inside a literal, backslash as an ordinary byte
+with no escape meaning, and an unterminated literal at EOF or before a later semicolon.
+Assert decoded logical
+bytes, original span, and a bounded source-positioned `LexerError` for invalid input.
+
+For comments, cover line comments ending at newline and EOF, terminated non-nested block
+comments, comment markers inside strings, quote markers inside comments, attempted nested
+block comments under the non-nested rule, and an unterminated block comment. Verify the
+next token and span after each valid comment and the exact lexical error boundary after an
+invalid one.
+
+#### Multi-statement synchronization tests
+
+Parse batches shaped as:
+
+```text
+valid statement ; malformed statement ; valid statement ;
+malformed statement ; independently malformed statement ; valid statement ;
+unterminated lexical construct at end-of-input
+```
+
+For batch recovery supported by §21.17, assert the malformed statement is diagnosed,
+synchronization advances to semicolon or end-of-input without merging statements, and a
+later independent statement can be parsed with accurate spans. Single-statement mode may
+stop at its first error. Do not require IDE-grade token insertion or recovery inside an
+unterminated lexical token.
 
 #### Round-trip debug tests
 
@@ -1152,9 +1218,18 @@ A debug AST formatter may produce canonical SQL-like output for inspection.
 
 It need not reproduce original whitespace/comments.
 
+Reparse the debug form and compare syntax structure, decoded literals, identifiers, and
+operator grouping. Do not treat this formatter as canonical SQL serialization.
+
 ---
 
 ### Binder Tests
+
+Use immutable mock descriptors and snapshot-aware catalog fixtures. For successful binding,
+assert resolved `BindingId`, stable TableId/ColumnId, logical type, nullability, source
+span, and inserted casts/operator identity—not merely later query success.
+
+#### Name resolution and wildcards
 
 Cover:
 
@@ -1167,22 +1242,71 @@ self-joins
 qualified references
 SELECT *
 table.*
-type promotion
-invalid casts
-NULL typing
-aggregate placement
-GROUP BY validation
-ORDER BY alias
-ORDER BY ordinal
-LEFT JOIN nullability
-DML target binding
-unique/primary-key metadata
-subquery scopes
 ```
+
+For self-joins, prove distinct BindingIds despite one TableId. Distinguish unknown qualifier
+from unknown qualified column, and never accept a leftmost ambiguous match.
+
+Expand `SELECT *` in visible FROM-relation order and each descriptor's logical presentation
+order; expand `u.*` only from that binding. Cover aliases, self-joins, a missing qualifier,
+and no-FROM queries. Assert hidden/system columns are absent and output identities/types/
+nullability are explicit. ColumnId numerical order is not the wildcard ordering oracle.
+
+#### Types, predicates, and aggregates
+
+Table-driven binding covers implicit numeric promotion, explicit and assignment casts,
+invalid casts, standalone/contextual NULL, all predicate BOOLEAN requirements, 3VL
+nullability, and exact operator/aggregate overload selection from Chapters 17 and 29.
+
+Aggregate legality cases include WHERE/JOIN aggregate rejection, unsupported nested or
+DISTINCT/FILTER aggregate forms, grouped and nongrouped SELECT/HAVING expressions, grouping
+constants, HAVING type/visibility, aggregate result type/nullability, and empty-input
+metadata. Assert SELECT aliases are not visible in HAVING.
+
+#### ORDER BY, LEFT JOIN, and DML
+
+For ORDER BY, bind an ordinary expression, output alias, and 1-based ordinal; cover alias
+versus input-name precedence, ambiguity, invalid ordinals, unsupported BOOLEAN ordering,
+and resolved ASC/DESC/NULL order. Inspect the resulting bound expression or slot identity.
+
+For LEFT JOIN, assert preserved-side nullability remains unchanged and every right-side
+output becomes nullable, including expressions and descriptors derived from otherwise NOT
+NULL columns. Repeat through nested LEFT/INNER structures.
+
+For INSERT/UPDATE/DELETE, cover target-table and target-column lookup, canonical INSERT
+column order, omitted/default/typed-NULL handling, duplicate assignments/column-list names,
+closed assignment coercions, BOOLEAN WHERE, hidden target RID/old-value requirements, and
+RETURNING row-image binding. Inspect resolved UNIQUE/PRIMARY KEY/NOT NULL metadata without
+rederiving it from physical indexes. Binding allocates no persistent object/File IDs and
+performs no execution.
 
 Binder tests should not require physical execution.
 
 Use an in-memory/mock catalog implementation where useful.
+
+---
+
+### Front-End Error and Source-Span Tests
+
+Drive one representative failure through each architecture-owned category in §21.16:
+
+```text
+LexerError
+ParserError
+BindError
+TypeError
+CatalogError
+ConstraintDefinitionError
+UnsupportedFeature / UnsupportedCorrelation
+CardinalityError
+```
+
+For SQL-originating failures, assert the smallest useful retained source-byte span: bad
+token, unexpected grammar production, unknown/ambiguous identifier, invalid cast/operator,
+invalid constraint definition, unsupported subquery form, and scalar-subquery occurrence
+for a runtime cardinality error. Preserve lower-layer categories where §21.16 requires it.
+Internal logical-validator defects use internal invariant/validation errors and need no
+invented SQL span.
 
 ---
 
@@ -1207,11 +1331,123 @@ Especially:
 
 A query must not have one semantic meaning in the binder and another in the index comparator/executor.
 
+Generate shared values/types at signed boundaries, FLOAT64 NaN/signed-zero/infinity cases,
+NULL/UNKNOWN combinations, VARCHAR byte-order cases, and legal/illegal promotions. For
+each capability that exists, compare binder overload/type/nullability with bound constant
+evaluation, the §41.5 vector-expression oracle, and index-key canonical comparison/hash
+semantics. An absent downstream capability postpones execution of that comparison; it does
+not remove the durable property requirement.
+
+---
+
+### Subquery Tests
+
+Execute every row of `ARCHITECTURE.md` §20.14.1 as a table-driven bind/plan/result or
+rejection case. The table supplies expected support, arity, bound result, zero/multirow
+behavior, canonical logical mode, and physical fallback; this guide does not duplicate the
+matrix. Every accepted occurrence is independently uncorrelated and every rejected form
+produces its structured error/span without a partially valid bound or logical plan.
+
+#### Scopes and derived tables
+
+Create nested blocks with local names, local aliases, ambiguous local references, names
+that exist only in an ancestor, and independently nested no-FROM SELECTs. Assert lookup is
+local-only; an attempted ancestor capture is `UnsupportedCorrelation`, an unrelated missing
+name remains the ordinary name error, and no executable OuterRef/Apply state appears.
+
+For derived tables, test the mandatory relation alias with and without optional `AS`,
+missing/duplicate/invalid aliases, explicit and direct-source output names, duplicate or
+generated unnamed outputs, `d.*` projection order, and lookup through the derived
+descriptor. Child aliases, hidden columns, and unnamed generated outputs do not leak.
+Derived-column alias lists are wholly unsupported in v1, so every `d(a,b)` form is rejected
+rather than tested as a supported column-count-mismatch feature.
+
+#### Scalar cardinality and error precedence
+
+For each scalar result type, construct final subquery output with zero, exactly one, two,
+and more than two rows after WHERE/aggregation/HAVING/DISTINCT/ORDER/OFFSET/LIMIT. Assert:
+
+```text
+zero rows -> one typed NULL scalar
+one row -> that value, including SQL NULL
+second successfully constructed row -> CardinalityError
+```
+
+Inject an error while constructing the first row, the second row, and a later row. First/
+second-row construction errors precede cardinality failure; after two rows construct
+successfully, CardinalityError precedes later work. `LIMIT 1` may prove at-most-one, while
+an estimate or `required_rows=1` may not remove the check.
+
+#### EXISTS demand
+
+Use children whose projection, DISTINCT value, or ORDER BY key would raise a controlled
+error if value-evaluated. Assert projection-irrelevant work is bound but not demanded for
+EXISTS, while FROM/WHERE/grouping/HAVING/OFFSET/LIMIT work remains demanded. A global
+aggregate performs its required child work and then exists even over empty input.
+
+Place deterministic counters/failures after the first final relational row. EXISTS stops
+at that row; NOT EXISTS applies ordinary Boolean NOT. `LIMIT 0`, OFFSET, grouped
+aggregation, and no-row cases exercise the opposite outcomes without relying on timing.
+
+#### IN and NOT IN
+
+Drive the complete §20.14.6 truth table with empty and nonempty RHS, NULL/non-NULL probes,
+matching and nonmatching values, RHS NULL markers, all-NULL RHS, and duplicate values/
+NULLs. Assert exact TRUE/FALSE/UNKNOWN in both filtering and projection contexts. Empty RHS
+returns FALSE/TRUE for IN/NOT IN even with a NULL probe; duplicate multiplicity does not
+change truth or require one physical deduplication strategy.
+
+Repeat with promoted numerics, VARCHAR bytes, infinities, `+0.0/-0.0`, and canonical-
+equivalent NaNs. Membership equality/hash state must agree with the shared §17.10.3 type
+property tests. Inject output, memory, and spill errors throughout the complete RHS build;
+on first demand a left-expression error precedes a dormant build, while any demanded build
+error precedes probing.
+
+#### Lazy occurrence, snapshot, and CommandId
+
+Place scalar/EXISTS/IN occurrences in selected and skipped CASE arms, short-circuited AND/
+OR right operands, and predicates over empty outer selections. A skipped occurrence never
+runs; a demanded occurrence initializes at most once per bound occurrence per statement
+attempt and serves all outer rows. On statement retry, old side state is discarded.
+
+Use concurrent commits and current-command visibility fixtures to assert outer and subquery
+plans share one effective snapshot, ReadEpochGuard, TxnId, and CommandId. A subquery never
+takes a fresh READ COMMITTED snapshot, consumes a new CommandId, creates a nested
+transaction, or independently owns logical locks. Cross-reference the §41.3 isolation and
+statement-retry tests for the underlying visibility mechanics.
+
+#### Relational clauses and DML integration
+
+Cover global and grouped aggregates, DISTINCT, ORDER BY, LIMIT, and OFFSET inside scalar,
+EXISTS, IN, and derived-table contexts. Include global aggregate over empty input, zero/
+one/multiple grouped results, DISTINCT reducing scalar duplicates, scalar `LIMIT 1`,
+EXISTS after OFFSET, and IN over the post-LIMIT/OFFSET result. Without ORDER BY, do not
+assert which arbitrary row `LIMIT 1` selects.
+
+Evaluate subquery errors in INSERT/UPDATE/DELETE WHERE, assignments, input expressions,
+and RETURNING before and after the first published transaction-owned write. Assert the
+subquery error enters the existing §39.1 matrix at that boundary; this section defines no
+new rollback/retry policy.
+
+#### Rewrites and unsupported forms
+
+For each exactly proven empty subquery child, compare fallback and rewritten scalar,
+EXISTS/NOT EXISTS, IN/NOT IN, and derived-table results. Preserve one-time left evaluation,
+lazy demand, 3VL, schema, and errors. Repeat with `estimated_rows == 0` but no approved proof
+and assert no exact-empty rewrite, cross-referencing the §41.6 Semantic Emptiness Tests.
+
+Directly exercise every unsupported §20.14.1 row, including correlated forms, row-valued
+or multi-column scalar/IN forms, ANY/SOME/ALL, LATERAL, CTE/set-operation forms, and
+data-modifying subqueries. Assert the architecture-defined `UnsupportedFeature`,
+`UnsupportedCorrelation`, type, or syntax category, useful source span, and absence of an
+executable logical/physical node. Parser/AST capacity and hypothetical decorrelation never
+authorize support.
+
 ---
 
 ### Catalog Tests
 
-Test:
+Preserve bootstrap/open and ordinary metadata coverage:
 
 ```text
 bootstrap open
@@ -1226,6 +1462,51 @@ descriptor-cache invalidation
 transactional catalog visibility
 DROP retirement
 ```
+
+Bootstrap tests create and reopen the minimal locator plus six self-hosted catalog
+relations, then cross-check built-in identities and reconstruct immutable descriptors. Use
+corrupt bootstrap/self-description mismatch fixtures only through the owning lifecycle/
+catalog validation procedures; do not reproduce persisted catalog layouts here.
+
+#### Identity and historical schema
+
+Create table/index/constraint objects, record their durable IDs, drop/abort/retire them,
+create replacements, and reopen. Assert zero is never allocated, crash/abort gaps remain
+consumed, and TableId/IndexId/ConstraintId/FileId plus historical table-local ColumnIds are
+never reused. Do not assert a particular gap size or allocator implementation.
+
+Build several SchemaVers for one TableId and retain tuples/descriptors requiring the older
+versions. Resolve current and historical valid versions and compare immutable ColumnIds,
+physical/logical positions, types, defaults, and index-key reconstruction inputs. An
+unavailable or corrupt required historical version produces its architecture-owned error;
+the cache never substitutes the current schema.
+
+#### Snapshot-aware cache and DDL visibility
+
+Use two transactions with deterministic barriers around CREATE/DROP commit and abort.
+Assert the creator sees completed earlier DDL after its CommandId boundary, another
+transaction sees no uncommitted metadata, READ COMMITTED sees committed metadata at the
+appropriate statement snapshot, and an older REPEATABLE READ snapshot retains its prior
+view. Cache hits must produce the same result as snapshot-aware catalog relations.
+
+Borrow an immutable descriptor in the old snapshot, publish a newer committed descriptor,
+and invalidate/replace current cache ownership. Assert the borrowed object and its schema
+remain byte/field unchanged, a new eligible snapshot may receive a distinct new descriptor,
+and delayed invalidation/install cannot leak metadata across snapshots or regress current
+identity. Addresses may help prove non-mutation but are not semantic IDs.
+
+#### CREATE abort and DROP retirement
+
+Abort CREATE after private allocation, after durable final-name publication, and after
+transaction-owned catalog rows. Assert catalog invisibility, consumed IDs, deterministic
+orphan-retirement ownership, and no treatment of filesystem existence as committed object
+publication. Reuse the §41.3 lifecycle/orphan tests for namespace cleanup details.
+
+For DROP, test pre-commit visibility, abort restoration, committed disappearance from new
+snapshots, and continued safety for old snapshots/descriptors. Physical unlink waits for
+the architecture's snapshot/descriptor/page/file-owner retirement conditions; identity is
+not reused and cleanup failure does not mutate the committed catalog outcome. This section
+does not duplicate vacuum or file-retirement protocols.
 
 ---
 
@@ -1267,6 +1548,43 @@ Project
         Get(emp)
 ```
 
+Add representative canonical shapes for no-FROM Values, INNER/LEFT/CROSS joins, DISTINCT,
+Sort/Limit, INSERT VALUES/SELECT, UPDATE/DELETE with hidden RID and required old values,
+supported DDL/control statements, derived-table `LogicalSubqueryScan`, and scalar/EXISTS/IN
+independent child modes. Inspect LogicalSlotId identity, output order/type/nullability,
+stable descriptor references, and hidden-system visibility. Do not assert physical access
+or join algorithms.
+
+---
+
+### Logical-Plan Validator Tests
+
+Test the logical validator independently by constructing immutable malformed plans that
+bypass parser/binder construction. Supply otherwise valid descriptors so each test isolates
+one invariant. Validator failure is an internal architecture error, not a user SQL syntax
+error, and occurs before optimization or execution.
+
+| Area | Malformed logical state | Required assertion |
+|---|---|---|
+| Slots/schema | Missing child slot, sibling/unavailable slot reference, duplicate output LogicalSlotId, output/expression order mismatch, or schema inconsistent with child/output expressions | Reject without assigning a physical interpretation |
+| Types | Unresolved expression, non-BOOLEAN Filter/HAVING/Join predicate, incompatible comparison/cast, aggregate result mismatch, or output type/nullability contradiction | Reject using the already-resolved type contract |
+| Operator shape | Wrong child count, condition on CROSS, missing required join condition, misplaced aggregate reference, impossible DML/DDL child, or hidden target RID removed | Reject before rewrite/search |
+| Catalog/nullability | Inconsistent TableId/SchemaVer descriptor, mutated/stale identity pairing, or LEFT JOIN right output not null-extended | Reject rather than repair from names/current cache |
+| Semantic proof | Empty annotation/replacement with missing, statistics-derived, or operator-invalid provenance | Reject under §§20.17.10 and 35.2 |
+| Subquery state | Unsupported mode, wrong arity/type/nullability, missing/multiple independent child, OuterRef/correlated slot, invalid derived slot/name map, or NOT wrapper inconsistent with the mode | Reject using §20.14 without executing the support matrix again |
+
+Maintain positive validator fixtures for every canonical logical family above so a
+validator that rejects all plans cannot pass.
+
+#### Validation around rewrites
+
+At rewrite entry, pass a malformed logical plan and assert validation fails before any
+rule-match/application counter advances. After each major rewrite phase, use a test-only
+malformed transform or injected bad output to assert immediate validation before the plan
+can enter another phase or physical search. Valid user SQL may produce a structured
+front-end error, but it must never directly manufacture an accepted malformed logical
+plan.
+
 ---
 
 ### Logical Rewrite Tests
@@ -1294,6 +1612,49 @@ This is particularly important for:
 - outer joins,
 - DISTINCT,
 - aggregates.
+
+For every rule, run structural input/output tests both when its preconditions hold and at
+the nearest non-matching boundary. Validate the input before matching and the output after
+the phase as described above. Differential tests use NULL-rich and FLOAT64 edge data,
+controlled errors, and normalized unordered results.
+
+#### Volatility, folding, and Boolean 3VL
+
+Use test registry descriptors for IMMUTABLE, STABLE, and VOLATILE expressions without
+changing the v1 user-visible empty scalar-function registry. Count evaluations and inject
+errors to assert rewrites never duplicate/drop/reorder VOLATILE work, fold STABLE/VOLATILE
+expressions as immutable constants, or hide/newly force an error.
+
+Constant folding covers deterministic scalar results, NULL, casts, arithmetic errors,
+searched CASE, and short-circuited branches using §17.10.2 precedence. Boolean
+simplification runs complete TRUE/FALSE/UNKNOWN fixtures; accept only identities valid
+under SQL 3VL and the architecture's evaluation-demand rules.
+
+#### Predicate pushdown and projection pruning
+
+For predicate pushdown, construct INNER/CROSS and LEFT JOIN plans with left-local,
+right-local, cross-side, NULL-sensitive, and volatile/erroring predicates. Assert legal
+inner-side pushdown, preserved ON-versus-WHERE meaning, and no movement across a LEFT JOIN
+null-extension boundary without a separately proven transformation. A lower estimate is
+not rewrite authority.
+
+Projection-pruning fixtures place required values in parent projection, filters, join
+conditions, grouping/aggregate arguments, sorting, DML assignments/RETURNING, hidden target
+RID/system slots, and subquery/derived-slot maps. Assert only truly unused outputs are
+removed and all retained LogicalSlotIds keep their semantic identity.
+
+#### Exact-empty and subquery-sensitive rewrites
+
+Exercise every §20.17.10 propagation case with approved proof provenance and with an
+otherwise identical numerical-zero estimate lacking proof. Only the former may introduce a
+schema-equivalent empty/no-op plan. Preserve LEFT JOIN rows, global-aggregate one-row
+semantics, DML completion/affected-row behavior, and subquery lazy demand/left evaluation.
+Cross-reference the §41.6 Semantic Emptiness Tests rather than repeating estimator setup.
+
+For supported subquery semi/anti/marker or boundary-removal rewrites, compare against the
+canonical independent fallback. Preserve 3VL, duplicate behavior, cardinality checks,
+snapshot/CommandId, exact proof provenance, and §20.14.12 error precedence. Decorrelating
+an unsupported form is not a way to make it supported.
 
 ---
 
@@ -1349,10 +1710,22 @@ Requirements:
 
 - no crashes,
 - no out-of-bounds access,
+- no undefined behavior,
 - bounded failure behavior,
-- useful parser error instead of undefined behavior.
+- useful structured lexer/parser/binder/type error instead of generic failure,
+- no unbounded parser-recovery loop.
 
 SQL parser fuzzing is high-value because arbitrary text reaches it directly.
+
+Use reproducible corpus entries and report the generated seed on failure. Include arbitrary
+bytes, deeply nested delimiters, truncated literals/comments, long identifiers/lists,
+numeric boundaries, and malformed multi-statement batches. Literal/type-conversion and
+bound-constant-evaluator fuzzing must preserve the closed Chapter-17 error categories and
+bounded allocation behavior.
+
+Parser fuzzing may naturally reach subquery syntax, but deterministic table-driven
+§20.14 tests remain authoritative for supported and rejected forms. Fuzzing does not stand
+in for the subquery support matrix or logical-validator malformed-plan corpus.
 
 ---
 
