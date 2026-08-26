@@ -2073,7 +2073,7 @@ spill bytes
 
 ### Statistics Tests
 
-Test analyzer on controlled distributions:
+Test ANALYZE on controlled distributions:
 
 ```text
 uniform integers
@@ -2098,6 +2098,195 @@ null fraction
 width estimates
 ```
 
+Use exact reference counts for small inputs and fixed-seed generators for larger inputs.
+Run each applicable distribution through in-memory candidate construction, canonical
+serialization/decoding, and normalized descriptor materialization. Approximation quality
+may vary within the architecture's contract, but descriptor validity and normalization
+must not depend on input order, hash iteration, host rounding mode, or locale.
+
+When §34.8's bounded small-table exact mode applies, compare every non-NULL frequency and
+NDV with an exact map. Repeat immediately below/above the configured threshold and with an
+insufficient maintenance-memory budget to verify that changing collection mode changes
+approximation strategy, not descriptor validity or SQL semantics.
+
+### Statistics Algorithm Tests
+
+#### HLL NDV collection
+
+Exercise the process-local HLL state defined by [`ARCHITECTURE.md`](ARCHITECTURE.md)
+§§34.9 and 34.14.6.5 with empty input, one-value and very small domains, medium and large
+known cardinalities, heavy duplicate repetition, and, when the collector exposes a merge
+operation, disjoint partitions merged in varied orders. Assert:
+
+```text
+NULL never enters the sketch
+canonical-equal values hash as one value
+precision/register count and register domains are exact
+the bounded writer result lies between observed lower bounds and the exact non-NULL count
+nonfinite, negative, or malformed candidate state fails before persistence
+```
+
+Measure relative-error distributions over reproducible seeds and several cardinality
+scales rather than requiring one sketch instance to equal one fragile estimate. Compare the
+observed distribution with the HLL behavior implied by the architecture's fixed precision;
+do not introduce a separate universal tolerance. When merge is supported, partitioned
+collection must obey the same statistical and deterministic output bounds as direct
+collection.
+
+#### Heavy hitters and MCVs
+
+Feed the bounded heavy-hitter collector fixtures with one dominant value, several dominant
+values, values immediately around the top-entry cutoff, uniform data, many NULLs, and a
+long duplicate-heavy tail. Compare with exact reference frequencies and assert:
+
+- representable true heavy hitters are retained according to the collector's bounded-error
+  contract;
+- candidate count stays within the §34.10 bound and no unbounded exact map is required;
+- NULL is excluded from MCV identity while each persisted frequency remains relative to
+  all visible rows;
+- canonical-equal FLOAT64 values and exact VARCHAR bytes use the statistics equality mode;
+- canonical ordering, uniqueness, frequency bounds, and tie ordering satisfy §34.14.6.3;
+- MCV mass is removed exactly once from the residual population.
+
+Vary input and merge order to exercise bounded-error behavior. Approximate candidate sets
+need not be identical unless the collector contract requires it; every resulting accepted
+set must nevertheless receive the same deterministic canonical validation, ordering, and
+normalization.
+
+#### Reservoir and histogram construction
+
+Use fixed reservoir choices or an injectable deterministic sampler so the same sampled
+state can be replayed. Cover empty/tiny input, all-equal values, many duplicates, monotonic
+input, bimodal/skewed data, exact bucket-count boundaries, and samples larger than the
+configured reservoir. Test the structure directly rather than only through downstream
+selectivity.
+
+After MCV removal, assert that histogram boundaries are nondecreasing under the statistics
+scalar order, equal adjacent boundaries retain their defined grouped-boundary meaning,
+bin count remains bounded, each mass is valid, and normalized residual-bin mass covers the
+residual population within §34.14.6's exact tolerance. Decreasing boundaries, MCV/boundary
+identity overlap, impossible mass, and illegal degenerate forms invalidate the complete
+candidate.
+
+#### Value order, mass, and width
+
+Use controlled rows with calculable NULL, MCV, residual, and width components. Verify NDV
+excludes NULL, NULL fraction is separate, MCV and histogram mass do not overlap, and
+probability components satisfy the exact dyadic construction and normalization rules in
+§34.14.6. Width tests include empty/all-NULL columns, fixed-width values, and VARCHAR
+length distributions, including maximum-observed-width boundaries.
+
+Statistics scalar-order fixtures include:
+
+```text
+VARCHAR: empty bytes, embedded zero bytes, strict prefixes, high unsigned bytes,
+         and values around any persisted-scalar length boundary
+FLOAT64: negative finite values, -0.0/+0.0, infinities, canonical-equivalent NaNs,
+         and adjacent total-order values
+```
+
+Assert binary VARCHAR ordering and the canonical FLOAT64 total order. Raw object bytes,
+locale collation, and host unordered-NaN comparison are not valid oracles.
+
+---
+
+### Statistics Publication and Versioning Tests
+
+#### ANALYZE snapshot and candidate ownership
+
+Run ANALYZE with deterministic barriers while concurrent transactions insert, update,
+delete, commit, and abort. Capture the statement's effective snapshot and independently
+compute its visible rows. Assert that SQL-visible row/column statistics include exactly
+that snapshot, later visibility changes do not mutate the in-progress candidate, and
+physical heap/index-pressure observations remain separate approximate metadata. Reuse the
+MVCC fixtures above for visibility semantics rather than defining another snapshot model.
+
+For each statement attempt, assert one exact `StatsVersion = (TxnId, CommandId)`, one owner
+transaction, and one version on every TABLE/COLUMN/INDEX row and payload. Repeated ANALYZE
+commands in one transaction receive distinct monotonic CommandIds. Cross-version chunks,
+invalid identifier domains, and row/payload version disagreement reject the generation.
+
+#### Manifest completeness and terminal publication
+
+Build a complete version, then independently remove, duplicate, reorder, corrupt, or
+substitute each required chunk and each TABLE-manifest member. Also add an unlisted or
+wrong-object COLUMN/INDEX member. The loader must accept only one complete, internally
+consistent generation; it never combines members from different StatsVersions or salvages
+valid scopes from a failed generation.
+
+Place barriers before statement completion, before terminal COMMITTED publication, and at
+the C5 cache side effect. Verify:
+
+```text
+the owner may use its complete transaction-local descriptor after the CommandId boundary
+other transactions keep using the prior committed descriptor before terminal COMMITTED
+ABORT/cancellation and incomplete candidates never publish globally
+a complete committed generation becomes eligible atomically
+existing planners retain their immutable descriptor
+```
+
+After durable COMMIT, inject cache allocation/installation and delayed-callback failure.
+The transaction remains COMMITTED, the persistent complete generation remains usable, and
+the cache establishes the architecture-approved older/missing safe fallback without
+publishing a partial descriptor. Cross-reference the §41.3 post-durable COMMIT procedures;
+this section does not restate C0–C6.
+
+#### Generation selection and status reclamation
+
+Provide an older complete generation and newer variants that are complete, incomplete,
+aborted, unsupported, or corrupt. Load through ordinary catalog MVCC and assert selection
+of the greatest visible committed complete valid StatsVersion, otherwise the older valid
+generation or explicit missing-statistics fallback. Concurrent publication must not let a
+delayed older install replace a newer applicable descriptor.
+
+Freeze/reclaim the outer catalog tuple's creator status, retire the StatsVersion creator's
+status history, close/reopen, and reload. Assert that the opaque numeric StatsVersion is
+unchanged, directly comparable, and usable without transaction-status lookup, retained
+status pages, or terminal-cache reconstruction. Outer catalog MVCC visibility and payload
+identity remain distinct.
+
+#### One stable statistics snapshot per optimization
+
+Use optimizer hooks to publish generation B after one optimization has selected generation
+A but before it finishes costing. Every table/column/index lookup in that invocation must
+retain A's immutable applicable descriptors; no mixed A/B generation may enter one plan.
+A later optimization may select B. Repeat with a failed B publication and with a
+transaction-local descriptor visible only to its owner.
+
+---
+
+### Statistics Persistence and Validation Tests
+
+Construct catalog rows and chunked payloads directly so each validation layer can be
+isolated. Corrupt one aspect at a time:
+
+| Area | Cases | Required result |
+|---|---|---|
+| Outer/chunk framing | Missing, duplicate, noncontiguous, reordered, trailing, or size-inconsistent chunks | Reject the generation after safe row/chunk reconstruction; malformed core catalog framing retains its owning corruption outcome |
+| Header/identity | Magic, flags/reserved fields, scope, payload version, length arithmetic, CRC32C, TableId/ColumnId/IndexId, TypeId, StatsVersion, or schema/object fingerprint mismatch | Classify invalid versus well-framed unsupported statistics exactly as §§34.14.5–34.14.6 require |
+| Scalar payload | Truncated/malformed codec, NULL where forbidden, wrong TypeId, noncanonical persisted scalar, or invalid VARCHAR/FLOAT64 carrier | Reject the whole StatsVersion; never parse best-effort |
+| Probabilities/widths | NaN, infinity, negative or above-one probability, negative/nonfinite width, illegal correlation, or impossible cross-field relationship | Reject rather than clamp an individually invalid field |
+| MCV/histogram | Duplicate canonical identity, invalid tie order, decreasing boundary, MCV/boundary overlap, excessive counts, bad aggregate mass, or illegal degenerate form | Reject the entire generation; never merge/drop individual entries |
+| NDV/index consistency | NDV outside §34.14.6.5 bounds, invalid min/max relationship, wrong logical-live index count, or cross-generation disagreement | Reject generation-atomically |
+
+Directly execute every normative boundary vector in §34.14.6.10, including `+0`, `-0`,
+one, adjacent out-of-domain values, exact sums at and around `2^-40`, duplicate signed-zero
+and canonical-NaN MCV identities, equal/decreasing histogram boundaries, empty/all-NULL/
+one-value columns, exhausted residual mass, NDV limits, and correlation endpoints. Use
+exact dyadic/rational fixture construction so acceptance does not depend on host floating
+evaluation.
+
+For each accepted payload, assert one deterministic process-local descriptor: numerical
+zeros normalize to `+0`, scalar identities and MCV order are canonical, residual and bin
+masses use the architecture's one-rounding normalization, and serialize/decode yields the
+same semantic descriptor. Semantically identical permitted encodings normalize equally;
+rejected corruption is never treated as another normalization path.
+
+Use two tables with identical visible rows/selectivity but different dead versions,
+physical B+ entries, invisible entries, leaf pressure, and heap correlation. Logical row,
+NDV, and selectivity estimates remain equivalent while physical scan/index-pressure fields
+and costs may differ. Zero physical/live-entry statistics never suppress runtime access.
+
 ---
 
 ### Selectivity Estimation Tests
@@ -2117,9 +2306,11 @@ for:
 <
 <=
 >
-BETWEEN
+>=
+equivalent lower/upper bound conjunctions
 IN
 IS NULL
+IS NOT NULL
 AND
 OR
 NOT
@@ -2134,6 +2325,80 @@ outside MCV
 outside min/max
 near histogram boundaries
 ```
+
+For every primitive predicate, inspect the complete finite
+`PredicateTruthEstimate {TRUE, FALSE, UNKNOWN}` and assert normalization and legal bounds,
+not only filter row count. Directly execute the architecture-owned cases in §§35.6 and
+35.10–35.16:
+
+- equality MCV hit/residual/outside-range behavior;
+- range boundary inclusion and residual histogram interpolation;
+- `IS NULL` and `IS NOT NULL` with and without enforced NOT NULL;
+- IN lists with no NULL, one/multiple NULLs, duplicates, and no matching value;
+- NOT, AND, and OR over controlled truth triples, including independence fallback;
+- same-column equality/range/IN/NULL intersections and exact contradictions.
+
+Direct `BETWEEN` estimator dispatch is not a v1 scalar-registry capability under §35.10;
+assert it cannot bypass front-end support checks. The estimator exercises the equivalent
+registered lower/upper-bound conjunction only when supplied as a valid normalized logical
+predicate.
+
+Same-column fixtures cover overlapping and nested ranges, touching inclusive/exclusive
+boundaries, contradictory bounds, and equality inside/outside a range. Assert the
+normalized constraint-set path is used instead of multiplying independent estimates.
+Statistical min/max can influence its numerical estimate but cannot create the exact
+contradiction.
+
+Use exact or deliberately boundary-straddling scalar inputs for probability normalization,
+histogram interpolation, and clamping. Keep estimator finalization distinct from persisted
+statistics validation: downstream clamping must not legalize malformed statistics.
+
+Measure q-error against actual/reference counts for quality regressions, recording
+confidence and provenance. A high q-error is a performance-quality failure under the
+chosen regression threshold, not permission to change SQL semantics; conversely, a small
+or zero estimate used as semantic proof is a correctness failure regardless of q-error.
+
+---
+
+### Semantic Emptiness Tests
+
+Carry each fixture through estimator output, logical/physical alternative construction,
+memo insertion/dominance, final optimizer validation, and differential execution. At every
+layer inspect numerical estimates and semantic-proof metadata separately. Unless the exact
+§35.2 whitelist and §20.17.10 propagation rule apply, assert:
+
+```text
+estimated_rows may be 0
+is_provably_empty remains false
+normal access/join alternatives remain enumerable
+no empty/no-op replacement is accepted
+execution still runs and matches the reference result
+```
+
+The semantic-emptiness matrix includes:
+
+| Fixture | Required proof/result |
+|---|---|
+| Rounding, sampling, histogram endpoint, absent MCV, HLL/NDV approximation, independence, clamping, or missing fallback yields numerical zero | No semantic proof; executable alternatives remain |
+| Analyze an empty table, then commit a visible matching insert while retaining the stale zero descriptor | Estimate may remain zero; scan/index alternatives remain and execution returns the inserted row |
+| Stale min/max, histogram, or MCV suggests an equality/range value is outside the analyzed domain | No proof; a later visible matching row is returned |
+| Statistically disjoint join domains later gain a visible overlapping key | No proof; join remains executable and returns the match |
+| `null_fraction` is 0 or 1 without an enforced constraint | No proof for `IS NULL`/`IS NOT NULL`; schema constraint and statistics remain distinct |
+| Enforced NOT NULL contradicts `IS NULL` | Approved trusted-constraint proof in a row-rejecting context |
+| Complete constant FALSE or UNKNOWN predicate, exact contradictory typed literals, or zero-row `LogicalValues` | Approved exact proof only in the contexts permitted by §§20.17.10 and 35.2 |
+| LEFT JOIN has a proven-empty right side or an ON predicate proven never TRUE | Join is not empty; preserve every left row and null-extend it |
+| LEFT JOIN preserved side is proven empty | Propagated empty proof is accepted |
+| Grouped aggregate over a proven-empty child | Empty proof propagates |
+| Global aggregate over the same child | Not empty; execution produces the architecture-defined one row |
+| Actual SQL `LIMIT 0` | Approved `SQL_LIMIT_ZERO` proof |
+| `FIRST_K_ROWS(0)` or another costing objective is zero | No semantic proof and no executor row cap is fabricated |
+| Table/index live or physical-entry estimate is zero | Runtime SeqScan/usable IndexScan and heap visibility work are not suppressed |
+
+For every positive proof case, mutate the provenance to statistics, confidence, cost, or
+an unapproved metadata source and assert logical/physical/final validation rejection. For
+every non-proof zero estimate, perform optimized-versus-reference execution with visible
+rows. This is the canonical estimated-zero regression and must also pass through the memo
+tests below.
 
 ---
 
@@ -2155,6 +2420,16 @@ Compare baseline NDV estimator against MCV-aware estimator.
 
 Store regression expectations for controlled high-q-error cases.
 
+For each distribution, compute reference pair counts and complete NULL truth mass. Compare
+baseline NDV, common-MCV/residual, and trusted unique-key refinements. No common MCV or
+statistically disjoint domain may become semantic proof.
+
+LEFT JOIN fixtures independently estimate matched pairs and left rows with at least one
+match, and assert output cardinality never falls below the preserved-left estimate unless
+that input is itself proven empty. Add controlled DISTINCT and GROUP BY fixtures for one
+column, NULL grouping, and multiple columns; compare the §35.21–§35.23 NDV/damping rules
+with reference group counts while retaining heuristic provenance.
+
 ---
 
 ### Access Path Tests
@@ -2168,6 +2443,34 @@ IndexScan for ORDER BY avoidance
 SeqScan when index correlation is poor and result is large
 IndexScan when correlation is high
 ```
+
+Vary one architecture-owned input at a time:
+
+```text
+relation rows and physical pages
+predicate selectivity and row width
+required/projected payload width
+dead-version and physical index-entry pressure
+index/heap correlation
+effective-cache and calibrated page/CPU cost configuration
+required ordering
+```
+
+Inspect every enumerated SeqScan/usable IndexScan alternative, its bounds/residuals,
+estimated rows/width, physical candidate pressure, provided ordering, and component costs.
+Logical selectivity remains common to all physical algorithms; only physical work differs.
+
+Use two fixtures with the same selectivity but different table size, correlation, required
+width, ordering, or configured costs and require different legitimate path choices. This
+proves no universal selectivity threshold controls access selection. Planning must use the
+configured cache model rather than momentary BufferPool residency.
+
+For an index `(a,b,c)`, cover equality prefixes, one range after an equality prefix,
+inclusive/exclusive endpoints, duplicates/RID bounds, `IS NULL` on a nullable key, ordinary
+`= NULL`, an unconstrained suffix, a later-key predicate without its leading prefix, and
+residual predicates. Compare cursor results with the normalized SQL predicate and assert
+exact leftmost-prefix bounds, transient sentinel use, and residual classification under
+§§36.11–36.14; `IS NULL` may form its exact key bound while `= NULL` may not.
 
 Do not assert arbitrary exact cost numbers unless testing the cost formula itself.
 
@@ -2194,9 +2497,35 @@ Verify DP chooses the selective early join when statistics indicate it.
 
 Also test a case where a bushy plan wins.
 
+Generate small join graphs and compare enumerated legal trees with an independent exhaustive
+reference enumerator. Use distinct BindingIds for self-joins. Cover connected and
+disconnected graphs, a query that semantically requires a Cartesian product, and a
+connected graph where unnecessary Cartesian partitions must not displace connected
+alternatives. Cartesian cost may be high but legality is never changed by a blanket ban.
+
+Build LEFT JOIN regions with inner joins on each side. Assert the outer-join boundary stays
+atomic/constrained, legal inner reordering occurs within each side, and a lower cost cannot
+authorize crossing the boundary. Differentially execute representative legal reorderings;
+inject illegal reorderings only to assert final rejection before execution.
+
+For INNER equijoins, force cases where build-left and build-right are respectively cheaper
+and assert both supported orientations are enumerated. For LEFT hash join assert only the
+architecture-supported preserved/probe orientation appears. Also compare NestedLoop,
+HashJoin, capability-enabled MergeJoin, and INLJ without changing the shared logical join
+cardinality. INLJ fixtures include a tiny selective outer with a useful inner index and a
+large/unselective outer where repeated lookups lose.
+
 ---
 
-### Interesting-Order Tests
+### Physical Property and Enforcement Tests
+
+For each OrderingProperty, vary slot identity, direction, NULL order, collation, and prefix
+length. Assert exact-prefix satisfaction, rejection of near-matches, and advertised order
+only from runtime-capable providers. RequiredSlotSet fixtures retain predicates, join keys,
+grouping/aggregate inputs, ordering slots, output values, and hidden DML state while pruning
+unused payload.
+
+#### Interesting orders and enforcement
 
 Verify optimizer can retain a slightly more expensive ordered path and use it to avoid:
 
@@ -2211,6 +2540,22 @@ MergeJoin / streaming aggregate
 ```
 
 when total plan cost is lower.
+
+Compare an unordered cheapest child plus Sort with a more expensive naturally ordered
+IndexScan/join/aggregate path. Assert the ordered alternative survives dominance when it
+reduces total downstream cost. When no child supplies the exact property, require explicit
+Sort with startup, CPU, memory, and spill cost; when the property is already satisfied,
+reject redundant Sort enforcement.
+
+For ORDER BY with LIMIT/OFFSET, compare full Sort + Limit against Top-N using small and
+large checked `K`, no LIMIT, incompatible order, and different memory targets. Top-N must
+be semantically equivalent and selected only by the active objective cost.
+
+For GROUP BY and DISTINCT, compare hash implementations with capability-enabled ordered/
+streaming implementations under unordered input, already compatible ordering, required
+downstream order, and constrained memory. Include any necessary Sort enforcement in the
+total cost; an implementation's local operator cost is not compared as if properties were
+free.
 
 ---
 
@@ -2233,6 +2578,117 @@ in-memory Sort vs spill-aware costs
 
 where supported.
 
+Also compare `ALL_ROWS` with a safely propagated `FIRST_K_ROWS(K)` objective for the same
+logical query. Verify low-startup and low-total-cost alternatives can differ, blocking
+operators do not pretend all work scales with K, and objective identity participates in
+memo lookup where propagated. `FIRST_K_ROWS(0)` remains costing metadata, not semantic
+emptiness.
+
+With absent, rejected, stale, and low-confidence statistics, assert centralized finite
+fallback assumptions, explicit confidence/provenance, deterministic planning, retained
+runtime alternatives, and semantic correctness. A slower fallback plan is acceptable; a
+fabricated proof is not.
+
+---
+
+### Memo and Pruning Tests
+
+Construct memo/search requests that differ only in logical subproblem, required slots,
+ordering class, or propagated required-rows objective, and construct alternatives that
+differ in feasibility or semantic proof. Exercise insertion, dominance, replacement, and
+pruning directly.
+Assert:
+
+- the only semantically valid or capability-enabled alternative is never discarded;
+- useful ordering and low-startup alternatives survive when required by the active key;
+- required slots/properties are never erased by merging distinct states;
+- estimated rows and semantic-empty provenance remain orthogonal fields;
+- hash-map order, allocator address, worker timing, and pointer values cannot affect
+  retention or final selection.
+
+The mandatory estimated-zero regression inserts an executable alternative with
+`estimated_rows == 0` and `is_provably_empty == false`, then applies cost ties, dominance,
+property pruning, and join-DP transitions. It must remain available whenever required. Run
+the selected plan against data containing a visible row/match. A second malformed candidate
+that promotes the estimate into proof must be rejected, not allowed to dominate the
+executable plan.
+
+---
+
+### Cost Model Tests
+
+For scans, joins, Sort, Top-N, aggregates, DISTINCT, materialization, and spill paths,
+evaluate cost components over zero/small/large and boundary-straddling inputs. Assert every
+ordinary cost and component is finite and nonnegative, `total = startup + run` for the
+full-result objective, and invalid arithmetic cannot leak NaN or an uncontrolled infinity
+into comparison. Test exact formulas only with their architecture-owned configured weights;
+otherwise assert monotonic relationships and component attribution.
+
+Use otherwise identical plans with large unused columns present/absent from RequiredSlotSet.
+Required payload width, decode/materialization CPU, hash state, sort records, and spill
+bytes must reflect the pruned plan rather than full table width.
+
+Assign several deterministic query-memory budgets across simultaneously live blockers.
+Assert assigned targets do not exceed the phase budget, stable redistribution order is
+used, estimated peak is the maximum simultaneous phase rather than a blind sum, and hash,
+sort, aggregate, DISTINCT, and materialization spill components respond to the targets.
+Required Sort/Top-N/ordered aggregate/DISTINCT enforcement contributes its full startup,
+memory, and spill cost before alternatives are compared.
+
+---
+
+### Optimizer Determinism and Resource-Limit Tests
+
+Create exact and near-tied alternatives, then perturb insertion order, allocator layout,
+hash seeds/iteration order, and repeat optimization. The canonical structural key must
+choose the same plan under §38.4's tie rule. Verify the structural comparison key is
+collision-free for the compared alternatives; force or simulate a compact
+`PlanFingerprint` collision and prove the hash alone never decides identity, dominance, or
+tie order. Fingerprints remain deterministic diagnostics rather than semantic identity or
+a cryptographic guarantee.
+
+At, below, and above the exhaustive join threshold, compare explored subsets/partitions
+with expected exhaustive or bounded behavior. Independently lower the planning-arena/work
+budget through deterministic hooks. Assert transition to the deterministic connected
+heuristic, bounded local-improvement passes, bounded memo/arena growth, legal complete plan
+return when fallback fits, and controlled `OptimizerResourceLimit` when even fallback
+cannot fit. Wall-clock duration may be measured diagnostically but is not the correctness
+trigger when a deterministic work/memory limit is available.
+
+---
+
+### Final Optimizer Validation Tests
+
+After selection and before handing a plan to execution, invoke optimizer final validation
+and then the execution-layer Physical-Plan Validator tests above. Construct one malformed
+winner for each §38.24 class:
+
+```text
+changed logical output/join semantics or illegal predicate placement
+missing required output/hidden RID slot
+unsatisfied or falsely advertised ordering
+crossed LEFT JOIN boundary or unsupported physical capability
+negative/nonfinite memory or spill annotation
+statistics-derived or otherwise unapproved semantic-empty/no-op proof
+estimated-zero base/join subtree with every executable path removed
+```
+
+Give each malformed plan the lowest numerical cost. Assert final validation fails,
+execution is never invoked, no DML/storage/catalog/WAL effect occurs, and a structured
+internal optimizer/validation error is surfaced. Cost cannot excuse an invalid plan.
+
+For the proof boundary, test both forms explicitly:
+
+```text
+estimated_rows == 0 + statistics-derived is_provably_empty -> reject
+estimated_rows == 0 + is_provably_empty == false + executable path -> accept
+```
+
+Positive final plans must preserve output slots, hidden RIDs, join semantics, runtime
+capabilities, memory/spill declarations, and every required/provided ordering. Reuse the
+§41.5 validator and pre-DML-effect procedures rather than duplicating their malformed-plan
+matrix.
+
 ---
 
 ### Optimizer Differential Correctness Tests
@@ -2249,6 +2705,12 @@ For small random schemas/data:
 
 This tests optimizer transformation correctness independently of cost quality.
 
+Include NULL-rich and skewed inputs, stale/missing/rejected statistics, numerical-zero
+estimates without proof, different legal join orders/algorithms, interesting-order choices,
+and memory-driven plan changes. Normalize only results whose SQL ordering is unspecified.
+Compare both result values and controlled errors; optimization may change performance but
+never expression demand or SQL semantics.
+
 ---
 
 ### Optimizer Fuzzing
@@ -2261,6 +2723,9 @@ predicate combinations
 statistics values within legal ranges
 join graphs
 ordering requirements
+required slot sets
+semantic-proof metadata
+memory budgets
 ```
 
 Requirements:
@@ -2269,8 +2734,56 @@ Requirements:
 no crashes
 no NaN/negative costs escaping
 no invalid physical plan
-bounded planning time above threshold
+bounded planning work/resources above threshold
+no semantic proof fabricated from estimates/statistics
 ```
+
+Generate malformed statistics/proof/property inputs only through paths intended to reject
+them, and require bounded structured failure. Record reproducible seeds. Fuzzing supplements
+the explicit publication, estimated-zero, memo, and final-validation regressions; it does
+not replace them.
+
+---
+
+### Plan Regression Suite
+
+Maintain named optimizer scenarios containing:
+
+```text
+schema and stable object identities
+statistics descriptor/version and confidence
+query/logical input
+cost and memory configuration
+important semantic/property expectations
+canonical plan fingerprint where diagnostically stable
+```
+
+Include selective point lookup, large range scan, star/bushy join, skewed hot key, required
+Cartesian product, LEFT JOIN boundary, ORDER BY index match, small LIMIT, low-memory spill,
+missing/stale statistics, and estimated-zero-without-proof cases. Fix configuration and
+assert exact shape only when deliberate; otherwise assert legality, properties, capability,
+and semantic result so tests do not overfit incidental cost changes.
+
+### Optimizer Diagnostics Tests
+
+Inspect structured EXPLAIN/trace fields rather than unstable prose. Verify visibility of:
+
+```text
+selected StatsVersion and staleness/confidence/provenance
+table/column/index pressure inputs and fallback assumptions
+predicate TRUE/FALSE/UNKNOWN estimates
+estimated rows and row width
+is_provably_empty and approved proof provenance as a separate field
+enumerated/chosen access bounds, residuals, join order, algorithms, and orientations
+major cost components, memory targets, spill expectation, and required/provided properties
+dominance pruning, interesting-order retention, and bounded-fallback reason
+final plan structural key/fingerprint and planning resource counters
+```
+
+For an estimated zero without proof, diagnostics must show both facts distinctly. Compare
+estimated rows with actual execution counters through the §41.5 EXPLAIN ANALYZE tests and
+verify q-error/reporting does not mutate estimates, proofs, persistent statistics, or future
+planning semantics.
 
 ---
 
@@ -2300,34 +2813,6 @@ actual runtime ranking
 The goal is not perfect milliseconds.
 
 The goal is that cheaper predicted plans usually correspond to faster actual plans.
-
----
-
-### Plan Regression Suite
-
-Maintain a set of named optimizer scenarios with:
-
-```text
-schema
-statistics
-query
-expected important plan properties
-plan fingerprint where stable
-```
-
-Run on every optimizer change.
-
-Examples:
-
-```text
-selective point lookup
-large range scan
-star join
-skewed hot key
-ORDER BY index match
-small LIMIT
-low-memory hash spill
-```
 
 ---
 
