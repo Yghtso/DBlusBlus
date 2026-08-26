@@ -1,27 +1,49 @@
-# Performance-First Relational Database
+# DBlusBlus
 
-A single-node relational database management system built from first principles. The primary goal of this project is architectural: bridging the gap between relational database theory and a practical, highly performant engine. 
+DBlusBlus is a from-scratch, single-node relational database project implemented in
+C++20 for Linux/POSIX environments. Its purpose is to make practical database internals
+understandable by implementing the important storage, transaction, execution, and
+optimization mechanisms directly rather than delegating them to a database framework.
 
-This repository serves as a rigorous implementation of modern database internals, prioritizing high-learning-value designs over convenient shortcuts.
+The project combines correctness-focused systems engineering with deliberate performance
+measurement. Its architecture is designed to remain small enough to study end to end while
+still representing realistic database responsibilities and invariants.
 
-Fresh Linux toolchain, build, test, analysis, and benchmark instructions are in the [development guide](docs/DEVELOPMENT.md#development-baseline).
+## Goals and design philosophy
 
-## Architectural Overview
+- **Mechanism transparency:** page management, replacement, tuple storage, indexing,
+  concurrency control, recovery, execution, and optimization are intended to remain
+  visible as they are implemented.
+- **Correctness and explicit invariants:** persistent formats, I/O failures, concurrency,
+  transaction semantics, and recovery behavior are governed by explicit contracts.
+- **Architectural clarity:** subsystem ownership and dependency direction remain clear,
+  with lower layers independent of higher-level SQL concerns.
+- **Measured performance:** cache behavior, allocation, synchronization, I/O patterns,
+  cardinality, and intermediate-result size are treated as measurable engineering
+  concerns.
+- **Durable foundations:** simple implementations are preferred when they satisfy the
+  architecture without turning foundational subsystems into throwaway work.
 
-The database is designed with a strict, performance-first layered architecture. Lower layers (like storage and indexing) are completely decoupled from higher-level SQL concepts.
+## System characteristics
 
-* **Platform:** Linux-first (x86-64 / ARM64), developed entirely in **C++20**.
-* **Storage Layer:** Page-oriented storage (8 KiB slotted pages) with row-oriented heap tables.
-* **Buffer Pool:** Explicit database-managed buffer pool using a CLOCK replacement policy, strictly enforcing Write-Ahead Logging (WAL) rules.
-* **Indexing:** Custom page-backed B+ Trees serving as the primary general-purpose index.
-* **Concurrency Control:** Heap-version MVCC (Multi-Version Concurrency Control) supporting Read Committed and Snapshot Isolation (Repeatable Read).
-* **Durability:** Mandatory append-only WAL with group commit and ARIES-inspired crash recovery (utilizing STEAL + NO-FORCE policies).
-* **Execution Engine:** Vectorized, chunk-at-a-time execution model (defaulting to 1024 rows/chunk) using typed vectors to maximize CPU cache efficiency and avoid per-cell allocations.
-* **Query Optimizer:** Rule-based logical optimization paired with a System-R-style cost-based physical optimizer (bottom-up dynamic programming).
+The authoritative v1 architecture specifies:
 
-## System Layering
+- a Linux-first C++20 platform using POSIX file APIs;
+- page-oriented storage with 8 KiB pages, row-oriented heap tables, and explicit
+  little-endian persistent encoding;
+- a database-managed buffer pool with CLOCK replacement;
+- page-backed B+ tree indexes;
+- heap-version MVCC with transaction locking;
+- write-ahead logging, group commit, and crash recovery under STEAL/NO-FORCE;
+- a relational catalog and limited SQL front end;
+- typed, vectorized query execution;
+- statistics, cardinality estimation, and cost-based physical optimization.
 
-The system strictly adheres to the following dependency direction. Lower layers never depend on or have knowledge of the layers above them.
+These are architectural design characteristics, not a claim that every subsystem is
+already implemented. See [`PROJECT_STATE.md`](docs/PROJECT_STATE.md) for implemented
+capabilities, limitations, and active development boundaries.
+
+The architecture follows a strict downward dependency direction:
 
 ```text
 SQL / Parser
@@ -45,25 +67,30 @@ WAL + Page Manager
 Operating System / Storage Device
 ```
 
-## Engineering Philosophy
+## Build
 
-* **Correctness before micro-optimization:** Implement the simplest version compatible with the architecture, test it heavily, benchmark it, and optimize only based on exact measurements.
-* **Explicit Control:** Avoid OS-level shortcuts. The database explicitly controls caching, eviction, dirty-page flushing, and WAL-before-data ordering (using explicit `pread`/`pwrite`/`fdatasync`, avoiding `mmap` for primary data structures).
-* **Performance Model:** Execution and storage paths are designed to explicitly respect CPU cache behavior, branch prediction, allocation frequency, and sequential vs. random I/O.
-* **Explicit Serialization:** Persistent on-disk formats are explicitly serialized. The codebase never depends on compiler struct memory layouts for persistence.
+After installing the required development tools, configure, build, and test the primary
+Clang Debug preset from the repository root:
 
-## Implementation Roadmap
+```sh
+cmake --preset clang-debug
+cmake --build --preset clang-debug
+ctest --preset clang-debug
+```
 
-The implementation is broken down into distinct, strictly testable phases:
+See the [development guide](docs/DEVELOPMENT.md#development-baseline) for tool
+requirements, Linux package setup, all build presets, sanitizers, static analysis,
+formatting, benchmarks, clangd integration, and troubleshooting.
 
-1. **Raw Storage:** File management, slotted heap pages, and tuple encoding.
-2. **Buffer Management:** Frame tracking, page guards, and CLOCK replacement.
-3. **Indexes:** B+ tree pages, latch coupling, splits/merges, and range scans.
-4. **Transactions & Durability:** Transaction manager, MVCC visibility, WAL, group commit, crash recovery, and vacuuming.
-5. **Catalog & SQL:** Handwritten parser, AST, semantic binder, and system catalog.
-6. **Query Execution:** Logical plans, vectorized data chunks, hash joins, and aggregation.
-7. **Optimization:** Statistics, rule rewrites, access-path selection, and cost models.
-8. **Performance:** Profiling, allocation reduction, and parallel execution.
+## Documentation
 
----
-*Note: The architecture outlined in the underlying specifications acts as a strict contract. Any structural deviations from the locked architecture require explicit proposals and benchmarked justifications.*
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — authoritative technical architecture,
+  persisted formats, subsystem contracts, and invariants.
+- [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) — implementation capabilities,
+  limitations, and active boundaries.
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — development environment, build and
+  tooling workflow, implementation sequencing, and module organization.
+- [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — testing, crash-injection, fuzzing,
+  regression, and benchmark methodology.
+- [`devlog/`](devlog/) — chronological implementation milestones and task-specific
+  engineering records.
