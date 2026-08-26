@@ -4,6 +4,9 @@
 
 This document defines detailed testing, crash-injection, fuzzing, regression, and benchmark procedures.
 
+For fresh-machine toolchain setup and normal build/check invocation, see
+[`DEVELOPMENT.md` — Development baseline](DEVELOPMENT.md#development-baseline).
+
 `ARCHITECTURE.md` defines the correctness/performance obligations. This guide describes practical ways to verify those obligations. A test recipe does not weaken or replace an architectural invariant, and benchmark numbers are measurements rather than persistent architecture constants.
 
 Milestone labels in this guide are organizational verification checkpoints only; current implementation status belongs in `PROJECT_STATE.md`.

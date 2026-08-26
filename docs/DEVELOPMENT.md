@@ -2,15 +2,438 @@
 
 ## Purpose and authority
 
-This document defines implementation sequencing, milestone targets, and recommended module-layout guidance that is useful for engineering work but is not part of the technical architecture contract.
+This document defines development-environment setup, build and tooling workflow,
+implementation sequencing, milestone targets, and recommended module-layout guidance. It
+is planning and development guidance, not part of the technical architecture contract or
+a record of current implementation state.
 
 `ARCHITECTURE.md` defines intended system behavior and persistent/concurrency contracts. `PROJECT_STATE.md` records what is currently implemented and which phase is active. This guide does **not** authorize crossing a project phase gate; current project status and explicit project decisions remain authoritative for sequencing.
 
 Exact filenames and directory organization may evolve. The subsystem responsibility boundaries defined by `ARCHITECTURE.md` do not.
 
-The sections below organize development guidance by dependency and subsystem. When this guide and `ARCHITECTURE.md` differ on intended behavior, `ARCHITECTURE.md` is authoritative.
+The sections below first cover the developer environment and daily workflow, then organize
+implementation guidance by dependency and subsystem. When this guide and `ARCHITECTURE.md`
+differ on intended behavior, `ARCHITECTURE.md` is authoritative.
 
 ---
+
+# Part I — Development Environment and Workflow
+
+## Development baseline
+
+The architecture's initial platform baseline is Linux on x86-64 or ARM64 with POSIX file
+APIs. The current implementation uses C++20 without compiler extensions. Clang is the
+primary development compiler, and production code is expected to compile with both Clang
+and GCC.
+
+The repository declares these exact minimums or language requirements:
+
+- CMake 3.25 or newer;
+- CMake Presets schema version 6;
+- C++20, required, with compiler extensions disabled;
+- Ninja as the generator for every repository preset.
+
+No project-specific minimum compiler, Ninja, GTest, Google Benchmark, clang-tidy, or
+clang-format version is currently declared beyond requiring a tool or library compatible
+with the configuration above. A compiler must provide the C++20 features used by the
+source and standard library.
+
+The build expects system-provided dependencies. It does not use CMake `FetchContent` or
+otherwise download GoogleTest or Google Benchmark.
+
+## Required tools
+
+| Tool or dependency | Purpose | Required for | Repository requirement |
+|---|---|---|---|
+| Linux/POSIX environment | Runs the current storage implementation and tests | Build and runtime baseline | Linux; x86-64 or ARM64; POSIX file APIs |
+| Git | Clone and contributor checks | Obtaining the source; `git diff --check`; formatting file discovery | No project-specific minimum |
+| CMake and CTest | Configure, generate, and run tests | All configurations; test execution | 3.25 or newer |
+| Ninja | Build preset generator | Every repository build preset | Required by presets; no project-specific version minimum |
+| Clang/Clang++ | Primary C++ compiler | Primary development, release, sanitizer, analysis, and benchmark presets | C++20 support; no project-specific compiler version minimum |
+| GTest | Unit-test executable and CTest discovery | Default configure, build, and tests because `BUILD_TESTING` defaults to `ON` | `find_package(GTest REQUIRED)`; no version minimum |
+| GCC/G++ | Secondary C++ compiler | GCC portability verification and the full local matrix | C++20 support; no project-specific compiler version minimum |
+| clang-tidy | Static analysis during compilation | `clang-tidy` preset and full local matrix | Must be discoverable as `clang-tidy`; no version minimum |
+| clang-format | Non-mutating style verification | Primary development and full local matrix | Repository `.clang-format`; no version minimum |
+| Clang sanitizer runtime | AddressSanitizer and UndefinedBehaviorSanitizer | `clang-asan` preset and full local matrix | Compiler/runtime support for `-fsanitize=address,undefined` |
+| Google Benchmark | Benchmark executable | `clang-bench` preset only | `find_package(benchmark REQUIRED)`; no version minimum |
+
+CTest is installed with CMake. CMake finds GTest through its system CMake package and links
+`GTest::gtest_main`. The benchmark configuration finds the system Google Benchmark CMake
+package, links `benchmark::benchmark_main`, and finds POSIX Threads transitively; the
+project declares no separate thread-library package.
+
+GCC, clang-tidy, clang-format, the sanitizer runtime, and Google Benchmark are not needed
+merely to configure and build the primary Clang Debug tree, except that a distribution may
+package some of them together. They are required for their corresponding full-matrix
+checks.
+
+## Linux package installation
+
+Package names vary by distribution. Install packages that provide the conceptual
+requirements in the table above. The package names here are examples for the Arch-derived
+environment used for validation, not project or architecture requirements.
+
+Read-only `pacman` package metadata verified these package names:
+
+| Capability | Arch-family package |
+|---|---|
+| CMake/CTest | `cmake` |
+| Ninja | `ninja` |
+| Clang, clang++, clang-format, clang-tidy | `clang` |
+| Clang sanitizer runtimes | `compiler-rt` (a dependency of `clang`) |
+| GCC/G++ | `gcc` |
+| GTest CMake package and libraries | `gtest` |
+| Google Benchmark CMake package and libraries | `benchmark` |
+| Git | `git` |
+
+For an Arch-family machine intended to run the complete current matrix, the user may
+install the verified packages explicitly:
+
+```sh
+sudo pacman -S --needed git cmake ninja clang gcc gtest benchmark
+```
+
+This is an installation example only. It was not executed during validation; the project
+does not run privileged or package-changing commands automatically.
+
+## Clone the repository
+
+```sh
+git clone <repository-url>
+cd DBlusBlus
+```
+
+Use the clone URL appropriate for your access. Build and test commands below run from the
+repository root.
+
+## First build: Clang Debug
+
+This is the canonical first build and normal development tree:
+
+```sh
+cmake --preset clang-debug
+cmake --build --preset clang-debug
+ctest --preset clang-debug
+```
+
+The preset creates `build/clang-debug`, selects `clang++`, uses `Debug`, enables tests,
+and exports `build/clang-debug/compile_commands.json`.
+
+## Current CMake presets
+
+| Preset | Purpose | Configure and build | Test command |
+|---|---|---|---|
+| `clang-debug` | Primary Clang Debug development build | `cmake --preset clang-debug` then `cmake --build --preset clang-debug` | `ctest --preset clang-debug` |
+| `clang-asan` | Clang Debug with ASan and UBSan | `cmake --preset clang-asan` then `cmake --build --preset clang-asan` | `ctest --preset clang-asan` |
+| `clang-release` | Optimized Clang build with tests available | `cmake --preset clang-release` then `cmake --build --preset clang-release` | `ctest --test-dir build/clang-release --output-on-failure` |
+| `clang-tidy` | Clang Debug build that runs clang-tidy on each compilation | `cmake --preset clang-tidy` then `cmake --build --preset clang-tidy` | Optional after analysis: `ctest --test-dir build/clang-tidy --output-on-failure` |
+| `gcc-debug` | GCC Debug portability build | `cmake --preset gcc-debug` then `cmake --build --preset gcc-debug` | `ctest --preset gcc-debug` |
+| `clang-bench` | Optimized Clang benchmark build with tests disabled | `cmake --preset clang-bench` then `cmake --build --preset clang-bench` | None; `BUILD_TESTING=OFF` |
+
+Only `clang-debug`, `clang-asan`, and `gcc-debug` have named CTest presets. The explicit
+`--test-dir` commands above are supported for the other test-enabled build trees.
+
+## Running tests
+
+List the tests CMake discovered without running them:
+
+```sh
+ctest --preset clang-debug -N
+```
+
+Run the complete primary suite with failure output:
+
+```sh
+ctest --preset clang-debug --output-on-failure
+```
+
+The test preset already enables failure output, so the shorter
+`ctest --preset clang-debug` is equivalent. For a focused edit loop, pass a CTest regular
+expression, for example:
+
+```sh
+ctest --preset clang-debug -R '^ProjectSmokeTest\.' --output-on-failure
+```
+
+## GCC portability verification
+
+Run the secondary compiler check with the repository's GCC preset:
+
+```sh
+cmake --preset gcc-debug
+cmake --build --preset gcc-debug
+ctest --preset gcc-debug
+```
+
+This is part of the full local matrix rather than the fastest per-edit loop. In the dated
+environment validation below, GCC 16.2.1 configured and built the tree and passed all
+209 tests. That result does not claim support for every GCC version.
+
+## Sanitizers
+
+The sanitizer preset independently enables AddressSanitizer and UndefinedBehaviorSanitizer
+in a Clang Debug build:
+
+```sh
+cmake --preset clang-asan
+cmake --build --preset clang-asan
+ctest --preset clang-asan
+```
+
+Do not disable leak detection by default. If LeakSanitizer works in the current
+environment, run it normally with the commands above.
+
+In the 2026-08-26 validation execution environment, LeakSanitizer could not initialize
+because the process ran under ptrace. The failure occurred during GoogleTest discovery
+after the test binary linked, with `LeakSanitizer does not work under ptrace`. Only in
+that situation, rerun the build/discovery and tests with leak detection disabled:
+
+```sh
+ASAN_OPTIONS=detect_leaks=0 cmake --build --preset clang-asan
+ASAN_OPTIONS=detect_leaks=0 ctest --preset clang-asan
+```
+
+This workaround disables LeakSanitizer only. ASan and UBSan remain compiled and linked
+into the targets. The complete 209-test suite passed under ASan and UBSan in the verified
+environment with no findings.
+
+## clang-tidy
+
+The analysis preset locates `clang-tidy` and applies the repository's `.clang-tidy`
+checks while compiling production code, tests, and the normal executable:
+
+```sh
+cmake --preset clang-tidy
+cmake --build --preset clang-tidy
+```
+
+Configuration fails explicitly with `clang-tidy requested but not found` if the tool is
+absent.
+
+## clang-format
+
+The repository has no formatting wrapper script or formatting build target. Perform a
+non-mutating project-wide check against `.clang-format` with:
+
+```sh
+git ls-files -z -- '*.cpp' '*.h' | xargs -0 clang-format --dry-run --Werror
+```
+
+This checks tracked C++ source and headers without rewriting them. If another
+clang-format major version reports differences, treat that as a tool-version
+compatibility finding and review it before reformatting files. Do not mix
+repository-wide formatting with unrelated implementation work.
+
+## Warnings as errors
+
+Warnings are enabled for project targets by default. To additionally promote them to
+errors in the primary tree, reconfigure that preset with the project option and rebuild:
+
+```sh
+cmake --preset clang-debug -DDBLUSBLUS_WARNINGS_AS_ERRORS=ON
+cmake --build --preset clang-debug
+```
+
+This option adds `-Werror` for Clang and GCC project targets. It is a stronger local
+verification build, not a redefinition of the project's warning policy.
+
+## Benchmark build
+
+Google Benchmark is required only for the benchmark preset. Configure and compile it
+with:
+
+```sh
+cmake --preset clang-bench
+cmake --build --preset clang-bench
+```
+
+This produces `build/clang-bench/benchmarks/dblusblus_benchmarks` in a Release build and
+disables unit-test compilation. Successful configuration and compilation verify benchmark
+target availability; they are not a performance claim. Detailed benchmark methodology
+remains in [`VERIFICATION.md`](VERIFICATION.md).
+
+## compile_commands.json / clangd
+
+The root CMake file and every configure preset enable `CMAKE_EXPORT_COMPILE_COMMANDS`.
+After the primary configure, point clangd-compatible tooling at the primary database with
+an ignored root symlink:
+
+```sh
+ln -s build/clang-debug/compile_commands.json compile_commands.json
+```
+
+The command is intended for a fresh clone where no root link exists. Both the generated
+database and root link are ignored and must not be committed. No editor-specific
+configuration is required.
+
+## Normal development loop
+
+For most edits, keep the primary tree configured and use this short loop:
+
+1. Edit the relevant source and tests.
+2. Run `cmake --build --preset clang-debug`.
+3. Run a focused CTest regex, such as
+   `ctest --preset clang-debug -R '^ProjectSmokeTest\.' --output-on-failure`.
+4. Run `ctest --preset clang-debug` periodically and before handing off a meaningful
+   change.
+
+A developer need not run the entire sanitizer, GCC, analysis, and formatting matrix after
+every tiny edit. Use the broader matrix below before declaring a non-trivial milestone
+complete, in proportion to the change.
+
+## Full local milestone verification
+
+The following is the complete current local toolchain matrix. The LeakSanitizer fallback
+is conditional and should be used only when the default sanitizer commands fail with the
+ptrace initialization message.
+
+```sh
+cmake --preset clang-debug
+cmake --build --preset clang-debug
+ctest --preset clang-debug
+
+cmake --preset clang-asan
+cmake --build --preset clang-asan
+ctest --preset clang-asan
+
+# ptrace-only LeakSanitizer fallback, if required:
+ASAN_OPTIONS=detect_leaks=0 cmake --build --preset clang-asan
+ASAN_OPTIONS=detect_leaks=0 ctest --preset clang-asan
+
+cmake --preset gcc-debug
+cmake --build --preset gcc-debug
+ctest --preset gcc-debug
+
+cmake --preset clang-tidy
+cmake --build --preset clang-tidy
+
+cmake --preset clang-debug -DDBLUSBLUS_WARNINGS_AS_ERRORS=ON
+cmake --build --preset clang-debug
+
+git ls-files -z -- '*.cpp' '*.h' | xargs -0 clang-format --dry-run --Werror
+
+cmake --preset clang-release
+cmake --build --preset clang-release
+ctest --test-dir build/clang-release --output-on-failure
+
+cmake --preset clang-bench
+cmake --build --preset clang-bench
+
+git diff --check
+```
+
+This matrix compiles the benchmark target but intentionally does not execute benchmarks.
+Detailed test, crash-injection, fuzzing, regression, and benchmark procedures are defined
+in [`VERIFICATION.md`](VERIFICATION.md).
+
+## Build directories and generated files
+
+Each configure preset writes to its own `build/<preset-name>` directory:
+
+```text
+build/clang-debug
+build/clang-asan
+build/clang-release
+build/clang-tidy
+build/gcc-debug
+build/clang-bench
+```
+
+The entire `build/` tree is generated and ignored. Do not edit or commit generated CMake
+or Ninja files, compilation databases, compiler output, sanitizer output, test temporary
+databases, or spill files. To start one configuration over, remove only that exact preset
+directory from the repository root, then configure it again. For example:
+
+```sh
+rm -rf build/clang-debug
+cmake --preset clang-debug
+```
+
+Do not remove the repository root or arbitrary paths. Recreate the root
+`compile_commands.json` symlink after removing its target tree if needed.
+
+## Troubleshooting
+
+- **CMake rejects the project or presets:** verify `cmake --version` is at least 3.25.
+  Both the root project and presets declare this minimum.
+- **Ninja is missing:** every preset specifies the Ninja generator. Install the
+  distribution package that provides `ninja`, then reconfigure the affected preset
+  directory.
+- **Clang or GCC is missing:** named presets request `clang++` or `g++` directly. Install
+  the corresponding C++ compiler; no fallback compiler is selected for those presets.
+- **GTest is not found:** primary, GCC, sanitizer, release, and analysis configurations
+  enable tests and call `find_package(GTest REQUIRED)`. Install a GTest development
+  package that exposes a CMake package with `GTest::gtest_main`.
+- **Google Benchmark is not found:** install a development package that exposes a CMake
+  package with `benchmark::benchmark_main`. It is needed only by `clang-bench`.
+- **clang-tidy is not found:** install a package that provides the executable, then
+  recreate or reconfigure `build/clang-tidy`.
+- **clang-format is missing or reports differences:** install the formatter, confirm its
+  version, and inspect diagnostics. Do not silently rewrite the repository merely to
+  accommodate an unreviewed version difference.
+- **Sanitizer symbols or runtimes are missing:** install the compiler's matching sanitizer
+  runtime. For Clang on the verified distribution this is `compiler-rt`. A ptrace-only
+  LeakSanitizer failure is handled by the conditional workaround in the Sanitizers
+  section; it is not a reason to disable ASan or UBSan.
+- **A package is unavailable on another distribution:** use that distribution's package
+  search or repository documentation to locate a package providing the required
+  executable or CMake imported target. Do not add an automatic dependency download to
+  the project.
+
+## Verified development environment
+
+This is one dated portability-validation environment, not a set of mandatory exact project
+versions. DBlusBlus does not require Omarchy or Arch Linux.
+
+Validation date: 2026-08-26.
+
+| Item | Verified value |
+|---|---|
+| Distribution | Omarchy 4.0.1 (`ID_LIKE=arch`) |
+| Kernel | Linux 7.1.9-arch1-2 |
+| Architecture | x86_64 |
+| libc | glibc 2.44 |
+| Command shell | GNU Bash 5.3.15 |
+| CMake / CTest | 4.4.2 |
+| Ninja | 1.13.2 |
+| Clang / Clang++ | 22.1.8, target `x86_64-pc-linux-gnu` |
+| GCC / G++ | 16.2.1 |
+| GTest | 1.17.0 |
+| Google Benchmark | 1.9.5 |
+| clang-format | 22.1.8 |
+| clang-tidy | 22.1.8 |
+| Clang sanitizer runtime | compiler-rt 22.1.8 |
+| Git | 2.55.0 |
+
+Fresh build results on this environment:
+
+- Clang Debug: configured, built, 209 tests discovered, 209/209 passed;
+- GCC Debug: configured, built, 209/209 passed;
+- Clang ASan + UBSan: configured and instrumented, 209/209 passed with no findings;
+- LeakSanitizer: ptrace initialization failure; `detect_leaks=0` workaround required only
+  for LSan in that environment;
+- clang-tidy: built cleanly with no diagnostics;
+- clang-format: project-wide dry run passed;
+- warnings-as-errors: Clang build passed;
+- Clang Release: configured, built, 209/209 passed;
+- benchmark preset: configured and built; benchmark executable and `BM_Smoke` were
+  present;
+- compile database: generated in the primary build tree and root ignored symlink verified.
+
+The current Phase-1 source uses expected Linux/POSIX calls including `open`, `pread`,
+`pwrite`, `fstat`, `ftruncate`, and `fdatasync`. It uses explicit fixed-width
+little-endian codecs rather than host object layout and compile-time checks the required
+IEEE-754 binary64 representation. Clang, GCC, sanitizer, filesystem/I/O tests, and tooling
+checks exposed no project portability defect on this supported Linux environment.
+
+---
+
+# Part II — Implementation Sequencing and Module Layout
+
+`PROJECT_STATE.md` currently records Phase 1 complete and Phase 2 — Buffer Management not
+started. BufferPool is the first Phase 2 implementation boundary if separately authorized;
+nothing in this guide grants that authorization. Future module and milestone guidance
+below is planning guidance only.
 
 ## Suggested Implementation Order
 

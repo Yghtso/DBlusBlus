@@ -4,6 +4,8 @@ A single-node relational database management system built from first principles.
 
 This repository serves as a rigorous implementation of modern database internals, prioritizing high-learning-value designs over convenient shortcuts.
 
+Fresh Linux toolchain, build, test, analysis, and benchmark instructions are in the [development guide](docs/DEVELOPMENT.md#development-baseline).
+
 ## Architectural Overview
 
 The database is designed with a strict, performance-first layered architecture. Lower layers (like storage and indexing) are completely decoupled from higher-level SQL concepts.
