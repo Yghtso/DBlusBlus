@@ -7,9 +7,13 @@ This document defines detailed testing, crash-injection, fuzzing, regression, an
 For fresh-machine toolchain setup and normal build/check invocation, see
 [`DEVELOPMENT.md` — Development baseline](DEVELOPMENT.md#development-baseline).
 
-`ARCHITECTURE.md` defines the correctness/performance obligations. This guide describes practical ways to verify those obligations. A test recipe does not weaken or replace an architectural invariant, and benchmark numbers are measurements rather than persistent architecture constants.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) defines the correctness/performance obligations. This
+guide describes practical ways to verify those obligations. A test recipe does not weaken
+or replace an architectural invariant, and benchmark numbers are measurements rather than
+persistent architecture constants.
 
-Milestone labels in this guide are organizational verification checkpoints only; current implementation status belongs in `PROJECT_STATE.md`.
+Procedures are organized by subsystem capability and apply whenever that capability is
+under verification. Implementation status belongs in `PROJECT_STATE.md`.
 
 ---
 
@@ -83,16 +87,24 @@ Microbenchmarks and end-to-end benchmarks should both exist.
 
 ---
 
-## Storage Milestone 1 Required Tests
+## Storage Verification
 
 At minimum:
 
 ### Slotted-page tests
 
 - insert until full,
-- DEAD slots are not immediately reusable at this milestone,
+- basic heap-page mutation treats DEAD slots as non-reusable,
 - NORMAL -> DEAD transitions and compaction preserve SlotIds,
-- DEAD -> UNUSED transition and reusable-slot tests are deferred until the Chapter 14 vacuum/reclamation protocol is implemented,
+- DEAD -> UNUSED transition and reusable-slot tests exercise the Chapter 14
+  vacuum/reclamation protocol,
+- ordinary owner validation enforces page identity, version, geometry, required-zero
+  fields, and schema-directed tuple validity for every retained NORMAL and DEAD tuple,
+- ordinary owner validation rejects overlapping NORMAL/NORMAL, NORMAL/DEAD, and DEAD/DEAD
+  retained tuple ranges,
+- retained DEAD slots receive complete tuple validation and use canonical retained or
+  reclaimed coordinates with `aux=0`,
+- `REDIRECT_RESERVED` is rejected by ordinary owner validation,
 - compaction,
 - invalid slot access,
 - tuple bytes survive compaction.
@@ -110,6 +122,8 @@ At minimum:
 ### Disk tests
 
 - page zero/superblock,
+- generic v1 superblock encoding writes zero flags and decoding rejects every nonzero flag
+  or required-zero reserved field,
 - extend file,
 - random page read/write,
 - reopen persistence,
@@ -140,14 +154,14 @@ Verify:
 - thousands of tuples,
 - many pages,
 - scan after reopen,
-- delete markers only after MVCC phase,
+- deletion-marker behavior under MVCC visibility,
 - FSM stale-entry repair.
 
 ---
 
-## Storage Milestone 1 Benchmarks
+## Storage Benchmarks
 
-Add benchmarks before optimizing.
+Establish measurements before optimizing storage mechanisms.
 
 Measure at least:
 
@@ -175,7 +189,9 @@ Do not optimize based only on intuition.
 
 ---
 
-## Required Deterministic Tests
+## B+ Tree Verification
+
+### Required Deterministic Tests
 
 Structural cases:
 
@@ -209,7 +225,7 @@ Key-format cases:
 
 ---
 
-## Duplicate Stress Test
+### Duplicate Stress Test
 
 Insert enough identical user keys with distinct RIDs to span many leaf pages.
 
@@ -227,7 +243,7 @@ This specifically validates the decision to route using full physical separators
 
 ---
 
-## Randomized Tests
+### Randomized Tests
 
 Compare the B+ tree to an in-memory sorted oracle of physical keys.
 
@@ -250,11 +266,12 @@ compare complete sorted contents against oracle
 
 Random seeds must be reproducible and printed on failure.
 
-This test suite is mandatory before concurrency.
+Single-threaded randomized structural verification is a prerequisite for concurrency
+stress testing.
 
 ---
 
-## Concurrent Tests
+### Concurrent Tests
 
 Stress:
 
@@ -272,7 +289,7 @@ Add watchdogs/timeouts to detect deadlocks.
 
 ---
 
-## B+ Tree Benchmarks
+### B+ Tree Benchmarks
 
 Measure:
 
@@ -303,7 +320,7 @@ composite keys
 
 Benchmark both:
 
-### Hot tree
+#### Hot tree
 
 Mostly resident in buffer pool.
 
@@ -314,7 +331,7 @@ Focus:
 - latches,
 - cache behavior.
 
-### Larger-than-buffer tree
+#### Larger-than-buffer tree
 
 Working set exceeds buffer pool.
 
@@ -327,7 +344,9 @@ Focus:
 
 ---
 
-## Crash Injection Framework
+## Transaction, Durability, and Reclamation Verification
+
+### Crash Injection Framework
 
 Add deterministic crash/fault injection points around:
 
@@ -350,7 +369,7 @@ Tests should be able to terminate the process at a selected injection point, reo
 
 ---
 
-## Recovery Property Tests
+### Recovery Property Tests
 
 For random transaction workloads:
 
@@ -367,7 +386,7 @@ Logical committed results must match.
 
 ---
 
-## MVCC Visibility Tests
+### MVCC Visibility Tests
 
 Build table-driven tests for:
 
@@ -389,7 +408,7 @@ Test exact `xmin/xmax/cmin/cmax` combinations, not only end-to-end SQL.
 
 ---
 
-## Isolation Tests
+### Isolation Tests
 
 READ COMMITTED:
 
@@ -406,7 +425,7 @@ REPEATABLE READ / snapshot isolation:
 
 ---
 
-## Locking Tests
+### Locking Tests
 
 Test:
 
@@ -427,7 +446,7 @@ Use deterministic barriers rather than timing sleeps where possible.
 
 ---
 
-## Group Commit Benchmarks
+### Group Commit Benchmarks
 
 Benchmark:
 
@@ -454,7 +473,7 @@ Compare against a diagnostic mode that forces one fsync per commit to quantify g
 
 ---
 
-## Checkpoint/Recovery Benchmarks
+### Checkpoint/Recovery Benchmarks
 
 Measure:
 
@@ -477,7 +496,7 @@ Test both:
 
 ---
 
-## Vacuum Benchmarks
+### Vacuum Benchmarks
 
 Measure:
 
@@ -502,19 +521,21 @@ Use workloads with:
 
 ---
 
-## SQL Grammar Testing
+## Catalog, SQL, and Logical-Plan Verification
+
+### SQL Grammar Testing
 
 Use:
 
-### Positive parser tests
+#### Positive parser tests
 
 Valid SQL -> expected AST shape.
 
-### Negative parser tests
+#### Negative parser tests
 
 Invalid SQL -> expected syntax error and source span.
 
-### Precedence tests
+#### Precedence tests
 
 Verify:
 
@@ -526,7 +547,7 @@ a OR b AND c
 
 parse correctly.
 
-### Round-trip debug tests
+#### Round-trip debug tests
 
 A debug AST formatter may produce canonical SQL-like output for inspection.
 
@@ -534,7 +555,7 @@ It need not reproduce original whitespace/comments.
 
 ---
 
-## Binder Tests
+### Binder Tests
 
 Cover:
 
@@ -566,7 +587,7 @@ Use an in-memory/mock catalog implementation where useful.
 
 ---
 
-## Type-System Property Tests
+### Type-System Property Tests
 
 Test consistency between:
 
@@ -589,7 +610,7 @@ A query must not have one semantic meaning in the binder and another in the inde
 
 ---
 
-## Catalog Tests
+### Catalog Tests
 
 Test:
 
@@ -609,7 +630,7 @@ DROP retirement
 
 ---
 
-## Logical Planner Tests
+### Logical Planner Tests
 
 Given bound statements, assert canonical logical-plan shapes.
 
@@ -649,7 +670,7 @@ Project
 
 ---
 
-## Logical Rewrite Tests
+### Logical Rewrite Tests
 
 For every rewrite rule:
 
@@ -658,7 +679,7 @@ input logical plan
 expected transformed plan
 ```
 
-plus, once execution exists:
+plus, when an execution implementation is available:
 
 ```text
 differential semantic test:
@@ -677,7 +698,7 @@ This is particularly important for:
 
 ---
 
-## Catalog / Front-End Benchmarks
+### Catalog / Front-End Benchmarks
 
 Performance is less critical than execution/storage, but benchmark enough to avoid pathological architecture.
 
@@ -693,11 +714,11 @@ large expression-tree binding
 logical plan construction time
 ```
 
-Optimizer planning benchmarks will later dominate complex-query planning work.
+Optimizer planning benchmarks cover complex-query planning work separately.
 
 ---
 
-## Parser/AST Memory Benchmark
+### Parser/AST Memory Benchmark
 
 Track allocations/bytes for:
 
@@ -714,7 +735,7 @@ Do not optimize syntax parsing before profiling, but prevent obvious per-token/p
 
 ---
 
-## Front-End Fuzzing
+### Front-End Fuzzing
 
 Fuzz at least:
 
@@ -736,9 +757,11 @@ SQL parser fuzzing is high-value because arbitrary text reaches it directly.
 
 ---
 
-## Execution Testing Strategy
+## Execution Verification
 
-### Operator unit tests
+### Execution Testing Strategy
+
+#### Operator unit tests
 
 Feed synthetic DataChunks directly into:
 
@@ -753,19 +776,19 @@ Limit
 
 without SQL parser/storage.
 
-### Pipeline tests
+#### Pipeline tests
 
 Construct physical plans manually and validate chunk flow/dependencies.
 
-### End-to-end tests
+#### End-to-end tests
 
 SQL -> storage results.
 
-### Differential tests
+#### Differential tests
 
 Compare supported SQL results against a reference DB where semantics align.
 
-### Spill tests
+#### Spill tests
 
 Use tiny memory budgets to force:
 
@@ -776,7 +799,7 @@ external sort
 DML spool spill
 ```
 
-### Cancellation tests
+#### Cancellation tests
 
 Cancel during:
 
@@ -792,7 +815,7 @@ and verify cleanup.
 
 ---
 
-## Vector Correctness Tests
+### Vector Correctness Tests
 
 Test every kernel across:
 
@@ -820,7 +843,7 @@ Results must be representation independent.
 
 ---
 
-## String Lifetime Tests
+### String Lifetime Tests
 
 Create tests that deliberately:
 
@@ -834,7 +857,7 @@ Use allocator poisoning/debug memory where practical to catch accidental borrowe
 
 ---
 
-## Hash Join Tests
+### Hash Join Tests
 
 Cover:
 
@@ -857,7 +880,7 @@ Compare to nested-loop join results on randomized small inputs.
 
 ---
 
-## Aggregate Tests
+### Aggregate Tests
 
 Cover:
 
@@ -879,7 +902,7 @@ Randomized results should compare against a simple reference implementation.
 
 ---
 
-## Sort Tests
+### Sort Tests
 
 Cover:
 
@@ -902,7 +925,7 @@ Compare output ordering against the semantic comparator, not raw bytes.
 
 ---
 
-## DML Execution Tests
+### DML Execution Tests
 
 Specifically test Halloween protection.
 
@@ -928,7 +951,7 @@ unique-key update
 
 ---
 
-## Execution Microbenchmarks
+### Execution Microbenchmarks
 
 Measure:
 
@@ -958,7 +981,7 @@ Benchmark with NULL-free and NULL-heavy data.
 
 ---
 
-## Vector Size Benchmark
+### Vector Size Benchmark
 
 Benchmark at least:
 
@@ -978,7 +1001,7 @@ Do not assume a larger vector is always faster; cache footprint and branch behav
 
 ---
 
-## End-to-End Execution Benchmarks
+### End-to-End Execution Benchmarks
 
 Create repeatable workloads for:
 
@@ -1011,7 +1034,9 @@ spill bytes
 
 ---
 
-## Statistics Tests
+## Statistics and Optimizer Verification
+
+### Statistics Tests
 
 Test analyzer on controlled distributions:
 
@@ -1040,7 +1065,7 @@ width estimates
 
 ---
 
-## Selectivity Estimation Tests
+### Selectivity Estimation Tests
 
 For synthetic data with known distributions, compare:
 
@@ -1077,7 +1102,7 @@ near histogram boundaries
 
 ---
 
-## Join Estimation Tests
+### Join Estimation Tests
 
 Synthetic joins:
 
@@ -1093,11 +1118,11 @@ duplicate-heavy MCVs
 
 Compare baseline NDV estimator against MCV-aware estimator.
 
-Store regression expectations for cases that previously failed badly.
+Store regression expectations for controlled high-q-error cases.
 
 ---
 
-## Access Path Tests
+### Access Path Tests
 
 Construct catalog/stats scenarios where optimizer should choose:
 
@@ -1115,7 +1140,7 @@ Prefer plan-shape expectations under controlled parameters.
 
 ---
 
-## Join-Order Tests
+### Join-Order Tests
 
 Use known cardinalities where one join order is dramatically better.
 
@@ -1136,7 +1161,7 @@ Also test a case where a bushy plan wins.
 
 ---
 
-## Interesting-Order Tests
+### Interesting-Order Tests
 
 Verify optimizer can retain a slightly more expensive ordered path and use it to avoid:
 
@@ -1154,7 +1179,7 @@ when total plan cost is lower.
 
 ---
 
-## Memory/Spill Plan Tests
+### Memory/Spill Plan Tests
 
 With identical statistics but different query memory budgets:
 
@@ -1175,7 +1200,7 @@ where supported.
 
 ---
 
-## Optimizer Differential Correctness Tests
+### Optimizer Differential Correctness Tests
 
 For small random schemas/data:
 
@@ -1191,7 +1216,7 @@ This tests optimizer transformation correctness independently of cost quality.
 
 ---
 
-## Optimizer Fuzzing
+### Optimizer Fuzzing
 
 Fuzz:
 
@@ -1214,7 +1239,7 @@ bounded planning time above threshold
 
 ---
 
-## Cost Model Benchmarks
+### Cost Model Benchmarks
 
 For each operator collect actual resource behavior across scales:
 
@@ -1243,7 +1268,7 @@ The goal is that cheaper predicted plans usually correspond to faster actual pla
 
 ---
 
-## Plan Regression Suite
+### Plan Regression Suite
 
 Maintain a set of named optimizer scenarios with:
 
@@ -1271,7 +1296,7 @@ low-memory hash spill
 
 ---
 
-## Optimizer Performance Benchmarks
+### Optimizer Performance Benchmarks
 
 Measure planning time for join counts:
 
@@ -1301,7 +1326,7 @@ Verify exhaustive search transitions to bounded heuristic behavior.
 
 ---
 
-## Star Schema Benchmark
+### Star Schema Benchmark
 
 Even though the engine is general purpose, use a synthetic star schema to stress:
 
@@ -1314,11 +1339,11 @@ aggregation
 
 This is an excellent optimizer-learning workload.
 
-Later TPC-H-inspired queries can be added without claiming benchmark compliance.
+TPC-H-inspired queries may be added without claiming benchmark compliance.
 
 ---
 
-## No Benchmark Gaming
+### No Benchmark Gaming
 
 Do not hardcode:
 
@@ -1329,3 +1354,13 @@ special-case TPC query shapes
 ```
 
 Optimizer improvements must arise from general statistics/rules/costing.
+
+---
+
+## Document Maintenance
+
+Update this guide when verification obligations, stable procedures, invariant coverage, or
+benchmark methodology changes. Do not update it merely because another run succeeds, a
+test count changes, another compiler or machine is exercised, or an implementation
+milestone completes. Run-specific evidence and historical results belong in `devlog/`, CI
+artifacts, or task completion reports.
