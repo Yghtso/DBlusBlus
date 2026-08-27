@@ -271,7 +271,7 @@ Critical dependency rules:
 - Transaction visibility MAY inspect tuple headers but MUST NOT be embedded in the physical heap-page parser.
 - Buffer management MUST remain independent of heap tuple and B+ tree key semantics.
 
-Concrete source-code directory and filename organization is not an architectural requirement. Persistent database namespace layout is the separate compatibility/recovery contract in §4.7.1–§4.7.8.
+Concrete source-code directory and filename organization is not an architectural requirement. Persistent database namespace layout is the separate compatibility/recovery contract in §4.7.1–§4.7.9.
 
 ---
 
@@ -368,9 +368,11 @@ against an owner that has not reached `READY`.
 ### 3.3.2 Active process exclusivity and lock object
 
 V1 actively enforces one process-local database owner and one operating-system
-process owner for one actual opened database root. It never permits independent
-WAL managers, BufferPools, file registries, recovery coordinators, or catalog
-caches for that root.
+process owner for one actual database root. The same ownership authority governs
+creation publication, ordinary open, and offline whole-root removal. It never
+permits independent WAL managers, BufferPools, file registries, recovery
+coordinators, catalog caches, publication owners, or removal owners for that
+root.
 
 The lock object is the existing regular file:
 
@@ -378,29 +380,54 @@ The lock object is the existing regular file:
 database_root/database.control
 ```
 
-The owner opens the final root with §4.7 no-follow, directory-relative rules,
-opens `database.control` read/write as a regular file with no-follow and
-close-on-exec, and obtains a nonblocking exclusive whole-file POSIX
+An ordinary opener or remover opens the final root with §4.7 no-follow,
+directory-relative rules. A creation-publication owner uses the already
+validated staging root before its final rename. Each opens `database.control`
+read/write as a regular file with no-follow and close-on-exec and obtains a
+nonblocking exclusive whole-file POSIX
 `fcntl(F_SETLK)` write lock with `l_whence=SEEK_SET`, `l_start=0`, and `l_len=0`.
 The lock is process-associated. It is OS lock state, not a byte, slot, flag, or generation
 inside `database.control`; the control-file format is unchanged. There is no
 v1 lock file whose mere directory-entry existence denotes ownership.
 
-Only opening/fstat/type-checking the final root and `database.control` may occur
-before the lock attempt. The engine MUST NOT read/choose control slots,
-inventory managed objects/WAL, initialize storage managers, run recovery, or
-mutate database state before the lock succeeds. Failure because another process
-owns the lock returns a distinct nonwaiting `DATABASE_BUSY` result and performs
-none of those operations.
+For an ordinary open or offline removal, only opening/fstat/type-checking the
+final root and `database.control` may occur before the lock attempt. The engine
+MUST NOT read/choose control slots, inventory managed objects/WAL, initialize
+storage managers, run recovery, or mutate database state before the lock
+succeeds. Failure because another process owns the lock returns a distinct
+nonwaiting `DATABASE_BUSY` result and performs none of those operations. The
+creator's private staged bootstrap and validation precede its ownership attempt
+under §4.7.8 and are not ordinary inspection of a final database root.
 
 Because process-associated record locks do not conflict with another open by
 the same process, a synchronized process-local registry keyed by stable identity
-of the actual opened root/control inode is also mandatory. A second
-`OpenDatabase` for the same root, including a path alias, fails `DATABASE_BUSY`;
-v1 does not coalesce handles and does not permit two independent owner objects.
-Path strings alone are not owner identity. All managed access remains relative
-to the retained opened root/directory descriptors, so later path rebinding does
-not move the ownership domain.
+of the actual opened root/control inode is also mandatory. Creation publication
+claims the validated staging-root/control inode pair before final rename;
+ordinary open and offline removal claim the retained final-root/control pair. A
+second operation for the same root, including a path alias, fails
+`DATABASE_BUSY`; v1 does not coalesce handles and does not permit two independent
+owner objects. Path strings alone are not owner identity. All managed access
+remains relative to retained opened directory descriptors, so later path
+rebinding does not move the ownership domain.
+
+The same-filesystem root renames in §§4.7.8–4.7.9 preserve the root-directory
+inode, `database.control` inode, retained descriptors, process-local stable
+identity claim, and existing control lock. Only namespace classification changes
+from staging to final or from final to retired. A final-path opener after a
+creation rename therefore reaches the same locked control inode. These protocols
+introduce no second lock identity, persistent publication/removal marker, or
+additional DatabaseInstance state.
+
+After an independent opener or remover acquires the final-root claim and lock,
+it MUST retain the external parent, verify that the final entry still identifies
+the retained root inode, successfully `fsync` that parent, and revalidate the
+entry/identity against path rebinding before interpreting control contents beyond
+the minimum identity needed for this adoption, inventorying WAL, recovering,
+mutating/removing the database, or publishing READY. This adoption prerequisite
+conservatively establishes final-root namespace durability after a prior owner
+may have died between root rename and parent synchronization. The owner lock is
+only the coordination/admission gate; external-parent `fsync` is the durability
+mechanism.
 
 The control descriptor that owns the lock is the sole independently opened
 descriptor for that control inode in the owner process. All control reads and
@@ -414,6 +441,12 @@ remains held while the OS lock is released/its descriptor is closed, preventing
 a same-process opener from exploiting process-associated lock semantics; only
 then is the claim removed and `CLOSING -> CLOSED` published.
 
+Creation-publication ownership is held from §4.7.8's pre-rename gate through
+durable final-root publication and either continues into the returned
+DatabaseInstance or is released in the same lock-before-claim order before a
+no-handle create returns. Offline removal ownership is held through §4.7.9's
+durable retirement publication; private reclamation may retain it longer.
+
 Process termination releases the POSIX lock automatically. Record locks are not
 inherited as owned locks by a forked child, and close-on-exec prevents descriptor
 inheritance through successful `exec`. Using a live database owner from a
@@ -425,7 +458,8 @@ lock. No fork-support or ownership-transfer protocol exists in v1.
 ### 3.3.3 Open preconditions, ordered protocol, and recovery entry
 
 `OpenDatabase(path)` accepts only the exact final database root. A missing path,
-non-directory, recognized `.dblusblus-creating` staging root, missing
+non-directory, recognized `.dblusblus-creating` staging root, recognized
+`.dblusblus-removing-<token>` retired root, missing
 `database.control`, or incomplete bootstrap is not opened as a database. Managed
 directories/files obey §4.7's object-type, no-follow, same-filesystem, permission,
 and stable-directory-descriptor rules. The engine does not follow a symlink or
@@ -448,16 +482,17 @@ The ordered open protocol is:
 |---:|---|
 | 1 | Open and identify the caller's final root under §4.7; reject staging roots and unsafe object types. |
 | 2 | Atomically claim the process-local root identity, open `database.control`, and acquire §3.3.2's nonblocking exclusive lock. On contention, release the claim/descriptor and return `DATABASE_BUSY` without recovery. |
-| 3 | Retain root, `pending/`, and `wal/` directory descriptors and inventory only exact managed names. Unknown names are recorded/ignored, never deleted by guesswork. |
-| 4 | Validate both control slots independently under §13.2, the immutable `catalog.dat` bootstrap locator/header under §16.9, the `txn_status.dat` superblock, and bootstrap-referenced system heap/FSM identities needed to address recovery. Data/status/catalog pages that WAL may repair are opened in recovery-private form and are not published to ordinary readers. |
-| 5 | Inventory exact WAL segment names, consider usable control generations in descending order, validate the selected checkpoint and required contiguous retained segment range, and establish that enough recovery input exists to enter recovery. |
-| 6 | Construct only recovery-scoped DiskManager/file registry, WAL, BufferPool/page-reconstruction, checkpoint, transaction-status, and catalog-bootstrap services; do not start normal background services. Transition `OPENING -> RECOVERING`. |
-| 7 | Establish the valid contiguous WAL prefix and reconcile its tail, then run analysis and redo for bootstrap-addressable status/catalog/system state under Chapter 13. Keep redo for not-yet-classified non-bootstrap FileIds deferred as §13.13.1 requires. Raw transaction-status data is not an ordinary lookup authority during this step. |
-| 8 | Resolve losers and repair terminal status, decode the recovered self-hosted catalog rows through the exact §16.5 schema-v1 descriptors, perform §16.5.9–§16.5.10 fixed-point/reference validation, require every bootstrap/committed catalog-owned file at its exact final basename with valid identity/superblock, and then apply/finish any deferred redo and append-tail reconciliation for required files. |
-| 9 | Durably complete/install the required recovery checkpoint, including control-slot publication, after all required redo/status/file reconciliation and before enabling ordinary status/catalog use. |
-| 10 | Classify every exact managed `pending/` entry and unowned exact managed final file under §4.7.6. Classification is mandatory before READY; durable physical unlink may be completed now or retained as an explicit cleanup task because catalog/bootstrap lookup cannot expose the orphan. Unknown names remain untouched. |
-| 11 | Enable ordinary transaction-status lookup, construct immutable catalog/schema and required runtime terminal/ownership caches, finish normal BufferPool/file registrations, and construct background services behind a closed start gate. |
-| 12 | Atomically publish `RECOVERING -> READY`, open transaction/statement admission, and release the background-service start gate. The exclusive process lock remains held. |
+| 3 | Perform §3.3.2's independent-owner root-adoption barrier: retain the external parent, verify its final entry against the retained root inode, successfully synchronize the parent, and revalidate/reconcile identity before control-slot interpretation, WAL inventory, recovery, or database mutation. |
+| 4 | Retain root, `pending/`, and `wal/` directory descriptors and inventory only exact managed names. Unknown names are recorded/ignored, never deleted by guesswork. |
+| 5 | Validate both control slots independently under §13.2, the immutable `catalog.dat` bootstrap locator/header under §16.9, the `txn_status.dat` superblock, and bootstrap-referenced system heap/FSM identities needed to address recovery. Data/status/catalog pages that WAL may repair are opened in recovery-private form and are not published to ordinary readers. |
+| 6 | Inventory exact WAL segment names, consider usable control generations in descending order, validate the selected checkpoint and required contiguous retained segment range, and establish that enough recovery input exists to enter recovery. |
+| 7 | Construct only recovery-scoped DiskManager/file registry, WAL, BufferPool/page-reconstruction, checkpoint, transaction-status, and catalog-bootstrap services; do not start normal background services. Transition `OPENING -> RECOVERING`. |
+| 8 | Establish the valid contiguous WAL prefix and reconcile its tail, then run analysis and redo for bootstrap-addressable status/catalog/system state under Chapter 13. Keep redo for not-yet-classified non-bootstrap FileIds deferred as §13.13.1 requires. Raw transaction-status data is not an ordinary lookup authority during this step. |
+| 9 | Resolve losers and repair terminal status, decode the recovered self-hosted catalog rows through the exact §16.5 schema-v1 descriptors, perform §16.5.9–§16.5.10 fixed-point/reference validation, require every bootstrap/committed catalog-owned file at its exact final basename with valid identity/superblock, and then apply/finish any deferred redo and append-tail reconciliation for required files. |
+| 10 | Durably complete/install the required recovery checkpoint, including control-slot publication, after all required redo/status/file reconciliation and before enabling ordinary status/catalog use. |
+| 11 | Classify every exact managed `pending/` entry and unowned exact managed final file under §4.7.6. Classification is mandatory before READY; durable physical unlink may be completed now or retained as an explicit cleanup task because catalog/bootstrap lookup cannot expose the orphan. Unknown names remain untouched. |
+| 12 | Enable ordinary transaction-status lookup, construct immutable catalog/schema and required runtime terminal/ownership caches, finish normal BufferPool/file registrations, and construct background services behind a closed start gate. |
+| 13 | Atomically publish `RECOVERING -> READY`, open transaction/statement admission, and release the background-service start gate. The exclusive process lock remains held. |
 
 The immutable catalog locator and bootstrap-required identities are pre-recovery
 addressing roots, not ordinary catalog state. The self-hosted catalog rows become
@@ -513,6 +548,7 @@ The READY linearization may occur only when all of these are true:
 
 ```text
 exclusive OS lock and process-local owner claim held
+retained final-root entry verified and external-parent namespace durability established after ownership acquisition
 stable managed directory/file ownership established
 valid control/checkpoint and contiguous WAL prefix established
 analysis, all required/deferred redo, append-tail reconciliation, and loser resolution complete
@@ -621,19 +657,26 @@ failure never changes a durable COMMIT to ABORTED.
 
 ### 3.3.7 Create, removal, crash, and lifecycle errors
 
-After §4.7.8 durably renames/synchronizes a newly created staging root, a creator
-that returns an open database handle MUST pass through the same §3.3.2–§3.3.4
-ownership, validation, recovery, cache, and READY gates. It may retain safely
-opened root/control descriptors and a lock established on the same control inode
-across the final rename only if doing so is exactly equivalent to those gates;
-there is no separate less-validated “new database ready” path. Database creation
-success without an open handle may stop after durable root publication.
+Section 4.7.8's creation-publication owner MUST establish the ordinary
+process-local root/control claim and exclusive control lock after validating the
+staging root and before final rename, then retain both through external-parent
+synchronization. A creator returning an open database handle continues that
+same ownership without release/reacquire through the §3.3.2–§3.3.4 validation,
+recovery, cache, and READY gates; no handle reaches READY or admits/acknowledges
+ordinary work before durable root publication. A no-handle create releases the
+lock, then the process claim, only after durable root publication and before
+returning success. There is no separate less-validated “new database ready”
+path.
 
-Whole-database DROP/removal is not a v1 online operation. External/offline root
-removal is supported only while the database is `CLOSED` and the remover has
-acquired the same exclusive control-file lock, so removal cannot race open or
-recovery. It follows §4.7 durability for every namespace deletion it chooses to
-acknowledge.
+Whole-database DROP/removal is not a v1 online operation. Under §4.7.9 it starts
+only with no ordinary DatabaseInstance, transaction, BufferPool/database
+manager, worker, or background producer, then acquires the same process-local
+root/control claim and exclusive control lock and performs §3.3.2's independent
+root-adoption barrier. It proves supported-v1 destructive root identity without
+running ordinary recovery or reaching READY, durably retires the complete final
+root before deleting any contents, and treats later private reclamation as
+retryable cleanup. Contention returns `DATABASE_BUSY` before destructive
+inspection or mutation.
 
 Process crash releases the process-associated lock and all runtime state. Machine
 crash likewise removes OS lock state. Neither requires a stale-lock-file cleanup,
@@ -1307,6 +1350,23 @@ using the same canonical unsigned decimal spelling. The exact private basename i
 
 WAL segment basenames are exact in §12.2. Temporary query/spill files are not persistent database objects and remain under Chapter 24's separately managed temporary namespace.
 
+Database-root lifecycle uses two reserved same-parent private sibling grammars
+for final basename `D`:
+
+```text
+D.dblusblus-creating
+D.dblusblus-removing-<token>
+```
+
+The first is §4.7.8's private creation staging root. The second is §4.7.9's
+removal-retired root, where `<token>` is exactly 32 lowercase hexadecimal digits
+encoding a collision-resistant 128-bit token. A token collision is resolved by
+choosing another token; neither private grammar is an ordinary `OpenDatabase`
+target, and a caller-selected final basename MUST NOT itself match either
+reserved private grammar. Exact recognized private siblings are distinct from
+unrelated/unknown external-parent entries, which are never deleted by loose
+prefix or suffix matching.
+
 While a database is open, the storage namespace owner keeps open directory descriptors for:
 
 ```text
@@ -1315,13 +1375,23 @@ database_root/pending
 database_root/wal
 ```
 
-and resolves managed entries relative to those descriptors. The external parent directory descriptor is required only while creating and durably publishing the database root itself.
+and resolves managed entries relative to those descriptors. The external parent
+directory descriptor is retained while creating/publishing a root, independently
+adopting a final root under §3.3.2, or retiring/reclaiming a root under §4.7.9.
+Root lifecycle operations resolve and revalidate the final/private entries
+relative to that retained parent descriptor.
 
 `database.control` also supplies the process-associated advisory lock object in
 §3.3.2. Lock ownership is operating-system state, not control-file contents or
 filename existence; this adds no control-slot field or persistent-format value.
 
-Opening an existing database uses no-follow directory-relative lookup for managed names. `database_root`, `pending/`, and `wal/` must be directories; control/object/segment names must be regular files. A managed-name symlink or wrong filesystem object type is an open/corruption error, not an alternate path to follow.
+Opening an existing database uses no-follow directory-relative lookup for managed
+names. `database_root`, `pending/`, and `wal/` must be directories;
+control/object/segment names must be regular files. A managed-name symlink or
+wrong filesystem object type is an open/corruption error, not an alternate path
+to follow. Whole-root reclamation remains bound to its retained retired-root
+descriptor and MUST NOT follow symlinks, traverse an unproven mount/filesystem
+boundary, or touch external-parent siblings.
 
 All three managed directories and the database root's external parent/destination are on one filesystem for operations that use rename. V1 does not support cross-filesystem publication fallback.
 
@@ -1468,6 +1538,15 @@ Recovery may defer or skip page redo for a missing/private FileId only after pro
 
 Orphan cleanup removes only entries matching the exact engine-managed private/final grammar and proven unowned by committed state. Unknown unrelated names are not guessed to be garbage. Each cleanup unlink follows §4.7.7 and is complete only after the owning directory is synchronized.
 
+Exact `D.dblusblus-removing-<32-lowercase-hex>` siblings are instead
+whole-root retirement artifacts owned by §4.7.9. They are never opened as
+databases. Cleanup of such an artifact is not ordinary orphan cleanup: only
+after supported-v1 root identity, exclusive root ownership, and durable
+retirement have been established does §4.7.9 authorize deletion of every entry
+contained beneath the retained retired root, including names unknown to ordinary
+object classification. This authority never extends to an unrelated
+external-parent sibling or through a followed link/mount boundary.
+
 ### 4.7.7 Durable unlink and retirement
 
 An object final name is not unlinked merely because DROP committed. Chapter 21's snapshot/descriptor gates and the canonical BufferPool drain in §7.12.5 first establish that no live owner can use the file.
@@ -1513,19 +1592,164 @@ The bootstrap protocol is:
 5. fsync staging/pending, staging/wal, and the staging root directory
 6. validate the complete bootstrap using the normal open-time identity,
    checksum, and cross-reference rules
-7. rename the staging directory to final basename D using no-replace semantics
-8. fsync the external parent directory
-9. only then report database creation success
+7. atomically establish §3.3.2's process-local root/control-inode claim
+   and acquire the ordinary nonblocking exclusive database.control lock
+8. revalidate that final D is absent, fsync the external parent to
+   establish/reconcile any prior final-name absence, and revalidate D
+   before publication
+9. rename the staging directory to final basename D using no-replace semantics
+10. fsync the external parent directory
+11. only then publish durable database creation
 ```
 
 The staging root as a whole is private; startup-critical files inside it use their final basenames and are not ordinary transaction-owned DDL files. The initial WAL segment follows §12.2.1 before step 5.
 
-A crash before step 7 leaves no final database root and may leave only a recognized staging-root orphan. A crash after rename but before parent sync is an unacknowledged creation: after restart the final or staging name may survive; a surviving final root is usable only if complete bootstrap validation succeeds, while a staging root is never opened as a database. A crash after step 8 leaves a durably named, fully initialized database. Stale staging roots are removed only by explicit engine create/maintenance logic after proving that no live creator owns them, and their removal is synchronized in the external parent directory.
+A same-filesystem root rename preserves the root/control inodes, retained
+descriptors, process claim, and control lock. The creator retains that ownership
+through step 10. After step 9 a final-path opener reaches the same locked control
+inode and returns `DATABASE_BUSY` before control-slot interpretation, WAL
+inventory, recovery, or mutation. The lock is the ownership/admission gate;
+step 10's external-parent `fsync`, not the lock, is the durable root-publication
+point.
+
+If creation returns an opened handle, the creator continues the same claim,
+control descriptor, and lock without release/reacquire through §3.3.7's normal
+recovery and READY gates; the handle is not published and admits or acknowledges
+no ordinary work before READY. If creation returns only a durable-create result,
+it releases/closes the control lock while retaining the process claim, removes
+that claim, and only then returns success after step 10.
+
+If step 9 succeeds but step 10 fails, creation reports no success, publishes no
+READY handle, and retains publication ownership while retrying/reconciling. The
+failure does not establish whether rename durability succeeded. If the creator
+has begun constructing a DatabaseInstance, §3.3.4's failed-open versus
+noncontinuable cleanup rules apply without admitting ordinary work. If the
+creator dies, a later independent owner applies §3.3.2's adoption barrier before
+inspection, recovery, removal, READY, or acknowledged work.
+
+A crash before step 9 leaves no final database root and may leave only a
+recognized staging-root orphan. A crash after rename but before step 10 is an
+unacknowledged creation: the live creator's lock excludes competitors, and after
+restart the final or staging name may survive; a surviving final root is usable
+only after independent adoption and complete bootstrap validation, while a
+staging root is never opened as a database. A crash after step 10 leaves a
+durably named, fully initialized database. Stale staging roots are removed only
+by explicit engine create/maintenance logic after proving that no live creator
+owns them, and their removal is synchronized in the external parent directory.
 
 Opening an existing database never treats `D.dblusblus-creating` as an alias for `D`.
-If creation returns an opened handle rather than only a durable-create result,
-the creator follows §3.3.7's normal exclusive-owner/recovery/READY gates; it does
-not publish a second shortcut startup state.
+
+### 4.7.9 Whole-database retirement and removal
+
+Whole-database removal is an offline root-lifecycle operation, not SQL DDL or an
+ordinary database open. It begins only when no ordinary DatabaseInstance,
+transaction, BufferPool/database manager, worker, or background producer exists.
+The remover becomes the sole offline lifecycle owner without entering READY or
+constructing ordinary runtime services.
+
+Given final basename `D`, the canonical protocol is:
+
+```text
+1. retain the external parent and safely open exact final root D with
+   descriptor-relative, no-follow, directory-type checks
+2. safely open D/database.control read/write as a no-follow regular file
+3. atomically establish the stable root/control-inode process claim
+4. acquire §3.3.2's ordinary nonblocking exclusive control lock;
+   contention returns DATABASE_BUSY before destructive inspection/mutation
+5. perform independent root adoption: verify parent entry D identifies the
+   retained root, fsync the external parent, then revalidate/reconcile identity
+6. establish supported-v1 destructive database-root identity as defined below
+7. choose an absent same-parent reserved name
+   D.dblusblus-removing-<token>; retry token selection on collision
+8. rename D to that private sibling with same-filesystem no-replace semantics
+9. delete no internal content before retirement publication
+10. fsync the external parent
+11. only after step 10 publish semantic whole-database removal
+12. optionally reclaim the private retired tree under the contained U1 rules
+13. if reclamation completes, rmdir the empty retired root and fsync the
+    external parent before claiming physical residue absence
+14. release the old control lock/descriptor while retaining the old process
+    claim, then remove that claim after all owned use has stopped
+```
+
+Step 5 precedes control interpretation beyond minimum safe adoption identity and
+all destructive mutation. Removal does not select a recovery control generation,
+inventory WAL, run recovery, reconstruct transaction status/catalog state,
+construct BufferPool/runtime services, or publish READY. Logical consistency is
+not required when the exclusively owned supported-v1 root is destroyed as one
+unit.
+
+Destructive identity first applies §4.14.6's control-family/version dispatch to
+both complete 4096-byte slots. Any exact `DBLUSCTL` slot claiming
+`format_version > 1` returns `UNSUPPORTED_DATABASE_FORMAT` and forbids removal.
+Otherwise supported-v1 identity requires at least one readable complete slot
+whose bytes `0..7` are exact ASCII `DBLUSCTL`, whose little-endian bytes `8..9`
+are `format_version = 1`, and whose little-endian bytes `10..11` are
+`header_size = 88`. That slot's CRC, generation, range, flags/reserved, or
+cross-field validation may fail: such corruption prevents normal open but does
+not erase the positively identified supported-v1 family or prohibit explicit
+whole-root destruction. Missing, unreadable, symlink/wrong-type control, absence
+of this exact framing, or an unrelated root returns the existing missing/
+`NOT_A_DATABASE`/I/O result without destructive mutation. V1 supplies no
+force-removal path for unrecognizable or future-format roots.
+
+The durable whole-database removal publication point is step 8's retirement
+rename plus step 10's successful external-parent `fsync`. That one parent sync
+durably establishes both absence of captured old `D` and presence of the exact
+private retired root. Until it succeeds, no removal success is reported and no
+internal content is deleted. Once it succeeds, the captured old database is
+semantically removed even if private physical reclamation remains pending; a
+later cleanup failure never renames it back, resurrects it, or changes that
+success.
+
+After durable retirement, explicit whole-root cleanup has U1 authority to delete
+every entry contained beneath the retained supported-v1 retired root, including
+managed files and names unknown to ordinary orphan classification. Traversal is
+descriptor-relative, no-follow, bottom-up where required, and never follows a
+symlink, crosses an unproven mount/filesystem boundary, or touches an external-
+parent sibling. A contained symlink is unlinked as an entry; a contained special
+entry is unlinked only where the platform contract safely permits; an unsafe
+mount/boundary leaves reclamation incomplete. WAL, pending, catalog, status, and
+system files are reclamation content and need no recovery/catalog ownership
+classification. Ordinary §4.7.6 orphan cleanup remains unable to delete unknown
+names.
+
+Complete physical reclamation synchronizes the directory mutations it claims,
+removes nested directories safely, removes root-level files, keeps
+`database.control` until sufficiently late in cleanup where practical and
+deletes it only after old `D` is durably retired, removes the empty retired root,
+and synchronizes the external parent after that `rmdir`. Internal
+unlink synchronization may be batched where §4.7.2 permits; a crash before a
+claimed cleanup barrier merely restores retryable private residue. The remover
+may retain old-root ownership through immediate cleanup. If cleanup is deferred,
+it may release that old lock/claim after step 11 because the old root is no
+longer a live `D`; an exact retired artifact remains eligible for a later
+explicit, contained, idempotent cleanup opportunity. No background cleanup
+service is promised.
+
+Removal crash/failure outcomes are:
+
+- before step 8, complete live `D` remains and no removal success exists;
+- after step 8 but before step 10, publication is uncertain, no content is
+  deleted, ownership is retained while possible for retry/reconciliation, and a
+  crash may leave live `D` or the recognized retired root;
+- after step 10, old `D` is durably absent and the retired root is durable;
+- during private cleanup, any subset may reappear after crash but remains
+  contained retryable retired residue, never a partially deleted live `D`;
+- after retired-root `rmdir` but before its parent sync, the retired name may
+  reappear without changing semantic removal; after that sync physical residue
+  absence is durable.
+
+`OpenDatabase` never targets the retired grammar. Once step 10 completes, a new
+database may be created at `D` even while old retired residue remains: it has a
+new root/control inode ownership domain, and database-local FileId values do not
+collide with those in the retired root. Cleanup remains bound to the old retained
+root and MUST NOT resolve through or touch the new `D`. A creator that observes
+runtime absence while a prior retirement may be unsynchronized uses §4.7.8 step
+8 to establish/reconcile old-name absence before publishing a new `D`. A fresh
+removal invocation that cannot capture an identifiable live `D` returns the
+existing missing/non-database result; a recognized retired artifact may still
+be handled by explicit cleanup.
 
 ## 4.8 Common page header
 
@@ -2519,6 +2743,12 @@ V1 specifically forbids:
 23. A required committed object file is never reconstructed from filename guesswork when its durable final entry is missing.
 24. A checksum-valid page is not ordinary state until §4.13's required structural layer accepts it; writers and recovery publish only locally valid completed results.
 25. V1 readers/writers follow §4.14's strict version, known-mask, reserved-zero, enum, trailing-byte, and no-downgrade rules; only the explicit statistics whitelist may ignore unsupported persisted metadata.
+26. Database-root creation owns the ordinary process-local root/control claim and `database.control` lock before final-root rename and retains both through successful external-parent synchronization; the lock excludes competing use but does not make the root durable.
+27. After acquiring ordinary ownership of an existing final root, an independent opener or remover verifies the retained parent entry, synchronizes the external parent, and revalidates root identity before database inspection, recovery, mutation, removal, READY, or acknowledged work.
+28. Whole-database removal performs no internal content deletion while the captured old database occupies live final name `D`; semantic removal is published only by the no-replace retirement rename followed by successful external-parent synchronization.
+29. While old `D` remains the live database root, its ordinary `database.control` lock inode is not unlinked, replaced, or made independently recreatable.
+30. A durably retired root is private reclamation state, never an ordinary open target; reclamation failure or crash cannot restore or resurrect old `D` and leaves only contained, retryable residue.
+31. Ordinary orphan cleanup never guesses unknown names, while explicit whole-root reclamation may remove unknown contained entries only after supported-v1 identity, exclusive ownership, and durable root retirement have been established.
 
 ---
 
@@ -24148,6 +24378,39 @@ NONCONTINUABLE preventing ordinary work while retaining exclusivity through tear
 durable COMMIT survival across failed open/shutdown and next recovery
 ```
 
+Database-root publication/adoption verification MUST cover the ownership and
+durability boundaries in §§3.3.2–3.3.7 and §4.7.8, including:
+
+```text
+two-process and same-process competing open between final-root rename and
+external-parent fsync
+offline-remover competition while the creator owns publication
+DATABASE_BUSY before control-slot/WAL/recovery inspection by every losing actor
+creator process death and machine crash between rename and parent fsync
+independent-owner parent-entry verification/fsync/revalidation before inspection
+creator parent-fsync failure and reconciliation without false success or READY
+continuous claim/control-lock ownership for a returned handle
+no-handle ownership release only after durable root publication
+```
+
+Whole-database removal verification MUST cover §4.7.9's offline ownership,
+retirement publication, and contained reclamation boundaries, including:
+
+```text
+competing open, removal, create, same-process, and pathname-alias operations
+retirement rename before and after external-parent fsync
+parent-fsync failure and next-owner namespace reconciliation
+process and machine crash at every removal publication/cleanup boundary
+database.control inode/lock continuity and no content deletion before retirement durability
+removal of recognizable damaged supported-v1 roots
+refusal of missing, unrecognizable, and unsupported-future-format roots
+unknown files/directories, symlinks, safely unlinkable special entries, and
+mount/cross-filesystem containment
+idempotent cleanup crash/retry and recreation while retired residue remains
+retired-token collision handling and exact retired-name recognition
+no ordinary open of a retired root and no deletion of external-parent siblings
+```
+
 Statement/transaction error verification MUST cover every §39.1.3 matrix row on both sides of the first-published-write boundary where reachable. Required scenarios include multirow INSERT row-5 failure after four published rows, partial UPDATE/DELETE, pre-write read-only/cast/constraint/OOM/spill failure, §12.12 exact local rollback with and without an earlier statement write, empty-page/structural publication without a transaction-owned logical row effect, CommandId nonreuse, fresh READ COMMITTED snapshot after FA, rejection of same-TxnId retry after publication, explicit-transaction RETURNING failure before exposure, and autocommit RETURNING held through implicit COMMIT.
 
 COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
@@ -24827,19 +25090,34 @@ The following global invariants apply across subsystem boundaries and MUST NOT b
 10. Verification can force constrained resource configurations, including tiny buffer pools, to exercise eviction.
 11. Recovery is verified with simulated crashes.
 12. Performance-sensitive changes require measurement.
-13. Acknowledged durable state never depends on a file or WAL-segment namespace entry whose required parent-directory synchronization has not succeeded.
+13. Acknowledged durable state never depends on a file, WAL-segment, or final database-root namespace entry whose required parent-directory synchronization has not succeeded.
 14. A failed statement that published any transaction-owned database mutation cannot leave that transaction commit-eligible in v1.
 15. Durable `TXN_COMMIT` is irreversible and cannot be reclassified ABORTED by any later runtime, cache, cleanup, or transport failure.
 16. Successful COMMIT acknowledgement follows required runtime terminal publication and coherent ownership/cache cleanup.
 17. UNIQUE/PRIMARY KEY ownership is decided by §11.10's serialized current-state predicate, not ordinary snapshot visibility or physical index presence alone.
 18. One actual database root has at most one process-local owner and one
-    OS-exclusive process owner; recovery and ordinary mutation never run without
-    that ownership.
+    OS-exclusive process owner; creation publication, ordinary open, and offline
+    removal use the same stable root/control claim and `database.control` lock,
+    and recovery or ordinary mutation never runs without that ownership.
 19. Ordinary work begins only at §3.3's READY publication, and the exclusive
     lock is released only after every database user/manager has stopped.
 20. Successful controlled close drains transaction and BufferPool ownership,
     keeps WAL durability available through page flush/final checkpoint, and
     completes required namespace durability before reporting success.
+21. A creator owns the ordinary root/control gate across final-root rename and
+    external-parent synchronization; after prior-owner death, an independent
+    owner establishes and revalidates that parent durability before database
+    inspection, recovery, removal, READY, or acknowledged work.
+22. Whole-database removal deletes no internal content while the captured old
+    root occupies live final name `D`; removal is acknowledged only after the
+    no-replace retirement rename and ordered external-parent synchronization
+    make old `D` durably absent.
+23. The ordinary control-lock inode is not unlinked or replaced while its old
+    root remains live, and a durably retired root is never an ordinary open
+    target.
+24. Physical reclamation failure after durable whole-root retirement cannot
+    restore old `D`, reverse semantic removal, or authorize cleanup outside the
+    exact retained retired root.
 
 Subsystem invariant sets are canonical in their owning chapters. Heap/tuple invariants are listed in §5.21; FSM/reclamation invariants are listed in §6.13; I/O/buffer invariants are listed in §7.13; B+ tree invariants are listed in §8.29; transaction/snapshot invariants are listed in §9.16; MVCC invariants are listed in §10.6; logical-locking invariants are listed in §11.15; WAL/commit invariants are listed in §12.18; recovery invariants are listed in §13.21; vacuum/reclamation invariants are listed in §14.18; end-to-end write invariants are listed in §15.9. Catalog invariants are listed in §16.11; type/value invariants in §17.12 and persisted-scalar invariants in §17.13.5; lexer/parser/AST invariants in §18.16; binder/expression invariants in §19.20; logical-plan/rewrite invariants in §20.20; upper semantic-layer invariants in §21.20; physical-plan/runtime invariants in §22.8; vector/string invariants in §23.14; memory/spill invariants in §24.11; expression-execution invariants in §25.8; pipeline invariants in §26.10; scan/unary invariants in §27.12; join invariants in §28.13; aggregation invariants in §29.9; sorting invariants in §30.8; DML/result invariants in §31.13; parallel-runtime invariants in §32.13; optimizer invariants in §33.7; statistics invariants in §34.17; estimation invariants in §35.27; base-access/cost invariants in §36.19; join/property invariants in §37.18; memo/search invariants in §38.25.
 
