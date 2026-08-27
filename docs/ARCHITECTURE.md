@@ -48,7 +48,7 @@ The architecture is intended to support, end to end:
 - vectorized execution,
 - statistics and cardinality estimation,
 - cost-based optimization,
-- concurrent transactions and, later, parallel query execution.
+- concurrent transactions and a parallel-ready query-execution architecture that permits an initial single-worker baseline.
 
 The system SHOULD remain small enough that one contributor can understand the complete path from SQL text to persistent bytes while still implementing realistic database-system mechanisms.
 
@@ -64,9 +64,9 @@ The architecture prioritizes:
 
 The project deliberately accepts additional systems complexity where that complexity is inherent to the database mechanism being studied, provided the resulting engine remains realistically implementable.
 
-## 1.3 Non-goals for the initial major version
+## 1.3 Non-goals for v1
 
-The initial major version does not target:
+The v1 architecture does not target:
 
 - distributed consensus,
 - replication,
@@ -82,7 +82,7 @@ The initial major version does not target:
 - JIT query compilation,
 - GPU execution.
 
-These areas are outside the initial architecture scope and MAY be explored after the single-node engine is mature.
+These areas remain deferred from the v1 architecture baseline unless promoted by an explicit architecture revision.
 
 ## 1.4 Selected foundational decisions
 
