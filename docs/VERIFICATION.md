@@ -544,6 +544,323 @@ same database must conflict with the parent's ownership. Verify the control desc
 close-on-exec behavior by executing a helper and proving it cannot accidentally retain the
 lock after the parent releases its own descriptors.
 
+#### Deterministic database-root lifecycle harness
+
+The root-lifecycle procedures below verify `ARCHITECTURE.md` §§3.3.2–3.3.4 and 3.3.7,
+§§4.7.1, 4.7.6, and 4.7.8–4.7.9, the root rules in §4.15 and §41.3, and Appendix B
+invariants 13, 18, and 21–24. They use deterministic barriers rather than elapsed-time
+sleeps. Separate processes are required for POSIX lock contention, lock release on process
+death, and adoption after prior-owner death; in-process competitors separately verify the
+process-local stable-identity claim.
+
+The harness records an ordered event stream sufficient to assert, without depending on
+implementation class names:
+
+```text
+external-parent/root/control descriptor acquisition and (device,inode) identity
+process-local root/control claim acquisition and release
+ordinary database.control lock attempt, acquisition, and release
+root rename request/result and exact source/destination identities
+external-parent fsync begin/result
+parent-entry/root identity verification and post-fsync revalidation
+control-slot inspection, WAL inventory, recovery, catalog inspection, and mutation start
+READY publication and transaction admission
+private cleanup unlink/rmdir operations
+operation semantic result
+```
+
+Required conceptual barriers are:
+
+```text
+CREATE: staged bootstrap validated; ownership acquired; final rename completed;
+        external-parent fsync before/after; READY before/after; ownership release
+OPEN:   ownership acquired; adoption before/after; control inspection begins;
+        WAL inventory begins; recovery begins
+REMOVE: ownership acquired; adoption before/after; destructive identity validated;
+        retirement rename before/after; retirement parent fsync before/after;
+        private cleanup begins; retired-root rmdir completed; final parent fsync
+```
+
+Fault injection may intercept the corresponding filesystem operation or pause at the
+conceptual boundary. Child-process IPC releases barriers and reports observations. A test
+must not infer ordering from scheduler timing. Filesystem crash tests use the Crash
+Injection Framework's durable-prefix model or an isolated equivalent that distinguishes
+runtime rename visibility from parent-directory durability; real power removal is not
+required.
+
+Run the shared-ownership fixture once with creation publication, ordinary open, and offline
+removal as the attempted owner. For the same retained root/control identity, assert that all
+three use the same process claim and ordinary control-lock observations and that failure of
+either common gate prevents ownership. No operation-specific creator/remover ownership
+channel may admit a second owner. Repeat through a pathname alias to prove that path spelling
+is not identity.
+
+#### Database-root creation publication
+
+For a staged create, pause after the no-replace final-root rename is runtime-visible and
+before the external-parent `fsync` succeeds while the creator retains its claim, control
+descriptor, and lock. In a second process call ordinary open on final `D`; in another run
+attempt offline removal. Each competitor must receive `DATABASE_BUSY` through the ordinary
+ownership gate. Its trace must contain no control-slot interpretation, WAL inventory,
+recovery/catalog construction, namespace mutation, root retirement, READY publication, or
+transaction admission. This demonstrates that ownership blocks use while the parent sync,
+not the lock, remains the durability barrier.
+
+At the same barrier, attempt another open in the creator process using both the original
+spelling and an alias resolving to the same retained root/control inodes. The process claim
+must reject both attempts, create no second owner/DatabaseInstance, and produce the same
+pre-inspection `DATABASE_BUSY` semantics even though process-associated POSIX locks do not
+conflict within one process.
+
+Run create-result variants as follows:
+
+| Variant | Required observations |
+|---|---|
+| returns an open handle | Claim and control lock are acquired before final rename and remain continuously held across rename, parent sync, ordinary recovery/READY prerequisites, and handle publication. No release/reacquire event occurs; a competing process stays busy throughout; READY, transaction admission, and handle publication occur only after the successful parent sync. |
+| returns only durable-create success | Claim and lock remain held through successful parent sync; lock release occurs while the process claim still exists; claim removal follows lock release; success follows both. A competitor remains busy before release and may acquire/open after release. |
+
+Inject failure of the external-parent `fsync` after a successful final rename. While the
+creator is paused in reconciliation, assert no success, READY handle, transaction admission,
+or ownership release and prove that competing open/removal remains busy. The oracle records
+the rename as durability-uncertain—it must not label it definitely persisted or definitely
+lost. If DatabaseInstance construction began, verify the ordinary failed-open versus
+noncontinuable cleanup outcome without admitting work.
+
+Terminate the creator process after final rename and before parent sync. The OS lock must be
+released by process death, but that death is not a publication event. Start an independent
+opener against a surviving final root and assert this order:
+
+```text
+claim and ordinary control lock
+verify retained external-parent entry identifies retained root inode
+fsync external parent
+revalidate/reconcile parent entry and retained identity
+control-slot selection / WAL inventory / recovery
+```
+
+No control/WAL/recovery observation may precede adoption. If the final root did not survive
+an independently modeled machine crash, ordinary open instead follows the architecture's
+missing/staging classification; process death by itself is never treated as publication
+proof.
+
+Exercise machine-crash durable prefixes around root publication:
+
+| Crash boundary | Allowed survivor/classification | Assertions after restart |
+|---|---|---|
+| before final rename | staging root or no staged entry; no final live root | staging is never an ordinary open target; no acknowledged ordinary database work exists |
+| after final rename, before external-parent sync | final or staging survivor according to the modeled durable prefix | no pre-crash ordinary work was acknowledged; a surviving final root completes independent adoption before use |
+| after successful external-parent sync | durably published final root | ordinary ownership, adoption/open validation, and recovery may proceed |
+
+For every create-publication case, capture root/control `(device,inode)` before rename and
+after access through final `D`. Assert the retained descriptors and control lock still name
+the same objects. This is platform-contract validation for the supported Linux/POSIX model,
+not a replacement for the architecture's durability assertions.
+
+#### Independent final-root adoption
+
+Exercise ordinary open and offline removal with a barrier immediately after successful
+process claim/control-lock acquisition. Permit each operation to continue one event at a
+time and require parent-entry/root verification, external-parent `fsync`, and identity
+revalidation to complete before any control interpretation beyond minimum adoption identity,
+WAL inventory, recovery, catalog inspection, database/namespace mutation, removal identity
+validation, or READY publication.
+
+Inject open/read, identity-check, and parent-sync failures independently during adoption.
+Assert the existing `IO_OR_DURABILITY_FAILURE` or architecture-defined identity error, no
+READY/recovery/mutation/transaction admission, and dependency-ordered ownership cleanup or
+retention when safe unwind is uncertain. Inspect the control bytes and filesystem to prove
+that no persisted adoption marker, control bit, or alternate root state was written.
+
+Test pathname rebinding in an isolated parent directory. After retaining parent/root/control
+descriptors but before post-sync revalidation, have a coordinated helper move the final entry
+and install a different root at the same pathname. The owner must detect that the parent
+entry no longer identifies the retained root and stop before inspection or mutation of
+either object. Repeat for open and removal. Where direct rebinding is unavailable, inject a
+different `(device,inode)` identity result at the revalidation boundary and require the same
+failure. Path-string equality alone is never an acceptable oracle.
+
+#### Offline whole-database removal and destructive identity
+
+For each active-owner condition below, attempt whole-database removal and assert
+`DATABASE_BUSY` or the architecture-defined lifecycle rejection before destructive
+validation, retirement rename, or content mutation:
+
+```text
+ordinary DatabaseInstance active before READY
+READY DatabaseInstance active
+DRAINING or CLOSING owner still retaining exclusivity
+same-process owner through the stable root/control claim
+cross-process owner through the ordinary database.control lock
+creator retaining root-publication ownership
+another offline remover
+pathname alias of any of the same actual roots
+```
+
+The positive fixture begins from `CLOSED` with no ordinary DatabaseInstance, transaction,
+BufferPool/database manager, worker, or background producer. Assert that only this offline
+lifecycle owner can acquire removal authority; the test must not close or convert a live
+instance as an implicit part of removal.
+
+After legitimate offline ownership and adoption, record all service-construction events.
+Removal must reach minimum destructive identity validation and retirement without READY,
+normal recovery, BufferPool construction, catalog/transaction-status reconstruction, WAL
+inventory/redo/undo, transaction admission, or background-service startup.
+
+Use table-driven fixtures for destructive identity. Every allowed case first satisfies
+no-follow retained-parent/root lookup, parent-entry/root identity match, regular no-follow
+`database.control`, stable process claim, ordinary control lock, and completed adoption.
+
+| Control/root fixture | Expected removal authority |
+|---|---|
+| complete slot with bytes `0..7 = DBLUSCTL`, little-endian `format_version=1` at `8..9`, and `header_size=88` at `10..11` | may select a retired name; no recovery-usable generation is required |
+| one such complete slot plus a corrupt/invalid other slot | may select a retired name |
+| exact v1 framing with bad CRC, invalid generation/range, invalid flags/reserved bytes, or failed cross-field validation | may select a retired name; ordinary open remains subject to its stricter validation |
+| recognizable v1 control plus corrupt catalog, missing required managed file, or torn/malformed WAL | may select a retired name without catalog/WAL interpretation or recovery |
+| missing root or `database.control` | `NOT_A_DATABASE`/the existing missing-target result; no destructive mutation |
+| control symlink or wrong object type | `NOT_A_DATABASE`; no destructive mutation and no followed target |
+| unreadable control with no established identity | `IO_OR_DURABILITY_FAILURE`; no destructive mutation |
+| no exact supported control-family framing or unrelated ordinary directory | `NOT_A_DATABASE`; no destructive mutation |
+| exact `DBLUSCTL` family with `format_version > 1` in either slot | `UNSUPPORTED_DATABASE_FORMAT`; no destructive mutation or fallback to another v1 slot |
+
+Pair a damaged exact-v1 fixture with an otherwise similar future-version fixture. The first
+must become retirement-eligible after exclusive authority; the second must be refused before
+retired-name selection or mutation. Also place plausible database filenames in an unrelated
+directory without exact control framing and compare a recursive tree manifest before/after
+the refused operation. U1 authority must never arise from superficial filenames.
+
+#### Retired-root classification and retirement publication
+
+Table-test external-parent basename classification for exact
+`D.dblusblus-removing-<token>`, where `<token>` is exactly 32 lowercase hexadecimal digits.
+Accept exact length/lowercase-hex only. Reject shorter/longer, uppercase, nonhex, empty-token,
+missing-token, and wrong-suffix variants. Classify `D.dblusblus-creating`, ordinary valid
+final names, and retired names as three distinct cases; both private forms are non-openable,
+and a caller-selected final basename matching either reserved grammar is rejected.
+
+Precreate the first selected retired name to force a deterministic collision. Assert the
+existing artifact is not overwritten, the no-replace retirement fails for that destination,
+another token is selected, and old `D` remains complete/live until a later no-replace rename
+actually succeeds. No statistical randomness test is required.
+
+Pause removal before retirement rename while the remover owns `D`. Same-process, alias, and
+cross-process open/removal competitors must encounter the common ownership gate and perform
+no inspection/recovery/mutation. After runtime retirement rename but before parent sync,
+ordinary `OpenDatabase(D)` must not attach to or search for the retired root; it observes no
+live target unless a distinct `D` exists. This runtime observation is not evidence of durable
+absence.
+
+The publication test releases the retirement sequence one boundary at a time:
+
+```text
+no-replace rename D -> exact retired sibling succeeds
+assert no semantic-success result and no internal unlink/rmdir
+external-parent fsync succeeds
+assert semantic removal of captured old D is now publishable
+```
+
+Inject rename failure and parent-sync failure separately. Rename failure leaves complete
+live `D`. Parent-sync failure after rename produces `IO_OR_DURABILITY_FAILURE`, no semantic
+success, no internal cleanup, and a durability-uncertain namespace; the live remover retains
+authority while reconciling. The test oracle must not claim that old `D` is definitely
+durably absent merely because runtime lookup fails.
+
+During the same sequence, verify that the retained root/control descriptors have unchanged
+inodes across retirement rename and that the ordinary control lock and process claim remain
+continuous without release/reacquire through successful retirement parent sync. Capture all
+unlink/replace operations: `database.control` must not be removed or made independently
+recreatable while the captured old root remains live at `D`, and any control deletion must
+follow durable retirement.
+
+Attempt creation of a new `D` after runtime retirement rename but before its parent sync.
+The new creator may not acknowledge publication from runtime absence alone: its trace must
+establish/reconcile prior-name absence through the external-parent durability barrier before
+its own final rename/publication. Repeat after successful retirement parent sync with the old
+retired tree intact; creation may then publish a distinct root/control inode pair.
+
+#### Whole-database removal crash matrices
+
+Use separate process-termination and machine-crash/durable-prefix matrices. At every
+boundary, record final/retired names, retained identities, lock release/ownership, semantic
+result, and whether cleanup was permitted.
+
+| Boundary | Process-death procedure and next action | Machine-crash durable outcome |
+|---|---|---|
+| before ownership | terminate before claim/lock; retry as a fresh operation | complete live `D` |
+| after ownership, before retirement rename | terminate owner; next actor reacquires/adopts | complete live `D` |
+| after rename, before retirement parent sync | terminate without cleanup; next actor reconciles exact external-parent namespace | live `D` or recognized complete retired root; never partially deleted content |
+| after retirement parent sync | terminate before cleanup | old `D` durably absent; retired root durable |
+| during private cleanup | terminate after selected contained unlinks | retired content may survive/reappear and cleanup retries; old `D` remains absent |
+| after retired-root `rmdir`, before final parent sync | terminate before residue-durability acknowledgement | retired name may reappear after machine crash; semantic removal remains complete |
+| after final parent sync | terminate after physical-completion barrier | retired residue durably absent |
+
+For each prefix, retain a pre-removal structural manifest of the captured root. If restart
+finds the captured old root inode at live `D`, assert its files/directories and contents were
+not partially deleted by whole-root removal and that the event log contains no cleanup
+operation. If restart finds a retired root, it must match the exact retired grammar and never
+become an ordinary open target. Absence may be acknowledged as semantic removal only where
+the retirement parent-sync barrier succeeded.
+
+#### Contained retired-root reclamation and recreation
+
+First prove the authority distinction. Add an unknown regular file and unknown directory to
+a live supported-v1 root; ordinary §4.7.6 orphan classification must preserve both. In a
+separate fixture, acquire exclusive removal authority, durably retire the root, and run
+private cleanup; the same unknown contained forms may be deleted without catalog ownership
+classification.
+
+Exercise containment with sentinels:
+
+- place a symlink in the retired root pointing to an external file and directory; cleanup
+  unlinks only the symlink entry and both external targets remain byte-for-byte intact;
+- where safely supported, add a FIFO and local socket and verify only their contained
+  entries are removed; privileged device-node creation is not required;
+- place unrelated files/directories and another database beside `D` and the retired sibling;
+  compare their identities and contents before/after cleanup;
+- in an isolated integration harness, place a mounted/cross-device directory beneath the
+  retired root and require traversal refusal with cleanup left pending. Where mount setup is
+  unavailable, inject a child filesystem/device-identity mismatch at the descent decision
+  and assert no child open/unlink occurs.
+
+Inject cleanup failure after durable retirement. The API-independent semantic result must
+remain successful removal of old `D`; no rename-back occurs, the exact retired root remains
+recognized cleanup residue, and no background-cleanup promise is assumed. A fresh
+`RemoveDatabase(D)` with no live `D` follows the existing missing/non-database result rather
+than re-reporting capture of the old database; explicit cleanup may still target the exact
+retired artifact.
+
+Build partially reclaimed trees and retry explicit cleanup after ordinary failure and after
+process crash. Already-absent entries are accepted idempotently, remaining entries are
+removed bottom-up under retained no-follow descriptors, no catalog/WAL/recovery service is
+constructed, and no live `D` or external sibling is touched. Crash-restored internal entries
+remain private residue and do not change semantic removal.
+
+After retired-root `rmdir`, crash once before and once after the external-parent `fsync`.
+Before that sync the retired name may reappear; afterward physical residue absence is
+durable. Semantic removal remains successful in both cases because retirement publication
+preceded cleanup.
+
+For recreation isolation, keep the old retired root, create and durably publish a new `D`,
+and record distinct root/control inodes. Continue old cleanup using only descriptors bound to
+the old retired root. Place sentinel data in the new root and prove cleanup cannot resolve
+through or mutate it. If convenient, allocate equal numeric database-local FileIds in the
+old and new roots and confirm no cross-root lookup; inode/root isolation remains the required
+oracle even when equal FileIds are not induced. Direct open or generic discovery of the old
+retired basename must always reject it as a live database.
+
+The root-removal result matrix is:
+
+| Condition | Semantic result | Retirement mutation | Private cleanup |
+|---|---|---:|---:|
+| owner contention | `DATABASE_BUSY` | forbidden | forbidden |
+| missing/unrecognizable root or wrong control type | `NOT_A_DATABASE`/existing missing-target result | forbidden | forbidden |
+| unreadable identity input | `IO_OR_DURABILITY_FAILURE` | forbidden | forbidden |
+| unsupported future control format | `UNSUPPORTED_DATABASE_FORMAT` | forbidden | forbidden |
+| recognizable damaged v1 after ownership/adoption | eligible to proceed | allowed | only after durable retirement |
+| adoption sync/identity failure | existing identity or `IO_OR_DURABILITY_FAILURE` | forbidden | forbidden |
+| retirement rename failure | `IO_OR_DURABILITY_FAILURE` | not published | forbidden |
+| retirement parent-sync failure | `IO_OR_DURABILITY_FAILURE`; durability uncertain | rename may be runtime-visible but removal is unacknowledged | forbidden |
+| cleanup failure after durable retirement | semantic removal remains successful; cleanup residue is diagnostic/pending | already published | retry allowed |
+
 #### Control slots and required recovery inputs
 
 Build fixtures for one valid control slot, two valid slots, and no valid slots. Exercise
