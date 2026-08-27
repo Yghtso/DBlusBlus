@@ -855,7 +855,7 @@ The canonical advancing-domain inventory is:
 | `FileId` | uint32 | `0` invalid | `1` | `UINT32_MAX-1 = 4,294,967,294` | never | `FILE_ID_EXHAUSTED`; fail the file/object creation before semantic publication |
 | `PageNo` identity | uint64 | `UINT64_MAX` invalid; page `0` is the superblock | `0`; ordinary pages begin `1` | representable ordinary domain ends at `UINT64_MAX-1`; the v1 physical-I/O cap below makes `1,125,899,906,842,622` the last allocatable ordinary page | unpublished serialized tail number may be retried; published reuse only through the owning free/reclamation protocol | `PAGE_NUMBER_EXHAUSTED` for that file |
 | `published_page_count` / physical page count | process-local uint64 exclusive bound reconstructed from aligned file length | `0` cannot describe an initialized managed file | `1` | `1,125,899,906,842,623` | may return from `N+1` to `N` only during proven unpublished §12.12 tail rollback | same per-file `PAGE_NUMBER_EXHAUSTED`/I/O boundary |
-| `SlotId` | uint16 | `UINT16_MAX` invalid; `0` legal | `0` | representable `UINT16_MAX-1`; heap geometry currently limits an allocated slot to `1017` | only `DEAD -> UNUSED` after §14.6 grace | page-local `NO_SPACE`, not global ID exhaustion |
+| `SlotId` | uint16 | `UINT16_MAX` invalid; `0` legal | `0` | representable `UINT16_MAX-1`; the v1 heap-page geometry limits an allocated slot to `1017` | only `DEAD -> UNUSED` after §14.6 grace | page-local `NO_SPACE`, not global ID exhaustion |
 | `TxnId` | uint64 | `0` invalid, `1` frozen | `2` | `18,446,744,073,708,503,041` under the exact fixed-block reservation rule below | never | `TXN_ID_EXHAUSTED`; reject new transaction admission |
 | `CommandId` | uint32 | no sentinel; `0` legal | `0` | `UINT32_MAX = 4,294,967,295` | never within a transaction | no later ordinary statement in that transaction; COMMIT/ROLLBACK remain legal |
 | `TableId` | uint64 shared catalog-object allocator | `0` invalid; `1..6` fixed built-ins | built-ins `1`; later allocations at least `7` | `UINT64_MAX-1 = 18,446,744,073,709,551,614` | never | `ID_EXHAUSTED`; fail DDL before semantic publication |
@@ -1141,7 +1141,7 @@ the WAL append end from the complete valid prefix. Consumed orphan/gap IDs remai
 consumed; reaching the last legal value and crashing makes the next request fail,
 not restart from an earlier value.
 
-Implementations and boundary verification MUST forbid at least:
+Implementations MUST forbid at least:
 
 1. TxnId/CommandId/object-ID/PageNo/LSN wrap into zero, a sentinel, or prior value.
 2. TxnId reuse after status reclamation or reuse of a consumed aborted-DDL ID.
@@ -1153,11 +1153,11 @@ Implementations and boundary verification MUST forbid at least:
 8. allowing a wrapped modification/root/FPI/read-epoch token to equal a stale token.
 9. truncating statistics chunk count/index or publishing an unrepresentable B+ level.
 
-Tests must be able to inject/synthesize each allocator or counter immediately below,
-at, and above its boundary without performing the corresponding number of real
-allocations. Required cases include crash/restart after the last durable allocation,
-consumed-gap behavior, exact maximum record/page construction, and rejection before
-publication. This is a verification obligation, not a prescribed allocator API.
+Exhaustion behavior MUST remain deterministic at every boundary. Consumed
+high-water and gap state MUST survive restart, maximum-size record/page
+construction MUST use checked arithmetic, and unrepresentable candidates MUST be
+rejected before publication. Detailed verification and fault-injection procedures
+for these requirements belong in `VERIFICATION.md`.
 
 ## 4.4 Page identity
 
@@ -1585,7 +1585,7 @@ The bootstrap protocol is:
    with exclusive no-follow semantics
 2. open the staging root and create its pending/ and wal/ directories
 3. create/initialize database.control, catalog.dat, txn_status.dat,
-   all six system-relation heap/FSM files, any other required built-in
+   the heap and FSM files for all six system relations, any other required built-in
    object files, and initial WAL segment 0
 4. fdatasync every startup-critical regular file after its complete
    initialized contents/length are written
