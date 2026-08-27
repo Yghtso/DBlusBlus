@@ -3071,7 +3071,7 @@ Tuple storage v1 is inline-only: one tuple must fit entirely inside one heap pag
 
 Overflow/TOAST-style tuple storage is not part of the v1 heap format.
 
-For the initial page geometry:
+For the v1 page geometry:
 
 ```text
 PAGE_SIZE         = 8192
@@ -3079,7 +3079,7 @@ heap total header = 48
 slot entry        = 8
 ```
 
-the maximum accepted raw tuple payload is:
+the maximum accepted complete encoded tuple length is:
 
 ```text
 8135 bytes
@@ -3087,7 +3087,7 @@ the maximum accepted raw tuple payload is:
 
 The bound is intentionally strict.
 
-A raw payload of:
+A complete encoded tuple length of:
 
 ```text
 8136 bytes
@@ -3095,13 +3095,13 @@ A raw payload of:
 
 MUST be rejected even though that size would make the slot directory and tuple region meet exactly with zero bytes remaining.
 
-The 8135-byte bound is a raw heap-page storage limit. It is not a promise that every byte string up to that size is a semantically valid encoded SQL tuple.
+The 8135-byte bound is a complete encoded tuple length limit for heap-page storage. It is not a promise that every byte string up to that size is a semantically valid encoded SQL tuple.
 
 Schema-directed tuple encoding/validation may reject values for independent tuple-format reasons.
 
-An oversized tuple insertion MUST produce an explicit row-too-large/unsupported outcome rather than truncating or corrupting the page.
+An oversized tuple insertion MUST produce `ROW_TOO_LARGE` rather than truncating or corrupting the page.
 
-Overflow/large-object storage remains deferred until the base heap, WAL/recovery, MVCC, and index layers are mature.
+Overflow/large-object storage is deferred from the v1 architecture baseline.
 
 ## 5.7 Tuple header v1
 
@@ -3165,7 +3165,7 @@ They exist because transaction identity and statement/command visibility are dis
 
 is valid and MUST NOT be interpreted as an invalid sentinel.
 
-The exact visibility interpretation of `xmin`, `xmax`, `cmin`, and `cmax` belongs to the MVCC/transaction chapters.
+The exact visibility interpretation of `xmin`, `xmax`, `cmin`, and `cmax` is defined by §§9.6–9.7 and 10.2–10.4.
 
 ### 5.7.4 Previous-version pointer
 
@@ -3425,7 +3425,7 @@ Low-level bitmap primitives do not enforce SQL `NOT NULL` constraints.
 
 Schema-directed tuple validation MUST reject a persisted NULL bit for a column declared `NOT NULL` in the schema version interpreting that tuple.
 
-Such a tuple is invalid/corrupt or incompatible relative to that schema.
+Such a supported-v1 tuple is malformed heap data and MUST be classified as `CORRUPT_HEAP`.
 
 ### 5.10.4 Unused bitmap bits
 
@@ -3633,11 +3633,11 @@ ResolveSchema(TableId, tuple.schema_version)
 
 defined in Chapter 16.
 
-The first implementation MAY support only schema version `1`, but any persisted schema version that may still occur in tuple storage MUST remain historically resolvable.
+V1 tuple writers emit `SchemaVer{1}`, and `SchemaVer{0}` is invalid. Any persisted schema version that may still occur in tuple storage MUST remain historically resolvable.
 
-The field exists from the initial format so schema evolution does not require silently changing the tuple representation.
+The field is present in tuple format v1 so an explicit architecture revision can define schema evolution without silently changing the tuple representation.
 
-SQL DDL MAY reject schema changes that require unsupported version translation/tuple rewriting until such behavior is explicitly implemented.
+Schema-changing ALTER and version translation/tuple rewriting are deferred from the v1 architecture baseline. Producing additional SchemaVer values requires an explicit architecture revision.
 
 ## 5.14 INSERT protocol boundary
 
@@ -3665,7 +3665,7 @@ The FSM is advisory.
 
 A stale FSM candidate MUST NOT make insertion incorrect; actual heap-page free space is checked after fetching/latching the page.
 
-The exact ordering of WAL creation, page mutation, dirty-state publication, and page-LSN updates is owned by the later WAL/BufferPool transaction protocol. This chapter does not preempt that ordering.
+The exact ordering of WAL creation, page mutation, dirty-state publication, and page-LSN updates is defined by §§7.10.1, 12.11–12.12, and 15.2. This chapter does not preempt that ordering.
 
 ## 5.15 UPDATE protocol boundary
 
@@ -3693,7 +3693,7 @@ The heap layer MAY prefer placing the new version on the same page when sufficie
 
 Same-page placement is a locality optimization, not an invariant.
 
-The detailed transaction visibility, command-ID handling, locking, WAL, and abort behavior is defined by later transaction/durability chapters.
+The detailed transaction visibility, command-ID handling, locking, WAL, and abort behavior is defined by §§9.6, 10.2–10.4, 12.12, 15.3, 15.6, and 39.1.
 
 ## 5.16 DELETE protocol boundary
 
