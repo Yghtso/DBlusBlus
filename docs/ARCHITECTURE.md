@@ -116,7 +116,7 @@ This intent is rationale for the selected architecture; it does not override con
 
 ## 2.1 Layered system model
 
-The system follows a downward dependency model:
+The high-level system coordination and representation flow is:
 
 ```text
 SQL / Parser
@@ -140,9 +140,14 @@ WAL + Page / File Management
 Operating System / Storage Device
 ```
 
-The diagram represents dependency direction, not necessarily one runtime call stack.
+In this overview, each downward arrow denotes a high-level handoff or service-consumption
+relationship from the preceding stage to the stage below; it is not necessarily one runtime
+call stack or a complete static module-dependency graph.
 
-Lower layers MUST NOT depend on higher-layer syntax or semantic objects.
+Lower infrastructure MUST NOT depend on unresolved higher-layer syntax, semantic
+coordination, or policy objects, and receiving metadata does not transfer ownership of its
+semantics. Resolved immutable descriptors, schemas, layouts, types, and identifiers MAY
+cross a boundary only where the owning architecture contract explicitly permits them.
 
 Examples:
 
@@ -207,7 +212,7 @@ The first correct implementation of a subsystem MAY use simpler synchronization 
 
 ## 2.5 Storage subsystem ownership and dependency direction
 
-The storage stack follows the dependency direction:
+The storage stack is ordered from foundational providers to higher-level consumers:
 
 ```text
 common definitions
@@ -220,6 +225,9 @@ heap pages / B+ tree physical pages
     ↓
 relation / index abstractions
 ```
+
+In this diagram, each downward arrow means that the lower layer consumes services or
+definitions provided by the layer above.
 
 Higher-level coordination builds on these layers rather than bypassing them.
 
@@ -256,7 +264,7 @@ These names describe architectural roles; exact C++ type names are not required 
 Critical dependency rules:
 
 - `HeapPage` MUST NOT perform raw file I/O or call `DiskManager` directly.
-- Normal resident-page access flows through the BufferPool once buffer management exists.
+- Normal resident-page access flows through the BufferPool.
 - `HeapPage` interprets one already-resident page and does not own a second page-sized allocation.
 - `TupleCodec` is independent of page management.
 - `TupleCodec` MAY depend on schema/type definitions but MUST remain independent of SQL parser AST representation.
