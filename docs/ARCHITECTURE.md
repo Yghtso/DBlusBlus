@@ -9,7 +9,7 @@ This document defines the technical architecture of DBlusBlus: a from-scratch, s
 
 It specifies architectural responsibilities, subsystem boundaries, persistent-format requirements, concurrency and lifetime rules, correctness invariants, and performance-relevant design constraints.
 
-`ARCHITECTURE.md` is the authority for intended system behavior. Project progress belongs in `PROJECT_STATE.md`; implementation sequencing and module-layout guidance belong in `DEVELOPMENT.md`; detailed test and benchmark procedures belong in `VERIFICATION.md`; historical implementation records belong in `devlog/`.
+`ARCHITECTURE.md` is the authority for intended system behavior. `PROJECT_STATE.md` records current implementation capabilities, limitations, architecture/implementation mismatches, and active implementation boundaries; implementation sequencing and module-layout guidance belong in `DEVELOPMENT.md`; detailed test and benchmark procedures belong in `VERIFICATION.md`; historical implementation records belong in `devlog/`.
 
 ## Contract language
 
@@ -24125,7 +24125,7 @@ unsupported forked-handle use and close-on-exec behavior
 one-valid/two-valid/no-valid control-slot opens and legal fallback
 missing required WAL/bootstrap/committed files
 torn txn-status recovery before ordinary lookup
-crash/failure at every §3.3.7 open/shutdown point
+crash/failure at every open/shutdown boundary in §§3.3.3 and 3.3.6, with §3.3.7 lifecycle outcomes
 no transaction/background admission before READY
 failed-open worker/descriptor/BufferPool/lock cleanup
 orphan classification without deletion of unknown names
