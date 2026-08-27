@@ -240,14 +240,14 @@ FileId, the shared catalog-object allocator, and TxnId block reservation use thi
 matrix. Control generation uses the same durability observations without an identity
 return. PageNo and WAL specialize the matrix below.
 
-| Boundary | Durable allocator state | Caller observed ID? | Crash/restart oracle | Reuse? |
-|---|---|---:|---|---|
-| Before candidate/range validation | Old valid high-water | No | Recover old authority; retry follows the owner rule | Only if the owner never consumed it |
-| After validation, before durable write | Old valid high-water | No | Recover old authority; no external durable reference names candidate | Owner-specific retry may use candidate |
-| During control write or before required sync | Previous valid durable slot/high-water remains authority | No | Torn/new nondurable state is not selected as committed allocation authority | Candidate is not considered consumed unless recovery proves durable advance |
-| After durable high-water, before return/publication | New high-water | No | Recover at or beyond new high-water; the lost candidate or reserved suffix remains a legal gap | No for no-reuse IDs |
-| After return or semantic publication | New high-water | Yes | Recover beyond candidate and preserve every durable reference | No for no-reuse IDs |
-| Terminal high-water, failed next request | Terminal high-water | No new ID | Reopen remains terminal; repeated request has the same semantic exhaustion category | No reset or backward rebuild |
+| Boundary | Durable allocator state | Caller observed ID? | Crash/failure injection | Expected recovered next state | Reuse? | Oracle |
+|---|---|---:|---|---|---|---|
+| Before candidate/range validation | Old valid high-water | No | Stop before candidate construction | Old authority; retry starts from its candidate | Only if the owner has not consumed it | Selected durable high-water and absence of external reference |
+| After validation, before durable write | Old valid high-water | No | Fail/stop before persistence begins | Old authority; no external durable reference names candidate | Owner-specific retry may use candidate | Durable high-water, namespace/catalog state, and caller result |
+| During control write, before successful required sync | Old slot is the last acknowledged durable authority; a complete newer slot may or may not survive a crash | No | Inject short/torn write, sync failure, process stop, and machine crash separately | Recovery selects the highest complete valid surviving authority: old permits owner-specific retry; new consumes the candidate/range | Only when recovered authority proves no durable advance | Independent slot validation/selection plus recovered high-water; never guess from the failed call |
+| After durable high-water, before return/publication | New high-water | No | Stop after successful durability barrier | New authority; next issue/allocation is beyond the lost candidate or reserved suffix | No for no-reuse IDs | Durable generation/high-water and consumed-gap assertion |
+| After return or semantic publication | New high-water | Yes | Crash after caller/publication observation | New authority beyond candidate; every durable reference remains valid | No for no-reuse IDs | High-water, published identity/reference, and reopen result |
+| Terminal high-water, failed next request | Terminal high-water | No new ID | Repeat failure, restart, and reopen | Same terminal authority; next request fails in the same semantic category | No reset or backward rebuild | Terminal high-water plus stable error and no persistence/publication attempt |
 
 At each row, compare the recovered control generation/high-water, next issued value,
 catalog/file presence, WAL evidence, and public result. Object absence never authorizes
@@ -476,34 +476,40 @@ client outcome separately from durable transaction outcome.
 `U` means the universal B-1/B0/B+1 procedure owns the case; `S` means the named
 specialization adds the domain oracle; `P` means the persistent high-water matrix applies;
 `V` means owner validation supplies B+N; and N/A means the architecture defines no such
-dimension. Every `COMPLETE` status is a required coverage mapping, not a run result.
+dimension. Every inventory row appears separately. Every `COMPLETE` status is a required
+coverage mapping, not a run result.
 
-| Domain | B-1 | B0 | B+1 | B+N | Persistence / crash gap / restart | Reuse | Concurrency | Error/lifecycle owner | Status |
-|---|---:|---:|---:|---:|---|---|---|---|---|
-| FileId | U | U | U | V | P | forbidden | P | Durable identifier specialization | COMPLETE |
-| TableId | U | U | U | V | P | forbidden | P, shared | Durable identifier specialization | COMPLETE |
-| IndexId | U | U | U | V | P | forbidden | P, shared | Durable identifier specialization | COMPLETE |
-| ConstraintId | U | U | U | V | P | forbidden | P, shared | Durable identifier specialization | COMPLETE |
-| TxnId | U | S | S | V | P, block suffix | forbidden | P, block | TxnId terminal block | COMPLETE |
-| CommandId | U | S | S | N/A above uint32 | transaction-local | forbidden within txn | N/A | CommandId specialization | COMPLETE |
-| ColumnId | U | U | U | V | catalog publication | forbidden in history | owner serialization | Schema specialization | COMPLETE |
-| SchemaVer | U | U | U | V | catalog publication | forbidden in history | owner serialization | Schema specialization | COMPLETE |
-| Control generation | U | S | S | V zero/malformed | control-slot crash oracle | forbidden | serialized update | Control specialization | COMPLETE |
-| PageNo / published count | U | S | S | V | PAGE_INIT/WAL reconciliation | predicate-gated | serialized append | Page specialization | COMPLETE |
-| SlotId / heap slot count | U | S | S | V | page/WAL owner | grace-gated | page-latched | Slot specialization | COMPLETE |
-| Heap tuple length | U | U | U | V | page/MTR publication | N/A | owner serialization | Encoded specialization | COMPLETE |
-| FSM entry count | U | U | U | V | page publication | N/A | owner serialization | Structural specialization | COMPLETE |
-| B+ slot/key/entry bounds | U | U | U | V | MTR publication | structural | tree protocol | Encoded specialization | COMPLETE |
-| B+ height/level | U | S | S | V | root MTR publication | contraction only | tree protocol | B+ specialization | COMPLETE |
-| WAL Lsn/end | U | S | S | V | valid-prefix crash oracle | forbidden | WAL reservation | WAL specialization | COMPLETE |
-| WAL segment index | U | S | S | V | namespace/WAL recovery | forbidden | WAL reservation | WAL specialization | COMPLETE |
-| WAL total/payload length | U | S | S | V | no reservation on failure | N/A | WAL reservation | WAL specialization | COMPLETE |
-| Default/scalar lengths | U | U | U | V | catalog owner | N/A | owner serialization | Encoded specialization | COMPLETE |
-| Statistics chunks/scopes/counts | U | U | U | V | generation-atomic publication | no reuse within generation | owner serialization | Encoded specialization | COMPLETE |
-| Checkpoint indexes/counts/totals | U | U | U | V | checkpoint remains uninstalled | N/A | checkpoint owner | Encoded specialization | COMPLETE |
-| Runtime generation tokens | U | S | S | N/A persisted | process-local | quiescence-gated | owning domain | Generation specialization | COMPLETE |
-| Pin/reference counters | U | U | U | N/A persisted | process-local | decrement only | owning domain | Generation specialization | COMPLETE |
-| Read epoch | U | S | S | V zero | process-local restart/quiescence | restart/quiescence-gated | epoch mutex | Epoch specialization | COMPLETE |
+| Domain | B-1 | B0 | B+1 | B+N | Persistence | Crash gap | Restart | Reuse | Concurrency | Error category | Lifecycle outcome | Verification owner | Status |
+|---|---:|---:|---:|---:|---|---|---|---|---|---|---|---|---|
+| FileId | U | U | U | V | control high-water | P | terminal persists | forbidden | serialized/concurrent requests | `FILE_ID_EXHAUSTED` | only new file/object allocation fails | Durable identifier specializations | COMPLETE |
+| TableId | U | U | U | V | shared control high-water | P | terminal persists | forbidden | shared allocator contention | `ID_EXHAUSTED` | DDL requiring ID fails | Durable identifier specializations | COMPLETE |
+| IndexId | U | U | U | V | shared control high-water | P | terminal persists | forbidden | shared allocator contention | `ID_EXHAUSTED` | DDL requiring ID fails | Durable identifier specializations | COMPLETE |
+| ConstraintId | U | U | U | V | shared control high-water | P | terminal persists | forbidden | shared allocator contention | `ID_EXHAUSTED` | DDL requiring ID fails | Durable identifier specializations | COMPLETE |
+| TxnId | U | S | S | V | durable block end | P, lost suffix | terminal persists | forbidden | block reservation contention | `TXN_ID_EXHAUSTED` | new transaction admission fails | TxnId terminal block | COMPLETE |
+| CommandId | U | S | S | N/A above uint32 | transaction-local | N/A | transaction-local | forbidden within transaction | N/A | `COMMAND_ID_EXHAUSTED` | later statement fails; COMMIT/ROLLBACK legal | CommandId specialization | COMPLETE |
+| ColumnId | U | U | U | V | catalog publication | no row publication | schemas survive reopen | forbidden in history | catalog owner | owning DDL rejection | schema construction fails | Schema specialization | COMPLETE |
+| SchemaVer | U | U | U | V | catalog publication | no row publication | old schemas readable | forbidden in history | catalog owner | owning DDL rejection | schema evolution fails | Schema specialization | COMPLETE |
+| Control-slot generation | U | S | S | V zero/malformed | alternating control slot | surviving-slot oracle | selected max remains | forbidden | serialized control update | requiring operation fails | dependent control update cannot proceed | Control specialization | COMPLETE |
+| PageNo | U | S | S | V | file length + WAL publication | unpublished-tail exception | reconcile before READY | predicate-gated | serialized append | `PAGE_NUMBER_EXHAUSTED` | append in one file fails | Page specialization | COMPLETE |
+| `published_page_count` | U | S | S | V | reconstructed exclusive bound | exact tail rollback | reconstruct/reconcile | unpublished retreat only | serialized append | PageNo/I/O boundary | cannot outrun file/WAL authority | Page specialization | COMPLETE |
+| SlotId | U | S | S | V | heap page/WAL | no global gap | page recovery | grace-gated | page-latched | `NO_SPACE`, not ID exhaustion | page-local insertion/reuse result | Slot specialization | COMPLETE |
+| WAL Lsn/exclusive end | U | S | S | V | valid WAL prefix/durable LSN | specialized append oracle | terminal end reconstructed | forbidden | WAL reservation | `WAL_POSITION_EXHAUSTED` | ordinary WAL work gated; credited closure preserved | WAL specialization | COMPLETE |
+| WAL segment index | U | S | S | V | WAL namespace | segment publication oracle | inventory/recovery | forbidden | WAL reservation | `WAL_POSITION_EXHAUSTED` | no later segment position | WAL specialization | COMPLETE |
+| Statistics chunk count/index | U | U | U | V | generation-atomic catalog rows | failed generation unpublished | fallback after reopen | not within generation | ANALYZE owner | generation invalid/failure | ordinary statistics fallback | Encoded specialization | COMPLETE |
+| B+ tree height/node level | U | S | S | V | root MTR publication | no provisional root | existing tree valid | contraction only | tree protocol | root-growth failure | insertion fails before new root publication | B+ specialization | COMPLETE |
+| Heap `slot_count` | U | U | U | V | heap page/WAL | no identity gap | page recovery | slots grace-gated | page-latched | `NO_SPACE` | page-local capacity path | Structural specialization | COMPLETE |
+| Heap `tuple_length` | U | U | U | V | page/MTR publication | no partial tuple | page recovery | N/A | owner serialization | `ROW_TOO_LARGE` | tuple operation fails | Encoded specialization | COMPLETE |
+| FSM `entry_count` | U | U | U | V | FSM page publication | no partial count | rebuild/reopen | N/A | owner serialization | next-page/PageNo result | owning FSM growth path | Structural specialization | COMPLETE |
+| B+ node `slot_count` | U | U | U | V | MTR publication | no partial node | tree recovery | structural | tree protocol | split/rebalance result | existing tree remains valid | Encoded specialization | COMPLETE |
+| B+ key/entry lengths | U | U | U | V | MTR publication | no partial entry | tree recovery | N/A | tree protocol | key/construction failure | index operation fails before publication | Encoded specialization | COMPLETE |
+| WAL total/payload length | U | S | S | V | no reservation on failure | no WAL gap | valid prefix unchanged | N/A | WAL reservation | record/encoded-length failure | WAL operation fails before reservation | WAL specialization | COMPLETE |
+| Default-blob `total_length` | U | U | U | V | catalog publication | no catalog row publication | catalog remains readable | N/A | catalog owner | oversized-default rejection | DDL/default construction fails | Encoded specialization | COMPLETE |
+| `PersistedScalarV1.payload_length` | U | U | U | V | enclosing owner | no enclosing publication | owner-specific reopen | N/A | owner serialization | enclosing-builder result | default/statistics owner decides | Encoded specialization | COMPLETE |
+| Statistics scope/manifest counts/lengths | U | U | U | V | generation-atomic publication | failed generation unpublished | fallback after reopen | N/A | ANALYZE owner | generation invalid/failure | statistics fallback | Encoded specialization | COMPLETE |
+| Checkpoint DATA indexes/counts/totals | U | U | U | V | checkpoint sequence | remains uninstalled | prior installed checkpoint | N/A | checkpoint owner | checkpoint construction failure | close/open follows checkpoint requirement | Encoded specialization | COMPLETE |
+| Runtime generation tokens | U | S | S | N/A persisted | process-local | N/A | N/A persistence | quiescence-gated | owning domain | operation rejection | unrelated runtime work may continue | Generation specialization | COMPLETE |
+| Pin/reference counters | U | U | U | N/A persisted | process-local | N/A | N/A persistence | decrement only | owning domain | acquisition failure | existing owners remain valid | Generation specialization | COMPLETE |
+| Read epoch | U | S | S | V zero | process-local | N/A durable gap | restart/quiescence reinit | restart/quiescence-gated | epoch mutex | retirement/reuse disabled | unrelated operations continue | Epoch specialization | COMPLETE |
 
 ### Architecture-obligation coverage map
 
