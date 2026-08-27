@@ -279,7 +279,7 @@ Concrete source-code directory and filename organization is not an architectural
 
 ## 3.1 Supported platform
 
-The initial supported environment is:
+The v1 supported platform is:
 
 - Linux,
 - x86-64 or ARM64,
@@ -289,13 +289,13 @@ The initial supported environment is:
 
 Portability is desirable but secondary to correctness, observability, and direct access to the required operating-system mechanisms.
 
-The Linux-first baseline permits later experimentation with facilities such as `io_uring`, direct I/O, huge pages, and NUMA-aware designs without making those facilities requirements of the initial architecture.
+The Linux-first v1 baseline permits experimentation with facilities such as `io_uring`, direct I/O, huge pages, and NUMA-aware designs, but such experimentation does not make those facilities part of the required v1 platform contract.
 
 ## 3.2 Implementation language
 
 The implementation MUST use C++20.
 
-Compiler-specific extensions are not part of the architectural language baseline unless a later explicit decision introduces one.
+Compiler-specific extensions are not part of the architectural language baseline unless an explicit architecture revision introduces one.
 
 C++20 was selected because it provides direct control over:
 
@@ -353,12 +353,12 @@ The normative transition table is:
 | `RECOVERING` | uncertain mutation/publication state or incomplete quiescence/cleanup | `NONCONTINUABLE` | ordinary work remains forbidden and the lock stays held |
 | `READY` | controlled close wins the admission gate | `DRAINING` | lock remains held; only already-admitted completion/cancellation and shutdown work continue |
 | `READY` | database-fatal transition under §§12.12.4 and 39.1 | `NONCONTINUABLE` | admission closes immediately; durable transaction outcomes are preserved |
-| `DRAINING` | admitted work and producer services have quiesced | `CLOSING` | normal durability sequence continues with the lock held |
-| `DRAINING` | shutdown invariant/durability failure | `NONCONTINUABLE` | successful close is forbidden |
+| `DRAINING` | §3.3.6 steps 1–3 complete: admitted work and ordinary producer services have quiesced | `CLOSING` | publish this transition before step 4; final durability/resource teardown continues with the lock held |
+| `DRAINING` | transaction/producer quiescence or shutdown-invariant failure during §3.3.6 steps 1–3 | `NONCONTINUABLE` | successful close is forbidden |
 | `NONCONTINUABLE` | owner starts non-clean quiescence/resource destruction | `CLOSING` | no final-checkpoint/clean-state claim; lock remains held until teardown's last step |
 | `CLOSING` | every normal §3.3.6 close prerequisite completes | `CLOSED` | managers/descriptors close first; OS lock release is the external ownership transition, then the local claim/state publish completes; report success |
 | `CLOSING` | non-clean teardown safely releases all process-local users | `CLOSED` | use the same final ownership-release order and report the original open/shutdown/noncontinuable failure, never success |
-| `CLOSING` | a live guard/worker/ownership invariant still prevents safe destruction | `NONCONTINUABLE` | retain the owner and lock; retry teardown or let process termination release OS resources |
+| `CLOSING` | final durability/resource-teardown failure under §3.3.6, including a live guard/worker/ownership invariant that prevents safe destruction | `NONCONTINUABLE` | successful clean close is forbidden; retain the owner and lock until non-clean teardown can safely proceed or process termination releases OS resources |
 
 Only `READY` admits normal work. APIs and diagnostics MUST expose enough state to
 distinguish not-open/closed, opening, recovering, ready, draining, and
@@ -529,11 +529,11 @@ Before that one publication, no transaction/statement API or background service
 may observe a partly recovered database. After it, every admitted component sees
 the same recovered ownership/status/catalog state.
 
-Open uses scoped ownership so any failure stops and joins all started recovery tasks,
-quiesces and destroys a partial BufferPool before closing its files, closes every
-registration/descriptor except the lock descriptor, releases and closes the OS lock,
-and only then removes the process-local identity claim. No owner is exposed as
-READY and no worker survives failed-open return.
+A failed open whose outcome and process-local ownership are fully known and quiesceable
+uses scoped ownership to stop and join all started recovery tasks, quiesce and destroy a
+partial BufferPool before closing its files, close every registration/descriptor except
+the lock descriptor, release and close the OS lock, and only then remove the process-local
+identity claim. No owner is exposed as READY and no worker survives failed-open return.
 
 A known validation/corruption/recovery error whose process-local state can be
 fully quiesced ends in `CLOSED`; a later independent open may retry and either
@@ -580,7 +580,10 @@ After it wins, new transactions, statements, COMMIT requests not already in
 `COMMITTING`, maintenance work, ordinary file opens/page loads, and scheduled
 checkpoint/flush producers are rejected. Already-admitted COMMIT/ABORT and
 lifecycle cleanup may still use their required internal BufferPool/WAL paths
-until the later BufferPool quiesce in step 4. Exact shutdown ordering is:
+until the later BufferPool quiesce in step 4. Steps 1–3 execute in `DRAINING`.
+Successful completion of step 3 publishes `DRAINING -> CLOSING` before step 4;
+steps 4–8 execute in `CLOSING` unless a failure enters `NONCONTINUABLE`. Exact
+shutdown ordering is:
 
 | Step | Required action and dependency |
 |---:|---|
