@@ -136,8 +136,8 @@ The encoded-length, structural-count, and process-local domains are:
 | Domain | Class | Width and valid maximum | Invalid/reserved terminal values | Advancement and persistence scope | Reuse policy | Exhaustion result | Canonical owner |
 |---|---:|---|---|---|---|---|---|
 | Heap `slot_count` | E | uint16 field; `1018` | Zero legal; values above geometry invalid | Page-local checked directory geometry | Count persists; slots reuse only through free list/grace | `NO_SPACE`, not numeric ID exhaustion | §§4.3.2.5, 5.3–5.5 |
-| Heap `tuple_length` | E | uint16 field; schema-valid raw tuple through `8135` bytes | Zero only for canonical reclaimed states | Exact tuple construction before page publication | N/A | `ROW_TOO_LARGE` | §§4.3.2.5, 5.6–5.13 |
-| FSM `entry_count` | E | uint16 field; `8144` | Zero legal | Checked page-local initialized-prefix construction | N/A | Next FSM page or owning PageNo/file failure | §§4.3.2.5, 6.4–6.5 |
+| Heap `tuple_length` | E | uint16 field; complete encoded tuple through `8135` bytes | Zero only for canonical reclaimed states | Exact tuple construction before page publication | N/A | `ROW_TOO_LARGE` | §§4.3.2.5, 5.6–5.13 |
+| FSM `entry_count` | E | uint16 field; `8144` | Zero legal | Checked page-local initialized-prefix construction | N/A | Next FSM page or owning PageNo/file failure | §§4.3.2.5, 6.5–6.7 |
 | B+ node `slot_count` | E | uint16 field; `1016` | Zero legal | Checked node construction/split/rebalance before MTR publication | Slots are structural positions | Split/rebalance or pre-publication failure | §§4.3.2.5, 8.7–8.17 |
 | B+ user-key / entry lengths | E | uint16 fields; key `1024`, leaf `1040`, internal `1048` | Zero-length key invalid | Exact key/entry construction before page/MTR publication | N/A | Key-too-large/construction failure | §§4.3.2.5, 8.6–8.10 |
 | WAL `total_length` / payload length | E | uint32 fields; total `67,108,864`, payload `67,108,816` | total zero invalid; payload zero legal | Exact size plus Align8 before narrowing/reservation | N/A | `WAL_RECORD_TOO_LARGE` / `ENCODED_LENGTH_EXCEEDED` | §§4.3.2.4–4.3.2.5, 12.6–12.7 |
@@ -499,7 +499,7 @@ coverage mapping, not a run result.
 | B+ tree height/node level | U | S | S | V | root MTR publication | no provisional root | existing tree valid | contraction only | tree protocol | root-growth failure | insertion fails before new root publication | B+ specialization | COMPLETE |
 | Heap `slot_count` | U | U | U | V | heap page/WAL | no identity gap | page recovery | slots grace-gated | page-latched | `NO_SPACE` | page-local capacity path | Structural specialization | COMPLETE |
 | Heap `tuple_length` | U | U | U | V | page/MTR publication | no partial tuple | page recovery | N/A | owner serialization | `ROW_TOO_LARGE` | tuple operation fails | Encoded specialization | COMPLETE |
-| FSM `entry_count` | U | U | U | V | FSM page publication | no partial count | rebuild/reopen | N/A | owner serialization | next-page/PageNo result | owning FSM growth path | Structural specialization | COMPLETE |
+| FSM `entry_count` | U | U | U | V | FSM page publication | no partial count | rebuild/reopen | N/A | owner serialization | next-page/PageNo result | owning FSM growth path | Free-space map verification — initialized prefix and suffix | COMPLETE |
 | B+ node `slot_count` | U | U | U | V | MTR publication | no partial node | tree recovery | structural | tree protocol | split/rebalance result | existing tree remains valid | Encoded specialization | COMPLETE |
 | B+ key/entry lengths | U | U | U | V | MTR publication | no partial entry | tree recovery | N/A | tree protocol | key/construction failure | index operation fails before publication | Encoded specialization | COMPLETE |
 | WAL total/payload length | U | S | S | V | no reservation on failure | no WAL gap | valid prefix unchanged | N/A | WAL reservation | record/encoded-length failure | WAL operation fails before reservation | WAL specialization | COMPLETE |
@@ -618,6 +618,495 @@ Verify:
 - scan after reopen,
 - deletion-marker behavior under MVCC visibility,
 - FSM stale-entry repair.
+
+### Free-space map verification
+
+This verification family owns the deterministic procedures for the FSM contract in
+`ARCHITECTURE.md` Chapter 6. It specializes the generic storage-format, owner-validation,
+PAGE_INIT, WAL/MTR, recovery, and reclamation procedures rather than duplicating them. The
+relevant generic owners are Architecture §§4.10–4.13, 7.3–7.12, 12.9, 12.12, 12.17,
+13.11–13.19, 14.5–14.12, 14.16, 15.2–15.4, 39.1, and 41.1.
+
+#### Deterministic fixtures and observability
+
+Build FSM fixtures with explicit little-endian codecs. Unless a case intentionally targets
+structural or owner corruption, each fixture has the correct v1 FileSuperblock, FileKind,
+FileId, TableId, common header, `FSM_DATA` PageType, PageNo, 48-byte header, reserved-zero
+fields, initialized prefix, zero suffix, paired published bounds, and checksum. This keeps a
+category or mapping case from accidentally becoming a format-corruption case.
+
+The FSM-specific codec fixture checks exact offsets and widths independently:
+
+| Byte range | Verification oracle |
+|---|---|
+| `0..31` | canonical common page header |
+| `32..39` | little-endian `first_heap_page_no` |
+| `40..41` | little-endian `entry_count` |
+| `42..43` | zero FSM `reserved16` |
+| `44..47` | zero FSM `reserved32` |
+| `48..8191` | exactly 8144 one-byte category entries |
+
+Assert a 16-byte FSM-specific extension, a 48-byte total header, an 8192-byte complete page,
+and no gap or overlap. The generic FileSuperblock procedure supplies the separate 72-byte
+`FileKind::FSM` superblock checks.
+
+The test oracle computes category and mapping results independently of the production helper
+under test. A static expected vector or a test-side checked-arithmetic implementation is
+acceptable; calling the production helper to calculate its own expected result is not.
+
+Deterministic hooks or barriers expose these abstract events without prescribing production
+function or class names:
+
+```text
+heap mutation published
+heap page published
+guarded heap free_bytes captured
+FSM mapping computed
+candidate category read
+heap owner validation accepted
+heap insertion recheck begins
+FSM mutation begins
+FSM WAL publication completes
+FSM page writeback begins
+FSM PAGE_INIT publication completes
+prefix advancement begins and completes
+local repair begins and completes
+rebuild page publication completes
+candidate publication occurs
+```
+
+Concurrency and crash cases use barriers, injected outcomes, or coordinated child processes;
+they MUST NOT depend on sleeps or probabilistic timing. Category bytes cannot be observed as
+trusted candidate metadata until transfer, format/version dispatch, checksum, page identity,
+registered FSM owner, paired heap owner, FSM header/ranges, prefix, and suffix validation have
+completed. A plausible `page_lsn` on a bad-checksum page must not become trusted state.
+
+#### Category arithmetic and heap geometry
+
+Exhaustively enumerate every legal `free_bytes` value in `0..8144`. For each value, calculate
+the expected category with independent checked arithmetic:
+
+```text
+b        = min(free_bytes, 8144)
+u        = min(max(b - 8, 0), 8135)
+expected = floor(u * 255 / 8135)
+```
+
+Compare the expected value with the category codec/update result, assert that it is in
+`0..255`, and assert monotonic nondecrease from the preceding input. This is an exhaustive
+8145-case domain check, not a sampled property test. Where the category converter accepts a
+wider input domain, also pass 8145 and the converter's maximum representable input and assert
+that checked clamping produces the same result as 8144; these are converter-saturation cases,
+not valid heap-geometry fixtures.
+
+Independently enumerate every category `c` in `0..255` and calculate:
+
+```text
+minimum_usable(c) = (c * 8135 + 254) / 255
+```
+
+Assert exact equality with the inverse helper, monotonic nondecrease, checked intermediate
+arithmetic, `minimum_usable(0) = 0`, `minimum_usable(255) = 8135`, and no result above 8135.
+Keep explicit readable vectors for categories 1, 127, and 254 with expected lower bounds 32,
+4052, and 8104 respectively.
+For every forward-domain input and every threshold category, assert that a forward result at
+least that threshold represents at least the corresponding `minimum_usable` byte count. This
+joint exhaustive check proves that the inverse never promises more complete encoded tuple
+bytes than the forward bucket guarantees.
+
+Named boundary vectors keep failures readable:
+
+| `free_bytes` | Usable bytes after the slot reserve | Expected category |
+|---:|---:|---:|
+| 0 | 0 | 0 |
+| 1 | 0 | 0 |
+| 8 | 0 | 0 |
+| 9 | 1 | 0 |
+| 39 | 31 | 0 |
+| 40 | 32 | 1 |
+| 71 | 63 | 1 |
+| 72 | 64 | 2 |
+| 4075 | 4067 | 127 |
+| 8142 | 8134 | 254 |
+| 8143 | 8135 | 255 |
+| 8144 | 8135 | 255 |
+
+Create otherwise valid `FSM_DATA` fixtures containing every byte value `0..255` inside the
+initialized prefix and assert that all are accepted. Verify category zero in two contexts:
+inside `[0, entry_count)` it is an initialized least-capacity estimate; at or beyond
+`entry_count` the same zero byte is uninitialized storage and cannot be accessed or returned
+as a candidate.
+
+Exercise the eight-byte new-slot reserve with paired heap/FSM fixtures. For a requested
+complete encoded tuple length `n`, compare a gap of `n + 8` with `n + 7` using the exact
+inverse/bucket threshold: the first may advertise the request under the new-slot convention,
+while the second must not guarantee it. Separately construct an architecture-authorized
+reusable `UNUSED` slot and a gap that fits `n` only without a new slot. Heap insertion may
+succeed, while FSM selection may conservatively skip the page; the oracle classifies this as
+safe packing inefficiency and retains the guarded heap recheck.
+
+For the whole-tuple limit, assert that complete encoded length 8135 is accepted by the heap
+limit, a fresh page with `free_bytes = 8144` maps to category 255, free gaps 8143 and 8144 map
+to 255, and `minimum_usable(255) = 8135`. A complete encoded tuple length of 8136 must still
+be rejected by the Chapter 5 heap oracle; no category interpretation makes it legal.
+
+Construct a fragmented heap page whose current contiguous `[lower,upper)` gap is smaller than
+its total reclaimable space. Assert that pre-compaction categorization uses the current gap,
+legal compaction may increase the recomputed category, and the old lower category remains a
+safe stale value. FSM metadata must not itself authorize compaction or claim post-compaction
+capacity before heap logic establishes it.
+
+#### Mapping and maximum coverage
+
+For every mapping case, the independent checked-arithmetic oracle computes:
+
+```text
+ordinal        = heap_page_no - 1
+fsm_page_no    = 1 + ordinal / 8144
+entry_index    = ordinal % 8144
+reverse_page   = 1 + (fsm_page_no - 1) * 8144 + entry_index
+```
+
+Reject heap page zero, `INVALID_PAGE_NO`, underflow, overflow, an FSM data PageNo of zero, and
+any entry index at least 8144 before narrowing or indexing. Verify these fixed vectors:
+
+| Heap PageNo | Heap ordinal | FSM PageNo | Entry | Coverage boundary |
+|---:|---:|---:|---:|---|
+| 1 | 0 | 1 | 0 | first entry of FSM page 1 |
+| 8144 | 8143 | 1 | 8143 | last entry of FSM page 1 |
+| 8145 | 8144 | 2 | 0 | first entry of FSM page 2 |
+| 16288 | 16287 | 2 | 8143 | last entry of FSM page 2 |
+| 16289 | 16288 | 3 | 0 | first entry of FSM page 3 |
+| 1,125,899,906,842,622 | 1,125,899,906,842,621 | 138,249,006,243 | 7773 | maximum physical heap PageNo |
+
+For representative FSM page `P`, verify that entries `0..8143` reverse to the contiguous
+range `1 + (P-1)*8144` through `P*8144`, subject to the physical PageNo and initialized-prefix
+bounds. Forward then reverse and reverse then forward must each produce one identity, with no
+gap or overlap.
+
+At the v1 maximum physical heap PageNo, verify checked subtraction, division, remainder,
+addition, multiplication, and file-offset formation before narrowing. The paired file needs
+`138,249,006,243` FSM data pages, `138,249,006,244` total pages including its superblock, and
+`1,132,535,859,150,848` bytes. Its last page begins with heap PageNo
+`1,125,899,906,834,849` and needs initialized prefix length 7774. Assert the final FSM PageNo
+and signed positional-I/O byte range remain legal, so FSM capacity does not exhaust before
+the heap PageNo domain.
+
+#### Initialized prefix, format, and ownership
+
+Create valid pages with `entry_count` 0, 1, 8143, and 8144 when all represented pages lie
+within the paired heap's published bound. Create raw malformed input with `entry_count = 8145`
+and reject it before category access or ordinary publication.
+
+Publish a heap extent longer than its initialized FSM prefix and assert that the FSM page is
+structurally valid, only initialized entries are searchable, and omitted suffix coverage is
+not corruption. Then extend the prefix without skipping positions: heap publication must
+precede entry availability, the new entry must map to the exact heap PageNo, and every byte
+after the new prefix must remain zero.
+
+For each selected prefix length, verify all suffix bytes are zero. Inject one nonzero byte at
+the first suffix position, a middle suffix position, and the final category byte where those
+positions exist; each fixture is malformed v1 FSM data and must be rejected. Direct access,
+update, or candidate publication at `index == entry_count` must also be rejected rather than
+interpreting the suffix zero as category zero.
+
+Pair each FSM page with the authoritative heap published bound. A prefix ending exactly at
+that bound is accepted; a prefix extending one entry beyond it is rejected before ordinary
+candidate use. An initialized entry for a retired, unpublished, or out-of-bound heap PageNo
+must never become a candidate.
+
+Use two fully valid relations A and B with distinct TableIds, heap FileIds, and FSM FileIds.
+Ordinary FSM use for A must agree across the expected FSM descriptor, `FileKind::FSM`, FSM
+FileId, superblock object_id/TableId, paired heap TableId/identity, requested FSM PageNo and
+`FSM_DATA` type, and both files' published bounds. Attempting FSM(A) with heap(B) is rejected
+as wrong-owner state before candidate publication, not treated as stale metadata.
+
+Run a table-driven owner/format matrix containing:
+
+```text
+correct FSM FileId, wrong TableId
+wrong FSM FileId, correct TableId
+correct superblock, wrong registered descriptor
+valid page bytes copied from another FSM file
+correct TableId, wrong paired HEAP identity
+FSM PageNo 0 used as FSM_DATA
+INVALID_PAGE_NO
+stored PageNo mismatch
+wrong PageType or FileKind
+unpublished FSM PageNo
+bad header_size or checksum
+nonzero common or FSM reserved field
+wrong deterministic first_heap_page_no
+recognized future format version
+```
+
+Malformed v1 and wrong-owner cases are rejected before category access. A recognized future
+format/version produces the canonical unsupported-format result before future bytes are
+interpreted. The bad-checksum case embeds a plausible high `page_lsn` and proves checksum
+acceptance precedes trust in that LSN. Generic FileSuperblock and common-page checks reuse the
+Chapter 4 storage procedures; this family adds the FSM pairing, deterministic mapping,
+prefix/suffix, and candidate-publication oracles.
+
+#### Advisory candidates and physical-space effects
+
+For stale high, persist a structurally valid suitable category while the paired heap page has
+insufficient actual insertion space. Candidate selection may suggest the page, but it must
+then fetch and owner-validate the heap page, acquire the required protection, recompute actual
+heap insertion feasibility, and reject mutation. Assert no extent overlap or out-of-bounds
+write, and permit downward repair plus continued search/fallback. A test hook immediately
+before heap mutation must fail the test if no guarded geometry recheck occurred.
+
+For stale low, persist a category below the request threshold while the heap page can accept
+the tuple. Candidate search may skip the page and choose another page or extension. The oracle
+records only efficiency/packing loss; no exact packing or eventual-discovery guarantee is
+imposed. Repair or rebuild may improve the category.
+
+Construct a structurally and owner-valid category that differs from current heap geometry.
+Structural validation must accept it, and ordinary use treats it as stale advisory metadata,
+not corruption. Parameterize the stale-high and stale-low cases so that the stale source can
+also be the process-local candidate accelerator while persisted FSM bytes remain exact.
+Invalidating or rebuilding that accelerator must not affect persistent correctness, and no
+container, bucket layout, or tie-breaker is prescribed.
+
+Exercise physical-space changes rather than logical row counts:
+
+- logical DELETE retains its tuple bytes and must not advertise reclaimed space;
+- UPDATE consumes destination capacity while the old version retains its space until
+  reclamation;
+- an aborted but physically retained inserted version still consumes space;
+- `NORMAL -> DEAD` and retained DEAD payload do not by themselves create reusable bytes;
+- payload discard, `DEAD -> UNUSED`, or compaction may permit a refreshed category computed
+  from the final validated heap geometry.
+
+An FSM value that resembles an empty or maximally available page cannot authorize SlotId,
+RID, or whole-page reuse. The Vacuum and Reclamation Tests remain the oracle for the
+Chapter 14 grace and identity predicates.
+
+#### Mutation, PAGE_INIT, and crash boundaries
+
+Create a deterministic boundary where a heap mutation publishes successfully and the FSM
+hint update is omitted or fails before publication. Assert that the heap mutation remains
+valid, its statement/transaction outcome is not rolled back solely because the hint is
+absent, the old category may remain stale, and later candidate use remains safe through heap
+recheck. This directly permits separate heap and FSM MTRs without requiring them.
+
+For an attempted FSM update after heap truth changes, inject:
+
+| Boundary | FSM survivor | Required oracle |
+|---|---|---|
+| before FSM mutation publication | old complete legal category | heap result remains valid; stale hint is safe |
+| complete FSM WAL publication, page not flushed | redoable mutation | generic recovery may install the complete new category |
+| WAL/publication outcome is unsafe or indeterminate | canonical failure state | apply §39.1; do not invent an FSM-specific result |
+| after complete FSM page publication | new complete legal category | `page_lsn`, checksum, and candidate visibility agree |
+
+Specialize the generic PAGE_INIT and MTR Rollback Tests for new `FSM_DATA` pages. Pause after
+private image construction, after PAGE_INIT WAL assignment, before published-bound advance,
+and after ordinary publication. Assert correct PageNo/type/owner/header/prefix/suffix,
+WAL-before-data, final checksum, and page_lsn. No private or unpublished page may enter either
+the persisted or runtime candidate search.
+
+Crash before PAGE_INIT publication, after PAGE_INIT WAL publication but before data flush,
+and after page publication. Reuse the generic append/recovery oracle, adding that candidate
+search never sees a private/unpublished FSM page. Failure before publication leaves no
+ordinary searchable page; a published page must recover as a complete valid page.
+
+Interrupt prefix advancement near both an ordinary boundary and 8144. Recovery must expose
+either the old complete prefix or the new complete prefix, never a torn count, nonzero bytes
+outside the recovered prefix, a skipped initialized position, or a prefix past the heap
+published bound.
+
+Use barriers for both growth races:
+
+- while one worker publishes a new heap page, FSM search/update may lag but cannot lead the
+  authoritative heap bound;
+- when mapping first requires a new FSM data page, concurrent search ignores it until
+  PAGE_INIT, publication, owner validation, prefix validity, and candidate publication all
+  complete.
+
+#### Required derived state, repair, rebuild, and recovery
+
+For a committed table, ordinary open establishes the catalog-owned FSM descriptor, managed
+identity, FileId, FileKind, TableId, and final file name. Remove the required FSM file and
+assert that READY cannot silently treat it as optional or substitute another file. Where the
+canonical recovery/repair owner permits reconstruction, the required object must be restored
+at its exact identity before normal use.
+
+Separate structurally valid staleness from structural invalidity. READY may admit a valid but
+inaccurate FSM according to the recovery contract. Bad checksum, bad header size, nonzero
+reserved data, wrong deterministic range, excessive prefix, nonzero suffix, or owner mismatch
+must not enter ordinary use. An explicitly owned rebuild reads validated paired heap geometry;
+it never treats invalid old category values as source truth.
+
+This family proves the complete required/rebuildable/derived/persistent classification:
+
+- required: the expected catalog-owned FSM identity is not ignored;
+- rebuildable: the owned repair/recovery path can reconstruct invalid category state;
+- derived: validated heap geometry, not old FSM bytes, row counts, or planner statistics, is
+  the rebuild oracle;
+- persistent: rebuilt pages use ordinary PAGE_INIT, WAL, page_lsn, checksum, and publication
+  procedures.
+
+For local repair, begin with one stale-high and one stale-low entry, capture a guarded and
+owner-validated heap snapshot, independently calculate its category, and publish only the
+mapped entry/prefix change permitted by the architecture. Assert owner and mapping stability.
+The result may become stale again after a later heap mutation. Crash during repair and accept
+only the old complete category or new complete category according to generic WAL/page
+recovery; torn page state is forbidden.
+
+For whole-file or page-range rebuild, scan validated paired heap-page headers, derive each
+current contiguous gap, apply the same independent forward-category oracle used by incremental
+updates, map each heap PageNo exactly once, construct the legal prefix, and zero the suffix.
+Compare incremental update and rebuild across the exhaustive `free_bytes` domain to prove
+formula identity.
+
+Crash after any published rebuild page/prefix. Every published survivor must be independently
+valid; short or missing coverage remains non-searchable rather than fabricated category-zero
+coverage; unpublished work is ignored or reconciled; and rebuild can restart or resume under
+the recovery owner. If rebuild scans concurrently with heap changes, accept structurally legal
+stale categories and require heap recheck. A quiescent rebuild strategy is also conforming;
+the test suite must not require one scheduling choice.
+
+The crash/recovery specialization is:
+
+| Injected boundary | Heap authority | Permitted FSM survivor | Recovery/candidate oracle |
+|---|---|---|---|
+| heap mutation durable, hint absent | new heap state | old legal category | READY may retain staleness; heap recheck is final |
+| FSM WAL mutation complete, page unflushed | corresponding heap state | old disk image plus redoable WAL | redo installs a complete legal FSM mutation |
+| FSM PAGE_INIT private or unpublished | published heap bound only | no ordinary FSM page | page cannot be searched; generic append recovery applies |
+| FSM PAGE_INIT published | published heap bound | complete initialized FSM page | validate owner/header/prefix/suffix before search |
+| prefix advancement interrupted | unchanged published heap bound | old or new complete prefix | no torn count, skipped entry, nonzero suffix, or lead beyond heap |
+| local repair interrupted | authoritative heap page | old or new complete category | either survivor is advisory-safe; no torn page |
+| rebuild partially published | validated heap pages | independently valid published prefixes/pages | short coverage is safe; restart/resume rebuild |
+| page reinit or retirement before FSM refresh | new authoritative bound/incarnation | stale old category | bound and Chapter 14 gates prevent candidate or RID misuse |
+
+#### Reclamation, retirement, and identity safety
+
+Specialize the Vacuum and Reclamation Tests with an FSM estimate that suggests maximal
+capacity while a former RID or page identity is still grace-protected. Before the complete
+Chapter 14 predicate, SlotId reuse and whole-page reinitialization remain forbidden. After
+grace and canonical reinitialization, the heap geometry resets and FSM state may be refreshed
+for the new page incarnation; an old RID must not resolve to a new tuple prematurely.
+
+Persist stale FSM metadata for a retired or out-of-bound heap PageNo and for a physically
+present unpublished heap tail. Assert that candidate publication rejects each case before
+heap access based on FSM alone. Repair/rebuild may remove or zero such metadata, but the stale
+bytes cannot expand the authoritative heap bound.
+
+#### Error and classification matrix
+
+| Condition | Procedure | Expected classification or result |
+|---|---|---|
+| category differs from guarded heap geometry | stale-high/low fixture | legal advisory staleness; heap recheck decides |
+| malformed v1 FSM page | raw format/prefix/suffix fixture | corruption; reject ordinary use |
+| valid bytes owned by another FSM/heap pair | two-relation owner fixture | wrong-owner corruption; reject before candidate publication |
+| required FSM file absent | committed-table open fixture | missing-required-object/open-repair outcome; never optional substitution |
+| recognizable future page/file format | version-dispatch fixture | unsupported-format result before layout interpretation |
+| exact or short ordinary I/O | generic disk fault specialization | canonical I/O failure |
+| unsafe WAL/publication failure | FSM mutation injection | canonical §39.1 durability/instance consequence |
+| candidate fails guarded heap-space recheck | stale-high insertion fixture | candidate `NO_SPACE`/retry path, not FSM corruption |
+
+#### FSM verification domain/case matrix
+
+| Domain | Deterministic fixture | Fault/race boundary | Expected oracle | Architecture reference | Status |
+|---|---|---|---|---|---|
+| Forward categories | all `free_bytes` 0..8144 | N/A | exact independent formula and monotonicity | §§6.3, 6.3.1 | COMPLETE |
+| Inverse categories | all categories 0..255 | N/A | exact lower bound and monotonicity | §6.4 | COMPLETE |
+| Slot reserve / tuple limit | paired gaps, reusable slot, 8135/8136 | heap recheck | conservative eight-byte rule; heap decides | §§5.4–5.6, 6.3–6.4 | COMPLETE |
+| Mapping boundaries | fixed vectors and reverse map | arithmetic limits | no gap, overlap, wrap, or early FSM exhaustion | §6.6; §4.3.2.3 | COMPLETE |
+| Prefix/suffix | counts 0, 1, 8143, 8144, malformed 8145 | prefix publication | short prefix accepted; suffix canonical | §§6.7–6.8 | COMPLETE |
+| Owner pairing | two valid relations and cross-cases | before candidate publication | exact descriptor/FileId/TableId/heap pairing | §§4.10, 4.13.6, 6.13 | COMPLETE |
+| Stale high | overstated legal category | before heap mutation | guarded heap recheck prevents unsafe insert | §§6.1, 6.10 | COMPLETE |
+| Stale low | understated legal category | candidate enumeration | efficiency loss only | §6.10 | COMPLETE |
+| PAGE_INIT | canonical private FSM page | WAL and publication boundaries | unpublished page never searchable | §§6.8, 12.9, 12.12 | COMPLETE |
+| Prefix crash | prefix near ordinary/full boundary | count/category publication | old or new complete prefix only | §§6.7–6.8, 12.12 | COMPLETE |
+| Local repair | stale-high and stale-low entries | repair WAL publication | old or new legal category | §6.10; §12.12 | COMPLETE |
+| Rebuild | validated heap scan | partial page/range publication | restartable valid short coverage; formula identity | §6.10; §§13.11–13.19 | COMPLETE |
+| Required file | committed catalog owner | missing/corrupt file at open | owned repair/rebuild or no READY | §§4.13.6, 6.10, 13.18 | COMPLETE |
+| Reclamation/reuse | grace-protected RID/page | before and after grace | FSM never authorizes identity reuse | §§6.12–6.13, 14.5–14.12 | COMPLETE |
+
+#### Chapter 6 architecture-obligation coverage map
+
+The atomic inventory below is the procedural owner map for Chapter 6. “Complete” means that
+the obligation has a deterministic fixture, operation or injected boundary, and explicit
+oracle in this section or in the named generic procedure it specializes.
+
+| # | Architecture obligation | Architecture owner | Verification owner | Status |
+|---:|---|---|---|---|
+| 1 | Forward formula exactness | §6.3 | Category arithmetic — exhaustive forward domain | COMPLETE |
+| 2 | Inverse formula exactness | §6.4 | Category arithmetic — exhaustive inverse domain | COMPLETE |
+| 3 | Forward monotonicity | §6.3 | Category arithmetic — adjacent full-domain comparison | COMPLETE |
+| 4 | Saturation at physical/tuple maxima | §6.3 | Category arithmetic — 8143/8144 and upper-limit cases | COMPLETE |
+| 5 | Category-zero boundary and meaning | §§6.2–6.4 | Category arithmetic — named boundaries and context test | COMPLETE |
+| 6 | Every uint8 category is valid in-prefix | §§6.2, 6.5 | Category arithmetic — 0..255 encoded fixtures | COMPLETE |
+| 7 | Eight-byte new-slot reserve | §6.3 | Category arithmetic — `n+8`/`n+7` paired cases | COMPLETE |
+| 8 | Reusable-slot conservative understatement | §6.3 | Category arithmetic — reusable UNUSED fixture | COMPLETE |
+| 9 | 8135 maximum complete encoded tuple interaction | §§5.6, 6.3–6.4 | Category arithmetic — whole-tuple boundary | COMPLETE |
+| 10 | 8136 remains an invalid complete encoded tuple | §5.6 | Category arithmetic — heap final-authority boundary | COMPLETE |
+| 11 | First heap-page mapping | §6.6 | Mapping — heap 1 vector | COMPLETE |
+| 12 | Last entry of FSM page 1 | §6.6 | Mapping — heap 8144 vector | COMPLETE |
+| 13 | First entry of FSM page 2 | §6.6 | Mapping — heap 8145 vector | COMPLETE |
+| 14 | Exact 8144-entry boundaries | §6.6 | Mapping — 8144/8145 and 16288/16289 vectors | COMPLETE |
+| 15 | Reverse mapping and coverage | §6.6 | Mapping — bidirectional range enumeration | COMPLETE |
+| 16 | Checked mapping arithmetic | §6.6 | Mapping — checked operation/failure cases | COMPLETE |
+| 17 | Maximum heap PageNo mapping | §§4.3.2.3, 6.6 | Mapping — terminal vector | COMPLETE |
+| 18 | Maximum paired FSM coverage | §§4.3.2.3, 6.6 | Mapping — page-count/file-length proof | COMPLETE |
+| 19 | `entry_count` lower bound | §6.7 | Prefix — zero-count valid fixture | COMPLETE |
+| 20 | `entry_count` upper bound | §6.7 | Prefix — 8144 valid and 8145 invalid fixtures | COMPLETE |
+| 21 | Short initialized prefix is valid | §6.7 | Prefix — heap extent longer than prefix | COMPLETE |
+| 22 | Initialized category zero is valid | §§6.7–6.8 | Prefix — in-prefix zero fixture | COMPLETE |
+| 23 | Suffix bytes are canonical zero | §6.7 | Prefix — valid zero suffix | COMPLETE |
+| 24 | Nonzero suffix is malformed | §6.7 | Prefix — first/middle/final corruption fixtures | COMPLETE |
+| 25 | Entry outside prefix is inaccessible | §6.7 | Prefix — `index == entry_count` operations | COMPLETE |
+| 26 | Prefix cannot exceed paired heap bound | §6.7 | Prefix — exact-bound/one-past pair | COMPLETE |
+| 27 | Correct HEAP/FSM TableId pairing | §§4.10, 4.13.6 | Ownership — valid relation fixture | COMPLETE |
+| 28 | HEAP and FSM use distinct FileIds | §§4.7, 6.1–6.2 | Ownership — valid relation identity checks | COMPLETE |
+| 29 | Wrong FSM/heap attachment is rejected | §§4.13.6, 6.13 | Ownership — two-relation cross-pair fixture | COMPLETE |
+| 30 | Wrong FileKind is rejected | §§4.10, 6.2 | Ownership — malformed-owner table | COMPLETE |
+| 31 | Wrong PageType is rejected | §§4.9, 6.5 | Ownership — malformed-owner table | COMPLETE |
+| 32 | Wrong stored PageNo is rejected | §§4.9, 6.6 | Ownership — malformed-owner table | COMPLETE |
+| 33 | Unpublished FSM page is rejected | §§4.11, 6.8 | Ownership/PAGE_INIT — publication barrier | COMPLETE |
+| 34 | Entry beyond heap bound is rejected | §§6.7, 6.13 | Prefix/ownership — paired-bound fixture | COMPLETE |
+| 35 | Stale-high category is safe | §6.10 | Advisory — overstated candidate fixture | COMPLETE |
+| 36 | Stale-low category is safe | §6.10 | Advisory — understated candidate fixture | COMPLETE |
+| 37 | Heap recheck precedes mutation | §§6.1, 6.4, 6.10 | Advisory — mandatory ordering hook | COMPLETE |
+| 38 | Runtime candidate index is not authoritative | §6.9 | Advisory — invalidation/stale runtime parameter | COMPLETE |
+| 39 | FSM cannot prove insertion success | §§6.1, 6.10 | Advisory — stale-high rejection | COMPLETE |
+| 40 | FSM cannot authorize RID reuse | §§6.12–6.13 | Reclamation — grace-protected capacity fixture | COMPLETE |
+| 41 | Heap mutation may precede FSM hint update | §6.10; §14.16 | Mutation — omitted-hint boundary | COMPLETE |
+| 42 | Missed FSM update does not roll back heap truth | §6.10; §39.1 | Mutation — omitted/failed hint oracle | COMPLETE |
+| 43 | Separate FSM MTR is permitted | §§6.8, 6.10; §12.12 | Mutation — separate publication fixture | COMPLETE |
+| 44 | WAL-before-data applies to FSM | §§6.8, 12.17 | PAGE_INIT/WAL generic specialization | COMPLETE |
+| 45 | `page_lsn` and checksum follow final FSM mutation | §§4.12, 6.8 | PAGE_INIT/WAL specialization | COMPLETE |
+| 46 | FSM PAGE_INIT publication is atomic | §§6.8, 12.9, 12.12 | PAGE_INIT boundary matrix | COMPLETE |
+| 47 | Private/unpublished FSM pages are not searchable | §6.8 | PAGE_INIT candidate-publication hook | COMPLETE |
+| 48 | Complete FSM mutation is redoable | §§12.12, 13.13 | Mutation/recovery — WAL-published case | COMPLETE |
+| 49 | READY may use structurally valid stale FSM | §6.10; §13.18 | Recovery — stale valid open fixture | COMPLETE |
+| 50 | Structurally invalid FSM is rejected | §§4.13, 6.5–6.8 | Format/ownership corruption matrix | COMPLETE |
+| 51 | Local stale-entry repair | §6.10 | Repair — guarded heap snapshot fixture | COMPLETE |
+| 52 | Interrupted repair is atomic/recoverable | §§6.10, 12.12 | Repair — old/new survivor crash case | COMPLETE |
+| 53 | Rebuild derives from heap geometry | §6.10 | Rebuild — validated heap scan | COMPLETE |
+| 54 | Partial rebuild crash remains safe | §6.10; §§13.11–13.19 | Rebuild — published-prefix crash matrix | COMPLETE |
+| 55 | Interrupted prefix advancement remains complete | §§6.7–6.8, 12.12 | Prefix — old/new survivor crash case | COMPLETE |
+| 56 | Rebuild can restart/resume safely | §6.10; §13.18 | Rebuild — partial restart case | COMPLETE |
+| 57 | FSM file is required for its catalog owner | §§4.7, 4.13.6 | Required-state — missing-file open fixture | COMPLETE |
+| 58 | Missing FSM follows owned repair/open behavior | §§4.13.6, 6.10, 13.18 | Required-state — no optional substitution | COMPLETE |
+| 59 | FSM is rebuildable derived persistent state | §§6.8, 6.10 | Required-state four-part classification fixture | COMPLETE |
+| 60 | Logical DELETE does not free physical bytes | §§5.16, 15.4 | Physical effects — retained tuple fixture | COMPLETE |
+| 61 | UPDATE old page retains physical consumption | §§5.15, 15.3 | Physical effects — old/new version fixture | COMPLETE |
+| 62 | Vacuum/compaction may refresh category | §§6.11–6.12, 14.16 | Physical effects — state/compaction matrix | COMPLETE |
+| 63 | `DEAD -> UNUSED` remains grace-gated | §§6.12, 14.5–14.12 | Reclamation — before/after grace fixture | COMPLETE |
+| 64 | Whole-page reinit remains RID/page-reuse gated | §§6.12, 14.5–14.12 | Reclamation — page-incarnation fixture | COMPLETE |
+| 65 | Retired/unpublished heap pages cannot be candidates | §§4.11, 6.7–6.8 | Retirement — stale out-of-bound fixtures | COMPLETE |
+| 66 | Exact FSM page layout and little-endian fields | §§6.5–6.5.1 | Deterministic canonical fixture and codec checks | COMPLETE |
+| 67 | Common/FSM reserved fields are zero | §§6.5.1, 6.13 | Format — table-driven nonzero fixtures | COMPLETE |
+| 68 | Future format and malformed v1 dispatch differ | §§4.13–4.14, 6.5 | Format — version/classification matrix | COMPLETE |
+| 69 | Category input is current contiguous heap gap | §§5.4, 6.3, 6.11 | Category/compaction fixture | COMPLETE |
+| 70 | Runtime accelerator is derived and nonpersistent | §6.9 | Advisory — invalidate/rebuild runtime index | COMPLETE |
+| 71 | FSM validation ordering protects LSN/category use | §§4.13, 6.13 | Observability — staged acceptance hooks | COMPLETE |
+| 72 | Stale, corrupt, missing, unsupported, I/O, WAL, and `NO_SPACE` outcomes remain distinct | §§4.13–4.14, 6.10, 39.1 | Error and classification matrix | COMPLETE |
+
+Coverage inventory: `72 COMPLETE`, `0 PARTIAL`, `0 MISSING`, and
+`0 CONTRADICTORY`.
 
 ---
 
