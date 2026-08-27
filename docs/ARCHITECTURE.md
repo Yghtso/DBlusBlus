@@ -3881,7 +3881,8 @@ This chapter defines:
 - heap-page compaction constraints,
 - vacuum's physical-reclamation boundary.
 
-I/O ownership, BufferPool mechanics, and WAL/recovery ordering are defined by later chapters.
+I/O ownership and BufferPool mechanics are defined by §§7.3–7.12, WAL-backed
+page-mutation publication by §12.12, and crash recovery by §§13.11–13.19.
 
 ## 6.2 FSM file organization
 
@@ -3903,7 +3904,7 @@ uint8_t category
 255 = greatest represented insertion capacity
 ```
 
-Larger category values represent greater tuple-payload insertion capacity under the v1 mapping.
+Larger category values represent greater complete encoded tuple insertion capacity under the v1 mapping.
 
 All byte values `0..255` are valid categories for initialized entries.
 
@@ -3924,7 +3925,7 @@ maximum contiguous gap
     = 8144 bytes
 ```
 
-The persisted category represents **conservative tuple-payload insertion capacity assuming that a new 8-byte slot entry is required**.
+The persisted category represents **conservative complete encoded tuple insertion capacity assuming that a new 8-byte slot entry is required**.
 
 The v1 mapping first computes:
 
@@ -3943,7 +3944,7 @@ where:
 
 ```text
 8    = HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE
-8135 = HEAP_PAGE_MAX_RAW_TUPLE_SIZE
+8135 = maximum v1 complete encoded tuple length
 ```
 
 The category is then:
@@ -3959,7 +3960,13 @@ Inputs above the physical 8144-byte contiguous-gap maximum are clamped to 8144 b
 
 The mapping is monotonic.
 
-The mapping remains conservative even if a later insertion path can sometimes reuse a slot without paying the new 8-byte slot-entry cost. Persisted FSM metadata MUST NOT overstate guaranteed insertion capacity merely because slot reuse may become possible.
+The mapping deliberately reserves the 8-byte new-slot cost even when insertion
+can reuse an architecture-authorized `UNUSED` slot. A reusable slot can
+therefore make actual insertion capacity greater than the category's guarantee.
+This conservative underestimation is safe because actual heap geometry remains
+authoritative and every FSM candidate is rechecked before mutation. Persisted
+FSM metadata MUST NOT overstate guaranteed insertion capacity based on slot
+reuse.
 
 ### 6.3.1 Representative boundaries
 
@@ -3975,7 +3982,7 @@ free_bytes 8143, 8144     -> category 255
 
 ## 6.4 Category lower-bound interpretation
 
-For a persisted category `c`, the v1 inverse helper is an **inclusive lower bound** on represented usable tuple-payload bytes.
+For a persisted category `c`, the v1 inverse helper is an **inclusive lower bound** on represented usable complete encoded tuple bytes.
 
 It is not an upper bound and not a bucket midpoint.
 
@@ -4130,7 +4137,11 @@ with:
 0 <= entry_count <= 8144
 ```
 
-The initialized prefix represents currently existing heap pages beginning at the page's persisted `first_heap_page_no`.
+The initialized prefix represents a contiguous range of published heap pages
+beginning at the page's persisted `first_heap_page_no`. It need not cover every
+published heap page; a shorter prefix is structurally valid. The initialized
+range MUST NOT extend beyond the paired heap file's authoritative published
+page bound.
 
 Entries satisfying:
 
@@ -4138,7 +4149,7 @@ Entries satisfying:
 entry_index >= entry_count
 ```
 
-are uninitialized future-entry storage.
+are uninitialized entry storage.
 
 In FSM_DATA v1, every byte in that uninitialized suffix MUST persist as zero.
 
@@ -4146,13 +4157,18 @@ Structural validation MUST reject a nonzero byte in the uninitialized suffix.
 
 Entry access/update operations MUST reject an index outside the initialized prefix.
 
-A later relation-wide FSM owner MAY grow the initialized prefix as additional heap pages are allocated. That ownership/lifecycle policy is separate from the persisted page format.
+Architecture-authorized FSM maintenance MAY extend or repair the initialized
+prefix as heap pages are published. Entries outside the prefix remain absent
+from FSM candidate selection until that maintenance publishes them. This
+ownership/lifecycle policy is separate from the persisted page format.
 
 ## 6.8 Blank FSM_DATA page initialization
 
-Initializing a new FSM_DATA page first deterministically zeroes the entire 8192-byte page and then writes the explicit common and FSM-specific headers.
+Initializing a new FSM_DATA page first deterministically zeroes the entire
+8192-byte page and then constructs the explicit common and FSM-specific headers
+as a private page image under §§4.11.1 and 12.12.
 
-Before WAL integration, common-header defaults are:
+The common-header fields are:
 
 ```text
 page_type       = FSM_DATA
@@ -4160,8 +4176,6 @@ format_version  = 1
 header_size     = 48
 page_no         = actual FSM PageId.page_no
 flags           = 0
-page_lsn        = INVALID_LSN unless explicitly supplied
-checksum_crc32c = 0
 reserved16      = 0
 ```
 
@@ -4172,7 +4186,7 @@ first_heap_page_no =
     deterministic value derived from FSM page number
 
 entry_count =
-    caller-selected initialized prefix length
+    owner-selected initialized prefix length
 
 reserved16 = 0
 reserved32 = 0
@@ -4180,14 +4194,14 @@ reserved32 = 0
 
 `entry_count` is subject to the `0..8144` invariant in §6.7.
 
-All category bytes initially remain zero.
+All category bytes initially remain zero. A zero byte inside the initialized
+prefix is category `0`; bytes in the uninitialized suffix are canonical zero.
 
-Before WAL/recovery integration, ordinary FSM_DATA page mutation does not:
-
-- advance `page_lsn`,
-- generate or update a whole-page CRC32C checksum.
-
-Once WAL/recovery is active, the global page-checksum and WAL policies apply.
+Before ordinary publication, the owning `PAGE_INIT` assigns `page_lsn` to its
+record LSN and finalizes the valid whole-page checksum under §§4.11.1 and 12.9.
+The page is not ordinarily searchable until that PAGE_INIT and the owning
+published-page bound complete the §12.12 publication protocol. Subsequent
+persistent FSM mutations and writeback obey §§7.10–7.11, 12.12, and 12.17.
 
 ## 6.9 Runtime FSM acceleration
 
@@ -4312,15 +4326,21 @@ The conceptual sequence is:
 
 This sequence defines subsystem responsibilities, not the final crash-safe WAL ordering.
 
-The exact crash-safe ordering is owned by the later WAL/recovery and vacuum protocols.
+The exact WAL publication and recovery ordering is owned by §§12.12 and 13.13;
+vacuum reclamation and FSM maintenance are owned by §§14.5–14.12 and 14.16.
 
 A heap page that becomes completely empty remains reusable database space.
 
 The engine is not required to shrink the underlying operating-system file merely because a page becomes empty.
 
-Physical slot reuse remains subject to the later safe RID-reuse protocol; vacuum eligibility and page compaction alone do not implicitly authorize immediate RID reuse.
+Physical slot reuse remains subject to the RID-reuse protocol in §§14.5–14.12;
+vacuum eligibility and page compaction alone do not implicitly authorize
+immediate RID reuse.
 
-The same rule applies to whole-page recycling: an empty heap page may remain reusable database space, but reinitializing its `PageNo` in a way that reuses former `(PageNo, SlotId)` identities requires the later physical RID-reuse safety protocol.
+The same rule applies to whole-page recycling: an empty heap page may remain
+reusable database space, but reinitializing its `PageNo` in a way that reuses
+former `(PageNo, SlotId)` identities requires the physical RID-reuse safety
+protocol in §§14.5–14.12.
 
 ## 6.13 FSM and reclamation invariants
 
@@ -4328,7 +4348,7 @@ The same rule applies to whole-page recycling: an empty heap page may remain reu
 2. FSM page `0` is an FSM FileSuperblock; `FSM_DATA` pages begin at page `1`.
 3. Each ordinary heap data page maps deterministically to one one-byte FSM category.
 4. Category values are exactly `0..255`, with larger values representing greater conservative insertion capacity.
-5. The v1 category assumes an 8-byte new-slot cost and caps usable tuple payload at 8135 bytes.
+5. The v1 category assumes an 8-byte new-slot cost and caps represented complete encoded tuple length at 8135 bytes.
 6. `category = floor(usable_insertion_bytes * 255 / 8135)`.
 7. `minimum_usable(c) = ceil(c * 8135 / 255)`.
 8. FSM_DATA v1 is exactly 8192 bytes with a 48-byte total header and 8144 one-byte entries.
