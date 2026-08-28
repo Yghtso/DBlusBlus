@@ -2476,6 +2476,489 @@ Focus:
 
 ## Transaction, Durability, and Reclamation Verification
 
+### Transaction identity, snapshot, and status verification
+
+This section is the detailed procedural owner for the transaction identity, snapshot,
+transaction-status, and terminal-publication contracts in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §§9.1–9.16. Numeric Exhaustion and
+Terminal-Boundary Verification remains the detailed owner for TxnId reservation/exhaustion
+and CommandId boundaries; the COMMIT, ABORT, lifecycle, recovery, isolation, and vacuum
+sections below remain the detailed owners for their existing cross-layer procedures. The
+procedures here add the Chapter-9-specific byte, lookup, lifetime, and race oracles without
+redefining tuple visibility (§10), write/uniqueness conflicts (§11), WAL semantics
+(Chapter 12), recovery outcomes (Chapter 13), or read-epoch reclamation (Chapter 14).
+
+#### Deterministic harness, observability, and independent oracles
+
+Transaction concurrency verification uses controlled scheduling and barriers rather than
+elapsed-time sleeps or repeated stress until a race occurs. The harness can pause and record
+these semantic events without requiring production function names:
+
+```text
+TxnId reservation begins / control high-water becomes durable / TxnId is issued
+transaction registration begins / active-registry publication completes
+snapshot high-water is read / active set is captured / snapshot registration completes
+terminal status-page mutation begins / terminal WAL append completes
+terminal WAL becomes durable
+runtime terminal-cache publication / runtime state transition / active removal
+snapshot unregister / read-only terminal cleanup
+status-page PAGE_INIT reservation / append / page-bound publication
+crash or injected failure
+recovery image reconstruction / terminal redo / loser resolution / READY publication
+```
+
+The event log records TxnIds, isolation and CommandId, runtime states, snapshot fields,
+active-registry membership, terminal-cache result, transaction `last_wal_lsn` and
+persistent/current-statement write flags, durable WAL end, status PageId and bytes, file
+published bound, held logical locks/gates, cancellation/deadlock state, snapshot-horizon
+registration, database health, and client result. Every race below forces both legal orders
+at the owning linearization point. Random stress remains complementary; it is not a
+substitute for these schedules.
+
+Test-side oracles are independent:
+
+- TxnId-to-status mapping is computed from mathematical integers and checked before
+  conversion to persisted widths;
+- snapshot membership is an expected ordered set built from the harness-controlled states,
+  not copied from the production snapshot;
+- terminal-race outcomes follow the barrier order and §9.14 linearization, not the state
+  returned by the implementation under test;
+- recovery outcomes derive from the independently constructed valid durable WAL prefix, not
+  from resident status bytes or the precrash API result.
+
+Every valid fixture is canonical except for the one defect under test. Valid status fixtures
+have the correct file/page identity, published bound, checksum, version, flags/reserved
+bytes, PAGE_INIT history, and registered owner. A status-lookup test cannot accidentally use
+a corrupt page, and a corruption test changes only its selected dimension.
+
+#### TXN_STATUS persisted bytes, capacity, and mapping
+
+The generic FileSuperblock codec and registered-owner procedures in Storage Verification and
+§§4.10, 4.13.6 verify the `txn_status.dat` specialization with this matrix:
+
+| Region/property | Canonical fixture | Independent mutation/oracle |
+|---|---|---|
+| Page 0 framing | Exact 8192-byte FileSuperblock; `FileKind::TXN_STATUS=5`; valid FileId; `object_id=0`; page size/version/header fields from §4.10 | Mutate kind, FileId, object identity, version, header size, flags, checksum, or each required-zero field/range independently |
+| Trailing superblock bytes | Generic 72-byte header followed by canonical zero bytes | Walk the complete required-zero suffix with one nonzero byte per fixture |
+| Physical/published bound | Aligned file length and §12.12-reconciled process-local `published_page_count`; this is not invented as a superblock field | Truncated, overlong, misaligned, and publication/WAL-disagreeing fixtures never expose an unowned page |
+| Data-page framing | 32-byte common header; `PageType::TXN_STATUS=7`; no specialized header; payload bytes `32..8191` | Mutate PageId, type, version, `header_size`, flags/reserved, checksum, page length, and published-bound relation one at a time |
+
+Ordinary lookup validates registered file/owner and published PageNo, performs an exact read,
+dispatches file/page version, verifies checksum and common PageId/header fields, verifies
+TXN_STATUS type, and only then reads the two-bit payload. A recognized future file/page
+version produces the owning unsupported-format result. A supported-v1 framing/checksum,
+identity, range, or reserved-zero defect produces the owning corruption/open/recovery
+failure. The valid semantic code `INVALID` is neither corruption nor an unsupported format.
+
+The test oracle independently recomputes:
+
+```text
+payload bytes       = 8192 - 32 = 8160
+entries per byte    = 4
+entries per page    = 8160 * 4 = 32640
+
+ordinal             = txn_id - FIRST_NORMAL_TXN_ID
+status_page_no       = 1 + ordinal / 32640
+entry_in_page        = ordinal % 32640
+payload_byte_index   = entry_in_page / 4
+two_bit_index        = entry_in_page % 4
+page_byte_offset     = 32 + payload_byte_index
+bit_shift            = 2 * two_bit_index
+```
+
+All subtraction, division, addition, and PageNo/file-offset conversion uses checked
+mathematical arithmetic. Reserved TxnIds `0` and `1`, values above the maximum normal TxnId,
+and any result outside the v1 physical PageNo domain are rejected before page access.
+
+The two-bit test is the Cartesian product of every status code and position:
+
+| Position | Shift | Mask | Codes encoded/decoded independently |
+|---:|---:|---:|---|
+| 0 | 0 | `0x03` | `00 INVALID`, `01 COMMITTED`, `10 ABORTED`, `11 RESERVED` |
+| 1 | 2 | `0x0c` | all four codes |
+| 2 | 4 | `0x30` | all four codes |
+| 3 | 6 | `0xc0` | all four codes |
+
+For each of the 16 cases, prefill the other six bits with both zero and nonzero patterns,
+replace only the selected two bits, and assert that neighboring statuses remain unchanged.
+Decode through an independent mask/shift oracle so production encode/decode are not each
+other's oracle.
+
+The required boundary/status mapping matrix is:
+
+| TxnId/case | Ordinal | PageNo | Entry | Byte offset | Shift | Status fixture | Expected observation/result |
+|---|---:|---:|---:|---:|---:|---|---|
+| `2` | 0 | 1 | 0 | 32 | 0 | INVALID plus active registry | First normal TxnId; lookup is IN_PROGRESS |
+| `3` | 1 | 1 | 1 | 32 | 2 | COMMITTED | Second bit position; lookup is COMMITTED |
+| `5` | 3 | 1 | 3 | 32 | 6 | ABORTED | Fourth bit position; lookup is ABORTED |
+| `6` | 4 | 1 | 4 | 33 | 0 | RESERVED | Next payload byte; recognized nonterminal result |
+| `32640` | 32638 | 1 | 32638 | 8191 | 4 | INVALID plus active registry | Penultimate first-page entry; lookup is IN_PROGRESS |
+| `32641` | 32639 | 1 | 32639 | 8191 | 6 | COMMITTED | Last first-page entry; lookup is COMMITTED |
+| `32642` | 32640 | 2 | 0 | 32 | 0 | ABORTED | First next-page entry; extension then ABORTED lookup |
+| `32643` | 32641 | 2 | 1 | 32 | 2 | RESERVED | Adjacent next-page entry; recognized nonterminal result |
+| `18,446,744,073,708,503,041` | `18,446,744,073,708,503,039` | `565,157,600,297,442` | 28,799 | 7,231 | 6 | COMMITTED | Maximum legal mapping; lookup is COMMITTED |
+| Normal TxnId at/above durable allocation end | formula result, if physically represented | formula result | formula result | formula result | formula result | INVALID | Unallocated/high-water-invalid; never guessed ABORTED or allocated |
+| Allocated nonretired TxnId on malformed page | formula result | published mapped page | formula result | formula result | formula result | untrusted | Owning corruption/open/recovery failure before status decode |
+
+The maximum calculation is recomputed from the §4.3.2.1 block sequence, not copied from
+production constants. The oracle additionally proves status PageNo
+`565,157,600,297,442` is below maximum physical PageNo
+`1,125,899,906,842,622`. The universal B-1/B0/B+1 procedure remains the no-wrap and
+`TXN_ID_EXHAUSTED` owner.
+
+A freshly initialized status payload decodes as `INVALID`, but interpretation also consumes
+the durable allocation high-water and runtime context:
+
+- an entry at or above `reserved_txn_id_end` must remain `INVALID` and is not evidence of an
+  allocated or aborted transaction;
+- an allocated active TxnId with `INVALID` persistent bits is `IN_PROGRESS` through the
+  active registry, not ABORTED;
+- an allocated, nonactive status-dependent reference with only `INVALID` or `RESERVED`
+  after completed recovery is the §9.11.1/§9.13 invariant failure, not a guessed outcome;
+- `RESERVED` is recognized v1 nonterminal state, never COMMITTED or ABORTED and never an
+  unknown-format value.
+
+#### Snapshot registration, representation, and lifetime
+
+The BEGIN/snapshot harness pauses a new transaction immediately before and after TxnId issue
+and active-registry publication, while another transaction pauses at high-water capture and
+active-set capture under §9.8's shared synchronization. It forces these orders:
+
+1. **Registration wins.** The new nonterminal TxnId is below captured `xmax` and appears in
+   `active` unless it is the owner.
+2. **Capture wins.** The new TxnId is assigned at or above the captured `xmax`; it need not
+   appear in `active` and is too new for that snapshot.
+
+For an ordinary writable BEGIN, instrumentation also asserts that registration, rather than
+a persistent RESERVED/IN_PROGRESS status mutation, represents the new nonterminal
+transaction. The valid status page, WAL end, and file bound remain unchanged by BEGIN.
+
+The explicit forbidden oracle is:
+
+```text
+txn_id < snapshot.xmax
+and transaction was nonterminal at capture
+and txn_id != snapshot.owner_txn_id
+and txn_id not in snapshot.active
+```
+
+This state fails the test because it would let a live transaction fall through both the
+active and too-new classifications. The synchronization may be held only for the capture or
+registration bookkeeping; instrumentation also asserts it is released before statement
+execution.
+
+Snapshot representation uses these canonical deterministic fixtures:
+
+| Case | Controlled state at capture | Expected `active` | Expected `xmin` | Stability oracle |
+|---|---|---|---:|---|
+| No other active | owner 50, `xmax=60` | `[]` | 60 | Later BEGIN/terminal events do not alter fields |
+| One lower active | active 20, owner 50, `xmax=60` | `[20]` | 20 | Membership retained after 20 later commits |
+| Multiple active | 30, 10, 40; owner 50; `xmax=60` | `[10,30,40]` | 10 | Sorted vector remains immutable |
+| Owner would be minimum | owner 10, other active 30, `xmax=60` | `[30]` | 30 | SELF is represented only by owner/command fields |
+| Sparse TxnIds | active 2 and 1,048,578; owner 500; larger `xmax` | `[2,1048578]` | 2 | Reservation gaps create no synthetic members |
+| BEGIN before capture | new 40 registered, owner 50, `xmax>40` | includes 40 | ordered minimum | Registration-wins oracle |
+| Capture before BEGIN | captured `xmax=60`, new TxnId `>=60` | excludes new | unchanged | High-water-wins oracle |
+| Terminal before capture | terminal cache/state published first | excludes terminal TxnId | from remaining set | Lookup observes terminal result |
+| Terminal after capture | TxnId nonterminal at capture | retains TxnId | captured value | No retroactive removal |
+
+V1 requires the sorted-vector representation but not one lookup routine. Tests assert exact
+sorted membership, owner exclusion, snapshot stability, and §9.7.3 `xmin`; they do not
+require `std::binary_search` or any other production helper. Alternative high-concurrency
+active-set representations are outside the v1 test obligation.
+
+After capture, controlled BEGIN, COMMIT, and ABORT operations mutate the live registry while
+the captured `xmax`, `active`, and `xmin` remain byte/value stable. For REPEATABLE READ, only
+the architecture-authorized `command_id` boundary changes between statements.
+
+Isolation-identity cases begin transactions with no isolation clause, explicit READ
+COMMITTED, explicit REPEATABLE READ, and each deferred §9.5 mode. They assert that omission
+selects READ COMMITTED, the two supported identities reach the matching procedures below,
+and deferred modes are rejected rather than silently mapped to a supported level. Public
+metadata and diagnostics identify REPEATABLE READ as snapshot isolation and never as
+SERIALIZABLE. The existing Isolation Tests remain the owner of behavioral visibility and
+write-skew outcomes.
+
+READ COMMITTED procedures hold one registered statement snapshot for the complete attempt,
+including scans and result production. SUCCESS and
+`FAILED_TRANSACTION_REMAINS_ACTIVE` unregister it and consume the CommandId; the next
+statement obtains a fresh snapshot. A permitted §15.7 pre-write retry unregisters the old
+attempt snapshot, captures a fresh snapshot, and retains the same logical CommandId. A
+post-write conflict follows MUST_ABORT/ABORT and cannot reuse the snapshot.
+
+REPEATABLE READ procedures assert no transaction snapshot exists merely because BEGIN
+returned. The first ordinary statement captures and registers it; later statements retain
+the same `xmax`, `active`, `xmin`, and owner while advancing the command boundary. It remains
+registered through terminal transaction cleanup. Snapshot registration is observed by the
+§14.2 global horizon: early unregister is a failure, and terminal/statement cleanup must not
+leak a registration. SQL snapshot lifetime remains distinct from §14.6's RID read-epoch
+guard.
+
+#### Terminal publication versus snapshot capture
+
+For COMMIT and ABORT separately, pause immediately before and after §9.14.1's atomic runtime
+terminal publication and race a snapshot capture through the same synchronization domain.
+Durable WAL/status prerequisites are arranged by the existing COMMIT/ABORT procedures; this
+test observes only Chapter 9's cache/state/registry linearization.
+
+| Race order | Expected snapshot/lookup result | Forbidden result |
+|---|---|---|
+| COMMITTED publication completes before capture | TxnId absent from `active`; terminal cache returns COMMITTED | Absent from active while lookup remains IN_PROGRESS |
+| Capture completes before COMMITTED publication | Nonterminal TxnId `<xmax` remains captured in `active`, even after later commit | Retroactive removal from captured snapshot |
+| ABORTED publication completes before capture | TxnId absent from `active`; terminal cache returns ABORTED | New snapshot records terminal TxnId as active |
+| Capture completes before ABORTED publication | TxnId remains in captured `active`; later status lookup may return ABORTED | Captured membership mutates after abort |
+
+At publication, the harness can retain a test observation of the old active-registry entry
+while the runtime terminal cache is already installed. Direct lookup must return the cache's
+COMMITTED/ABORTED value. This catches stale registry state overriding a terminal result.
+Logical locks/gates remain unavailable to competitors until terminal publication; their
+detailed waits remain Chapter-11 verification.
+
+#### Transaction-status lookup precedence
+
+Use canonical valid pages and independently control each runtime source. The mandatory
+precedence matrix is:
+
+| Case | FROZEN | SELF | Terminal cache | Active registry | Below retired cutoff | Persisted bits | Expected | Forbidden |
+|---|---:|---:|---|---|---:|---|---|---|
+| Frozen sentinel | yes | no | any | any | any | inaccessible | COMMITTED/frozen result | Page access |
+| Current transaction | no | yes | none | active | no | INVALID/RESERVED | SELF | Persistent status overriding self |
+| Cached commit with stale active | no | no | COMMITTED | stale active | no | any older value | COMMITTED | IN_PROGRESS |
+| Cached abort with stale active | no | no | ABORTED | stale active | no | any older value | ABORTED | IN_PROGRESS/COMMITTED |
+| Active ordinary TxnId | no | no | none | active | no | INVALID | IN_PROGRESS | Guessed ABORTED |
+| Retired history | no | no | none | absent | yes | page may be punched | RETIRED | Missing-page corruption or guessed COMMITTED |
+| Persisted commit | no | no | none | absent | no | COMMITTED | COMMITTED | IN_PROGRESS |
+| Persisted abort | no | no | none | absent | no | ABORTED | ABORTED | COMMITTED |
+| Persisted INVALID | no | no | none | absent | no | INVALID | nonterminal/invariant result defined by context | Guessed terminal result |
+| Persisted RESERVED | no | no | none | absent | no | RESERVED | recognized nonterminal/invariant result | Corruption or terminal result |
+
+RETIRED is tested only after the Chapter-14 status-history protocol durably publishes the
+cutoff and proves every surviving persistent correctness object status-independent. A
+missing or punched page without that proof is never synthesized as RETIRED. FROZEN and SELF
+tests instrument storage access and require no status-page fetch. Persisted terminal tests
+have valid owner/checksum/PageNo bytes and no earlier runtime source.
+
+#### Status-page extension, failure, and recovery
+
+The first terminal status mapped to an unpublished TXN_STATUS PageNo uses the generic
+PAGE_INIT and §12.10.5 protocol. The harness records private page construction, PAGE_INIT
+append, file-bound publication, terminal-record append, status-bit installation, and
+writeback eligibility. Before bound publication ordinary lookup cannot fetch the page; after
+publication the page is canonical and its first terminal update follows PAGE_INIT in WAL.
+
+Run the same procedure at the last entry of status page `N` and first entry of `N+1`.
+The former performs no extension; the latter selects exactly the next absolute PageNo,
+zero-initializes all 8,160 payload bytes to INVALID, and changes only the mapped two bits.
+
+| Case | Bound/WAL/page fixture | Injected boundary | Required outcome | READY? |
+|---|---|---|---|---:|
+| First status page | Bound contains only page 0 | PAGE_INIT then first terminal record | Page 1 publishes once; terminal bit and page_lsn follow WAL order | after valid completion |
+| Existing-page last entry | Page N published | Last mapped two bits | No extension; neighboring bits unchanged | yes |
+| Next-page first entry | N published, N+1 absent | PAGE_INIT for N+1 | Exact next PageNo; zero payload then terminal bit | after valid completion |
+| Known pre-PAGE_INIT failure | Old bound and no authorizing append | Reservation/construction/known append failure | Exact old file/bound/frame/WAL state; private page invisible | yes if generic rollback succeeds |
+| Post-authorizing failure | Valid PAGE_INIT or terminal append may exist | Runtime publication/status install failure | Retained completion/recovery or DATABASE_NONCONTINUABLE; no rollback-and-continue | no ordinary continuation until resolved |
+| Durable COMMIT, stale page | Commit in durable valid WAL prefix | Crash before status/data flush | Reconstruct/redo COMMITTED | yes after repair |
+| Durable ABORT, stale page | Abort terminal record survives | Crash before status flush | Reconstruct/redo ABORTED | yes after repair |
+| Torn status page | Bad checksum plus retained image/terminal WAL | Recovery page read | Ignore stored bits/LSN; restore image then terminal redo | yes after valid repair |
+| Unrecoverable malformed page | Bad page and no required retained reconstruction base | Recovery | Exact corruption/RECOVERY_FAILED result; no guessed statuses | no |
+| Active writer at crash | No surviving terminal COMMIT/ABORT | Analysis/loser resolution | ABORTED through canonical recovery terminal protocol | yes after loser completion |
+
+Crash prefixes cover PAGE_INIT append, terminal append, status-bit installation, page flush,
+and client acknowledgement. A durable COMMIT with stale/unflushed status, heap, and index
+pages recovers COMMITTED. A crash after durable COMMIT but before client acknowledgement
+also recovers COMMITTED and records client knowledge as uncertain. A stale status image never
+overrides terminal WAL; a torn page contributes neither trusted bits nor `page_lsn`.
+
+#### Read-only transaction specialization
+
+Read-only verification reuses ordinary transaction admission and snapshot procedures while
+asserting the no-terminal-WAL/status specialization:
+
+| Phase | TxnId | Active registry | Snapshot/horizon | Terminal WAL | Terminal status entry | Required result |
+|---|---:|---:|---|---:|---:|---|
+| BEGIN | yes | yes | none until owning statement boundary | no | no | ACTIVE transaction participates in registration race |
+| READ COMMITTED statement | yes | yes | registered statement snapshot | no | no | Same capture/lifetime rules as writable RC |
+| REPEATABLE READ first statement | yes | yes | transaction snapshot registered | no | no | Snapshot begins here, not merely at BEGIN |
+| REPEATABLE READ later statement | yes | yes | same membership/horizon, new command boundary | no | no | Long-lived snapshot may hold global horizon |
+| Successful completion | yes | removed at runtime terminal cleanup | snapshot unregistered | no | no | Successful transaction result after cleanup |
+| Abort/failure | yes | removed only through runtime abort cleanup | snapshot unregistered | no persistent terminal record required | no | No leaked active/snapshot ownership |
+| Long-running reader | yes | yes | registered RR/statement snapshot | no | no | §14.2 reclamation remains blocked where required |
+| Crash while active | durably reserved identity | process-local registry disappears | no surviving snapshot | no | no | No invented durable read-only commit/status fact |
+
+The long-running case cross-checks the Vacuum and Reclamation Tests: version/status history
+needed by the registered snapshot is retained. It does not equate the SQL snapshot with a
+§14.6 ReadEpochGuard. Durable reservation still prevents TxnId reuse even though no terminal
+record exists.
+
+#### Chapter-9 procedural matrices
+
+The error/result matrix keeps semantic status codes, runtime results, and failures distinct:
+
+| Condition | Expected category | Detailed owner |
+|---|---|---|
+| Exact next TxnId block unavailable | `TXN_ID_EXHAUSTED` | Numeric Exhaustion — TxnId terminal block |
+| Statement after final CommandId | `COMMAND_ID_EXHAUSTED` | Numeric Exhaustion — CommandId specialization |
+| Persisted `INVALID` | Valid nonterminal status code interpreted with runtime/high-water/recovery context | §§9.11–9.13 procedures above |
+| Persisted `RESERVED` | Recognized v1 nonterminal status | RESERVED and lookup procedures above |
+| Active registry winner | `IN_PROGRESS` runtime result | Lookup precedence |
+| Proven retired history | `RETIRED` runtime result | Lookup precedence plus Chapter 14 |
+| Malformed supported-v1 page | Owning corruption/open/recovery failure | Status-byte validation |
+| Recognizable future format | Owning unsupported-format result | §4.14 dispatch tests |
+| Known terminal-WAL failure | Exact retained-state retry/failure outcome | COMMIT/ABORT Fault-Injection Tests |
+| Uncertain append/publication | `DATABASE_NONCONTINUABLE` | Non-Crash WAL/MTR and §39.1 |
+| Recoverable effect-free statement failure | `FAILED_TRANSACTION_REMAINS_ACTIVE` | Statement Failure tests |
+| Transaction-fatal statement | `FAILED_TRANSACTION_MUST_ABORT` and automatic abort | Statement Failure/ABORT tests |
+
+The deterministic concurrency matrix is:
+
+| Scenario | Barrier/linearization | Legal survivors | Forbidden survivor | Oracle/owner |
+|---|---|---|---|---|
+| BEGIN vs capture | §9.8 registry/high-water synchronization | registered below `xmax` and active, or assigned at/above `xmax` | below `xmax`, nonterminal, absent | Independent expected set |
+| COMMIT vs capture | §9.14 runtime terminal publication | terminal-before capture, or captured active-before terminal | retroactive active removal | Terminal race matrix |
+| ABORT vs capture | §9.14 runtime terminal publication | terminal-before capture, or captured active-before terminal | retroactive active removal | Terminal race matrix |
+| Cache vs stale registry | terminal cache publication observed first | COMMITTED/ABORTED cache result | IN_PROGRESS | Lookup precedence |
+| RC attempt vs next statement | snapshot unregister/next capture | stable old attempt, fresh next snapshot | membership mutation or snapshot reuse | RC lifetime procedure |
+| RR snapshot vs later commit | first-statement capture | original active/horizon retained | later commit added to visible past | RR lifetime plus Chapter 10 |
+| Unregister vs reclamation | snapshot registry removal | no reclaim before legal unregister | early horizon advance | Vacuum/reclamation cross-check |
+| Shutdown vs BEGIN | READY→DRAINING admission gate | admitted-before drain or rejected-after gate | new transaction after gate | Database Lifecycle Tests |
+
+The high-level domain/case matrix is:
+
+| Domain | Deterministic fixture | Barrier/fault | Independent oracle | Architecture | Status |
+|---|---|---|---|---|---|
+| TxnId reservation | Exact block/high-water fixture | control write/sync/issue | durable exclusive end | §§4.3.2.1, 9.2–9.3 | COMPLETE |
+| TxnId exhaustion | Terminal exact block | next reservation | mathematical block sequence | §§4.3.2.1, 9.3 | COMPLETE |
+| CommandId | 0/max/failed/retry fixture | statement admission/end | checked command sequence | §§4.3.2.2, 9.6 | COMPLETE |
+| Status bytes | Canonical page vectors | one-field/bit mutation | independent byte/mask codec | §§4.13.6, 9.11–9.12 | COMPLETE |
+| Status mapping | Boundary TxnIds | page/bit access | mathematical formula | §9.12 | COMPLETE |
+| BEGIN/capture | Two controlled transactions | shared registry/high-water sync | expected ordered set | §9.8 | COMPLETE |
+| Snapshot representation | Empty/owner/sparse/multiple sets | capture | set/sort/min oracle | §§9.7–9.8 | COMPLETE |
+| Isolation identity | Default/RC/RR/deferred modes | transaction admission/diagnostic | exact admitted identity | §9.5 | COMPLETE |
+| RC lifetime | Two statements and retry | register/unregister | snapshot identity/event log | §9.9 | COMPLETE |
+| RR lifetime | First/later statements | first capture/terminal cleanup | fixed fields plus command boundary | §9.10 | COMPLETE |
+| COMMIT/capture | Durable writer and capturer | §9.14 publication | barrier order | §§9.14.1–9.14.2 | COMPLETE |
+| ABORT/capture | Aborting writer and capturer | §9.14 publication | barrier order | §§9.14.1, 9.14.3 | COMPLETE |
+| Lookup precedence | Controlled runtime/persistent sources | each precedence stage | explicit matrix | §9.13 | COMPLETE |
+| Status PAGE_INIT | First/next status page | append/publication faults | old/new bound and WAL order | §§9.12, 12.10.5 | COMPLETE |
+| Stale status vs WAL | Durable terminal records, stale page | crash/reopen | durable WAL model | §§12.10.5, 13.13.2–13.17 | COMPLETE |
+| Torn status | Bad checksum plus retained image | recovery | image plus terminal redo | §§13.14, 13.17 | COMPLETE |
+| Active loser | No terminal record | crash/analysis | WAL terminal evidence | §13.15 | COMPLETE |
+| Read-only | RC/RR/no-write transactions | completion/crash | event and WAL/status absence | §9.15 | COMPLETE |
+| Reclamation horizon | Long-lived read-only snapshot | vacuum/horizon query | registered snapshot set | §§14.2, 14.14 | COMPLETE |
+
+#### Chapter 9 architecture-obligation coverage map
+
+The atomic inventory contains 101 obligations. `COMPLETE` means that the obligation has a
+deterministic procedure in this section or a precise existing owner below; an architecture
+statement by itself is not counted as verification.
+
+| # | Domain | Atomic obligation | Architecture owner | Verification procedure/reference | Status |
+|---:|---|---|---|---|---|
+| 1 | TXNID RESERVATION | TxnId width and reserved sentinel values | §§4.3.2.1, 9.2 | Numeric Exhaustion — TxnId domain/boundaries | COMPLETE |
+| 2 | TXNID RESERVATION | First normal value and monotonic allocation | §§4.3.2.1, 9.2 | Numeric Exhaustion — TxnId domain/boundaries | COMPLETE |
+| 3 | TXNID RESERVATION | Fixed `2^20` reservation block | §§4.3.2.1, 9.3 | Numeric Exhaustion — exact-block procedure | COMPLETE |
+| 4 | TXNID RESERVATION | Reservation stores an exclusive durable end | §§4.3.2.1, 9.3 | Numeric Exhaustion — exact-block procedure | COMPLETE |
+| 5 | TXNID RESERVATION | No issue before durable high-water; known failure issues none | §9.3 | Numeric Exhaustion — reservation failure procedure | COMPLETE |
+| 6 | TXNID RESERVATION | Crash gaps are legal and reserved TxnIds are never reused | §9.3 | Numeric Exhaustion — restart/nonreuse procedure | COMPLETE |
+| 7 | TXNID EXHAUSTION | Maximum normal TxnId, no wrap, deterministic next-allocation failure | §§4.3.2.1, 9.3 | Numeric Exhaustion — terminal exact block | COMPLETE |
+| 8 | RECOVERY / STATUS RECONCILIATION | Torn control slots recover a valid durable TxnId high-water | §§9.3, 13.2 | Numeric Exhaustion — control-slot crash matrix | COMPLETE |
+| 9 | COMMANDID | CommandId is uint32 and zero is the first legal value | §§4.3.2.2, 9.6 | Numeric Exhaustion — CommandId specialization | COMPLETE |
+| 10 | COMMANDID | One CommandId is assigned per admitted logical statement | §9.6 | Numeric Exhaustion — statement-boundary sequence | COMPLETE |
+| 11 | COMMANDID | Permitted pre-write retry reuses the same logical CommandId | §§9.6, 15.7 | Numeric Exhaustion — retry specialization | COMPLETE |
+| 12 | COMMANDID | Success and recoverable failure consume the CommandId | §§9.6, 39.1 | Numeric Exhaustion plus Statement Failure tests | COMPLETE |
+| 13 | COMMANDID | `UINT32_MAX` is legal and the next statement is rejected without successor arithmetic | §§4.3.2.2, 9.6 | Numeric Exhaustion — terminal boundary | COMPLETE |
+| 14 | COMMANDID | Transaction-control operations do not consume ordinary CommandIds | §9.6 | Numeric Exhaustion — control-operation specialization | COMPLETE |
+| 15 | TRANSACTION STATE | Runtime state domain is exact | §9.4 | Statement Failure and Transaction-State Tests | COMPLETE |
+| 16 | TRANSACTION STATE | ACTIVE admits statements, commit, and abort as specified | §9.4 | Transaction-State Tests | COMPLETE |
+| 17 | TRANSACTION STATE | MUST_ABORT rejects statements/commit and admits abort | §9.4 | Statement Failure and Transaction-State Tests | COMPLETE |
+| 18 | TRANSACTION STATE | COMMITTING/ABORTING reject new statements and retain terminal ownership | §§9.4, 9.14 | COMMIT/ABORT Fault-Injection Tests | COMPLETE |
+| 19 | TRANSACTION STATE | Every legal lifecycle edge and illegal edge is enforced | §9.4 | Transaction-State Tests transition matrix | COMPLETE |
+| 20 | COMMIT | Authorizing commit append forbids transition to ABORTING/ABORTED | §§9.4, 9.14.2 | COMMIT Fault-Injection Tests | COMPLETE |
+| 21 | TRANSACTION STATE | COMMITTED and ABORTED are terminal and irreversible | §§3.3.6, 9.4 | Lifecycle plus COMMIT/ABORT tests | COMPLETE |
+| 22 | FAILURE / NONCONTINUABLE | Ordinary transaction admission requires READY | §§3.3, 9.4 | Database Lifecycle Tests | COMPLETE |
+| 23 | FAILURE / NONCONTINUABLE | DRAINING/NONCONTINUABLE transaction handling preserves terminal facts | §§3.3.5–3.3.6, 9.16, 39.1 | Database Lifecycle and Non-Crash WAL/MTR tests | COMPLETE |
+| 24 | BEGIN / REGISTRATION | TxnId issue, active registration, and snapshot high-water share the required synchronization | §§9.3, 9.8 | Snapshot registration race harness | COMPLETE |
+| 25 | SNAPSHOT REPRESENTATION | Snapshot contains exactly `xmax`, `active`, `xmin`, owner, and command fields | §9.7 | Snapshot representation matrix | COMPLETE |
+| 26 | SNAPSHOT REPRESENTATION | `xmax` is the captured next-unassigned normal TxnId | §§9.7.1, 9.8 | BEGIN/capture two-order procedure | COMPLETE |
+| 27 | SNAPSHOT REPRESENTATION | `active` contains every relevant normal nonterminal TxnId below `xmax` | §§9.7.2, 9.8 | Snapshot representation and forbidden-gap oracle | COMPLETE |
+| 28 | SNAPSHOT REPRESENTATION | Snapshot owner is excluded from `active` | §§9.7.2, 9.8 | Owner-exclusion fixture | COMPLETE |
+| 29 | SNAPSHOT REPRESENTATION | ACTIVE, MUST_ABORT, COMMITTING, and ABORTING are snapshot-active | §§9.4, 9.7.2 | Controlled-state membership fixture | COMPLETE |
+| 30 | SNAPSHOT REPRESENTATION | A captured nonterminal remains in `active` after later terminal publication | §§9.7.2, 9.14 | Terminal/capture race matrix | COMPLETE |
+| 31 | SNAPSHOT REPRESENTATION | V1 `active` is a sorted vector | §9.7.2 | Sorted empty/owner/sparse/multiple fixtures | COMPLETE |
+| 32 | SNAPSHOT REPRESENTATION | Membership implementation may vary without changing sorted-vector semantics | §9.7.2 | Representation-freedom assertion | COMPLETE |
+| 33 | SNAPSHOT REPRESENTATION | Nonempty `xmin` is the minimum captured active TxnId | §9.7.3 | Xmin multi-member/owner fixtures | COMPLETE |
+| 34 | SNAPSHOT REPRESENTATION | Empty `active` gives `xmin=xmax` | §9.7.3 | Empty-set fixture | COMPLETE |
+| 35 | SNAPSHOT REPRESENTATION | Owner and command fields drive self visibility without self membership | §9.7.4 | Owner fixture plus CommandId cross-reference | COMPLETE |
+| 36 | SNAPSHOT CAPTURE | High-water and active-set capture are one atomic observation | §9.8 | BEGIN/capture deterministic barriers | COMPLETE |
+| 37 | SNAPSHOT CAPTURE | No below-`xmax` nonterminal nonowner can be absent from `active` | §9.8 | Explicit forbidden-classification oracle | COMPLETE |
+| 38 | SNAPSHOT CAPTURE | Capture synchronization is not held during query execution | §9.8 | Harness lock-ownership observation | COMPLETE |
+| 39 | SNAPSHOT CAPTURE | Captured membership/horizons are immutable | §§9.7–9.10 | BEGIN/COMMIT/ABORT post-capture mutation fixture | COMPLETE |
+| 40 | RECLAMATION / HORIZON | Registered SQL snapshots contribute to the global snapshot horizon | §§9.9–9.10, 14.2 | Snapshot registration plus Vacuum/Reclamation tests | COMPLETE |
+| 41 | SNAPSHOT LIFETIME | READ COMMITTED captures a fresh snapshot for each statement attempt | §9.9 | Two-statement RC fixture | COMPLETE |
+| 42 | SNAPSHOT LIFETIME | RC snapshot remains stable through the complete attempt | §9.9 | In-attempt registry mutation fixture | COMPLETE |
+| 43 | SNAPSHOT LIFETIME | RC success/recoverable failure unregisters snapshot and consumes command | §§9.6, 9.9 | RC event-log cleanup fixture | COMPLETE |
+| 44 | SNAPSHOT LIFETIME | Allowed pre-write retry refreshes snapshot but reuses logical CommandId | §§9.9, 15.7 | RC retry fixture | COMPLETE |
+| 45 | SNAPSHOT LIFETIME | Post-write conflict does not reuse the attempt snapshot | §§9.9, 15.7 | RC conflict/abort cross-reference | COMPLETE |
+| 46 | SNAPSHOT LIFETIME | REPEATABLE READ captures on first ordinary statement, not BEGIN | §9.10 | RR BEGIN/first-statement fixture | COMPLETE |
+| 47 | SNAPSHOT LIFETIME | RR retains membership/horizon/owner fields across statements | §9.10 | RR multi-statement fixture | COMPLETE |
+| 48 | SNAPSHOT LIFETIME | RR updates only the command boundary per statement | §§9.6, 9.10 | RR fixture plus CommandId procedure | COMPLETE |
+| 49 | SNAPSHOT LIFETIME | RR registration remains until terminal cleanup | §§9.10, 14.2 | RR terminal/unregister horizon fixture | COMPLETE |
+| 50 | STATUS FILE LAYOUT | `txn_status.dat` superblock identity is canonical singleton metadata | §§4.10, 4.13.6, 9.12 | TXN_STATUS superblock specialization matrix | COMPLETE |
+| 51 | STATUS FILE LAYOUT | Status data page uses common header, PageType 7, and no specialized header | §§4.13.6, 9.12 | Data-page framing mutation matrix | COMPLETE |
+| 52 | STATUS FILE LAYOUT | Payload is 8,160 bytes and capacity is 32,640 entries | §§4.13.6, 9.12 | Independent capacity arithmetic | COMPLETE |
+| 53 | STATUS FILE LAYOUT | All four two-bit encodings and four bit positions round-trip independently | §§4.13.6, 9.11–9.12 | 16-case mask/shift matrix | COMPLETE |
+| 54 | STATUS FILE LAYOUT | RESERVED is recognized nonterminal v1 state | §§9.11–9.13 | RESERVED fixture and lookup matrix | COMPLETE |
+| 55 | STATUS MAPPING | Reserved TxnIds have no ordinary status ordinal | §9.12 | Checked mapping-domain rejection | COMPLETE |
+| 56 | STATUS MAPPING | Normal ordinal is `txn_id-2` | §9.12 | Independent mapping oracle | COMPLETE |
+| 57 | STATUS MAPPING | Absolute page and entry mapping use 32,640-entry pages | §9.12 | Boundary mapping matrix | COMPLETE |
+| 58 | STATUS MAPPING | Payload byte and least-significant-first shift are exact | §9.12 | Four-position encoding matrix | COMPLETE |
+| 59 | STATUS MAPPING | Status mutation preserves all neighboring two-bit entries | §§9.12, 12.10.5 | Nonzero-neighbor mutation fixtures | COMPLETE |
+| 60 | STATUS MAPPING | Checked maximum mapping fits the physical PageNo domain | §§4.3.2.1, 9.12 | Maximum-TxnId independent arithmetic | COMPLETE |
+| 61 | STATUS FILE LAYOUT | Newly initialized payload is canonical INVALID | §§9.11–9.12, 12.10.5 | PAGE_INIT zero-payload fixture | COMPLETE |
+| 62 | STATUS FILE LAYOUT | Owner, bound, version, checksum, identity, and reserved bytes validate before payload | §§4.10, 4.13.6 | Validation-order/corruption matrix | COMPLETE |
+| 63 | STATUS LOOKUP | INVALID above allocation high-water is not a terminal transaction result | §§9.11–9.13 | High-water INVALID fixtures | COMPLETE |
+| 64 | RECOVERY / STATUS RECONCILIATION | Status `page_lsn`/images accelerate reconstruction but terminal WAL is authoritative | §§9.11.1, 12.10.5, 13.17 | Status extension/recovery matrix | COMPLETE |
+| 65 | STATUS LOOKUP | FROZEN resolves without status-page access | §9.13 | FROZEN precedence fixture | COMPLETE |
+| 66 | STATUS LOOKUP | Current transaction resolves SELF before persistent state | §9.13 | SELF precedence fixture | COMPLETE |
+| 67 | STATUS LOOKUP | Runtime terminal cache precedes active and persistent sources | §§9.13–9.14 | Terminal-cache fixture | COMPLETE |
+| 68 | STATUS LOOKUP | Terminal cache wins over an intentionally stale active observation | §§9.13–9.14 | Cache-versus-stale-active race | COMPLETE |
+| 69 | STATUS LOOKUP | Active ordinary transaction resolves IN_PROGRESS | §9.13 | Active/INVALID fixture | COMPLETE |
+| 70 | STATUS LOOKUP | RETIRED requires a durably published Chapter-14 retirement proof | §§9.13, 14.14 | RETIRED/punched-page fixture | COMPLETE |
+| 71 | STATUS LOOKUP | Persisted COMMITTED and ABORTED decode after earlier sources miss | §9.13 | Valid persisted-terminal fixtures | COMPLETE |
+| 72 | STATUS LOOKUP | INVALID and RESERVED never produce guessed terminal results | §§9.11–9.13 | Lookup precedence matrix | COMPLETE |
+| 73 | STATUS LOOKUP | Missing referenced, nonretired status produces the owning invariant/corruption result | §§9.11.1, 9.13 | Missing-page/no-retirement fixture | COMPLETE |
+| 74 | TERMINAL PUBLICATION | Snapshot capture and terminal publication use one synchronization domain | §9.14.1 | COMMIT/ABORT capture race barriers | COMPLETE |
+| 75 | TERMINAL PUBLICATION | Cache install, terminal state, and active removal are one atomic publication | §9.14.1 | Event-log atomicity assertion | COMPLETE |
+| 76 | TERMINAL PUBLICATION | A new snapshot excludes a published terminal TxnId while old snapshots stay immutable | §9.14.1 | Terminal-before/after-capture fixtures | COMPLETE |
+| 77 | TERMINAL PUBLICATION | Logical locks/gates release only after terminal publication | §§9.14.1, 11.2 | Terminal-race assertion plus Locking Tests | COMPLETE |
+| 78 | COMMIT | Durable COMMIT C3 precedes runtime publication C4 | §9.14.2 | COMMIT C0–C6 Fault-Injection Tests | COMPLETE |
+| 79 | COMMIT | Resident status bits alone do not publish runtime commit | §§9.11.1, 9.14.2 | Status/capture event-order fixture | COMPLETE |
+| 80 | COMMIT | Durable COMMIT is irreversible despite later failure or lost acknowledgement | §§3.3.6, 9.14.2 | COMMIT faults plus crash-before-ack fixture | COMPLETE |
+| 81 | ABORT | Runtime ABORTED publication precedes logical lock release | §9.14.3 | ABORT A0–A4 plus terminal-race fixture | COMPLETE |
+| 82 | ABORT | Ordinary abort does not require immediate WAL sync | §9.14.3 | ABORT Fault-Injection Tests | COMPLETE |
+| 83 | ABORT | Crash before durable abort is resolved as a loser, not guessed from status bytes | §§9.14.3, 13.15 | Recovery loser fixture | COMPLETE |
+| 84 | ABORT | Abort requires no synchronous physical heap/index undo | §§5.6.3, 9.14.3 | ABORT tests plus MVCC/Reclamation cross-check | COMPLETE |
+| 85 | READ-ONLY TRANSACTION | Read-only transactions use normal identity/registry/snapshots but no ordinary terminal WAL/status | §9.15 | Read-only phase matrix | COMPLETE |
+| 86 | READ-ONLY TRANSACTION | Read-only success, abort/failure, and crash release runtime ownership without invented persistence | §9.15 | Read-only completion/crash fixtures | COMPLETE |
+| 87 | STATUS MAPPING | First/new status pages use PAGE_INIT and publish bounds before lookup | §§9.12, 12.10.5 | Status-page extension matrix | COMPLETE |
+| 88 | RECOVERY / STATUS RECONCILIATION | Durable COMMIT overrides stale/unflushed status and data pages | §§9.14.2, 13.13.2–13.17 | Durable-COMMIT stale-page crash fixture | COMPLETE |
+| 89 | RECOVERY / STATUS RECONCILIATION | Durable ABORT overrides stale status bytes | §§9.14.3, 13.15–13.17 | Durable-ABORT stale-page fixture | COMPLETE |
+| 90 | RECOVERY / STATUS RECONCILIATION | Torn status pages are reconstructed from valid images/WAL or recovery fails | §§13.14, 13.17 | Torn/unrecoverable page fixtures | COMPLETE |
+| 91 | RECOVERY / STATUS RECONCILIATION | Active transaction without terminal record becomes recovery loser | §13.15 | Active-at-crash fixture | COMPLETE |
+| 92 | FAILURE / NONCONTINUABLE | READY follows transaction-status/WAL reconciliation and loser completion | §§3.3, 13.19 | Page extension/recovery matrix plus Lifecycle Tests | COMPLETE |
+| 93 | CROSS-OWNER VISIBILITY | Chapter 10 receives stable snapshot, owner, command, and status inputs | §§9.7–9.14, 10.2–10.3 | This section plus MVCC Visibility Tests | COMPLETE |
+| 94 | CROSS-OWNER VISIBILITY | Chapter 11 remains owner of write/write and transactional uniqueness conflicts | §§9.14.1, 11.2–11.4 | Terminal input assertion plus Locking/UNIQUE Tests | COMPLETE |
+| 95 | RECLAMATION / HORIZON | SQL snapshot horizon, RID read epoch, and status retirement remain distinct and coordinated | §§9.9–9.10, 14.2, 14.6, 14.14 | Snapshot lifetime plus Vacuum/Reclamation Tests | COMPLETE |
+| 96 | OTHER | READ COMMITTED and REPEATABLE READ are the supported identities and READ COMMITTED is the default | §9.5 | Isolation-identity cases plus Isolation Tests | COMPLETE |
+| 97 | OTHER | REPEATABLE READ is identified as snapshot isolation, never SERIALIZABLE | §9.5 | Isolation-identity diagnostics plus write-skew case | COMPLETE |
+| 98 | OTHER | Deferred isolation/concurrency modes are not silently admitted as v1 modes | §9.5 | Isolation-identity rejection cases | COMPLETE |
+| 99 | CROSS-OWNER VISIBILITY | WAL/durability and recovery mechanics remain owned by Chapters 12–13 while Chapter 9 supplies lifecycle inputs | §9.1 | COMMIT/ABORT Fault-Injection and Recovery Property Tests | COMPLETE |
+| 100 | BEGIN / REGISTRATION | Ordinary BEGIN uses runtime registration and does not require persisted RESERVED/IN_PROGRESS status | §§9.8, 9.11, 9.11.1 | BEGIN event-log/status-absence fixture | COMPLETE |
+| 101 | TRANSACTION STATE | Required transaction-local semantic resources remain observable through their owning lifetime and cleanup | §9.4 | Harness resource log plus Statement, COMMIT, ABORT, and Lifecycle Tests | COMPLETE |
+
+Coverage totals: `COMPLETE=101`, `PARTIAL=0`, `MISSING=0`, `CONTRADICTORY=0`.
+
+---
+
 ### Crash Injection Framework
 
 Add deterministic process-termination points around:
