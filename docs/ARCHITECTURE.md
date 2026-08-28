@@ -4389,7 +4389,7 @@ It covers:
 
 The BufferPool is intentionally storage-format agnostic: it manages pages, not tuples, indexes, schemas, or SQL semantics.
 
-Later WAL/recovery chapters refine the buffer metadata and flush protocol where recovery requires additional state.
+The WAL-owned refinements to buffer metadata and flush publication are canonical in §§12.10, 12.12, and 12.16–12.17; redo and torn-page reconstruction are canonical in §§13.13–13.14.
 
 ## 7.2 Explicit I/O model
 
@@ -4592,7 +4592,7 @@ For one BufferPool instance, one `PageId` has at most one active load operation 
 
 The BufferPool MUST NOT parse heap tuples, physical schemas, or B+ tree keys.
 
-Normal page-format objects operate over bytes supplied through BufferPool-managed lifetime once the buffer layer exists. `HeapPage`, `FsmPage`, B+ page controllers, and tuple decoders are non-owning page-local views; they do not pin, unpin, evict, flush, or perform I/O.
+Ordinary managed page-format objects operate over bytes supplied through BufferPool-managed lifetime. `HeapPage`, `FsmPage`, B+ page controllers, and tuple decoders are non-owning page-local views; they do not pin, unpin, evict, flush, or perform I/O.
 
 ## 7.6 Canonical resident-frame state machine
 
@@ -4826,7 +4826,7 @@ This initial pin assignment prevents eviction between load publication and waite
 
 On load failure, the loader closes the current in-progress operation with one captured error, removes it from the page table so no new fetch can join it, wakes all registered waiters with that same error, and returns the frame to `FREE`. The completion result may remain process-locally reachable by those already registered waiters after mapping removal. A later independent fetch may install a new intent and retry; failed pages are not permanently poison-cached.
 
-The initial implementation MAY realize this logical table with conventional hash maps/condition variables protected by mutexes. It is not required to use one concrete container or lock. The abstraction MUST allow later partitioning while preserving the same one-loader, publication, pin, failure, and wakeup semantics.
+Implementations MAY realize this logical table with any map and coordination structures that preserve these semantics; its exact runtime containers and synchronization primitives are not persistent architecture. The design MUST remain partitionable and scalable in accordance with the parallel-ready architecture of §1.1 while preserving the same one-loader, publication, pin, failure, and wakeup semantics.
 
 There is never a public state in which a page-table entry names Page A while the frame identity/bytes belong to Page B. `EVICTING` retains A's non-pinnable mapping until A is durably handled and removed. Only after removal and complete frame reset may the frame bind to B as `LOADING`.
 
@@ -5104,7 +5104,7 @@ The numeric `modification_generation` itself remains monotonically increasing fo
 
 ### 7.12.3 No eligible frame
 
-One complete CLOCK attempt that finds no reservable `FREE`/victim frame returns the ordinary `NO_REPLACEABLE_FRAME` resource result to the load operation and all its current waiters. It does not steal a pinned/reserved frame or wait indefinitely while the caller may itself hold the only releasable pins. A caller may release guards and retry. A separately named cancellable/waiting convenience API may be added later but cannot weaken victim eligibility.
+One complete CLOCK attempt that finds no reservable `FREE`/victim frame returns the ordinary `NO_REPLACEABLE_FRAME` resource result to the load operation and all its current waiters. It does not steal a pinned/reserved frame or wait indefinitely while the caller may itself hold the only releasable pins. A caller may release guards and retry. A separately named bounded/cancellable waiting convenience API MAY exist, but it MUST preserve bounded/cancellable behavior and MUST NOT weaken victim eligibility or permit pinned/ineligible frames to be stolen; the ordinary load operation remains subject to the one-pass result above.
 
 ### 7.12.4 Newly allocated pages
 
@@ -5150,6 +5150,8 @@ BufferPool operations preserve distinctions equivalent to:
 FILE_OR_PAGE_NOT_FOUND
 RAW_IO_FAILURE
 CORRUPT_PAGE
+UNSUPPORTED_PAGE_FORMAT
+UNSUPPORTED_FILE_FORMAT
 NO_REPLACEABLE_FRAME
 WAL_RESERVATION_OR_APPEND_FAILURE
 WAL_DURABILITY_FAILURE
@@ -5160,7 +5162,7 @@ STORAGE_NONCONTINUABLE
 INTERNAL_INVARIANT_FAILURE
 ```
 
-The first nine categories before `STORAGE_NONCONTINUABLE` are explicit operation/storage errors in their applicable contexts; none is converted into successful fetch/flush/publication. `STORAGE_NONCONTINUABLE` is the §12.12.4 database-owner gate after uncertain append/restoration/publication state and is not an ordinary retry result. An internal invariant failure means frame/page-table ownership has become contradictory and likewise cannot continue ordinarily. The exact statement/transaction consequence is §39.1.3; COMMIT and ABORT use §§39.1.5–39.1.6.
+The first eleven categories before `STORAGE_NONCONTINUABLE` are explicit operation/storage errors in their applicable contexts; none is converted into successful fetch/flush/publication. Format dispatch preserves §4.14's distinction: malformed recognized-v1 bytes are corruption, while a recognizable unsupported future page/file format produces its applicable unsupported-format result. `STORAGE_NONCONTINUABLE` is the §12.12.4 database-owner gate after uncertain append/restoration/publication state and is not an ordinary retry result. An internal invariant failure means frame/page-table ownership has become contradictory and likewise cannot continue ordinarily. The exact statement/transaction consequence is §39.1.3; COMMIT and ABORT use §§39.1.5–39.1.6.
 
 ## 7.13 I/O and buffer invariants
 
