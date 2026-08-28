@@ -6725,7 +6725,7 @@ LockManager
 TransactionStatusStore
 ```
 
-They also interact with later-owned durability and reclamation responsibilities:
+They also interact with the durability and reclamation responsibilities owned by Chapters 12–14:
 
 ```text
 WalManager
@@ -6750,7 +6750,7 @@ Chapter 10 owns tuple visibility.
 
 Chapter 11 owns logical write/uniqueness conflicts.
 
-The later durability/recovery chapters own WAL record formats, commit flushing, checkpoints, and crash reconstruction.
+WAL record formats and commit flushing are owned by §§12.2–12.15; checkpoints and crash reconstruction are owned by §§13.4–13.19.
 
 A shortcut in one subsystem MUST NOT violate the identity, visibility, durability, conflict, or reclamation rules of another.
 
@@ -6868,7 +6868,7 @@ After a crash, unused IDs from an already durable reservation MAY be skipped per
 
 An ID that may have appeared in persistent database state MUST never be reused.
 
-The database-control-file physical layout and torn-update protocol are owned by the later durability/recovery chapter.
+The database-control-file physical layout and torn-update protocol are owned by §§13.2.1–13.2.4.
 
 ## 9.4 Transaction object and lifecycle state
 
@@ -6925,7 +6925,7 @@ Transaction admission is additionally gated by the database-owner state in
 Controlled shutdown handles each nonterminal transaction state exactly as
 §3.3.6 specifies without weakening the terminal-publication rules below.
 
-The exact WAL/durability steps that complete `COMMITTING` or reconstruct terminal state after a crash belong to the later durability/recovery chapters.
+The terminal status/WAL mutation and durability steps that complete `COMMITTING` are owned by §12.10.5 and §§12.13–12.15; §§13.12–13.19 own terminal-state reconstruction after a crash, and §39.1 owns failure/continuation outcomes.
 
 ## 9.5 Isolation levels
 
@@ -7062,11 +7062,9 @@ as applicable at the capture instant.
 
 A transaction represented in `active` remains invisible to this snapshot even if it commits later.
 
-The vector is sorted.
+The v1 `active` representation is a sorted vector. Membership testing MAY use binary search or another semantically equivalent lookup over that vector; it MUST preserve the captured membership, owner exclusion, snapshot stability, and sorted order used by §9.7.3's `xmin` derivation.
 
-Initial membership testing MAY therefore use binary search.
-
-A later high-concurrency implementation MAY replace this with a hybrid or different runtime representation without changing snapshot semantics.
+High-concurrency alternative snapshot active-set representations are deferred from the v1 architecture baseline.
 
 ### 9.7.3 xmin
 
