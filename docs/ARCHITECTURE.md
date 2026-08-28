@@ -5310,7 +5310,7 @@ root.slot_count    = 0
 
 A normal initialized empty tree MUST NOT use an invalid root.
 
-The v1 B+ superblock extension above is now byte-exact.
+The v1 B+ superblock extension above is byte-exact.
 
 Its `key_schema_fingerprint` is defined in §8.3.1 so the persisted metadata can be validated independently of compiler enums or ABI layout.
 
@@ -5328,7 +5328,7 @@ binary VARCHAR collation
 
 Native descending physical index components and locale-aware collations are deferred.
 
-A descending SQL result may initially be produced by executor sorting rather than native reverse index traversal.
+Descending SQL results MAY be produced by executor sorting; native reverse index traversal is deferred from v1 as specified in §8.20.1.
 
 The B+ tree's key-order semantics MUST agree with the database's SQL comparison semantics for the supported indexable types.
 
@@ -6136,7 +6136,7 @@ rather than blindly moving serialized entry bytes.
 
 The parent separator participates in the child boundary and MUST be transformed consistently.
 
-A clear reconstruction of the affected logical node entries is preferable to clever byte movement until equivalent correctness has been established; later implementation may optimize the physical copying without changing these semantics.
+Internal redistribution/merge MAY reconstruct the affected logical child/separator sequences or use another physically equivalent transformation. Every implementation MUST preserve the same canonical child/separator sequence, key ordering, routing bounds, occupancy legality, `BTREE_MTR` scope, and publication invariants.
 
 ## 8.18 Tree-local free pages and safe reuse
 
@@ -6385,11 +6385,11 @@ Holding the current leaf until the next leaf is safely pinned/latched prevents a
 
 ### 8.20.1 Reverse scans
 
-`prev_leaf_page_no` is maintained from the initial format, but native descending/reverse scans are deferred.
+`prev_leaf_page_no` is maintained in v1, but native descending/reverse scans are deferred from the v1 architecture baseline.
 
 Bidirectional latch coupling introduces additional deadlock-order concerns.
 
-A later reverse-cursor design may use restart or nonblocking-latch techniques.
+V1 therefore defines no reverse-cursor latch/restart protocol. Adding native reverse traversal requires an explicit architecture revision that preserves the page-lifetime and latch-order invariants.
 
 ## 8.21 B+ tree and IndexKeyCodec API boundaries
 
@@ -6569,15 +6569,13 @@ The B+ tree MUST NOT create a second private cache for upper tree levels.
 
 Frequently accessed root/internal pages should become resident naturally through the database replacement policy.
 
-If future profiling justifies special treatment, it must remain coordinated through BufferPool policy rather than bypassing page-lifetime/flush ownership.
+Any specialized residency treatment MUST remain coordinated through BufferPool policy and preserve BufferPool ownership of PageId identity, pin/latch lifetime, validation, dirty state, WAL-before-data, and retirement. It MUST NOT create a second cache or bypass page-lifetime/flush ownership.
 
 Secondary-index order does not imply heap-page locality.
 
 A range scan may therefore generate many random heap-page accesses.
 
 The optimizer MUST model this cost rather than assuming that the presence of an index automatically makes an index scan cheaper.
-
-Potential later execution/storage improvements include RID batching, heap-page-aware fetching where semantics permit, covering indexes, clustered storage, and prefetch.
 
 ## 8.25 Structural modification and WAL boundary
 
@@ -6645,7 +6643,7 @@ Runtime atomicity is provided by latch and publication ordering.
 
 Provisional MTR bytes are visible only inside the exclusive §12.10.3 ownership domain. Root identity/height/generation, parent/sibling reachability, and free-list effects become ordinary-reader-visible only at the successful MTR publication point; known pre-append failure restores all of them before latches release.
 
-Crash atomicity is provided by the later WAL/recovery protocol.
+Crash atomicity follows the `BTREE_MTR`/WAL publication rules in §§12.10.2–12.10.3 and §12.12 and the atomic redo/torn-page reconstruction rules in §§13.13.3–13.14.
 
 ## 8.27 Page validation and corruption handling
 
