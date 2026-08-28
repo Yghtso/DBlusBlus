@@ -4210,13 +4210,199 @@ same unique key serializes
 different unique keys proceed
 logical lock waits hold no page latches
 deadlock cycle detection
-youngest victim policy
+highest normal TxnId per cyclic strongly connected component
 lock release on commit
 lock release on abort
 cancelled waiter cleanup
 ```
 
-Use deterministic barriers rather than timing sleeps where possible.
+Use deterministic barriers, scheduler gates, or semantic event hooks rather than timing
+sleeps. Random stress may supplement these fixtures but cannot establish their required
+ordering.
+
+#### Deterministic logical-lock harness and independent oracles
+
+The harness records and can pause the following implementation-independent events:
+
+```text
+request created / exact LockKey resolved
+queue and current owners observed
+holder installed / waiter enqueued
+blocking owners and queue predecessors captured
+wait-for node/edges installed / synchronous deadlock scan completed
+requester begins waiting / requester becomes ineligible / request canceled
+holder terminal state published / resource released
+waiter selected / requester eligibility rechecked / grant installed / wake delivered
+target, key range, descriptor, and transaction status revalidated
+queue entry and wait-for edges removed
+```
+
+The fixture controls every event with barriers or explicit scheduler gates and forces both
+legal orders at cancellation, terminal publication, release, and grant boundaries. A test
+must fail if its required event is observable only by an elapsed-time timeout. Timeout
+events may be observed diagnostically, but they are never the deadlock or queue-order
+oracle.
+
+Test-side models independently compute:
+
+- exact `LockKey` equality, including complete tuple and encoded unique-key identities;
+- exclusive compatibility and the §11.13.3 retained-gate matrix;
+- FIFO order for each §11.12 LockManager queue and any represented gate predecessor;
+- same-owner reentrant, idempotent, subsumed, and rejected-transition cases;
+- requester eligibility and the cancellation linearization;
+- all blocking owner/predecessor edges and cyclic strongly connected components;
+- the highest normal TxnId victim in each cyclic component;
+- legal transaction state, terminal release point, and required post-grant revalidation;
+- tuple current-owner outcomes and UNIQUE current-state candidate outcomes.
+
+Production grant, conflict, SCC, and uniqueness decisions are observations, not their own
+oracles. Every fixture is valid except for its named mutation: physical page/RID/key and
+snapshot inputs remain canonical in a status test; queue and transaction states remain
+canonical in an ordering test; and queue/graph state is coherent immediately before an
+allocation fault.
+
+#### TUPLE_WRITE current-owner and failure verification
+
+Drive the §11.4 current-owner decision after exclusive
+`TUPLE_WRITE(TableId,physical RID)` grant and a fresh physical re-fetch. This is a direct
+write-admission test, not an inference from Chapter-10 visibility. UPDATE and DELETE run
+each applicable row, and no row may mutate the pre-wait target until identity, header,
+visibility, `xmax/cmax`, and required status have been revalidated.
+
+| Owner relation | Status/command fixture | Isolation/boundary | Wait? | Retry? | MUST_ABORT? | Expected error/result | May mutate original target? | Required revalidation |
+|---|---|---|---:|---:|---:|---|---:|---|
+| No competing owner | `xmax == INVALID_TXN_ID` sentinel; no status lookup | RC and RR | no | no | no | proceed if other checks pass | yes | full post-grant target check |
+| SELF, earlier command | `cmax < current CommandId` | RC and RR | no | target reacquisition as owned by DML | no | stale/not-current target | no | current row/command semantics |
+| SELF, same command | `cmax == current CommandId` | RC and RR | no | no independent writer retry | no | same-command result | only if same-operation rules authorize | exact operation/target context |
+| SELF, future command | `cmax > current CommandId` | persisted or runtime-only | no | no | no | persisted `CORRUPT_HEAP`; otherwise internal-invariant result | no | fail before conflict classification |
+| SELF, impossible order | `xmin == xmax == SELF`, `cmax < cmin` | persisted or runtime-only | no | no | no | corruption/internal-invariant result | no | fail before conflict classification |
+| Other owner | `IN_PROGRESS` | RC and RR | yes | after wake, by owning isolation rule | only if resulting rule requires | wait, then classify fresh state | no | release physical protection; full re-fetch |
+| Other owner | COMMITTED | RC, before first statement write | no after wake | fresh RC snapshot, same CommandId | no if retry remains clean | canonical pre-write retry/failed-active path | no | rediscover target and predicates |
+| Other owner | COMMITTED | RC, after first statement write | no after wake | no | yes | failed transaction / original write conflict | no | preserve causal result through abort |
+| Other owner | COMMITTED after retained snapshot | RR | no after wake | no | yes | serialization/write-conflict result | no | fixed snapshot remains unchanged |
+| Other owner | ABORTED | RC and RR | no | no | no | aborted `xmax` is ineffective | yes, after validation | overwrite `xmax/cmax` only through write path |
+| Other owner | RETIRED while outcome is required | RC and RR | no | no | no | corruption/invariant result | no | prove retirement contract violation |
+| Other normal TxnId | persisted `INVALID` status | RC and RR | no | no | no | canonical error | no | distinguish status from no-owner sentinel |
+| Other normal TxnId | recognized `RESERVED` status | RC and RR | no | no | no | canonical error | no | decoder succeeds; semantic use fails |
+| Other owner lookup | injected I/O failure | RC and RR | no | no | per exact §39 row | exact lower-layer I/O result | no | no status guess |
+| Other owner lookup | checksum, owner, or supported-v1 framing corruption | RC and RR | no | no | per exact §39 row | exact corruption/lower-layer result | no | no conflict conversion |
+| Other owner lookup | recognizable unsupported format | RC and RR | no | no | per exact §39 row | exact unsupported-format result | no | no corruption/no-conflict guess |
+
+The persisted `INVALID` row deliberately uses a normal competing TxnId. It is distinct from
+the valid `INVALID_TXN_ID` tuple sentinel, which performs no status lookup. RETIRED is
+constructed only through a valid Chapter-14 retirement fixture whose proof is then made
+inconsistent with the still-live tuple reference. The future-SELF and `cmax < cmin` rows
+cross-check Chapter 10, but the assertion here is that write-conflict code cannot convert
+those failures into an ordinary conflict or admission.
+
+For lookup failures, inject one exact status-layer outcome at a time through the canonical
+transaction-status fixture: raw I/O, checksum/framing/owner corruption, and recognizable
+future format. Assert exact error propagation, zero target mutation, no wait, and no
+fallback to ABORTED or no owner. This prevents unavailable or malformed ownership metadata
+from becoming write permission.
+
+#### Lock-table, waiter, and wait-for-graph resource exhaustion
+
+Provide fault points immediately before allocation or reservation of a new lock entry,
+waiter record, graph node when separately allocated, and graph edge. Capture queue and graph
+snapshots before and after the fault. A blocking request may begin sleep only after every
+required dependency is represented; partial request, queue, or graph state must be removed
+atomically on failure.
+
+| Resource | Fault point | First statement write? | Permitted partial queue/graph state | Statement / transaction result | Cleanup and ownership oracle |
+|---|---|---:|---|---|---|
+| Lock entry | before exact-key entry becomes reachable | no | none | `OutOfMemory`/owning allocation error; `FAILED_TRANSACTION_REMAINS_ACTIVE` | no entry or holder; prior locks unchanged |
+| Lock entry | same | yes | none | same causal error; `FAILED_TRANSACTION_MUST_ABORT` | abort retains prior ownership through A2/A3 |
+| Waiter | before queue publication | no | none | allocation error; `FAILED_TRANSACTION_REMAINS_ACTIVE` | no waiter, edge, or later grant; holder unchanged |
+| Waiter | same | yes | none | allocation error; `FAILED_TRANSACTION_MUST_ABORT` | no phantom waiter; prior ownership terminally released |
+| Graph node | transaction registration, or lazy materialization before request publication | no | no sleeping request | owning allocation error under §39.1 | transaction/request registration is absent or coherently canceled |
+| Graph node | same reachable post-write path, if representation allocates lazily | yes | no sleeping request | owning allocation error; `FAILED_TRANSACTION_MUST_ABORT` | abort from coherent pre-fault graph state |
+| Graph edge | before one required blocker edge becomes visible | no | entire failed edge set rolled back | allocation error; `FAILED_TRANSACTION_REMAINS_ACTIVE` | request canceled; no sleep on hidden dependency |
+| Graph edge | same | yes | entire failed edge set rolled back | allocation error; `FAILED_TRANSACTION_MUST_ABORT` | request canceled; abort retains owned resources to A3 |
+
+If transaction registration preallocates graph nodes, the graph-node rows inject at that
+registration owner and prove that no transaction capable of requesting a gate is published
+without its node capacity. They do not require a second lazy allocation path. If graph
+coherence cannot be established or restored after any fault, assert the existing internal-
+invariant/`DATABASE_NONCONTINUABLE` path instead of ordinary allocation failure. This is
+separate from an incompatible lock wait and from deadlock detection.
+
+#### FIFO, same-owner, cancellation, and terminal lifetime
+
+For one §11.12 exclusive LockManager key, install holder H and enqueue W1, W2, and W3 in
+barrier-controlled order. H's terminal release makes W1 the first eligible owner; W1's and
+W2's terminal releases then admit W2 and W3. Repeat for `TUPLE_WRITE` and `UNIQUE_KEY`.
+Compatible gate requests need not be delayed merely to mimic this exclusive queue; if an
+implementation elects a queue predecessor that prevents a gate grant, verify that the
+predecessor is represented in the graph.
+
+| Scenario | Queue before event | Controlled event | Expected next owner/result | Graph effect | Late grant? | Revalidation? |
+|---|---|---|---|---|---:|---:|
+| Ordinary FIFO | H; W1, W2, W3 | H releases after terminal publication | W1, then W2, then W3 after their releases | current blocker/predecessor edges rebuilt | no bypass | yes |
+| Canceled head | H; W1, W2 | W1 cancellation linearizes before H release | W2 after H release | all W1 edges removed | W1: no | W2: yes |
+| Deadlock-victim head | H; W1, W2 | W1 receives `DEADLOCK_DETECTED` and enters `MUST_ABORT` | W2 only after actual holder state permits | W1 outgoing wait removed; owned-resource edges persist until release | W1: no | W2: yes |
+| Same-owner tuple reacquire | T owns TUPLE_WRITE K | T requests identical K | immediate idempotent/reentrant success | no self-edge | not applicable | no new wait conclusion |
+| Same-owner unique reacquire | T owns UNIQUE_KEY K | T requests identical K | immediate idempotent/reentrant success | no self-edge | not applicable | no new wait conclusion |
+| MUST_ABORT waiter | H; W | W enters MUST_ABORT before H release | request canceled; ordinary statement cannot resume | waiter edges removed | no | not applicable |
+| ABORTING/ABORTED waiter | H; W | state transition precedes grant | request canceled/ineligible | waiter edges removed | no | not applicable |
+| COMMITTING/COMMITTED waiter | H; W | state transition precedes ordinary grant | request canceled/ineligible | waiter edges removed | no | not applicable |
+
+Same-owner reacquisition must not create an independently releasable acquisition or shorten
+the original terminal lifetime; tests assert ownership remains until C5 or A3 without
+requiring a reference-count implementation. Exercise every same-owner `ALLOW`/subsumption
+case in §11.13.3 and the two proactive rejections in §11.13.2, including same-table
+`SHARED_WRITER -> EXCLUSIVE_DDL`; a rejected transition creates no wait or self-edge.
+
+At the cancel-versus-release boundary, force both orders: cancellation completes before
+release, and release selects the request immediately before cancellation tries to
+linearize. Exactly one legal result may win. Once transaction ineligibility or cancellation
+has linearized, no later grant or wake may resume an ordinary statement. Observe requester
+eligibility immediately before installing a grant, not only when enqueuing it.
+
+#### Deadlock SCC, terminal release, and wake-up revalidation
+
+In addition to the cross-family schedules below, construct one SCC containing overlapping
+simple cycles and a second graph containing two disjoint cyclic SCCs. The independent graph
+oracle computes SCCs from the complete blocker/predecessor edge set. Exactly the highest
+normal TxnId in each cyclic SCC is selected; overlapping simple cycles within one SCC do
+not authorize separate cycle-local choices.
+
+Pause a selected victim after `MUST_ABORT` and before A2. Survivors must remain blocked on
+victim-owned resources through A2 ABORTED publication and may be selected/granted only by
+A3 release. The victim's outgoing wait is canceled immediately, but its held-resource
+ownership remains represented until release. An ordinary deadlock yields
+`DEADLOCK_DETECTED`, not timeout, resource exhaustion, or database noncontinuability.
+
+For a woken `TUPLE_WRITE` waiter, mutate the physical target state while it sleeps, then
+assert fresh RID/header/visibility/current-owner validation before any write. For a woken
+`UNIQUE_KEY` waiter, invalidate every cached range position and candidate result and require
+a complete `(K,MIN_RID)` rescan under fresh RID protection. Gate waiters perform the exact
+descriptor/manifest/object revalidation in §11.13.4. A grant is never proof that pre-wait
+physical conclusions remain valid.
+
+#### Runtime lock-state recovery and admission
+
+Extend Recovery Property Tests with a deterministic pre-crash state containing a
+`TUPLE_WRITE` holder, a `UNIQUE_KEY` holder, waiters, wait-for edges, and a cross-resource
+dependency. Crash at the controlled point, reopen, and observe LockManager/registered-gate
+state before ordinary admission.
+
+| Pre-crash runtime state | Durable terminal state | Runtime lock state after reopen | SQL lock replay? | UNIQUE predicate replay? | READY/admission | Expected transaction outcome |
+|---|---|---|---:|---:|---|---|
+| Active holder, no terminal record | none | no holder, waiter, queue, or edge | no | no | only after loser resolution and READY | canonical recovered ABORTED loser |
+| Durable committed holder | COMMIT record durable | empty | no | no | after committed state/data reconstruction and READY | COMMITTED |
+| Durable aborted holder | ABORT record durable | empty | no | no | after aborted state reconstruction and READY | ABORTED |
+| Holder plus waiter | holder terminal or nonterminal as fixture selects | empty; waiter does not survive | no | no | no pre-READY transaction request | outcomes from WAL/status, never queue |
+| Cyclic graph | any valid WAL prefix | no graph nodes/edges reconstructed from old waits | no | no | after recovery reaches READY | per durable terminal/loser analysis |
+| Unique-key holder plus waiter | holder terminal or nonterminal as fixture selects | no key holder/waiter | no | no | fresh post-READY requests only | current state checked by new SQL work |
+
+Instrument redo dispatch and assert it never requests `TUPLE_WRITE`, `UNIQUE_KEY`,
+`SchemaLock`, `TableWriterGate`, `STATS_PUBLISH`, `MANIFEST_CHANGE`, an SQL wait, or the
+§11.10 SQL UNIQUE predicate merely because historical DML/DDL held or checked them.
+Recovery may use its separately owned physical page/structure coordination. No ordinary
+transaction or logical-lock request is admitted until READY; after READY, fresh
+transactions build fresh process-local coordination state. This proves that lock queues
+and graph edges are runtime coordination rather than durable transaction truth.
 
 In addition, exercise every `ALLOW`, `WAIT + DEADLOCK GRAPH`, and `REJECT BEFORE WAIT`
 combination in `ARCHITECTURE.md` §11.13.3 and every wait-edge/recheck row in §11.13.4 for
@@ -4285,6 +4471,52 @@ aborted versions, exact duplicate physical keys, dangling/mismatched RIDs, and p
 reuse attempts. Corruption candidates must not be hidden by early exit after finding an
 ordinary conflict.
 
+#### Current-state status, failure, and race fixtures
+
+The normal-regression table includes no candidate, a committed/frozen live creator, a
+committed creator invisible to the checking transaction's old RR snapshot, an active
+creator, an aborted creator, an aborted deleter, a committed effective deleter, and an
+active deleter. It also includes exact `SELF_EXCLUDED` old/replacement RIDs, another live
+row from the same transaction, current-command and earlier-command self deletes,
+NULL-containing ordinary UNIQUE keys, and PRIMARY KEY NULL rejection. The independent
+oracle enumerates the complete exact-key range and applies §11.10.4 aggregate precedence;
+ordinary MVCC visibility is recorded only to prove it is not the admission oracle.
+
+Run each nonterminal creator/deleter case to both terminal outcomes. The checker first
+observes `WAIT_THEN_RECHECK`, publishes nothing, and waits without physical latches. After
+COMMITTED or ABORTED publication and release, it restarts the whole range check. In
+particular, a committed live creator is `UNIQUE_CONFLICT` even when invisible to the
+caller's retained RR snapshot, while an aborted creator is ignorable only after canonical
+status recheck.
+
+The following negative matrix uses a structurally valid index candidate, matching protected
+heap RID/relation/key, valid snapshot/operation context, and exactly one altered status or
+identity dimension:
+
+| Candidate status/result | Decoder valid? | Logical ownership resolvable? | Predicate/result | May proceed? | Exact error family/oracle |
+|---|---:|---:|---|---:|---|
+| RETIRED while candidate still requires outcome | yes | no | error, never candidate success | no | corruption/internal-invariant result; retirement proof contradicted |
+| Persisted `INVALID` for allocated normal owner | yes | no | error | no | canonical invalid-status/current-owner error |
+| Persisted `RESERVED` | yes | no | error | no | recognized encoding, semantically rejected state |
+| Status I/O failure | not reached/available | no | propagated failure | no | exact lower-layer I/O result |
+| Supported-v1 checksum/framing/owner corruption | no trusted status | no | propagated failure | no | exact corruption/lower-layer result |
+| Recognizable unsupported status format | format dispatch rejects | no | propagated failure | no | exact unsupported-format result |
+| Dangling, reused, wrong-relation, non-NORMAL, or key-mismatch RID | status is irrelevant after identity failure | no | `CORRUPTION_OR_INTERNAL_ERROR` conceptual branch | no | exact owning heap/index corruption result |
+
+For `RESERVED`, independently observe successful two-bit decoding before semantic rejection.
+For unsupported format, observe version dispatch before any status interpretation. For I/O
+and corruption, assert the exact lower-layer diagnostic survives §39 classification. None
+of these rows may become `NO_CONFLICT`, `WAIT_THEN_RECHECK`, or `UniqueViolation`; a
+constraint violation requires a valid current logical owner.
+
+Use two transactions for the same fully non-NULL key to cover INSERT/INSERT and
+UPDATE/INSERT in both lock-acquisition orders. If the first holder commits, the waiter
+rescans and reports `UniqueViolation`; if it aborts, the waiter may proceed only after a
+complete no-other-owner rescan. For DELETE/INSERT, the inserter waits under the key lock: a
+committed delete may free the key after recheck, while an aborted delete leaves the original
+owner conflicting. The holder's key lock remains present through C4 or A2 and is released
+only at C5 or A3; the waiter cannot begin its deciding rescan earlier.
+
 #### Same-statement and UPDATE cases
 
 Test duplicate values within one multirow INSERT for both sequential and batch/pending-set
@@ -4315,6 +4547,230 @@ statement's first published write. Assert the statement/client result and transa
 without defining a second UNIQUE-specific error policy. All `UNIQUE_KEY`, tuple, writer,
 schema, and publication ownership remains held until COMMITTED or ABORTED runtime terminal
 publication and releases only in C5 or A3.
+
+---
+
+### Chapter 11 Procedural Matrices and Coverage
+
+The matrices below consolidate procedure ownership; they do not replace the architecture's
+normative decisions.
+
+#### Error and result matrix
+
+| Observed condition | Expected result/state | Retry? | Ownership/release | Procedure owner |
+|---|---|---:|---|---|
+| Incompatible owner or represented predecessor | WAIT; transaction remains eligible | after grant only | existing ownership retained | Locking deterministic harness |
+| Clean RC stale-target conflict before first statement write | architecture-permitted same-CommandId fresh-snapshot retry or failed-active result | yes, only at §15.7 boundary | retained transaction locks remain terminal-duration | TUPLE current-owner matrix / Statement Failure tests |
+| RC stale-target conflict after first statement write | `FAILED_TRANSACTION_MUST_ABORT` | no | release through A2/A3 | TUPLE current-owner matrix / §39 tests |
+| RR post-snapshot committed writer | transaction-fatal serialization/write conflict | no | release through A2/A3 | TUPLE current-owner matrix / Isolation Tests |
+| Deadlock victim | `DEADLOCK_DETECTED`, then `MUST_ABORT` | no ordinary same-TxnId statement retry | held resources remain until A2/A3 | Deadlock SCC procedure |
+| Valid current logical UNIQUE owner | `UniqueViolation`; §39 determines failed-active versus must-abort | no internal post-write retry | key lock remains terminal-duration | UNIQUE current-state procedures |
+| Impossible persisted owner/RID/command state | exact corruption result | no | §39/lower-layer terminal handling | TUPLE/UNIQUE negative matrices |
+| Impossible runtime-only invariant | internal-invariant result | no | ordinarily `DATABASE_NONCONTINUABLE` | TUPLE/UNIQUE negative matrices |
+| Status/index/heap I/O failure | exact lower-layer result | only if owning layer explicitly permits | never guessed free/nonconflicting | Status-failure fixtures |
+| Recognizable future format | exact unsupported-format result | no semantic retry invented here | no write/constraint admission | Status-failure fixtures |
+| Coherent runtime allocation failure | `OutOfMemory` or exact owning resource error; FA before / MA after first write | per §39 only | partial request/graph removed; prior ownership preserved | Resource-exhaustion matrix |
+| Uncertain queue/graph/ownership coherence | internal-invariant / `DATABASE_NONCONTINUABLE` | no | controlled teardown/recovery; no guessed release | Resource-exhaustion matrix |
+| Waiter becomes transaction-ineligible | lock cancellation with original stronger cause preserved | no ordinary continuation | outgoing wait state removed; held resources terminally released | Queue/lifetime matrix |
+
+#### High-level domain and case matrix
+
+| Domain/case | Deterministic fixture | Controlled event/fault | Independent oracle | Architecture | Verification owner | Status |
+|---|---|---|---|---|---|---|
+| TUPLE_WRITE normal owner | Canonical target/current-owner rows | grant and re-fetch | owner/status/isolation matrix | §§11.2–11.7 | TUPLE current-owner procedure | COMPLETE |
+| TUPLE_WRITE invalid owner/status | RETIRED/INVALID/RESERVED/future SELF | one status/command mutation | no-guessing matrix | §§11.4, 11.15 | TUPLE negative rows | COMPLETE |
+| TUPLE_WRITE status failure | I/O/corruption/unsupported format | status lookup | exact injected result | §§11.4, 39.1 | TUPLE lookup rows | COMPLETE |
+| RC conflict | Competing committed updater | pre/post first-write boundary | fixed §15.7/§39 state model | §§11.5, 15.7 | TUPLE/Statement Failure tests | COMPLETE |
+| RR conflict | Retained snapshot plus later commit | holder terminal publication | fixed snapshot oracle | §11.6 | TUPLE/Isolation tests | COMPLETE |
+| UNIQUE normal owner | Complete exact-key candidate range | candidate terminal states | independent current-state classifier | §§11.8–11.10 | UNIQUE normal regression | COMPLETE |
+| UNIQUE invalid owner/status | RETIRED/INVALID/RESERVED | one status mutation | negative matrix | §11.10.4 | UNIQUE status fixtures | COMPLETE |
+| UNIQUE lookup failure | I/O/corruption/unsupported format | candidate status lookup | exact injected result | §§11.10.4, 39.1 | UNIQUE status fixtures | COMPLETE |
+| Lock-entry exhaustion | New exact key | pre-publication allocation | pre/post state snapshots | §§11.12, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| Waiter exhaustion | Contended exact key | enqueue allocation | queue/graph model | §§11.12–11.13, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| Graph-edge exhaustion | Blocking request | dependency installation | complete-edge model | §11.13.4 | Resource-exhaustion matrix | COMPLETE |
+| FIFO | H/W1/W2/W3 | terminal releases | independent ordered queue | §11.12 | Queue/lifetime matrix | COMPLETE |
+| Same-owner reacquire | Tuple/key current owner | identical request | owner identity model | §§11.12–11.13 | Queue/lifetime matrix | COMPLETE |
+| Cancellation/no-late-grant | Queued eligible waiter | state/cancel versus release | eligibility linearization | §§11.12–11.13.5 | Queue/lifetime matrix | COMPLETE |
+| Deadlock SCC | Overlapping and disjoint cycles | final edge addition | independent SCC/victim model | §11.13.4 | Deadlock SCC procedure | COMPLETE |
+| Terminal release | Waiting competitor | C4/C5 and A2/A3 gates | event-order model | §§11.11, 15.5–15.6 | COMMIT/ABORT and locking tests | COMPLETE |
+| Wake-up revalidation | Target/key/descriptor changes while waiting | release/grant | fresh-state oracle | §§11.3, 11.9, 11.13.4 | Wake-up procedures | COMPLETE |
+| Recovery reset | Holders/waiters/edges at crash | reopen/recovery/READY | durable WAL/status model | §§11.12–11.13, 13.11–13.19 | Runtime lock-state recovery | COMPLETE |
+| No SQL lock replay | DML WAL requiring redo | redo dispatch | event log excludes SQL locks | §§11.10.8, 13.13 | Runtime lock-state recovery | COMPLETE |
+| No UNIQUE replay | Authorized historical unique DML | redo dispatch | event log excludes SQL predicate | §§11.10.8, 13.13 | Runtime lock-state recovery | COMPLETE |
+
+#### Atomic architecture-obligation coverage map
+
+`COMPLETE` means a deterministic procedure above or a precise existing owner supplies the
+fixture, controlled event/fault, independent oracle, and expected observation. Architecture
+text alone is not counted as coverage.
+
+| ID | Primary domain | Atomic obligation | Architecture owner | Verification procedure/reference | Status |
+|---:|---|---|---|---|---|
+| 1 | LOCK IDENTITY | `TUPLE_WRITE` equality uses `(TableId,physical RID)` | §11.2 | Harness key oracle plus tuple-blocking cases | COMPLETE |
+| 2 | LOCK IDENTITY | Different table/RID tuples do not alias | §11.2 | Exact-key positive/negative vectors | COMPLETE |
+| 3 | LOCK IDENTITY | `UNIQUE_KEY` equality uses `(IndexId,complete encoded key)` | §11.8 | Harness key oracle plus unique races | COMPLETE |
+| 4 | LOCK IDENTITY | Hash collision cannot replace complete unique-key equality | §11.8 | Forced-collision key vectors | COMPLETE |
+| 5 | LOCK IDENTITY | Composite/scalar semantic equality matches encoded lock equality | §11.8 | UNIQUE key-codec matrix | COMPLETE |
+| 6 | LOCK IDENTITY | NULL-containing ordinary UNIQUE key has no duplicate lock identity | §§11.8, 11.10.2 | UNIQUE normal regression | COMPLETE |
+| 7 | LOCK MODE | Ordinary readers take no shared tuple lock | §11.1 | Isolation plus lock event log | COMPLETE |
+| 8 | COMPATIBILITY | TUPLE_WRITE and UNIQUE_KEY are exclusive | §§11.1, 11.12 | Same/different-key blocking cases | COMPLETE |
+| 9 | COMPATIBILITY | Different logical tuple/unique keys proceed independently | §§11.2, 11.8, 11.12 | Parallel exact-key fixtures | COMPLETE |
+| 10 | CROSS-OWNER | Registered schema/writer/publication domains use their exact scopes/modes | §11.13.1 | Complete §11.13.3 matrix execution | COMPLETE |
+| 11 | DEADLOCK GRAPH | Separate resource containers still share one graph | §§11.1, 11.13.1 | Cross-family cycle fixtures | COMPLETE |
+| 12 | RECOVERY RESET | Lock table/queues are process-local runtime state | §§11.12, 11.13 | Runtime lock-state recovery | COMPLETE |
+| 13 | ACQUISITION | Unowned exact logical key grants immediately | §11.12 | Harness grant event | COMPLETE |
+| 14 | ACQUISITION | Another owner of an exclusive key causes represented wait | §§11.12, 11.13.4 | Holder/waiter fixture | COMPLETE |
+| 15 | REENTRANCY | Same-owner exact key does not become a competing owner | §11.12 | Same-owner tuple/unique rows | COMPLETE |
+| 16 | QUEUE ORDER | Exclusive LockManager waiters follow FIFO | §11.12 | H/W1/W2/W3 fixture | COMPLETE |
+| 17 | ACQUISITION | UPDATE/DELETE acquires tuple key before owner mutation | §§11.4, 11.9 | DML revalidation integration | COMPLETE |
+| 18 | ACQUISITION | Unique locks are requested only after key derivation and latch release | §11.9 | Unique wait event sequence | COMPLETE |
+| 19 | LOCK ORDER | UPDATE old/new unique keys use total `(IndexId,key)` order when known | §11.9 | Opposite-expression-order fixture | COMPLETE |
+| 20 | LOCK ORDER | Multiple known unique constraints use the same total order | §11.9 | Multi-index key-set fixture | COMPLETE |
+| 21 | DEADLOCK GRAPH | Incrementally discovered multirow keys remain protected and graph-visible | §11.9 | Streaming multirow cross-key cycle | COMPLETE |
+| 22 | LOCK ORDER | DML/DDL/ANALYZE gate order follows operation table | §§11.13.2, 11.13.6 | Every operation-order row | COMPLETE |
+| 23 | COMPATIBILITY | Every §11.13.3 ALLOW/WAIT/REJECT cell is observed | §11.13.3 | Existing complete gate matrix procedure | COMPLETE |
+| 24 | CANCELLATION | Ineligible transaction states cannot acquire a new ordinary resource | §§11.13.3, 11.13.6 | Queue/lifetime state rows | COMPLETE |
+| 25 | LOCK/LATCH ORDER | TUPLE_WRITE wait retains no heap/B+/frame latch | §§11.3, 11.14 | Latch ownership event assertions | COMPLETE |
+| 26 | LOCK/LATCH ORDER | UNIQUE_KEY wait retains no physical latch/read epoch | §§11.3, 11.9 | Unique wait/recheck fixture | COMPLETE |
+| 27 | LOCK/LATCH ORDER | Registered gate wait retains no prohibited physical ownership | §§11.13.2, 11.13.7 | Cross-family schedules | COMPLETE |
+| 28 | LOCK/LATCH ORDER | Page latches never become transaction locks or graph nodes | §11.14 | Instrumented owner-domain assertion | COMPLETE |
+| 29 | WAKE-UP REVALIDATION | TUPLE_WRITE grant causes fresh target/owner validation | §§11.2–11.4 | TUPLE wake-up fixture | COMPLETE |
+| 30 | WAKE-UP REVALIDATION | UNIQUE_KEY grant causes complete fresh exact-key rescan | §§11.9–11.10 | UNIQUE wake-up fixture | COMPLETE |
+| 31 | WAKE-UP REVALIDATION | Gate grant causes resource-specific descriptor/manifest revalidation | §11.13.4 | Existing adversarial timelines | COMPLETE |
+| 32 | REVALIDATION | A pre-wait RID cannot authorize post-wait mutation | §§11.3, 11.10.8 | Mutated-target fixture plus read-epoch checks | COMPLETE |
+| 33 | TUPLE CURRENT OWNER | No-xmax sentinel permits write after ordinary checks | §11.4.1 | TUPLE matrix row | COMPLETE |
+| 34 | TUPLE CURRENT OWNER | SELF earlier-command target is stale/not blindly mutable | §11.4.2 with Ch. 10 | TUPLE matrix row | COMPLETE |
+| 35 | TUPLE CURRENT OWNER | SELF current-command uses same-command semantics | §11.4.2 with Ch. 10 | TUPLE matrix row | COMPLETE |
+| 36 | TUPLE CURRENT OWNER | Future SELF command is corruption/invariant failure | §§11.4.2, 11.10.4 | TUPLE negative fixture | COMPLETE |
+| 37 | TUPLE CURRENT OWNER | Same-owner `cmax < cmin` is not an ordinary conflict | §11.10.4 with §10.4 | TUPLE negative fixture | COMPLETE |
+| 38 | TUPLE CURRENT OWNER | Other IN_PROGRESS owner is waited upon | §11.4.4 | TUPLE matrix row | COMPLETE |
+| 39 | LOCK/LATCH ORDER | IN_PROGRESS wait releases physical protection first | §§11.3, 11.4.4 | Event-order assertion | COMPLETE |
+| 40 | RC WRITE CONFLICT | Committed owner before first write permits canonical RC retry | §11.5 | TUPLE matrix / Statement Failure tests | COMPLETE |
+| 41 | RC WRITE CONFLICT | Committed owner after first write requires MUST_ABORT | §11.5 | TUPLE matrix / §39 boundary | COMPLETE |
+| 42 | RR WRITE CONFLICT | Post-snapshot committed owner is transaction-fatal | §11.6 | TUPLE matrix / Isolation tests | COMPLETE |
+| 43 | TUPLE CURRENT OWNER | ABORTED xmax is ineffective after revalidation | §11.4.3 | TUPLE matrix row | COMPLETE |
+| 44 | FAILURE PROPAGATION | Required RETIRED owner outcome is corruption/invariant | §§11.10.4, 14.14.3 | TUPLE RETIRED fixture | COMPLETE |
+| 45 | FAILURE PROPAGATION | Persisted INVALID owner status is an error | §11.10.4 with §9.13 | TUPLE INVALID fixture | COMPLETE |
+| 46 | TERMINOLOGY | Persisted INVALID status differs from `INVALID_TXN_ID` sentinel | §§11.4.1, 11.10.4 | Explicit paired TUPLE rows | COMPLETE |
+| 47 | FAILURE PROPAGATION | Recognized RESERVED owner status is semantically rejected | §11.10.4 with §9.12 | TUPLE RESERVED fixture | COMPLETE |
+| 48 | FAILURE PROPAGATION | Current-owner I/O failure propagates exactly | §§11.4, 39.1 | TUPLE lookup fixture | COMPLETE |
+| 49 | FAILURE PROPAGATION | Current-owner corruption propagates exactly | §§11.4, 39.1 | TUPLE lookup fixture | COMPLETE |
+| 50 | FAILURE PROPAGATION | Unsupported status format propagates exactly | §§11.4, 39.1 | TUPLE lookup fixture | COMPLETE |
+| 51 | WRITE CONFLICT | UPDATE follows lock/re-fetch/current-owner protocol | §11.4 | DML plus TUPLE matrix | COMPLETE |
+| 52 | WRITE CONFLICT | DELETE follows the same conflict protocol | §11.4 | DML plus TUPLE matrix | COMPLETE |
+| 53 | CONCURRENCY | Two writers cannot silently overwrite one target version | §11.7 | Deterministic competing-writer fixture | COMPLETE |
+| 54 | CROSS-OWNER | Write admission is distinct from snapshot visibility | §§11.4–11.7 | TUPLE matrix plus MVCC Visibility tests | COMPLETE |
+| 55 | RETRY / MUST_ABORT | Pre-write internal RC retry retains one CommandId | §§11.5, 15.7 | CommandId/snapshot retry tests | COMPLETE |
+| 56 | RETRY / MUST_ABORT | RC retry captures a fresh statement snapshot | §§11.5, 15.7 | Isolation/Statement Failure tests | COMPLETE |
+| 57 | RETRY / MUST_ABORT | Published-write RC attempt cannot transparently retry | §§11.5, 39.1 | Pre/post boundary fixture | COMPLETE |
+| 58 | RR WRITE CONFLICT | RR never refreshes its retained snapshot after conflict | §11.6 | Isolation fixture | COMPLETE |
+| 59 | FAILURE PROPAGATION | Metadata/status errors are not ordinary write conflicts | §§11.4, 11.10.4 | TUPLE negative assertions | COMPLETE |
+| 60 | RETRY / MUST_ABORT | Statement/transaction result follows exact §39 class | §§11.5–11.6, 39.1 | Error/result matrix | COMPLETE |
+| 61 | UNIQUE CURRENT STATE | Empty exact-key range is NO_CONFLICT | §11.10.4 | UNIQUE normal regression | COMPLETE |
+| 62 | UNIQUE CURRENT STATE | Committed/frozen live creator conflicts | §§11.10.4–11.10.6 | UNIQUE normal regression | COMPLETE |
+| 63 | UNIQUE CURRENT STATE | Snapshot-invisible committed live owner still conflicts | §§11.10.1, 11.10.4 | Old-RR-snapshot fixture | COMPLETE |
+| 64 | UNIQUE CURRENT STATE | Active creator commit becomes conflict after rescan | §11.10.7 | Active-owner terminal fixture | COMPLETE |
+| 65 | UNIQUE CURRENT STATE | Active creator abort may free key after rescan | §11.10.7 | Active-owner terminal fixture | COMPLETE |
+| 66 | UNIQUE CURRENT STATE | Aborted creator is ignorable only after status check | §11.10.4 | UNIQUE normal regression | COMPLETE |
+| 67 | UNIQUE CURRENT STATE | Active deleter commit may free key after rescan | §§11.10.4, 11.10.7 | Delete/insert race | COMPLETE |
+| 68 | UNIQUE CURRENT STATE | Active deleter abort preserves conflict after rescan | §§11.10.4, 11.10.7 | Delete/insert race | COMPLETE |
+| 69 | UNIQUE CURRENT STATE | Aborted deleter is ineffective | §11.10.4 | UNIQUE normal regression | COMPLETE |
+| 70 | UNIQUE CURRENT STATE | Committed effective deleter removes old ownership | §11.10.4 | UNIQUE normal regression | COMPLETE |
+| 71 | UNIQUE CURRENT STATE | Exact current UPDATE old RID is SELF_EXCLUDED | §§11.10.3, 11.10.6 | UPDATE exact-RID fixture | COMPLETE |
+| 72 | UNIQUE CURRENT STATE | Published replacement exclusion is exact/context-local | §§11.10.3–11.10.4 | Continuation-context fixture | COMPLETE |
+| 73 | UNIQUE CURRENT STATE | Same transaction's other live row conflicts | §§11.10.5–11.10.6 | Multirow/same-Txn fixture | COMPLETE |
+| 74 | UNIQUE CURRENT STATE | Earlier-command self delete permits later reuse | §§11.10.4–11.10.6 | CommandId fixture | COMPLETE |
+| 75 | UNIQUE CURRENT STATE | Current-command other-row self delete does not free key | §§11.10.4–11.10.6 | Same-command fixture | COMPLETE |
+| 76 | UNIQUE CURRENT STATE | NULL-containing ordinary UNIQUE key skips duplicate admission | §11.10.2 | NULL matrix | COMPLETE |
+| 77 | UNIQUE CURRENT STATE | PRIMARY KEY rejects NULL before unique predicate | §11.10.2 | PRIMARY KEY NULL fixture | COMPLETE |
+| 78 | LOCK IDENTITY | Unique predicate equality uses canonical complete encoded bytes | §§11.8, 11.10.2 | Codec/equality vectors | COMPLETE |
+| 79 | UNIQUE CURRENT STATE | Complete physical exact-key range is enumerated | §11.10.4 | Candidate harness event/count oracle | COMPLETE |
+| 80 | UNIQUE CURRENT STATE | Corruption precedence survives an ordinary conflicting candidate | §11.10.4 | Conflict-plus-corrupt range fixture | COMPLETE |
+| 81 | FAILURE PROPAGATION | RETIRED required by a unique candidate is an error | §11.10.4 | UNIQUE RETIRED fixture | COMPLETE |
+| 82 | FAILURE PROPAGATION | INVALID required by a unique candidate is an error | §11.10.4 | UNIQUE INVALID fixture | COMPLETE |
+| 83 | FAILURE PROPAGATION | RESERVED required by a unique candidate is an error | §11.10.4 | UNIQUE RESERVED fixture | COMPLETE |
+| 84 | FAILURE PROPAGATION | Unique candidate status I/O failure propagates | §§11.10.4, 39.1 | UNIQUE failure matrix | COMPLETE |
+| 85 | FAILURE PROPAGATION | Unique candidate status corruption propagates | §§11.10.4, 39.1 | UNIQUE failure matrix | COMPLETE |
+| 86 | FAILURE PROPAGATION | Unique candidate unsupported format propagates | §§11.10.4, 39.1 | UNIQUE failure matrix | COMPLETE |
+| 87 | REVALIDATION | Dangling/reused/wrong-key candidate RID is corruption | §§11.10.4, 11.10.8 | UNIQUE identity-failure fixture | COMPLETE |
+| 88 | UNIQUE RACES | Concurrent same-key INSERTs cannot both commit | §§11.9, 11.10.7 | Both-holder-outcomes race | COMPLETE |
+| 89 | UNIQUE RACES | Unique UPDATE versus INSERT cannot both own one key | §§11.9, 11.10.6–11.10.7 | Both lock-order/outcome fixtures | COMPLETE |
+| 90 | UNIQUE RACES | DELETE/INSERT result follows deleter terminal outcome | §§11.9–11.10 | Delete/insert race | COMPLETE |
+| 91 | TERMINAL RELEASE | UNIQUE_KEY remains held through C4/A2 and releases C5/A3 | §11.11 | Unique release-boundary fixture | COMPLETE |
+| 92 | UNIQUE CURRENT STATE | Nonunique index maintenance does not invoke logical uniqueness admission | §§11.8–11.10 | Nonunique event-log fixture | COMPLETE |
+| 93 | QUEUE ORDER | Ordinary exclusive queue admits W1/W2/W3 in FIFO order | §11.12 | Queue/lifetime matrix | COMPLETE |
+| 94 | CANCELLATION | Canceled head is atomically removed and W2 can advance | §§11.12, 11.13.4 | Queue/lifetime matrix | COMPLETE |
+| 95 | CANCELLATION | Deadlock-victim head cannot later receive grant | §§11.12, 11.13.4 | Queue/lifetime matrix | COMPLETE |
+| 96 | REENTRANCY | Same-owner TUPLE_WRITE reacquire succeeds without wait | §11.12 | Queue/lifetime matrix | COMPLETE |
+| 97 | REENTRANCY | Same-owner UNIQUE_KEY reacquire succeeds without wait | §11.12 | Queue/lifetime matrix | COMPLETE |
+| 98 | REENTRANCY | Same-owner reacquire creates no self-edge/self-holder conflict | §§11.12–11.13 | Graph event assertion | COMPLETE |
+| 99 | TERMINAL RELEASE | Reacquire cannot shorten or split terminal ownership | §§11.11–11.12 | Same-owner retained-lifetime fixture | COMPLETE |
+| 100 | REENTRANCY | Identical/stronger same-owner gate requests are subsumed | §§11.13.2–11.13.3 | Complete gate matrix | COMPLETE |
+| 101 | ACQUISITION | Unsupported same-owner gate transitions reject before wait | §11.13.2 | Rejection/no-edge fixtures | COMPLETE |
+| 102 | NO-LATE-GRANT | MUST_ABORT waiter is canceled and cannot resume | §§11.12, 11.13.4 | Queue/lifetime matrix | COMPLETE |
+| 103 | NO-LATE-GRANT | ABORTING/ABORTED waiter cannot receive ordinary grant | §§11.12–11.13 | Queue/lifetime matrix | COMPLETE |
+| 104 | NO-LATE-GRANT | COMMITTING/COMMITTED waiter cannot receive ordinary grant | §§11.12–11.13 | Queue/lifetime matrix | COMPLETE |
+| 105 | CANCELLATION | Cancel-versus-release admits only its linearized legal winner | §§11.12–11.13 | Two-order barrier fixture | COMPLETE |
+| 106 | CANCELLATION | Canceled/disconnected request removes all outgoing wait state | §11.13.4 | Queue/graph snapshot assertion | COMPLETE |
+| 107 | DEADLOCK GRAPH | Every registered transaction resource family uses one graph | §11.13.1 | Cross-family cycles | COMPLETE |
+| 108 | DEADLOCK GRAPH | Waiter has an edge to every incompatible owner | §11.13.4 | Independent blocker-set comparison | COMPLETE |
+| 109 | DEADLOCK GRAPH | Elected queue predecessors that prevent grant have edges | §11.13.4 | FIFO/fairness predecessor fixture | COMPLETE |
+| 110 | DEADLOCK GRAPH | Relevant edge addition/replacement triggers synchronous detection | §11.13.4 | Scan-complete-before-sleep event order | COMPLETE |
+| 111 | DEADLOCK VICTIM | Overlapping simple cycles in one SCC yield one SCC decision | §§11.13.4, 11.15 | Overlapping-cycle graph fixture | COMPLETE |
+| 112 | DEADLOCK VICTIM | Disjoint cyclic SCCs each yield a victim | §11.13.4 | Two-SCC graph fixture | COMPLETE |
+| 113 | DEADLOCK VICTIM | Victim is highest normal TxnId in each cyclic SCC | §11.13.4 | Independent SCC/max oracle | COMPLETE |
+| 114 | DEADLOCK VICTIM | Victim receives DEADLOCK_DETECTED and enters MUST_ABORT | §11.13.4 | Victim state/result assertion | COMPLETE |
+| 115 | CANCELLATION | Victim's outgoing wait is canceled for abort progress | §11.13.4 | Victim queue/edge snapshot | COMPLETE |
+| 116 | TERMINAL RELEASE | Victim-held resources remain until A2/A3 | §§11.11, 11.13.4 | Paused-abort survivor fixture | COMPLETE |
+| 117 | WAKE-UP REVALIDATION | Survivor wakes only on actual release and revalidates | §11.13.4 | Release/grant/recheck event sequence | COMPLETE |
+| 118 | DEADLOCK VICTIM | Timeout is diagnostic and cannot choose the victim | §11.13.4 | Timeout-versus-SCC oracle fixture | COMPLETE |
+| 119 | RESOURCE EXHAUSTION | Lock-entry allocation failure before first write is coherent FA | §§11.12, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| 120 | RESOURCE EXHAUSTION | Lock-entry allocation failure after first write is MA | §§11.12, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| 121 | RESOURCE EXHAUSTION | Waiter allocation failure before first write leaves no request/edge | §§11.12–11.13, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| 122 | RESOURCE EXHAUSTION | Waiter allocation failure after first write is coherent MA | §§11.12–11.13, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| 123 | RESOURCE EXHAUSTION | Graph-node capacity is established before request-capable registration | §§11.13.1, 39.1 | Registration/lazy-node fault fixture | COMPLETE |
+| 124 | RESOURCE EXHAUSTION | Lazy post-write graph-node failure, if reachable, cannot publish a waiter | §§11.13.1, 39.1 | Representation-appropriate node fixture | COMPLETE |
+| 125 | RESOURCE EXHAUSTION | Graph-edge allocation failure before first write cancels coherently | §§11.13.4, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| 126 | RESOURCE EXHAUSTION | Graph-edge allocation failure after first write is coherent MA | §§11.13.4, 39.1 | Resource-exhaustion matrix | COMPLETE |
+| 127 | DEADLOCK GRAPH | No request sleeps without every represented dependency | §11.13.4 | Sleep-entry graph snapshot | COMPLETE |
+| 128 | FAILURE PROPAGATION | Uncertain graph/ownership coherence is noncontinuable | §§11.13.4, 39.1 | Graph-coherence failure fixture | COMPLETE |
+| 129 | TERMINAL RELEASE | Commit release occurs at C5 after C4 publication | §§11.11, 15.5 | COMMIT Fault-Injection plus wait observer | COMPLETE |
+| 130 | TERMINAL RELEASE | Abort release occurs at A3 after A2 publication | §§11.11, 15.6 | ABORT Fault-Injection plus wait observer | COMPLETE |
+| 131 | TERMINAL RELEASE | MUST_ABORT retains owned tuple/key/gates until ABORTED | §§11.11, 11.13.4 | Paused-abort fixture | COMPLETE |
+| 132 | WAKE-UP REVALIDATION | Holder terminal release never substitutes for fresh state checks | §§11.3, 11.13.4 | Tuple/unique/gate wake fixtures | COMPLETE |
+| 133 | CANCELLATION | Every transaction-ineligible waiter is canceled before ordinary continuation | §§11.12–11.13.5 | State-transition queue matrix | COMPLETE |
+| 134 | SHUTDOWN / LIFETIME | DRAINING rejects new ordinary statements/gates | §11.13.5 with §3.3.6 | Database Lifecycle Tests plus lock event log | COMPLETE |
+| 135 | SHUTDOWN / LIFETIME | DATABASE_NONCONTINUABLE admits no new ordinary acquisition | §11.13.5 | Lifecycle/noncontinuable fixture | COMPLETE |
+| 136 | SHUTDOWN / LIFETIME | Lock/gate manager outlives holders/waiters through controlled drain | §§11.12–11.13.5 | Drain/destruction event ordering | COMPLETE |
+| 137 | RECOVERY RESET | Reopen creates empty transaction lock/gate wait state | §§11.12–11.13 | Recovery reset matrix | COMPLETE |
+| 138 | RECOVERY RESET | Pre-crash holders do not survive | §§11.12–11.13 | Recovery reset matrix | COMPLETE |
+| 139 | RECOVERY RESET | Pre-crash waiters do not survive | §§11.12–11.13 | Recovery reset matrix | COMPLETE |
+| 140 | RECOVERY RESET | Pre-crash wait-for edges do not survive | §11.13.4 | Recovery reset matrix | COMPLETE |
+| 141 | RECOVERY RESET | Redo does not replay SQL locks or gate waits | §§11.10.8, 13.13 | Redo-dispatch event assertion | COMPLETE |
+| 142 | RECOVERY RESET | Redo does not rerun SQL UNIQUE current-state admission | §§11.10.8, 13.13 | Redo-dispatch event assertion | COMPLETE |
+| 143 | RECOVERY RESET | Ordinary admission begins only after READY | §§11.13.5, 13.19 | READY gate fixture | COMPLETE |
+| 144 | RECOVERY RESET | Loser outcome reconstruction needs no runtime-lock replay | §§11.11–11.13, 13.15 | Loser recovery row | COMPLETE |
+| 145 | CROSS-OWNER | Physical B+ candidate presence is not UNIQUE authority | §§11.10.1, 11.10.4 | Candidate/status harness | COMPLETE |
+| 146 | FAILURE PROPAGATION | Status/identity failure becomes neither free key nor conflict | §§11.4, 11.10.4 | TUPLE/UNIQUE negative matrices | COMPLETE |
+| 147 | RECOVERY RESET | Exact physical replay is distinct from SQL conflict admission | §§11.10.8, 11.15 | No-UNIQUE-replay fixture | COMPLETE |
+| 148 | OTHER | Queue/container/mutex choice is not a verification oracle | §11.12 | Semantic event/oracle harness | COMPLETE |
+| 149 | CROSS-OWNER | Published RETIRING claim rejects/cancels without a transaction edge | §§11.13.4–11.13.5 | Object-state revalidation fixture | COMPLETE |
+| 150 | CROSS-OWNER | Nontransaction maintenance owners remain outside the transaction graph | §11.13.5 | Owner-domain event assertions | COMPLETE |
+| 151 | SHUTDOWN / LIFETIME | Deadlock victim selection never authorizes physical unlink | §§11.13.5, 11.13.7 | DROP-victim drain fixture | COMPLETE |
+| 152 | WAKE-UP REVALIDATION | Writer/publication wake uses current manifest/object state | §11.13.4 | Gate wake adversarial timelines | COMPLETE |
+| 153 | CROSS-OWNER | Ordinary SELECT uses MVCC/descriptors without transaction gates | §§11.1, 11.13.6 | SELECT lock-event fixture | COMPLETE |
+| 154 | LOCK MODE | Deferred table/intention/schema/key-range LockManager families are not silently added | §11.1 | Registry enumeration and unsupported-scope checks | COMPLETE |
+| 155 | FAILURE PROPAGATION | UniqueViolation is emitted only for a valid logical owner | §§11.10.3–11.10.4, 39.1 | UNIQUE error-versus-violation assertions | COMPLETE |
+| 156 | OTHER | Implementation remains parallel-ready without container-specific expectations | §§11.12, 11.15 | Concurrency semantics across alternate harness scheduling | COMPLETE |
+
+Coverage totals for this 156-obligation inventory are:
+
+```text
+COMPLETE:      156
+PARTIAL:         0
+MISSING:         0
+CONTRADICTORY:   0
+```
 
 ---
 
