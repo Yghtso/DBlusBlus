@@ -2959,6 +2959,741 @@ Coverage totals: `COMPLETE=101`, `PARTIAL=0`, `MISSING=0`, `CONTRADICTORY=0`.
 
 ---
 
+### WAL Persistent Codec, Append, and Recovery Verification
+
+This section is the detailed procedural owner for the byte, append, durability,
+tail, and transaction-status WAL obligations in [`ARCHITECTURE.md`](ARCHITECTURE.md)
+Chapter 12. Numeric Exhaustion and Terminal-Boundary Verification remains the
+owner of mathematical end-of-domain and terminal-credit cases; Buffer management
+verification owns copied page writeback; B+ Tree Verification owns structural
+old-or-complete-new outcomes; the COMMIT, ABORT, lifecycle, checkpoint, and
+recovery sections own their existing cross-layer consequences. The procedures
+below verify Chapter 12 without redefining those contracts.
+
+#### Deterministic WAL harness and independent oracles
+
+The harness records architecture-level events without requiring a production
+class or function name:
+
+```text
+segment create requested / final name created / exact size established
+segment fdatasync completed / wal-directory fsync completed
+candidate reservation proposed / private record encoded / CRC and padding finalized
+valid append end published / transaction last_wal_lsn updated
+page/frame metadata published / physical WAL write begins or partially completes
+durability target requested / segment fdatasync completes / durable_lsn advances
+waiter released with success or exact failure
+recovery inventory begins / header and payload decode / CRC validation
+record accepted or rejected / valid tail established / READY published
+```
+
+Every concurrency or crash-prefix fixture uses a barrier, explicit scheduler
+gate, injected exact transfer result, or directly constructed persisted prefix.
+Elapsed sleeps, timing luck, and repeated random crashes are not correctness
+oracles. Random crash/property testing remains complementary.
+
+Four independent test-side models are mandatory:
+
+1. **Byte oracle.** Construct expected little-endian bytes from mathematical
+   field values and the architecture tables. Independently calculate header,
+   payload, `total_length`, `physical_span`, zero padding, and nested lengths.
+   Production encode followed by production decode is not sufficient.
+2. **CRC oracle.** Compute CRC32C with a test-side implementation or fixed
+   reference vectors over the 48-byte header with bytes `44..47` treated as zero
+   plus the exact payload. Alignment padding is excluded and checked separately.
+3. **LSN oracle.** Use widened arithmetic for Align8, segment index/offset,
+   exclusive end, record placement, and terminal `2^64` reasoning. Production
+   reservation helpers are not the oracle.
+4. **Recovery-prefix oracle.** Build the expected valid prefix from independently
+   accepted complete records and filesystem namespace facts, not from the
+   runtime append result or precrash API status.
+
+Each negative fixture is canonical except for one selected defect. A payload
+grammar test retains valid outer framing and CRC; a CRC test retains valid
+framing and payload; a namespace test changes only the synchronization fact.
+This isolation is essential because malformed recognized-v1 WAL, unsupported
+format, torn final tail, resource failure, and uncertain runtime authority have
+different outcomes.
+
+An ownership-seam fixture instruments WAL segment positional I/O, ordinary
+BufferPool page access, and the lower file-service calls. WAL append, flush, and
+recovery scanning must use the bounded raw-WAL path without treating a segment
+as a BufferPool page; the lower service may report exact I/O completion/failure
+but cannot choose append order or advance `durable_lsn`. This verifies the
+Chapter-7/12 ownership boundary without prescribing source layout.
+
+#### WAL segment namespace and creation
+
+Construct segment-name fixtures for indexes `0`, `1`, and `2^38-1`. The
+independent formatter expects exactly 16 lowercase hexadecimal digits, leading
+zeros, and `.wal`. Reject shorter, uppercase, signed, decimal, alternate-suffix,
+overwide, and index-`2^38` names through the owning namespace/inventory result.
+
+For segment zero, verify bytes `0..7` are zero, append end begins at LSN `8`, and
+no parser attempts to decode that prefix. For every later segment, place a record
+at offset zero to prove there is no invented segment header. Every segment fixture
+has exact length `67,108,864`; test one byte short, one byte long, and a legal
+exact final offset without allocating the complete maximum-index namespace.
+
+Instrument segment creation in this exact observable sequence:
+
+```text
+exact next final name created with exclusive/no-follow ownership
+ftruncate establishes 67,108,864 bytes
+segment fdatasync succeeds
+fsync(database_root/wal) succeeds
+records in the segment become eligible for a durability proof
+```
+
+Fail create, truncate, segment `fdatasync`, and directory `fsync` independently.
+No failure may advance `durable_lsn` into that segment or release a durability
+waiter successfully. A next-contiguous exact-size all-zero survivor is adoptable
+only after zero validation and renewed segment/directory synchronization. This
+procedure cross-references §§4.7, 12.2–12.2.1, and 13.10–13.11.
+
+#### WAL record framing, header, CRC, padding, and segment tails
+
+Build one canonical record with distinctive non-palindromic values in every
+multibyte field. Compare all 48 header bytes independently at offsets for
+`total_length`, `header_length=48`, `record_type`, zero flags/reserved, `lsn`,
+`txn_id`, `prev_txn_lsn`, `payload_length`, and `crc32c`. The same fixture
+verifies every integer is little-endian and `header.lsn` equals the physical
+logical start.
+
+Mutate one dimension at a time: header length, flags, reserved, total/payload
+relationship, physical-start LSN, alignment, segment containment, one covered
+header bit, one payload bit, and CRC bytes. Use a non-eight-aligned total to
+verify `physical_span=Align8(total_length)`, external bytes are all zero, and
+those bytes affect neither `total_length` nor CRC. A nonzero external padding
+byte in a complete required record is malformed recognized-v1 WAL even though
+the covered CRC remains unchanged.
+
+At a segment boundary construct:
+
+- a record whose physical span exactly consumes the remaining bytes;
+- a record that would exceed the remainder by one byte and therefore is never
+  split across segments;
+- at least 48 remaining bytes encoded as one valid CRC-protected `WAL_PAD` whose
+  zero payload consumes the tail;
+- fewer than 48 remaining bytes as a raw all-zero tail;
+- a complete header-sized all-zero suffix, which is unused zero tail rather
+  than a valid record because it lacks valid framing;
+- nonzero garbage in the equivalent tail position.
+
+The scanner never assembles an ordinary record across two segments. Tail
+classification is completed by the recovery matrix below; this local procedure
+proves the physical bytes and parser bounds in §§12.3–12.4.
+
+Feed an independently valid WAL_PAD to analysis and redo and assert it only
+advances framing to the segment boundary: it creates no page, transaction,
+checkpoint, or `page_lsn` action.
+
+#### WAL PageId and per-transaction ownership codecs
+
+Build the exact 16-byte WAL PageId independently: little-endian `file_id` at
+offset 0, zero `reserved32` at 4, and little-endian `page_no` at 8. Exercise
+minimum and high legal identities plus `INVALID_FILE_ID`, `INVALID_PAGE_NO`,
+nonzero reserved bytes, wrong target owner, and unpublished target PageNo.
+Malformed target identity must fail before redo or page publication.
+
+For one user transaction encode records `R1`, `R2`, and a terminal record and
+assert `R1.prev_txn_lsn=0`, `R2.prev_txn_lsn=R1.lsn`, and
+`terminal.prev_txn_lsn=R2.lsn`. Pure system records use zero header TxnId and
+previous LSN; BTREE_MTR's payload owner remains diagnostic. Also construct a
+recovery-generated TXN_ABORT using the analysis-derived loser TxnId and prior
+transaction LSN.
+
+#### PAGE_DELTA codec and payload rejection
+
+The minimum positive fixture uses `patch_count=1` and one one-byte patch at a
+legal page offset. Independently calculate its 24-byte prefix, 8-byte patch
+header, after-image byte, payload length `33`, record total `81`, physical span
+`88`, CRC, and padding. A second fixture uses multiple ordered nonoverlapping
+patches, including legal page-boundary ranges, and proves exact count and length
+accounting.
+
+Construct these complete outer-framing- and CRC-valid negative fixtures
+independently:
+
+| Defect | Required observation |
+|---|---|
+| `patch_count=0` | malformed recognized-v1 WAL/corruption; no redo or `page_lsn` advance |
+| `patch_count=1`, patch length zero | malformed recognized-v1 WAL |
+| descending or repeated offsets | malformed canonical ordering |
+| overlapping ranges | malformed payload |
+| checked `offset+length > 8192` | malformed payload without overflow |
+| overlap with common-header bytes `8..19` | malformed payload |
+| count/entry mismatch | malformed payload |
+| valid entries plus trailing payload byte | malformed payload |
+| nonzero patch reserved field | malformed recognized-v1 WAL |
+
+The zero-count fixture remains a complete known-type record: it is neither an
+empty legal operation, unsupported type, nor torn tail. Positive `count=1`
+guards against accidentally implementing `count>1`, while synthetic maximum
+record arithmetic preserves the existing upper bound.
+
+Exercise the writer boundary independently by requesting construction with
+`patch_count=0`. It must reject the request before LSN reservation and emit no
+record bytes; inspection of every successfully emitted PAGE_DELTA fixture must
+find at least one nonempty patch. Decoder rejection is not the writer oracle.
+
+#### PAGE_INIT and PAGE_IMAGE codecs
+
+Construct independent PAGE_INIT and PAGE_IMAGE vectors with the exact 24-byte
+payload prefix followed by 8192 image bytes: payload `8216`, record total
+`8264`. Verify WAL PageId, expected PageType, zero reserved field,
+`image_length=8192`, image PageNo/type, image `page_lsn=record.lsn`, image
+checksum, outer CRC, and complete physical span.
+
+Mutate one image dimension at a time: FileId/PageNo owner, PageType, common
+header, reserved bytes, image length, embedded `page_lsn`, and page checksum.
+The test-side page builder/checksum is independent from the production WAL/page
+encoder. PAGE_INIT targets a private new page and participates in bound/runtime
+publication; PAGE_IMAGE replaces an already-published page. Tests never collapse
+those record identities merely because their payload grammar is shared.
+
+The existing BufferPool new-page publication and PAGE_INIT/MTR Rollback Tests
+remain the detailed procedure for private extension, known pre-authorization
+failure, valid append, publication failure, crash with WAL but no data-page
+image, and WAL-before-data. These mappings remain COMPLETE.
+
+#### BTREE_MTR codec and nested-entry rejection
+
+The minimum positive PATCH_SET fixture uses `page_count=1`, one affected-page
+entry, and nested `patch_count=1`. Independently calculate the 16-byte MTR
+prefix, 24-byte entry prefix, 8-byte PATCH_SET prefix, one patch header/data,
+payload `57`, record total `105`, physical span `112`, outer CRC, and padding.
+Separately encode one FULL_IMAGE entry with exact `data_length=8192` and a valid
+image whose `page_lsn=mtr.lsn`.
+
+Use valid outer framing and CRC for each nested negative fixture:
+
+| Defect | Required observation |
+|---|---|
+| `page_count=0` | malformed recognized-v1 WAL; never an empty MTR/barrier/no-op |
+| one PATCH_SET with `patch_count=0` | malformed recognized-v1 WAL |
+| encoding `0` or unregistered encoding | WAL corruption, not unsupported top-level type |
+| short/long `data_length` | malformed nested payload |
+| nested count/length mismatch or trailing bytes | malformed nested payload |
+| nonzero entry/PATCH_SET reserved field | malformed recognized-v1 WAL |
+| invalid or duplicate PageId | malformed MTR membership |
+| unsorted affected-page entries | malformed canonical membership |
+| invalid nested patch order/overlap/bounds | malformed nested payload |
+| FULL_IMAGE length other than 8192 | malformed nested payload |
+
+Positive one-count fixtures prove the legal minimum. Synthetic count/length
+builders exercise the largest complete MTR admitted by the one-segment record
+bound and one unit beyond, without requiring massive resident allocations.
+
+Exercise both writer boundaries independently: request a BTREE_MTR with zero
+affected pages and request a one-page PATCH_SET with zero patches. Each request
+must fail before LSN reservation and emit no record. Inspect every successfully
+emitted MTR to prove it has at least one page and every PATCH_SET has at least one
+nonempty patch; decoder rejection is tested separately.
+
+For a legal multi-page fixture, entries are unique and sorted by
+`(file_id,page_no)`. Every final image and redo result uses the one common MTR
+LSN. The existing BTREE_MTR failure/crash/recovery and full-tree procedures own
+the no-flush, exact pre-authorization rollback, post-authorization completion,
+and old-or-complete-new recovery oracle; malformed/zero-membership records fail
+before that semantic layer.
+
+Associate one legal structural MTR diagnostically with a user transaction, then
+abort that user. Recovery and reopen preserve the authorized structural page
+shape while MVCC/status rules suppress loser-owned logical entries; no user
+abort physically reverses the system MTR.
+
+#### Registry, terminal, and checkpoint record codecs
+
+Build one independent valid vector for every record type code `0..9` and one
+complete CRC-valid vector using an unknown code. The unknown record is
+`UNSUPPORTED_WAL_FORMAT`, never an ignorable extension, generic corruption, or
+torn tail. A recognizable future owning format uses the §4.14 unsupported-format
+path; a known type with invalid v1 payload grammar uses corruption.
+
+TXN_COMMIT and TXN_ABORT fixtures have zero payload, total length 48, normal
+TxnId, and the exact transaction-chain tail. The recovery-generated abort form
+uses analysis-derived ownership. Byte validity is tested separately from C3 or
+ordinary ABORT durability. Read-only transaction procedures continue to require
+no ordinary terminal WAL/status record.
+
+Checkpoint vectors use the Chapter-13 owner rather than inventing Chapter-12
+payload fields: exact 32-byte BEGIN, DATA's 24-byte prefix plus exact DPT/writer
+arrays, and exact 32-byte END. Exercise zero DATA records, contiguous chunk
+indexes, count totals, cross-linked BEGIN identities, reserved-zero fields,
+redo bound, complete-sequence validation, WAL durability before control-slot
+installation, and retention of required image/checkpoint records.
+
+#### Append reservation, authorization, and physical failure
+
+Place deterministic barriers immediately before candidate reservation, after
+private encoding, immediately before and after valid-end publication, and before
+page/frame metadata publication. A canceled reservation or any injected
+reservation, allocation, validation, or known no-append failure must leave the
+valid append end, transaction `last_wal_lsn`, published page metadata, and DPT
+state unchanged. The next successful append uses the canonical current end, so
+the independently decoded stream has neither a hole nor an abandoned LSN.
+
+Schedule at least two appenders at each barrier. Decode the resulting physical
+prefix independently and require one total order, disjoint complete spans,
+correct segment padding, and each transaction's own `prev_txn_lsn` order. The
+procedure observes semantics only; it does not require a mutex, append-buffer
+capacity, ring, queue, thread count, or other realization.
+
+Use the two sides of valid-end publication as the authorization oracle:
+
+| Controlled stop/fault | Valid end | Published page/transaction metadata | Required outcome |
+|---|---:|---|---|
+| before authorization | old | old | exact restoration and ordinary error are permitted by the owning protocol |
+| complete bytes installed but valid end not published | old | old | private bytes are not WAL and cannot authorize publication |
+| immediately after valid-end publication | advanced across the complete record | publication must complete under retained ownership | rollback-and-continue is forbidden |
+| physical short write after authorization | advanced | legal published dirty state | retain exact append bytes, retry the same physical range, and keep `durable_lsn` unchanged |
+| append-end/assigned-byte ownership uncertain | unknown | never released as ordinary state | canonical database-noncontinuable path |
+
+For short-write fixtures, inject exact returned byte counts at the first byte,
+inside the header, inside the payload, and inside external padding. Compare every
+retry byte with the retained independent vector. A crash image contains only the
+chosen persisted prefix; recovery accepts only complete records. For uncertainty,
+make the harness unable to prove either valid-end state or the exact bytes assigned
+to it and assert no ordinary retry, page rollback, later append, writeback, or
+durability acknowledgement. These procedures specialize §12.12 and retain the
+broader Non-Crash WAL/MTR Failure Injection and §39.1 consequence tests.
+
+#### Durable prefix, group commit, COMMIT, and WAL-before-data
+
+Recovery first establishes the append end and initial durable-prefix fact from
+the validated persisted stream. An empty stream begins appending at LSN `8`; the
+test never interprets invalid LSN zero as a durable record.
+
+For a single-segment request through record LSN `X`, pause after bytes are written
+and again after segment `fdatasync`. The waiter cannot return and `durable_lsn`
+cannot cover `X` until the complete record and every required preceding byte are
+proven durable. For a cross-segment target, leave unsynchronized bytes in the
+older segment and prove synchronizing only the newer file is insufficient. Then
+synchronize every affected segment and permit monotonic advancement.
+
+For a record in a newly created segment, hold `fsync(database_root/wal)` after
+successful segment data synchronization. No durability waiter, COMMIT C3, or
+page writeback may treat that record as durable. Release the directory barrier
+and verify that namespace proof plus required segment synchronization permits the
+advance. Injecting either synchronization failure preserves every independently
+proven lower prefix and releases each affected waiter with the exact failure;
+fatal WAL-service or shutdown failure releases all unsatisfiable waiters rather
+than leaving them asleep.
+
+Use three legal aligned commit starts, `1000`, `1104`, and `1256`, with separate
+waiters. One durability operation through `1256` may release all three, but each
+assertion is evaluated independently against its own target. A lower-target waiter
+may return earlier only if its complete prefix is independently proven durable;
+no batching cadence is required. A flush failure cannot report success for an
+unproven target or falsely advance `durable_lsn`. This proves group-commit
+semantics while leaving scheduling, thread count, buffering, and coalescing
+mechanisms free.
+
+The COMMIT fixture appends TXN_COMMIT at `L`, holds `durable_lsn < L`, and proves
+C3 cannot complete. Once `durable_lsn >= L`, C3 may complete without a heap,
+index, or status-page force. C4 runtime terminal publication, C5 resource release,
+and C6 acknowledgement remain separately gated by the COMMIT Fault-Injection
+Tests. Put the same record in a new segment to exercise the namespace prerequisite,
+and coalesce several commits to prove each C3 remains tied to its own LSN. The
+ABORT fixture preserves ordinary A2 publication without inventing synchronous
+force, while WAL-before-data still prevents its status page from passing an
+undurable terminal `page_lsn`. A successful read-only transaction remains exempt
+from an ordinary terminal WAL/status record.
+
+For direct WAL-before-data coverage, prepare a copied stable dirty image with
+`page_lsn=L` and hold `durable_lsn<L`; assert data-page `pwrite` cannot begin.
+Advance the canonical durable prefix through the complete record at `L`, then
+permit writeback. Merely writing an OS byte at offset `L` never satisfies the
+oracle. Inject page `pwrite` and page `fdatasync` failures after WAL durability:
+the frame remains dirty under Chapter 7 and a durably COMMITTED transaction does
+not reverse. The Buffer management copied-image fixture remains the owner for a
+later generation `G+1` not being cleared by completion of copied generation `G`.
+Repeat the gate for heap, TXN_STATUS, WAL-protected FSM, catalog, B+ tree, and
+every applicable BufferPool-managed superblock/control-like page family; no
+record family receives an implicit unlogged writeback exception.
+
+#### WAL tail, segment inventory, and recovery handoff
+
+Construct exact persisted byte prefixes instead of depending on kill timing. The
+tail scanner matrix below covers a final suffix shorter than 48 bytes, a complete
+header with truncated payload/span, and a complete-sized CRC-invalid candidate at
+the first unrequired final suffix. Under §13.11 each is excluded from the valid
+tail; a complete malformed record inside the required retained prefix, or an
+invalid record followed by required history, is corruption and cannot be silently
+truncated. No decoder reads past the constructed bytes.
+
+Create a valid segment followed by one exact-size all-zero next-contiguous segment
+and verify it is an empty/adoptable tail only through §§12.2.1 and 13.11. Separately
+omit a required interior segment and require recovery failure. Retention-floor
+fixtures may omit or reconcile only segments Chapter 13/14 prove wholly older than
+the installed floor; an unexplained noncontiguous or future segment is never used
+to bridge a gap.
+
+Place a complete CRC-valid unknown type in the authoritative prefix and require
+`UNSUPPORTED_WAL_FORMAT`. Place a complete known PAGE_DELTA/BTREE_MTR with one
+forbidden zero count in the same position and require the canonical corruption
+path. Neither is a torn tail, and neither permits READY. This precedence is tested
+with otherwise canonical framing so nested grammar is the sole defect.
+
+Recovery-admission barriers prove ordinary append cannot begin until exclusive
+ownership, segment inventory, valid-tail reconstruction, append position,
+durable-prefix state, analysis/redo/loser resolution, and the Chapter-3 READY gate
+are established. Negative target fixtures use the actual PageId/catalog/file
+ownership chain: wrong FileId, wrong PageNo/type/owner, missing required target,
+and unpublished/orphan targets are classified before ordinary publication; no
+invented WAL database UUID is assumed.
+
+For redo, first use a checksum-invalid data page carrying a plausible high
+`page_lsn`; the stored LSN must not suppress reconstruction. After a page is
+valid/trusted, cover `page_lsn < record_lsn`, equality, and greater-than cases
+with the exact Chapter-13 apply/skip oracle. PAGE_INIT/PAGE_IMAGE/full-image MTR
+fixtures supply reconstruction bases; repeated recovery must be idempotent and a
+complete MTR may not leave a subset of page effects.
+
+#### TXN_STATUS image/terminal crash prefixes
+
+Use a status mutation that requires preparatory system image `F` and terminal
+record `T`, with `F<T`. Independently decode that `F` has system ownership and no
+terminal bit for the subject transaction, while `T` is on the user transaction's
+WAL chain. After successful runtime installation assert `rec_lsn=F` and
+`page_lsn=T`; the same rule uses PAGE_INIT LSN `I` for a newly allocated status
+page.
+
+Construct every crash case by selecting persisted record bytes, segment/directory
+durability facts, and status-page disk bytes independently. Runtime append success
+is not evidence after restart. In particular, an F-only prefix is merely a
+physical base and cannot create COMMITTED or ABORTED; a validly appended but
+unproven T produces the terminal outcome only if a complete T survives in the
+validated prefix; durable T reconstructs its terminal status even when the data
+page was never flushed. A durable COMMIT remains COMMITTED across crashes before
+runtime publication or acknowledgement.
+
+Before Chapter-9 runtime terminal publication, pause after resident status-bit
+installation and prove the active registry still reports the transaction as
+nonterminal to ordinary lookup. Persistent bits become ordinary terminal
+authority only through the owning publication/recovery rules; early resident
+installation cannot expose COMMITTED before C3/C4.
+
+For repeated same-page terminal mutations within one dirty interval, preserve the
+first required `rec_lsn`, advance `page_lsn` to each latest authorizing terminal
+record, and preserve dirty/DPT coherence. If a checkpoint FPI epoch adds a newer
+image while the page is already dirty, the original dirty-interval `rec_lsn`
+remains. Retention tests hold the image at `rec_lsn` and all later required
+terminal WAL until a durably clean page/checkpoint state makes them unnecessary;
+only then may Chapter 13/14 advance the floor.
+
+#### Length, position, checkpoint, and lifetime cross-owners
+
+For every record family, the independent builder exercises the smallest legal
+payload, the largest aligned record that fits one segment, and the next byte or
+count that would exceed the family, uint32, or segment bound. All additions and
+alignment use widened integers before narrowing; rejection occurs before record
+allocation, LSN reservation, provisional mutation, or publication. Count maxima
+remain consequences of the unchanged record-size grammar, so the positive
+nonzero-count boundary does not alter any upper limit.
+
+Numeric Exhaustion and Terminal-Boundary Verification directly supplies
+synthetic fixtures for the last legal minimum-size record start
+`2^64-48`, a legal exclusive mathematical end of `2^64`, rejection of the next
+reservation, maximum segment index `2^38-1`, and rejection of the next index
+before name formatting or creation. A separate injected ENOSPC at an ordinary
+legal LSN proves filesystem exhaustion is not `WAL_POSITION_EXHAUSTED`.
+Its terminal-headroom fixture admits an active persistent writer, consumes all
+general WAL capacity up to the credited boundary, rejects another ordinary WAL
+operation, and still permits the one required TXN_COMMIT or TXN_ABORT plus any
+bounded preparatory status image. Candidate reservation must preserve that
+credit without turning it into a hole.
+
+Checkpoint codecs and sequence validation are byte-covered above; Crash
+Injection Framework, Database Lifecycle Tests, and Recovery Property Tests
+remain the procedural owners for fuzzy capture, installation only after
+checkpoint WAL/control prerequisites, DPT redo bounds, full-image retention,
+and recycling. The status-image retention fixture specifically holds
+`F=rec_lsn` until those owners prove it unnecessary.
+
+Database Lifecycle Tests own the shutdown order: stop new admission, drain or
+fail authorized append/durability requests, wake unsatisfiable waiters, preserve
+WAL service until BufferPool no longer needs it, and perform no ordinary append
+before recovery publishes READY. Chapter 15/§39 fault tables remain the owners
+for the first-persistent-statement-write boundary; this section supplies the
+underlying WAL known-failure versus uncertainty result without changing the SQL
+consequence. Recovery continues to use redo plus loser status rather than
+physical user-DML undo or CLRs.
+
+#### WAL format-classification matrix
+
+| Fixture | Outer framing complete? | CRC valid? | Known v1 type? | Payload grammar valid? | First unrequired final tail? | Expected classification |
+|---|---:|---:|---:|---:|---:|---|
+| canonical record | yes | yes | yes | yes | either | accepted |
+| incomplete final header | no | N/A | undecodable | N/A | yes | incomplete/torn final tail; exclude suffix |
+| complete header, incomplete final payload/span | no | N/A | yes | undecidable | yes | incomplete/torn final tail; exclude suffix |
+| complete-sized CRC-invalid final candidate | yes | no | yes | otherwise yes | yes | invalid/torn final tail under §13.11; exclude suffix |
+| CRC-invalid required interior record | yes | no | yes | otherwise yes | no | `CORRUPT_WAL`/recovery failure |
+| complete unknown type | yes | yes | no | N/A | no | `UNSUPPORTED_WAL_FORMAT` |
+| recognizable future owning format | yes | as owned | not v1 | N/A | no | canonical unsupported-format result |
+| PAGE_DELTA `patch_count=0` | yes | yes | yes | no | either | malformed recognized-v1 WAL / corruption |
+| BTREE_MTR `page_count=0` | yes | yes | yes | no | either | malformed recognized-v1 WAL / corruption |
+| PATCH_SET `patch_count=0` | yes | yes | yes | no | either | malformed recognized-v1 WAL / corruption |
+| nonzero external alignment byte | yes | yes over covered bytes | yes | framing invalid | no | malformed recognized-v1 WAL / corruption |
+| malformed nested length | yes | yes | yes | no | no | malformed recognized-v1 WAL / corruption |
+
+The incomplete/CRC-invalid final-tail rows apply only at the first unrequired
+suffix. Relocating those same bytes into the required retained prefix changes
+the outcome to corruption. A complete CRC-valid known-v1 record with a forbidden
+zero count remains malformed/corrupt even when it is physically final; its
+recognized payload grammar prevents torn-tail treatment.
+
+#### Durable-prefix and WAL-before-data matrix
+
+| Scenario | Valid append end | Namespace durable? | Required segment data durable? | `durable_lsn` may cover target? | Waiter may return success? | Page at target LSN may write back? |
+|---|---|---:|---:|---:|---:|---:|
+| append only | includes target | yes | no | no | no | no |
+| data write complete, `fdatasync` pending | includes target | yes | no | no | no | no |
+| single-segment `fdatasync` complete | includes target | yes | yes | yes | yes | yes |
+| new-segment directory sync pending | includes target | no | yes | no | no | no |
+| cross-segment target, older file unsynced | includes target | yes | no | no | no | no |
+| cross-segment target, all required files synced | includes target | yes | yes | yes | yes | yes |
+| group waiter at lower proven target | beyond target | yes | through own target | yes for lower target | yes | yes |
+| group waiter at maximum unproven target | includes target | yes | no | no | no | no |
+| flush failure | includes target | as constructed | no for target | preserve prior proven value | no for affected target | no for affected page |
+
+#### WAL segment and framing matrix
+
+| Domain | Positive fixture | Negative/boundary fixture | Independent observation | Status |
+|---|---|---|---|---|
+| segment basename | indexes 0, 1, `2^38-1` | short, uppercase, decimal, wrong suffix, `2^38` | exact 16 lowercase hex digits plus `.wal` | COMPLETE |
+| segment-zero prefix | eight zero bytes; first LSN 8 | record-like bytes before 8 | scanner begins at 8 | COMPLETE |
+| segment header | later segment record at offset 0 | invented header displacement | no header bytes consumed | COMPLETE |
+| size | exactly 67,108,864 | one short/long | file length and terminal offset | COMPLETE |
+| creation durability | truncate, file sync, directory sync | fail each step | no durability credit before both sync classes | COMPLETE |
+| record start | eight-byte aligned | misaligned encoded/physical start | widened LSN arithmetic | COMPLETE |
+| header | exact 48-byte vector | each field/length mutation | byte oracle | COMPLETE |
+| CRC | independent canonical vector | header and payload bit flips | independent CRC32C | COMPLETE |
+| padding | zero and outside `total_length`/CRC | nonzero byte | byte and CRC oracles | COMPLETE |
+| no crossing | exact fit | one-byte excess | no cross-segment assembly | COMPLETE |
+| segment tail | valid WAL_PAD; short zero tail | header-sized zeros; garbage | framing and §13.11 location oracle | COMPLETE |
+
+#### WAL record-family codec matrix
+
+| Type/code | Minimum payload / positive boundary | Principal persistent fields | Page / txn association | Malformed boundary | Oracle | Status |
+|---|---|---|---|---|---|---|
+| WAL_PAD / 0 | zero-filled payload sized to segment remainder | normal header, zero payload bytes | neither | wrong size/nonzero payload | byte/CRC/segment arithmetic | COMPLETE |
+| PAGE_INIT / 1 | 8216 | PageId, type, reserved, length, full image | page; user or system per owner | image length/identity/LSN/checksum | independent page and WAL bytes | COMPLETE |
+| PAGE_DELTA / 2 | 33, count 1 and one-byte patch | PageId, type, count, patches | page; user or system per owner | count 0, empty/invalid patch | byte/nested-length oracle | COMPLETE |
+| PAGE_IMAGE / 3 | 8216 | same codec as PAGE_INIT, existing-page meaning | page; user or system per owner | image length/identity/LSN/checksum | independent page and WAL bytes | COMPLETE |
+| BTREE_MTR / 4 | 57 for one one-byte PATCH_SET | diagnostic owner, page count, entries | system record; multiple pages | page count 0, patch count 0, bad nested entry | nested byte/LSN oracle | COMPLETE |
+| TXN_COMMIT / 5 | 0 | header TxnId and previous transaction LSN | transaction | payload nonzero/invalid owner | byte/chain oracle | COMPLETE |
+| TXN_ABORT / 6 | 0 | header TxnId and previous transaction LSN | transaction | payload nonzero/invalid owner | byte/chain oracle | COMPLETE |
+| CHECKPOINT_BEGIN / 7 | 32 | exact Chapter-13 BEGIN fields | system | wrong identity/reserved/length | independent checkpoint vector | COMPLETE |
+| CHECKPOINT_DATA / 8 | 24 plus exact arrays | chunk/count prefix, DPT/writers | system | count/length/index mismatch | independent array arithmetic | COMPLETE |
+| CHECKPOINT_END / 9 | 32 | exact Chapter-13 END fields | system | cross-link/count/reserved mismatch | independent sequence oracle | COMPLETE |
+
+#### TXN_STATUS crash-prefix matrix
+
+| Controlled prefix/boundary | Surviving WAL | Status-page disk state | Runtime state after crash | Recovered terminal status | Recovery base | Legal client interpretation |
+|---|---|---|---|---|---|---|
+| before F | no F/T | prior trusted page | lost | loser becomes ABORTED where required | prior page/older retained image | no durable COMMIT |
+| F appended only | complete F, no T | prior page | lost | F supplies no terminal outcome; loser resolution applies | F | no durable COMMIT |
+| F durable only | durable F, no T | prior or F image | lost | same: F is semantically inert for terminal outcome | F | no durable COMMIT |
+| T appended, absent from surviving valid prefix | F only | unflushed | lost | loser outcome | F | no durable COMMIT |
+| complete T survives without prior acknowledgement | F then T in valid prefix | unflushed | lost | terminal code from T | F then terminal redo | client may be uncertain; recovery truth controls |
+| T durable, status page unflushed | durable F/T | prior page | lost | exact COMMITTED/ABORTED from T | F then T | COMMIT durable and irreversible |
+| page write attempted before T durability | T not durable | no new legal page | lost if crashed | derived from valid WAL only | prior/F | write must have been blocked |
+| stable status page after WBD | WAL through page_lsn durable | trusted page at T or later | lost | reflected outcome, idempotently checked | trusted page | outcome agrees with durable WAL |
+| crash after durable T before C4 | durable F/T | either | lost | COMMITTED for commit T | F/page plus T | success may be unknown; not ABORTED |
+| crash after C3 before C6 | durable F/T | either | lost | COMMITTED | F/page plus T | transport uncertainty cannot reverse outcome |
+
+#### WAL tail and inventory matrix
+
+| Fixture | Location | Complete framing / CRC | Segment continuity | Expected valid end | Classification | READY allowed? |
+|---|---|---|---|---|---|---:|
+| clean EOF/zero suffix | final tail | no next record | contiguous | after last complete record | clean tail | yes after recovery |
+| short all-zero tail | segment end, `<48` bytes | raw padding | contiguous | next segment boundary only if next valid record exists | legal tail padding | yes |
+| incomplete final header | final suffix | incomplete | contiguous | prior record end | torn/incomplete tail | yes after discard |
+| complete header, incomplete payload/span | final suffix | incomplete | contiguous | prior record end | torn/incomplete tail | yes after discard |
+| complete-sized CRC-invalid candidate | first unrequired final suffix | complete / bad | contiguous | prior record end | invalid/torn final tail | yes after discard |
+| CRC-invalid required interior record | retained interior | complete / bad | contiguous | cannot establish required prefix | corruption | no |
+| all-zero next segment | next contiguous segment | no record | contiguous | prior valid end | permitted empty tail; resync before adoption | yes |
+| missing required middle segment | retained interior | N/A | gap | cannot establish | corruption/recovery failure | no |
+| complete unknown record | authoritative prefix | complete / valid | contiguous | scan stops with semantic failure | `UNSUPPORTED_WAL_FORMAT` | no |
+| complete known malformed record, including final zero-count record | authoritative prefix or physical final record | complete / valid | contiguous | scan stops with grammar failure | `CORRUPT_WAL`/recovery failure | no |
+
+#### WAL error/result matrix
+
+| Condition | Expected architecture-owned result/consequence | Forbidden collapse |
+|---|---|---|
+| malformed recognized-v1 required WAL | `CORRUPT_WAL`/canonical recovery corruption | unsupported type, no-op, free truncation |
+| unknown complete record type / future owning format | `UNSUPPORTED_WAL_FORMAT` or owning unsupported-format result | generic v1 corruption or skip |
+| incomplete/invalid first final suffix | torn/invalid final-tail exclusion under §13.11 | accepted record or interior-corruption suppression |
+| logical record physical span exceeds segment | `WAL_RECORD_TOO_LARGE`/`ENCODED_LENGTH_EXCEEDED` before reservation | partial append |
+| mathematical WAL end exhausted | `WAL_POSITION_EXHAUSTED` before reservation/publication | wrap or ENOSPC |
+| filesystem ENOSPC/write/sync failure at legal position | exact WAL/filesystem I/O failure and §12.12 consequence | numeric exhaustion |
+| segment namespace synchronization failure | WAL I/O failure; no durability credit | durable segment inference from file data alone |
+| uncertain valid-end/assigned bytes | `DATABASE_NONCONTINUABLE` | ordinary append failure/retry guess |
+| fatal WAL service/shutdown failure | exact failure to all unsatisfiable waiters | indefinite wait or false success |
+| data-page write/sync failure after WAL durable | page remains dirty; exact page I/O failure | reverse WAL or COMMITTED outcome |
+
+#### High-level WAL domain/case matrix
+
+| Domain/case | Deterministic fixture or order | Independent oracle | Architecture / verification owner | Status |
+|---|---|---|---|---|
+| segment namespace | indexes 0, 1, maximum and malformed names | text grammar | §§12.2–12.2.1 / segment subsection | COMPLETE |
+| segment creation durability | fail create/truncate/file sync/directory sync | event order and namespace fact | §12.2.1 / segment subsection | COMPLETE |
+| record header | distinctive 48-byte vector | byte oracle | §12.4 / framing subsection | COMPLETE |
+| CRC and padding | bit flips and nonaligned total | CRC/byte oracle | §§12.3–12.4 / framing subsection | COMPLETE |
+| no crossing | exact fit and one-byte excess | widened placement arithmetic | §12.3 / framing subsection | COMPLETE |
+| WAL PageId | legal and invalid identities | 16-byte oracle | §12.5 / PageId subsection | COMPLETE |
+| PAGE_DELTA valid | count 1 and multiple patches | nested byte oracle | §12.8 / PAGE_DELTA subsection | COMPLETE |
+| PAGE_DELTA zero count | otherwise canonical complete record | grammar oracle | §12.8 / PAGE_DELTA subsection | COMPLETE |
+| PAGE_INIT / PAGE_IMAGE | exact images and owner mutations | page/WAL oracle | §§12.9–12.10 / image subsection | COMPLETE |
+| BTREE_MTR valid | one-page and multi-page | nested/common-LSN oracle | §12.10.2 / MTR subsection | COMPLETE |
+| BTREE_MTR/PATCH_SET zero count | otherwise canonical complete records | grammar oracle | §12.10.2 / MTR subsection | COMPLETE |
+| terminal records | commit/abort zero-payload vectors | byte/chain oracle | §§12.7.2, 9.14 / registry subsection | COMPLETE |
+| append reservation | cancel before authorization | valid-end oracle | §12.12.1 / append subsection | COMPLETE |
+| append authorization | barriers around valid-end publication | state-transition oracle | §§12.12.2–12.12.4 / append subsection | COMPLETE |
+| physical short write | exact prefix return counts | retained-byte/persisted-prefix oracle | §12.12.2 / append subsection | COMPLETE |
+| append uncertainty | indeterminate end or byte ownership | continuation-state oracle | §12.12.4 / append subsection | COMPLETE |
+| single/cross-segment flush | hold each segment sync | durable-prefix oracle | §12.13 / durability subsection | COMPLETE |
+| namespace prerequisite | hold directory sync | namespace/durable-prefix oracle | §§12.2.1, 12.13 / durability subsection | COMPLETE |
+| group commit | aligned distinct targets | per-waiter predicate | §§12.14–12.15 / durability subsection | COMPLETE |
+| WAL-before-data | hold `durable_lsn<L` | complete-record prefix oracle | §§7.10, 12.17 / durability subsection | COMPLETE |
+| tail reconstruction | exact final byte prefixes | recovery-prefix oracle | §13.11 / tail subsection | COMPLETE |
+| unknown vs malformed | complete unknown and known-invalid records | registry/payload grammar | §§12.7, 13.11 / format matrix | COMPLETE |
+| status two-record protocol | F/T persisted-prefix matrix | terminal/status model | §§12.10.5, 13.13.2 / status subsection | COMPLETE |
+| LSN/record exhaustion | synthetic terminal arithmetic | widened LSN oracle | §4.3.2.4 / numeric exhaustion | COMPLETE |
+| recovery handoff | hold READY and append admission | lifecycle event oracle | §§3.3, 13.19 / tail subsection | COMPLETE |
+
+#### Chapter-12 architecture-obligation coverage map
+
+The atomic inventory below assigns each obligation one primary domain. Splitting
+combined architecture sentences by independently faultable or observable result
+produces 117 obligations; no target count is imposed. `COMPLETE` means a direct
+procedure above or the named complete procedure supplies a
+deterministic oracle, not merely that Architecture states the requirement.
+
+| ID/domain | Atomic obligation | Architecture owner | Verification owner | Deterministic procedure/reference | Status |
+|---|---|---|---|---|---|
+| 1 A | WAL resides in the database `wal/` namespace | §12.2 | WAL segment namespace | exact directory/name inventory | COMPLETE |
+| 2 A | segment basename is 16 lowercase hex digits plus `.wal` | §12.2 | WAL segment namespace | indexes 0, 1, max plus malformed names | COMPLETE |
+| 3 A | segment size is exactly 67,108,864 bytes | §12.2 | WAL segment namespace | exact/short/long length fixtures | COMPLETE |
+| 4 A | v1 segment has no header | §12.2.1 | WAL segment namespace | later-segment record at offset zero | COMPLETE |
+| 5 A | segment-zero bytes 0..7 are zero and first append end is 8 | §§12.2, 13.11 | WAL segment namespace / tail | reserved-prefix decode fixture | COMPLETE |
+| 6 A | fresh unused segment bytes are zero | §12.2.1 | WAL segment namespace | exact-size zero-content validation | COMPLETE |
+| 7 A | required retained segment inventory is contiguous | §13.11 | WAL tail and inventory | missing-middle fixture | COMPLETE |
+| 8 B | segment creation orders create, truncate, file sync, directory sync | §12.2.1 | WAL segment namespace | event barriers and per-step faults | COMPLETE |
+| 9 B | creation/sync failure cannot advance durability | §§12.2.1, 12.13 | WAL segment namespace / durable prefix | hold/fail each prerequisite | COMPLETE |
+| 10 B | all-zero next segment requires validation and resynchronization before adoption | §§12.2.1, 13.11 | WAL tail and inventory | all-zero survivor fixture | COMPLETE |
+| 11 D | ordinary record never crosses a segment | §12.3 | WAL record framing | exact-fit and one-byte-excess fixtures | COMPLETE |
+| 12 D | ordinary record starts are eight-byte aligned | §§12.3–12.4 | WAL record framing / LSN oracle | aligned and misaligned physical starts | COMPLETE |
+| 13 E | `total_length`, payload, and physical-span arithmetic is exact | §§12.3–12.4 | WAL record framing | byte vector plus widened arithmetic | COMPLETE |
+| 14 D | external padding is zero and outside length/CRC | §§12.3–12.4 | WAL record framing | nonaligned total and padding mutation | COMPLETE |
+| 15 D | WAL_PAD and raw short zero tail are distinct | §§12.3, 12.7.1 | WAL record framing / tail matrix | legal PAD, short zero, header-sized zero fixtures | COMPLETE |
+| 16 C | record header is exactly 48 bytes at fixed offsets | §12.4 | WAL record framing | distinctive all-field byte vector | COMPLETE |
+| 17 C | all multibyte header fields are little-endian | §12.4 | Byte oracle | non-palindromic field values | COMPLETE |
+| 18 C | header/payload length relationships are validated | §12.4 | WAL record framing | inconsistent-length mutations | COMPLETE |
+| 19 C | encoded LSN equals physical logical record start | §12.4 | WAL record framing / LSN oracle | relocated and mismatched fixtures | COMPLETE |
+| 20 C | flags and reserved fields are zero | §12.4 | WAL record framing | independent nonzero mutations | COMPLETE |
+| 21 E | CRC32C coverage is exact | §12.4 | CRC oracle | independent header-zero-field plus payload vector | COMPLETE |
+| 22 E | covered header/payload corruption is rejected | §12.4 | WAL record framing | one-bit mutations | COMPLETE |
+| 23 I | WAL PageId is exact 16-byte ABI-independent codec | §12.5 | WAL PageId codec | byte-exact boundary vectors | COMPLETE |
+| 24 I | invalid/reserved/wrong target identity fails before redo | §§12.5, 13.13 | WAL PageId / recovery handoff | one-defect owner fixtures | COMPLETE |
+| 25 M | user records maintain per-transaction previous-LSN chain | §§12.6–12.7.3 | ownership codecs | R1/R2/terminal chain | COMPLETE |
+| 26 M | system record ownership and recovery abort ownership are canonical | §§12.6–12.7.3 | ownership codecs | system zero-owner and loser-abort fixtures | COMPLETE |
+| 27 H | record codes 0..9 are stable and each codec is exercised | §12.7 | registry codec matrix | one independent vector per code | COMPLETE |
+| 28 H | complete unknown record type is unsupported | §§12.7, 13.11 | registry / format matrix | CRC-valid unknown-code fixture | COMPLETE |
+| 29 H | future format, malformed v1, and torn tail remain distinct | §§4.14, 12.7, 13.11 | format-classification matrix | canonical three-way fixtures | COMPLETE |
+| 30 J | PAGE_DELTA count-one minimum is accepted | §12.8 | PAGE_DELTA codec | exact one-byte patch vector | COMPLETE |
+| 31 J | PAGE_DELTA multiple ordered patches are accepted | §12.8 | PAGE_DELTA codec | boundary multi-patch vector | COMPLETE |
+| 32 J | PAGE_DELTA zero count is corruption and cannot advance page_lsn | §§12.8, 12.18 | PAGE_DELTA codec | complete CRC-valid count-zero fixture | COMPLETE |
+| 33 J | each PAGE_DELTA patch is nonempty | §12.8 | PAGE_DELTA codec | count-one/length-zero fixture | COMPLETE |
+| 34 J | PAGE_DELTA order and nonoverlap are validated | §12.8 | PAGE_DELTA codec | descending/repeated/overlap fixtures | COMPLETE |
+| 35 J | PAGE_DELTA bounds and protected header range are validated | §12.8 | PAGE_DELTA codec | checked end/page_lsn-checksum range fixtures | COMPLETE |
+| 36 J | PAGE_DELTA count/length consumes payload exactly | §12.8 | PAGE_DELTA codec | mismatch and trailing-byte fixtures | COMPLETE |
+| 37 K | PAGE_INIT exact full-image codec is accepted | §12.9 | PAGE_INIT/PAGE_IMAGE codecs | independent 8216-byte payload vector | COMPLETE |
+| 38 K | PAGE_INIT image identity/type/LSN/checksum is validated | §12.9 | PAGE_INIT/PAGE_IMAGE codecs | one-field image mutations | COMPLETE |
+| 39 K | PAGE_INIT private/publication/crash protocol is old-or-published | §§5.4.2, 12.12 | PAGE_INIT and MTR Rollback Tests | pre/post-authorization and crash fixtures | COMPLETE |
+| 40 K | PAGE_IMAGE codec is distinct existing-page semantics | §12.9 | PAGE_INIT/PAGE_IMAGE codecs | paired same-layout semantic fixtures | COMPLETE |
+| 41 K | clean-to-dirty/checkpoint epoch requires a complete image | §12.10 | Buffer management verification / Crash Injection Framework | clean/dirty and FPI-epoch schedules | COMPLETE |
+| 42 K | dirty-interval `rec_lsn` names retained complete image | §§12.10.1, 12.16 | Buffer management verification / Crash Injection Framework | clean-to-dirty and retention assertions | COMPLETE |
+| 43 L | one-page BTREE_MTR is a legal minimum | §12.10.2 | BTREE_MTR codec | page-count-one PATCH_SET vector | COMPLETE |
+| 44 L | zero-page BTREE_MTR is corruption, not no-op | §§12.10.2, 12.18 | BTREE_MTR codec | complete CRC-valid zero-page fixture | COMPLETE |
+| 45 L | FULL_IMAGE nested entry has exact 8192-byte canonical image | §12.10.2 | BTREE_MTR codec | full-image positive/length-negative vectors | COMPLETE |
+| 46 L | PATCH_SET count one is accepted | §12.10.2 | BTREE_MTR codec | nested one-byte patch vector | COMPLETE |
+| 47 L | PATCH_SET zero count is corruption | §§12.10.2, 12.18 | BTREE_MTR codec | complete CRC-valid nested-zero fixture | COMPLETE |
+| 48 L | nested encoding/length/reserved/patch grammar is validated | §12.10.2 | BTREE_MTR codec | isolated nested-entry matrix | COMPLETE |
+| 49 L | affected PageIds are sorted and unique | §12.10.2 | BTREE_MTR codec | duplicate/unsorted fixtures | COMPLETE |
+| 50 L | every MTR participant uses one common MTR LSN | §12.10.2 | BTREE_MTR codec and nested-entry rejection / B+ Tree Verification | legal multi-page recovery vector | COMPLETE |
+| 51 L | complete MTR recovers old or complete new state | §§12.10.2–12.10.3, 13.13.3 | B+ Tree Verification | BTREE_MTR failure/crash/recovery procedure | COMPLETE |
+| 52 L | no-flush excludes partial MTR writeback/publication | §§12.10.3, 12.17 | B+ Tree Verification / Publication-atomicity observers | deterministic checkpoint/writeback barriers | COMPLETE |
+| 53 N | status mutation orders system image F before terminal T | §12.10.5 | TXN_STATUS crash prefixes | independently decoded F/T fixture | COMPLETE |
+| 54 N | F alone is terminally inert | §12.10.5.4 | TXN_STATUS crash prefixes | image-only prefix | COMPLETE |
+| 55 N | appended-undurable T is decided only by surviving valid WAL | §12.10.5.4 | TXN_STATUS crash prefixes | two persisted-prefix variants | COMPLETE |
+| 56 N | durable T repairs unflushed status page | §§12.10.5, 13.13.2 | TXN_STATUS crash prefixes | durable-T/unflushed-page restart | COMPLETE |
+| 57 N | status page uses `rec_lsn=F`, `page_lsn=T` | §§12.10.5.2, 12.16 | TXN_STATUS crash prefixes | runtime metadata assertion | COMPLETE |
+| 58 N | repeated status updates preserve rec_lsn and advance page_lsn | §12.10.5.2 | TXN_STATUS crash prefixes | same dirty-interval schedule | COMPLETE |
+| 59 N | status image/terminal WAL remains retained while required | §§12.10.5.3, 13.10, 14.14 | TXN_STATUS image/terminal crash prefixes / Crash Injection Framework | hold F until clean/checkpoint proof | COMPLETE |
+| 60 Z | heap redo precedes index MTR that references its RID | §12.11 | B+ Tree Verification / Statement Failure and Transaction-State Tests | ordered WAL decode and crash prefixes | COMPLETE |
+| 61 O | candidate reservation is private and non-consuming | §12.12.1 | Append reservation, authorization, and physical failure | cancel/fail before authorization | COMPLETE |
+| 62 O | concurrent appends establish one hole-free total order | §§12.12.1–12.12.2 | Append reservation, authorization, and physical failure | two-appender barrier schedules | COMPLETE |
+| 63 P | valid append is atomic complete-byte plus valid-end publication | §12.12.2 | Append reservation, authorization, and physical failure | before/after valid-end barriers | COMPLETE |
+| 64 P | reserved LSN cannot publish page/transaction metadata | §§12.12.1–12.12.3 | Append reservation, authorization, and physical failure | metadata observers before valid end | COMPLETE |
+| 65 Q | known preauthorization failure restores exact old state | §§12.12.3–12.12.4 | Non-Crash WAL/MTR Failure Injection | clean/dirty rollback captures | COMPLETE |
+| 66 Q | postauthorization rollback-and-continue is forbidden | §§12.12.3–12.12.4 | Append reservation, authorization, and physical failure / PAGE_INIT and MTR Rollback Tests | publication completion or noncontinuable | COMPLETE |
+| 67 Q | physical short write retains exact bytes and no durability credit | §12.12.2 | Append reservation, authorization, and physical failure | exact partial-count/retry fixtures | COMPLETE |
+| 68 Q | uncertain append end/bytes is noncontinuable | §12.12.4 | Append reservation, authorization, and physical failure | uncertainty fault and admission assertions | COMPLETE |
+| 69 O | append buffer retains required bytes while mechanism remains free | §12.12.5 | Append reservation, authorization, and physical failure / Database Lifecycle Tests | retry, no-hole, shutdown observations | COMPLETE |
+| 70 R | recovery establishes initial append/durable-prefix facts | §§12.13, 13.11 | Durable prefix, group commit, COMMIT, and WAL-before-data / WAL tail, segment inventory, and recovery handoff | empty and nonempty reopen fixtures | COMPLETE |
+| 71 R | single-segment durability waits for complete prefix sync | §12.13 | Durable prefix, group commit, COMMIT, and WAL-before-data | write/fdatasync barriers | COMPLETE |
+| 72 R | cross-segment durability syncs every affected segment | §12.13 | Durable prefix, group commit, COMMIT, and WAL-before-data | older-segment-unsynced fixture | COMPLETE |
+| 73 R | new-segment namespace sync precedes durability credit | §§12.2.1, 12.13 | Durable prefix, group commit, COMMIT, and WAL-before-data | directory-fsync barrier | COMPLETE |
+| 74 R | durable_lsn is monotonic and means complete record/prefix | §12.13 | Durable prefix, group commit, COMMIT, and WAL-before-data | independent accepted-prefix model | COMPLETE |
+| 75 S | group commit handles distinct aligned targets | §12.14 | Durable prefix, group commit, COMMIT, and WAL-before-data | 1000/1104/1256 waiter schedule | COMPLETE |
+| 76 S | no waiter returns before its own target | §§12.13–12.14 | Durable prefix, group commit, COMMIT, and WAL-before-data | per-waiter predicate assertions | COMPLETE |
+| 77 S | flush failure preserves proven prefix and wakes affected waiters | §§12.13–12.14 | Durable prefix, group commit, COMMIT, and WAL-before-data | multi-target sync failure | COMPLETE |
+| 78 X | fatal WAL service/shutdown wakes unsatisfiable waiters | §§3.3.6, 12.13 | Database Lifecycle Tests / Durable prefix, group commit, COMMIT, and WAL-before-data | fatal-service and drain barriers | COMPLETE |
+| 79 M | TXN_COMMIT codec and C3 durability boundary are exact | §§12.7.2, 12.15; §9.14.1 | Registry, terminal, and checkpoint record codecs / COMMIT Fault-Injection Tests | byte vector and `durable_lsn` barrier | COMPLETE |
+| 80 M | TXN_ABORT codec preserves ordinary no-force semantics | §§12.7.2, 12.10.5.2; §9.14.2 | Registry, terminal, and checkpoint record codecs / ABORT Fault-Injection Tests | byte vector and status WBD gate | COMPLETE |
+| 81 M | read-only terminal-WAL exception remains | §9.14 | Transaction identity, snapshot, and status verification / COMMIT Fault-Injection Tests | successful read-only transaction fixture | COMPLETE |
+| 82 M | durable COMMIT is irreversible; C4–C6 remain separate | §§9.14.1, 12.15 | COMMIT Fault-Injection Tests | C3 through acknowledgement boundaries | COMPLETE |
+| 83 T | page writeback is blocked while `durable_lsn < page_lsn` | §12.17 | Durable prefix, group commit, COMMIT, and WAL-before-data / Buffer management verification | direct pwrite gate | COMPLETE |
+| 84 T | WBD uses complete-record/prefix durability meaning | §§12.13, 12.17 | Durable prefix, group commit, COMMIT, and WAL-before-data | independent record acceptance oracle | COMPLETE |
+| 85 T | data flush failure leaves page dirty and cannot reverse commit | §§7.10–7.11, 12.17 | Buffer management verification | post-WAL page I/O faults | COMPLETE |
+| 86 T | older copied writeback cannot clear newer dirty generation | §§7.10–7.11, 12.16 | Buffer management verification | G/G+1 reconciliation fixture | COMPLETE |
+| 87 U | incomplete final header is excluded as torn tail | §13.11 | WAL tail and inventory | exact short persisted prefix | COMPLETE |
+| 88 U | incomplete final payload/span is excluded as torn tail | §13.11 | WAL tail and inventory | exact truncated record variants | COMPLETE |
+| 89 U | CRC-invalid complete-sized first final suffix is excluded as invalid tail | §13.11 | WAL tail and inventory | final-location CRC fixture | COMPLETE |
+| 90 U | CRC-invalid/malformed required interior WAL is corruption | §13.11 | WAL tail and inventory | bad interior followed by required history | COMPLETE |
+| 91 U | all-zero next segment is distinguished from required history | §§12.2.1, 13.11 | WAL tail and inventory | next-contiguous zero segment | COMPLETE |
+| 92 U | missing required interior segment prevents recovery | §13.11 | WAL tail and inventory | N/N+2 inventory | COMPLETE |
+| 93 W | retention-floor omissions/extras follow checkpoint ownership | §§13.10–13.11, 14.14 | WAL tail, segment inventory, and recovery handoff / Crash Injection Framework | installed-floor inventory variants | COMPLETE |
+| 94 V | recovery establishes valid end before READY/ordinary append | §§3.3.3, 13.19 | WAL tail, segment inventory, and recovery handoff / Database Lifecycle Tests | append blocked at each open phase | COMPLETE |
+| 95 V | checksum is validated before trusting disk page_lsn | §§4.13, 13.14 | WAL tail, segment inventory, and recovery handoff | high-LSN checksum-bad page | COMPLETE |
+| 96 V | trusted redo page_lsn less/equal/greater cases are exact | §§12.8–12.10, 13.13 | WAL tail, segment inventory, and recovery handoff | apply/skip/idempotence matrix | COMPLETE |
+| 97 G | record-family min/max and one-unit-excess lengths are checked | §§4.3.2.4, 12.3 | Length, position, checkpoint, and lifetime cross-owners / Numeric Exhaustion and Terminal-Boundary Verification | synthetic widened builders | COMPLETE |
+| 98 F | final LSN/exclusive-end arithmetic never wraps | §4.3.2.4 | Numeric Exhaustion and Terminal-Boundary Verification | `2^64-48`, end `2^64`, next rejection | COMPLETE |
+| 99 G | segment index stops at `2^38-1` without name truncation | §§4.3.2.4, 12.2 | Numeric Exhaustion and Terminal-Boundary Verification / WAL segment namespace and creation | max and next-index fixtures | COMPLETE |
+| 100 Y | WAL_POSITION_EXHAUSTED differs from legal-position ENOSPC | §§4.3.2.4, 12.12.4 | Numeric Exhaustion and Terminal-Boundary Verification / WAL error/result matrix | synthetic exhaustion vs injected filesystem fault | COMPLETE |
+| 101 W | checkpoint record codecs and sequence links are exact | §§13.5–13.8 | registry / Crash Injection Framework | BEGIN/DATA/END byte vectors | COMPLETE |
+| 102 W | checkpoint installation follows WAL/control durability prerequisites | §§13.5–13.10 | Crash Injection Framework / Database Lifecycle Tests | crash boundaries before/after install | COMPLETE |
+| 103 W | checkpoint/DPT retains required full images and status bases | §§12.10, 13.9–13.10 | Crash Injection Framework / TXN_STATUS image/terminal crash prefixes | rec_lsn retention fixtures | COMPLETE |
+| 104 V | WAL target ownership prevents cross-database/file/page replay | §§4.7, 12.5, 13.13 | WAL PageId and per-transaction ownership codecs / WAL tail, segment inventory, and recovery handoff | actual registry/catalog owner negatives | COMPLETE |
+| 105 Y | WAL failure consequences respect first persistent statement write | §§15.7, 39.1 | Non-Crash WAL/MTR Failure Injection / Statement Failure and Transaction-State Tests | prewrite and postwrite fault rows | COMPLETE |
+| 106 X | shutdown drains authorized WAL before service teardown | §§3.3.6, 12.12.5 | Database Lifecycle Tests | DRAINING append/flush/waiter order | COMPLETE |
+| 107 V | recovery uses redo plus loser status, not user-DML physical undo | §§12.1, 13.15–13.16 | Recovery Property Tests | committed model plus loser visibility | COMPLETE |
+| 108 V | only complete valid persisted WAL determines recovery and terminal authority | §§12.12, 13.11–13.20 | Recovery-prefix oracle / COMMIT Fault-Injection Tests / ABORT Fault-Injection Tests | exact persisted-prefix and terminal model | COMPLETE |
+| 109 J | PAGE_DELTA writers never emit zero-patch records | §§12.8, 12.18 | PAGE_DELTA codec and payload rejection | zero-count construction fails before reservation; emitted-record inspection | COMPLETE |
+| 110 L | BTREE_MTR writers never emit zero-page records | §§12.10.2, 12.18 | BTREE_MTR codec and nested-entry rejection | zero-page construction fails before reservation; emitted-record inspection | COMPLETE |
+| 111 L | PATCH_SET writers never emit zero-patch entries | §§12.10.2, 12.18 | BTREE_MTR codec and nested-entry rejection | nested zero-count construction fails before reservation; emitted-record inspection | COMPLETE |
+| 112 Z | WAL raw positional I/O is a bounded WAL-owned exception, not BufferPool ownership | §§7.3, 12.1, 12.13 | Deterministic WAL harness and independent oracles | ownership-seam instrumentation and injected lower I/O result | COMPLETE |
+| 113 G | reservation preserves terminal WAL/status-image headroom without creating holes | §§4.3.2.4, 12.12.1 | Numeric Exhaustion and Terminal-Boundary Verification / Length, position, checkpoint, and lifetime cross-owners | credited-terminal record after general-capacity exhaustion | COMPLETE |
+| 114 H | WAL_PAD affects framing only and never enters page/transaction redo | §§12.7.1, 13.12–13.13 | WAL record framing, header, CRC, padding, and segment tails | independently decoded PAD through analysis/redo | COMPLETE |
+| 115 T | every BufferPool-managed WAL-protected page family obeys WAL-before-data | §12.17 | Durable prefix, group commit, COMMIT, and WAL-before-data / Buffer management verification | parameterized page-family writeback gate | COMPLETE |
+| 116 L | user abort does not physically reverse an authorized system BTREE_MTR | §§12.10.2–12.10.4, 13.13.3 | BTREE_MTR codec and nested-entry rejection / B+ Tree Verification | diagnostic owner abort plus recovery/reopen | COMPLETE |
+| 117 N | active-registry state dominates resident status bits before runtime terminal publication | §§9.13–9.14, 12.10.5.2 | TXN_STATUS image/terminal crash prefixes / Transaction identity, snapshot, and status verification | pause after status-bit install before C3/C4 | COMPLETE |
+
+Coverage totals: **COMPLETE 117; PARTIAL 0; MISSING 0; CONTRADICTORY 0.**
+
 ### Crash Injection Framework
 
 Add deterministic process-termination points around:
