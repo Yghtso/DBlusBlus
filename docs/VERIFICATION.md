@@ -591,25 +591,542 @@ At minimum:
 - reopen persistence,
 - short/error I/O handling where injectable.
 
-### Buffer tests
+### Buffer management verification
 
-Use very small pools such as:
+This section is the detailed procedural owner for the I/O and BufferPool contract in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) Chapter 7. It specializes the generic checked-arithmetic,
+page-format, owner-validation, PAGE_INIT, WAL/MTR, recovery, reclamation, and lifecycle
+procedures rather than redefining them. The principal architecture owners are §§4.3.2,
+4.7–4.14, 7.2–7.13, 12.10, 12.12, 12.16–12.17, 13.13–13.14, 14.5–14.12, 14.17, 39.1,
+and 41.1.
+
+Use pools substantially smaller than the working set, including a three-frame pool, while
+retaining direct construction of synthetic runtime states for checked counter and failure
+boundaries. Every fixture is canonical except for the single dimension being tested: page
+size, format version, FileId, PageNo, FileKind, PageType, object owner, reserved fields,
+checksum, and published bound are valid unless that field is the injected fault.
+
+#### Deterministic harness and observability
+
+Concurrency verification uses hooks, barriers, injected outcomes, and coordinated threads or
+processes. It MUST NOT use sleeps, repeated racing until a failure appears, or elapsed time as
+the ordering oracle. The harness exposes abstract semantic events rather than requiring
+production function names:
 
 ```text
-3 frames
+load intent installed
+frame bound LOADING
+victim candidate observed
+victim reservation attempted/completed
+pin increment attempted/completed
+latch acquisition attempted/completed/canceled
+guard returned/released
+stable image copied with PageId/generation/page_lsn
+WAL durability requested/completed/failed
+page pwrite started/completed/short/failed
+page-file fdatasync started/completed/failed
+dirty reconciliation started/completed
+mapping marked non-pinnable/removed
+frame reset/new PageId bound
+PAGE_INIT publication-authorizing WAL appended
+owning published bound advanced
+frame published RESIDENT
+file gate changed ACTIVE/RETIRING/CLOSED
+retirement drain completed
 ```
 
-while touching many more than 3 pages.
+At each point the harness can inspect the logical frame state, bound PageId, page-table load
+intent and ordinary mapping, pin count, latch ownership/waiters, dirty flag and generation,
+I/O/no-flush/victim/drain reservations, replacement reference state, `page_lsn`, `rec_lsn`,
+DPT membership, WAL durable LSN, registered-file state, and persistent page-file completion.
+Test-only poisoning or generation assertions may detect stale borrowed references; production
+APIs need not expose one particular instrumentation mechanism.
 
-Verify:
+#### Frame lifecycle and publication
 
-- eviction,
-- dirty writeback,
-- pin protection,
-- no pin leaks,
-- CLOCK behavior,
-- concurrent read guards,
-- exclusive write guards.
+Exercise every row below from a controlled pre-state and pause at its publication point.
+Assert the stated observable condition, race one forbidden operation at that point, and inject
+each applicable failure before and after publication. This tests the matrix rather than using
+it as a second architecture definition.
+
+| State/transition case | Bound/mapped and caller-visible state | Deterministic operation and oracle |
+|---|---|---|
+| `FREE + NONE` | no PageId, no mapping, no pin, clean, not visible | bind only through a sole existing/new-page intent; stale metadata is absent |
+| `FREE -> LOADING + READ_IN_PROGRESS` | PageId and in-progress entry, no public pin/guard | pause before read; another same-page fetch joins and no ordinary caller sees bytes |
+| `FREE -> LOADING + NONE` for new page | private unpublished PageId, creator claim only | no ordinary fetch may join merely from the intended PageNo |
+| existing-page `LOADING -> RESIDENT` | same mapping becomes pinnable only after full validation | publication assigns one pin per uncancelled claim and wakes waiters |
+| new-page `LOADING -> RESIDENT` | owning bound and frame usability publish together | PAGE_INIT/MTR, canonical bytes, owner validation, bound, and creator pin are complete |
+| failed `LOADING -> FREE` | failed intent removed; no ordinary mapping/pin | frame reset, all joiners receive one captured error, clean retry may install a new intent |
+| `RESIDENT + NONE` | validated PageId, pinnable; dirty allowed | hit pin and persistent mutation follow their separate atomic publication points |
+| `RESIDENT -> RESIDENT + WRITEBACK_IN_PROGRESS` | mapping remains usable; writeback copy is private | one writeback reservation; pins/readers/writers follow copied-writeback rules |
+| resident writeback completion | same identity; dirty clears only on stable matching generation | newer generation or any failure leaves the frame dirty and coherent |
+| `RESIDENT -> EVICTING` | old mapping present but non-pinnable; pin count zero | final eligibility recheck/reservation is the linearization point |
+| clean `EVICTING -> FREE/LOADING` | old mapping removed before reset/rebind | no write; complete reset precedes any new PageId |
+| dirty `EVICTING -> WRITEBACK_IN_PROGRESS` | old identity retained; no ordinary access | WAL-gated stable writeback precedes removal/rebind |
+| dirty eviction success | old mapping removed; reset then FREE/new LOADING | exact write and file synchronization completed first |
+| dirty eviction failure `-> RESIDENT` | old mapping pinnable again, old identity and dirty metadata retained | requesting load/joiners receive the same failure; frame is not rebound |
+| retirement drain | RETIRING gate blocks new claims; existing ownership drains | mapping/reset/close/unlink cannot pass the drain or semantic discard authority |
+| shutdown drain | quiescing rejects new acquisitions | existing guards/I/O drain and required dirty flush completes before teardown |
+
+The corresponding state-condition matrix is exercised directly. For every row, inspect each
+column before allowing its listed outgoing transition; a mismatch is a failed invariant, not
+an alternate transition.
+
+| State/condition | PageId bound? | Page-table entry | Caller pinnable? | Dirty permitted? | I/O state | Eviction eligible? | Ordinary visibility | Legal outgoing transitions |
+|---|---:|---|---:|---:|---|---:|---|---|
+| `FREE` | no | none | no | no | `NONE` | allocation candidate, not eviction victim | none | existing/new-page `LOADING` |
+| existing-page `LOADING` | yes | in progress | no | no | `READ_IN_PROGRESS` | no | join coordination only | validated `RESIDENT`; failed `FREE` |
+| private new-page `LOADING` | yes | private in progress | no | only protected unpublished initialization state | `NONE` | no | creator coordination only | co-published `RESIDENT`; failed `FREE`/noncontinuable disposition |
+| `RESIDENT + NONE` | yes | usable | yes if file active and count representable | clean or dirty | `NONE` | only if every §7.9 predicate holds | guarded callers | hit/mutation; resident writeback; `EVICTING`; retirement drain |
+| `RESIDENT + WRITEBACK_IN_PROGRESS` | yes | usable | yes | dirty until matching stable reconciliation | `WRITEBACK_IN_PROGRESS` | no | guarded callers; private copy hidden | `RESIDENT + NONE` clean, newer-dirty, or failed-dirty |
+| clean `EVICTING + NONE` | yes | non-pinnable old mapping | no | no | `NONE` | already reserved | none | `FREE`; reset then new `LOADING` |
+| dirty `EVICTING + NONE` | yes | non-pinnable old mapping | no | yes | `NONE` | already reserved | none | eviction `WRITEBACK_IN_PROGRESS` |
+| `EVICTING + WRITEBACK_IN_PROGRESS` | yes | non-pinnable old mapping | no | yes until success | `WRITEBACK_IN_PROGRESS` | already reserved | none | `FREE`/new `LOADING` after success; restored `RESIDENT` after failure |
+| file-gated `RETIRING` frame | yes until drain/reset | existing non-new-pinnable mapping | no new pin | according to required persistence/discard authority | `NONE` or draining I/O | no | pre-gate guards only | drained/reset, then file `CLOSED`; failure remains RETIRING |
+| file `CLOSED` | no | none | no | no | none | no | none | no ordinary frame transition for the old FileId |
+
+Negative transition tests reject direct `FREE ->` caller-visible `RESIDENT`, ordinary guard
+return from `LOADING`, pinned or otherwise ineligible `RESIDENT -> EVICTING`, dirty eviction
+rebind before stable writeback, and old-to-new PageId binding without mapping removal and
+complete reset. `FREE` has only `NONE`; `LOADING`, `RESIDENT`, and `EVICTING` accept only the
+I/O combinations in §7.6.1. No test-only state setter may make an illegal combination look
+like a successful public operation.
+
+Distinguish persistent-page publication from frame publication. An existing PageNo may be
+persistently published while its frame remains private `LOADING`; a private new-page frame
+may exist while its PageNo is unpublished. A load intent is visible to joiners but is not an
+ordinary pinnable mapping. Tests observe these dimensions separately.
+
+#### Same-page fetch, victim races, and failure cleanup
+
+Coordinate at least two fetches for one valid nonresident PageId. Pause after the sole
+`LOAD_INTENT` installation and again after the frame becomes `LOADING`. Assert exactly one
+logical loader/read, one eventual ordinary resident identity, all joiners attached to that
+load, and exactly one pin for every successfully returned guard. Duplicate mutable ordinary
+copies are forbidden regardless of page-table container.
+
+Inject raw read failure, short transfer, bad checksum, wrong owner, and unsupported format
+while joiners wait. The loader removes/closes the in-progress mapping, resets the frame,
+publishes no guard/pin, and wakes every registered joiner with the corresponding captured
+error. Correct the underlying fixture and assert that a later independent fetch installs a
+new intent and succeeds; failed pages are not poison-cached.
+
+If a permitted bounded/cancellable waiting interface exists, cancel one joiner before
+publication and another immediately after claim-to-pin assignment. The first withdraws only
+its pending claim; the second releases only its assigned pin. Neither cancels the loader,
+removes a successful mapping, changes another caller's pin, nor leaks waiter state. This case
+is conditional and does not require such an optional interface.
+
+For fetch versus eviction, prepare an eligible zero-pin resident frame and pause before the
+final pin/victim reservation. If fetch wins, its pin makes victim reservation fail or retry.
+If eviction wins, the mapping becomes non-pinnable and fetch cannot acquire the old frame; it
+waits/retries according to §7.6.3. A pin acquired after reassignment begins is forbidden.
+
+#### Pin, latch, guard, and borrowed-reference lifecycle
+
+Use synthetic checked-counter states immediately below and at the pin maximum. The legal
+increment succeeds, an increment beyond the maximum fails without changing the count or
+PageId, and no wrap to zero occurs. Pair this with one-release-per-owner cases: normal
+destruction, explicit early release followed by destruction, transferred ownership,
+canceled latch acquisition after pinning, and attempted double release. Assert no underflow,
+no duplicate unpin, and no leaked pin.
+
+For canceled latch acquisition, pause after the pin and fail/cancel before latch ownership.
+Exactly that pin is released, no latch or guard survives, and the mapped frame remains valid.
+For guard transfer, the destination owns the one pin/latch claim and the source is inert;
+destination release performs latch release before checked unpin exactly once. During early
+release, pause between those events and prove eviction cannot win while the guard still
+depends on protected bytes.
+
+Exercise shared read guards, exclusive write guards, and transaction-lock separation.
+Concurrent readers may proceed; writers exclude byte readers/writers; a transaction-level
+wait retains no page latch. Pinning alone does not permit unsynchronized byte access and a
+latch alone does not preserve frame identity.
+
+To verify borrowed-reference lifetime, obtain a raw/typed view of page A, release its guard,
+evict/reassign the frame to B, and attempt stale use through a debug poison, frame token, or
+equivalent test facility. The stale view must not be accepted as a valid reference to B.
+This is a contract-violation detector, not a required production handle design.
+
+#### Copied stable flush, WAL, and dirty reconciliation
+
+For a dirty resident frame, reserve one writeback, copy a stable 8192-byte image under the
+read latch, and record copied PageId, `modification_generation`, and `page_lsn`. Release the
+latch, finalize the private checksum, satisfy WAL-before-data, perform an exact complete page
+write and required `fdatasync`, then pause at reconciliation. If identity and generation are
+unchanged, dirty/`rec_lsn`/DPT state may publish clean atomically; flush preserves the resident
+PageId and mapping.
+
+Race a newer mutation after copying generation G and before or after G's physical write.
+Generation G may become durable, but completion cannot clear generation G+1, its dirty flag,
+or its dirty-interval recovery metadata. A later explicit flush can persist G+1. Also inject
+a stale completion token for page A against a later identity B; it must not alter B. Normal
+reservations should prevent this reassignment, and the injected case proves the reconciliation
+defense.
+
+Keep a page pinned while flushing it. Assert no eviction, a coherent private image,
+WAL-before-data, preserved resident identity, and dirty clearing only for a matching
+generation. Pinning is not an immutability claim.
+
+When explicit flush requests overlap, accept join-and-recheck, serialized repeat, or an
+equivalent mechanism. The current-contents request returns success only when the then-current
+generation is stably clean. If optional background writeback exists, it uses the same copied
+generation/WAL rules and may skip or requeue busy/no-flush frames; no background worker is a
+required feature and it cannot make a pinned frame evictable.
+
+Specialize the generic Disk tests with zero-byte failure, short write, and exact 8192-byte
+write outcomes. Only the complete transfer may proceed toward stable completion. After a
+successful full `pwrite`, inject `fdatasync` failure: dirty and all recovery metadata remain,
+success/eviction is not published, and the frame retains the operation-appropriate identity.
+Where writes are batched, no covered frame becomes clean or evictable before the covering
+`fdatasync` succeeds.
+
+For WAL-backed pages, inject `flush_through(copied_page_lsn)` failure and prove data-page
+`pwrite` never begins. Dirty remains and the caller receives `WAL_DURABILITY_FAILURE`.
+Corrupt the resident page after checksum validation only through an explicit test fault; the
+write path must checksum the stable private image, not changing resident bytes. The existing
+§12.10/§12.12 tests own no-flush and DPT/checkpoint publication races; add a BufferPool
+observer proving checkpoint sees either the complete dirty transition or a safely durable
+clean page, never an intermediate state.
+
+#### CLOCK, eviction, failure restoration, and reset
+
+Table-test every victim-eligibility predicate: `RESIDENT`, zero pins, I/O `NONE`, no latch
+owner/waiter, no no-flush barrier, no competing victim/drain reservation, and a successful
+final reservation. For CLOCK reference behavior, a successful hit/load sets the use bit; an
+eligible referenced frame receives the defined second chance; an eligible unreferenced frame
+may be reserved. `FREE`, `LOADING`, `EVICTING`, pinned, and reserved frames do not become
+victims through the reference-bit rule.
+
+Construct separate pools in which every frame is excluded by pins, I/O, latch ownership or
+waiters, no-flush state, and victim/drain reservation. Count logical CLOCK visits and
+eligibility decisions rather than time. One complete unsuccessful ordinary pass returns
+`NO_REPLACEABLE_FRAME`, changes no pins/states, steals no frame, and does not wait
+indefinitely. A conditional bounded/cancellable convenience path cannot weaken these
+predicates.
+
+For clean eviction, assert non-pinnable reservation, old-mapping removal, complete reset,
+then optional new binding, with no data write. For dirty eviction, assert WAL durability,
+exact write, `fdatasync`, mapping removal/reset, then new binding. Independently inject WAL,
+write, short-write, and sync failure: restore the old pinnable `RESIDENT` mapping, preserve
+dirty/`rec_lsn`/generation/DPT state, release the reservation, fail the requesting load and
+its joiners, and permit a later retry. No alternative victim hides that failure.
+
+After successful eviction or failed loading cleanup, inspect all architecture-significant
+state: PageId, pins, dirty flag, cached/trusted `page_lsn` state where separately retained,
+`rec_lsn`/DPT/FPI metadata, I/O and no-flush state, latch/waiter state, replacement bit,
+victim/drain claims, and generation/identity tokens. Nothing owned by the old PageId may
+influence the new binding. Dirty/writeback generation follows §7.6.1; inject
+an old asynchronous completion and prove it cannot match a later residency. Apply the
+runtime-generation terminal/quiesce procedure under “Encoded, structural, generation, and
+epoch specializations” rather than brute-force wrapping.
+
+Pair `NO_REPLACEABLE_FRAME` against disk `RESOURCE_FULL`, `PAGE_NUMBER_EXHAUSTED`,
+`WAL_POSITION_EXHAUSTED`, identifier exhaustion, heap `NO_SPACE`, corruption, retirement,
+and `BUFFERPOOL_QUIESCING`. Each fixture reaches only its owning domain and no result is
+reported as generic “buffer full.”
+
+#### Validation before residency
+
+Parameterize ordinary load validation over the managed families applicable to the v1
+page registry:
+
+| Family/context | Owning specialization |
+|---|---|
+| `HEAP_DATA`, including catalog-relation heaps | §§4.13.3, 5.3–5.13, and immutable relation descriptor |
+| `FSM_DATA` | §§4.13.6 and Chapter 6 FSM verification |
+| `BTREE_INTERNAL`, `BTREE_LEAF`, `BTREE_FREE` | §§4.13.4–4.13.5 and B+ verification |
+| `TXN_STATUS` | §§9.12, 12.10.5, and recovery/status ownership |
+| `CATALOG_DATA` bootstrap page | §16.9 specialized bootstrap/open path; ordinary publication only where that owner registers it |
+| `SUPERBLOCK`/page zero | specialized open/identity path below, not assumed to be an ordinary data-page fetch |
+
+For each applicable ordinary family, start with canonical bytes and owner context. Observe
+registered-owner lookup, published-bound check, exact read, family/version dispatch,
+checksum, common PageId identity, FileKind/PageType compatibility, nonfetching L1/L2 owner
+validation, `LOADING -> RESIDENT`, then guard return. Fault each earlier step separately and
+assert no later ordinary publication, no guard/pin, complete load cleanup, one error for all
+joiners, and successful retry after correcting the fixture.
+
+Cases include bad checksum, wrong PageNo, wrong registered FileId/owner, wrong FileKind,
+wrong PageType, and family-local structural corruption. A plausible `page_lsn` behind a bad
+checksum must not be trusted for WAL/recovery decisions. For every applicable family pair a
+malformed recognized-v1 fixture with a recognizable future version: the first yields its
+canonical corruption result; the second yields `UNSUPPORTED_PAGE_FORMAT` or
+`UNSUPPORTED_FILE_FORMAT`. Dispatch must not parse future bytes as v1.
+
+#### BufferPool new-page publication
+
+Pause after append intent reservation and private `LOADING` frame binding. The selected
+PageNo remains outside the owning published bound, has no ordinary mapping or guard, and an
+ordinary concurrent fetch cannot attach merely by guessing it. The private frame is not
+evidence of persistent publication.
+
+Inject every known pre-publication-authorizing-WAL failure through the generic PAGE_INIT
+procedure. Assert private mapping/frame cleanup, unchanged published bound, no escaping
+guard/reference, serialized tail restoration, and deterministic PageNo reuse where §4.11.1.1
+permits it. After the publication-authorizing record validly appends, inject failure before
+complete bound/frame publication and require retained completion/retry or
+`STORAGE_NONCONTINUABLE`; do not roll back and reuse an authorized PageNo.
+
+On success, observe one publication boundary that has canonical initialized bytes,
+PAGE_INIT/MTR and frame recovery metadata, owner validation, owning `published_page_count`,
+ordinary `RESIDENT` mapping, and exactly one creator pin. Before it, neither scans nor fetches
+can use the page; after it, the bound includes the PageNo and the mapping is usable. Repeat
+with a concurrent ordinary fetch paused on each side.
+
+Specialize PAGE_INIT crash tests by asserting all frame-table, pin, latch, waiter, and CLOCK
+state disappears on process death. Recovery uses only WAL/file publication state and admits
+the page ordinarily only after reconstruction and canonical validation.
+
+#### File retirement and shutdown specialization
+
+Expose `ACTIVE -> RETIRING -> CLOSED` at the registered-file/BufferPool boundary. Race a new
+load/pin with the RETIRING gate: a claim linearized before the gate drains as existing
+ownership; a gate winner rejects the new operation with `FILE_RETIRED_OR_CLOSING`. No claim
+is admitted after the gate.
+
+Hold read/write guards across the transition. They remain valid until release, while no new
+guard is admitted and close/unlink waits. Race copied writeback or victim I/O with retirement;
+the I/O completes or fails before handle close, and all reservations drain before mapping
+removal. A descriptor or fd must never be closed while in-flight I/O still owns it.
+
+Test dirty discard in two matched fixtures. A proven semantic drop/retirement owner may
+authorize discard after drain; RETIRING alone and generic eviction do not. Without that
+authority, required dirty state is preserved/failed rather than discarded. Inject drain or
+writeback failure and assert the file remains RETIRING/nonordinary, no unlink or false CLOSED
+publication occurs, and higher-level failure handling receives the error. Successful CLOSED
+state has no mapping, frame, pin, guard, or I/O for the FileId; nonreuse prevents an old
+PageId from binding a new file.
+
+The existing “Shutdown, draining, and failure injection” procedure owns the complete
+database lifecycle. Its Chapter-7 specialization asserts BufferPool quiescing rejects new
+fetch/new-page work, existing guards/I/O drain, required dirty pages use WAL-before-data,
+required flush failure prevents clean shutdown, and BufferPool helpers/ownership end before
+the WAL service.
+
+#### Bounded raw-I/O exceptions
+
+Inventory every permitted BufferPool bypass and instrument capability use so an unlisted
+ordinary page operation cannot issue raw managed-page I/O:
+
+| Exception owner | Permitted object and reason | Validation/termination oracle |
+|---|---|---|
+| WAL manager | WAL segments use the WAL record/durability protocol | never interpreted as BufferPool pages; exception ends at WalManager boundary |
+| database lifecycle/recovery owner | `database.control` dual-slot lifecycle state | control validation precedes use; no PageGuard/CLOCK semantics are applied |
+| registered-file/open owner | initial FileSuperblock/page-zero identity establishment | bounded raw read is validated before registration; it is not a permanent page-zero escape |
+| bootstrap/create owner | private initial object/page construction before ordinary publication | canonical validation/publication completes before ordinary BufferPool use |
+| recovery owner | torn-page private reconstruction | untrusted bytes remain private; reconstructed page validates before READY/residency |
+| namespace owner/DiskManager | create/rename/unlink and directory synchronization | no page interpretation; exception ends at durable §4.7 namespace boundary |
+
+Record every direct DiskManager page read/write in ordinary HEAP/FSM/BTREE/catalog/status
+operations and require it to originate from BufferPool or one named private owner. The
+existence of WAL/control/bootstrap/recovery/namespace paths is not a generic escape hatch.
+Verify page-zero access according to its actual phase: identity-establishing access may be
+specialized before registration, while registered ordinary data-page access returns to the
+canonical BufferPool boundary.
+
+For recovery, start from a torn page requiring a complete image. Ordinary load rejects it;
+the private recovery owner may reconstruct without ordinary publication, but the resulting
+page passes normal checksum, identity, format, and owner validation before READY or guard
+return. Bootstrap follows the same private-construction-to-canonical-publication shape and
+must never be described or tested as an implementation-stage absence of BufferPool.
+
+#### Chapter 7 failure-classification matrix
+
+| Fixture/outcome | Required result and BufferPool oracle |
+|---|---|
+| invalid or unpublished PageId | `FILE_OR_PAGE_NOT_FOUND`; no data-page publication |
+| RETIRING/CLOSED owner | `FILE_RETIRED_OR_CLOSING`; no new claim |
+| failed/short transfer | `RAW_IO_FAILURE`; partial bytes never become resident/stably clean |
+| malformed recognized v1 / wrong owner | applicable corruption result, including `CORRUPT_PAGE`; no guard |
+| recognizable unsupported page/file version | `UNSUPPORTED_PAGE_FORMAT` / `UNSUPPORTED_FILE_FORMAT` |
+| WAL durability failure | `WAL_DURABILITY_FAILURE`; no dependent data-page write |
+| page write or `fdatasync` failure | `RAW_IO_FAILURE`; dirty and identity retained |
+| complete CLOCK pass without victim | `NO_REPLACEABLE_FRAME`; no waiting or stolen frame |
+| quiescing BufferPool | `BUFFERPOOL_QUIESCING`; existing claims only drain |
+| uncertain append/restoration/publication | `STORAGE_NONCONTINUABLE`; no ordinary retry/publication |
+
+The higher statement/transaction/lifecycle consequence remains owned by §39.1 and the
+existing failure procedures. Tests preserve distinctions rather than inventing BufferPool
+aliases.
+
+#### Chapter 7 concurrency matrix
+
+| Race | Deterministic barrier | Legal survivor(s) | Forbidden outcome | Architecture owner |
+|---|---|---|---|---|
+| same-page fetch/fetch | sole load intent | one loader and one resident identity; joiners share outcome | duplicate usable frames | §§7.5, 7.6.3, 7.8 |
+| fetch/victim | final pin/reservation | pin wins or mapping becomes non-pinnable | pin after reassignment begins | §§7.6.3, 7.12.1 |
+| flush/new mutation | stable copy G | G clean if unchanged; G+1 remains dirty | old completion clears G+1 | §§7.10.2–7.10.3 |
+| guard release/eviction | latch release before unpin | eviction only after complete release | eviction while guard uses bytes | §§7.7–7.9 |
+| dirty eviction/WAL | WAL durability request | WAL durable then page write, or preserved dirty failure | data write before WAL | §§7.10–7.12.1 |
+| retirement/fetch | RETIRING gate | pre-gate claim drains or post-gate rejection | new claim after gate | §7.12.5 |
+| retirement/guard | existing guard held | guard finishes; close waits | invalidated live view/use-after-close | §7.12.5 |
+| retirement/writeback | I/O reservation | I/O completes/fails before close | close/unlink during I/O | §7.12.5 |
+| shutdown/fetch | quiescing publication | old work drains; new work rejected | post-quiesce acquisition | §§7.12.6, 3.3.6 |
+| reassignment/stale view | complete frame reset | new identity only after old ownership ends | stale view accepted as new page | §§7.7.2, 7.12.2 |
+| checkpoint/clean-to-dirty | DPT transition gate | complete old or complete new DPT state | missing/intermediate rec_lsn/FPI state | §§7.10.1, 7.10.5 |
+
+#### Buffer management domain/case matrix
+
+| Family | Deterministic fixture | Barrier/fault | Expected oracle | Architecture reference | Status |
+|---|---|---|---|---|---|
+| Frame transitions | one frame per legal/illegal edge | transition publication | exact legal survivor; illegal edge absent | §§7.6.1–7.6.2 | COMPLETE |
+| Same-page miss | 2+ fetchers, nonresident page | load intent/read/validation | one loader/copy; shared result | §§7.6.3, 7.8 | COMPLETE |
+| Fetch-victim | eligible zero-pin resident | final recheck | pin or victim, never both | §§7.6.3, 7.12.1 | COMPLETE |
+| Pin arithmetic | synthetic max/zero states | increment/release | checked failure; no wrap/underflow | §§7.7, 7.9 | COMPLETE |
+| Guard lifecycle | read/write/transferred guards | acquire/cancel/release | one claim; latch before pin release | §§7.7–7.7.2 | COMPLETE |
+| Stable flush | dirty resident G | copied image/reconciliation | stable matching G may clean | §§7.10.2–7.10.3 | COMPLETE |
+| Flush-mutation | mutate to G+1 during G I/O | before/after write | G+1 remains dirty | §7.10.3 | COMPLETE |
+| Stable completion | injected write/sync/WAL outcomes | pwrite/fdatasync/WAL | no premature clean/write | §§7.10.3, 7.11 | COMPLETE |
+| Eviction/reset | clean/dirty victim | reservation/write/reset | no old-state leak; failure restores | §§7.12.1–7.12.2 | COMPLETE |
+| CLOCK exhaustion | each ineligibility predicate | one logical pass | exact `NO_REPLACEABLE_FRAME` | §§7.9, 7.12–7.12.3 | COMPLETE |
+| Family validation | each managed page family | each validation stage | no invalid RESIDENT/guard | §§7.6.4, 4.13–4.14 | COMPLETE |
+| New-page publication | private appended page | WAL/bound/frame publication | no partial ordinary visibility | §7.12.4 | COMPLETE |
+| Retirement | active file with loads/pins/I/O | RETIRING/drain/CLOSED | no post-gate claim or premature unlink | §7.12.5 | COMPLETE |
+| Shutdown | active BufferPool | quiesce/drain/flush | no false clean close | §§7.12.6, 3.3.6 | COMPLETE |
+| Raw-I/O exceptions | one fixture per named owner | bypass capability | only bounded owner uses bypass | §§7.3–7.5, 13.14 | COMPLETE |
+
+
+#### Chapter 7 architecture-obligation coverage map
+
+Domains are: A layer/ownership, B frame state, C identity/page table, D pin, E latch,
+F guard, G dirty state, H flush, I WAL/stable completion, J fetch, K PAGE_INIT/new page,
+L replacement/eviction, M validation/format, N retirement, O shutdown, P raw-I/O exception,
+Q concurrency, R failure, and S other architecture-defined storage behavior. Each row has
+one primary procedure owner; cross-referenced generic procedures remain part of that owner.
+
+| # | Domain | Atomic obligation and architecture owner | Verification owner and methodology | Status |
+|---:|:---:|---|---|---|
+| 1 | A | DiskManager owns managed raw positional I/O/handles — §7.3 | Bounded raw-I/O exceptions; capability trace | COMPLETE |
+| 2 | A | Raw layer does not parse formats or publish database objects — §§7.3–7.3.1 | Bounded exceptions; negative interface/property case | COMPLETE |
+| 3 | A | FileId is logical identity; fd is private and registration-lifetime-bound — §7.3.1 | Retirement/CLOSED and exception fixtures | COMPLETE |
+| 4 | A | Higher storage owner initializes/validates superblock and object identity — §7.3.1 | Page-zero/open exception plus generic format tests | COMPLETE |
+| 5 | A | Ordinary managed page views use BufferPool lifetime and perform no I/O — §7.5 | Capability trace across managed families | COMPLETE |
+| 6 | A | BufferPool remains format agnostic and invokes owner validation — §§7.5, 7.6.4 | Cross-family parameterized load | COMPLETE |
+| 7 | A | WAL durability owner is distinct; BufferPool enforces dependency — §§7.3, 7.11 | WAL failure barrier and call trace | COMPLETE |
+| 8 | S | Positional I/O does not use shared offsets — §7.4.1 | Existing Disk tests; concurrent offset fixture | COMPLETE |
+| 9 | S | Reads require an exact page and expose no partial result — §7.4.2 | Disk short-read injection plus LOADING oracle | COMPLETE |
+| 10 | S | Writes require complete-page transfer — §7.4.2 | Stable-completion short/exact-write matrix | COMPLETE |
+| 11 | S | EINTR retry and non-retried-close semantics — §7.4.3 | Existing Disk injectable syscall procedure | COMPLETE |
+| 12 | S | No implicit extension/sparse write; aligned checked file bounds — §§7.4.4–7.4.6 | Disk/PageNo exhaustion procedures | COMPLETE |
+| 13 | S | I/O errors retain file/page/operation/errno context — §7.4.7 | Injected I/O result inspection | COMPLETE |
+| 14 | I | `fdatasync` owns file-byte stability; namespace sync remains separate — §7.4.8 | Stable completion and namespace lifecycle cross-reference | COMPLETE |
+| 15 | B | Every frame maps to one legal ownership/I/O combination — §7.6.1 | Frame lifecycle matrix enumeration | COMPLETE |
+| 16 | B | `FREE -> LOADING+READ` binds sole existing-page intent — §7.6.2 | Existing-page transition barrier | COMPLETE |
+| 17 | B | `FREE -> LOADING+NONE` binds sole private new-page intent — §7.6.2 | New-page private-frame barrier | COMPLETE |
+| 18 | B | Existing-page `LOADING -> RESIDENT` only after validation — §7.6.2 | Transition/validation publication fixture | COMPLETE |
+| 19 | B | New-page `LOADING -> RESIDENT` coordinates bound and PAGE_INIT — §7.6.2 | New-page co-publication fixture | COMPLETE |
+| 20 | B | Failed `LOADING -> FREE` removes intent and resets frame — §7.6.2 | Loader-failure matrix | COMPLETE |
+| 21 | B | Resident hit atomically adds one checked pin — §7.6.2 | Hit/pin linearization fixture | COMPLETE |
+| 22 | B | Persistent mutation publishes generation/dirty/recovery metadata atomically — §§7.6.2, 7.10.1 | Existing WAL/MTR publication observer plus BufferPool state capture | COMPLETE |
+| 23 | B | Resident copied writeback reserves one orthogonal I/O state — §7.6.2 | Stable-flush base fixture | COMPLETE |
+| 24 | B | Matching-generation stable completion may publish clean — §7.6.2 | Dirty reconciliation barrier | COMPLETE |
+| 25 | B | Newer generation survives old writeback completion dirty — §7.6.2 | G/G+1 race | COMPLETE |
+| 26 | B | Resident writeback failure returns coherent dirty RESIDENT — §7.6.2 | WAL/write/sync fault matrix | COMPLETE |
+| 27 | B | Final victim reservation publishes `RESIDENT -> EVICTING` — §7.6.2 | Fetch/victim barrier | COMPLETE |
+| 28 | B | Clean eviction may end in FREE after mapping removal/reset — §7.6.2 | Clean-eviction fixture | COMPLETE |
+| 29 | B | Clean eviction may transfer reservation to new LOADING only after reset — §7.6.2 | Clean-rebind fixture | COMPLETE |
+| 30 | B | Dirty victim enters eviction writeback without ordinary access — §7.6.2 | Dirty-eviction fixture | COMPLETE |
+| 31 | B | Successful dirty eviction may end FREE after stable completion — §7.6.2 | Dirty-success/no-request fixture | COMPLETE |
+| 32 | B | Successful dirty eviction may bind new LOADING only after reset — §7.6.2 | Dirty-success/request fixture | COMPLETE |
+| 33 | B | Failed dirty eviction restores old pinnable RESIDENT — §§7.6.2, 7.10.4 | Eviction failure-restoration matrix | COMPLETE |
+| 34 | B | Retirement drain removes mapping only after claims/I/O/latches drain — §§7.6.2, 7.12.5 | Retirement state harness | COMPLETE |
+| 35 | B | Illegal direct visibility, pinned eviction, and pre-reset rebind transitions are absent — §§7.6.1–7.6.2 | Negative transition table | COMPLETE |
+| 36 | C | BufferPool identity is PageId, not frame/fd/path/pointer — §§7.5–7.6 | Cross-frame/reopen identity fixtures | COMPLETE |
+| 37 | C | At most one active load and usable frame exists per PageId — §§7.5, 7.8 | Same-page multi-fetch barrier | COMPLETE |
+| 38 | C | `LOAD_INTENT` is installed before victim selection/I/O — §7.8 | Intent observability barrier | COMPLETE |
+| 39 | C | Joiners register claims without public pins/latches — §7.8 | Joiner-state inspection | COMPLETE |
+| 40 | C | Successful load atomically publishes RESIDENT and claim pins — §7.8 | Publication/wakeup barrier | COMPLETE |
+| 41 | C | Canceled joiner removes/releases only its own claim — §7.8 | Conditional cancellation cases | COMPLETE |
+| 42 | C | Failed load closes mapping, shares one error, and wakes joiners — §7.8 | Loader failure with 2+ joiners | COMPLETE |
+| 43 | C | Corrected later fetch may retry; no poison cache — §7.8 | Failure-then-repair sequence | COMPLETE |
+| 44 | C | Mapping never names A while frame bytes/identity are B — §§7.8, 7.12.2 | Reset/rebind observer | COMPLETE |
+| 45 | J | Normal fetch rejects invalid/unpublished PageId before ordinary load — §7.6.3 | Published-bound fixture | COMPLETE |
+| 46 | J | Resident-hit pin is the fetch linearization point — §7.6.3 | Hit/victim two-survivor race | COMPLETE |
+| 47 | J | First miss/waiter linearize at one validated publication — §7.6.3 | Same-page success fixture | COMPLETE |
+| 48 | Q | Fetch versus victim reservation has only pin-wins or eviction-wins survivor — §7.6.3 | Final recheck barrier | COMPLETE |
+| 49 | D | Pin preserves frame residency/identity, not byte exclusion — §§7.7, 7.7.1 | Pin-without-latch negative case | COMPLETE |
+| 50 | E | Read/shared and write/exclusive latches protect page bytes — §7.7.1 | Concurrent guard matrix | COMPLETE |
+| 51 | E | Transaction lock waits retain no page latch — §7.7.1 | Lock/latch barrier cross-reference | COMPLETE |
+| 52 | F | One guard owns exactly one pin and appropriate latch — §7.7 | Guard lifecycle counter trace | COMPLETE |
+| 53 | F | Guard releases latch before checked unpin — §7.7 | Paused early-release observer | COMPLETE |
+| 54 | F | Canceled/failed latch acquisition releases one pin and no guard — §7.7 | Post-pin cancellation fault | COMPLETE |
+| 55 | D | Pin increment is checked and cannot wrap — §7.7 | Synthetic max boundary | COMPLETE |
+| 56 | D | Release cannot underflow or double-decrement — §7.7 | Double/destructor-after-release cases | COMPLETE |
+| 57 | F | Guard transfer leaves exactly one owner and inert source — §7.7.2 | Transfer/destruction trace | COMPLETE |
+| 58 | F | Early release equals destruction and is ownership-idempotent — §7.7.2 | Early release plus destructor | COMPLETE |
+| 59 | F | Borrowed page/view lifetime ends at guard release — §7.7.2 | Poison/token stale-use test | COMPLETE |
+| 60 | C | Stale view cannot observe a reassigned frame as valid B — §§7.7.2, 7.12.2 | A-release/evict/B-bind test | COMPLETE |
+| 61 | D | Pinned frame may flush but cannot evict — §§7.9, 7.10.2 | Pinned-flush and victim-negative pair | COMPLETE |
+| 62 | L | Zero pins are necessary but all §7.9 predicates are required — §7.9 | Eligibility table | COMPLETE |
+| 63 | G | Dirty means current published generation not known stable — §7.10 | State/result inspection | COMPLETE |
+| 64 | G | Dirty does not imply commit/WAL durability/visibility; COMMIT is NO-FORCE — §7.10 | Commit-with-dirty-resident integration case | COMPLETE |
+| 65 | G | Persistent mutation publication obeys WAL/no-flush/metadata order — §7.10.1 | Existing §12.12 procedure plus frame observer | COMPLETE |
+| 66 | G | Published mutation advances generation exactly once; provisional rollback does not — §§7.6.1, 7.10.1 | Clean/dirty rollback state comparison | COMPLETE |
+| 67 | S | Generation cannot repeat while stale completion exists; terminal handling quiesces — §§7.6.1, 4.3.2.5 | Runtime generation specialization | COMPLETE |
+| 68 | H | Copied writeback captures stable bytes/PageId/generation/page_lsn under read latch — §7.10.2 | Stable-copy barrier | COMPLETE |
+| 69 | H | Durable checksum is finalized on private stable image — §§7.10.2–7.10.3 | Changing-resident-copy checksum case | COMPLETE |
+| 70 | I | WAL durable LSN reaches copied page_lsn before page write — §7.11 | WAL/data ordering trace | COMPLETE |
+| 71 | I | WAL durability failure prevents data-page pwrite — §7.11 | `flush_through` fault | COMPLETE |
+| 72 | I | Stable transfer requires exact 8192-byte pwrite — §7.10.3 | Short/exact-write fault matrix | COMPLETE |
+| 73 | I | Stable completion additionally requires owning-file `fdatasync` — §7.10.3 | Full-write/sync-failure case | COMPLETE |
+| 74 | I | Batched sync cannot clean/evict a covered frame before sync — §7.10.3 | Multi-frame batch barrier | COMPLETE |
+| 75 | G | Matching PageId/generation reconciliation atomically clears dirty/DPT/rec_lsn — §§7.10.3, 7.10.5 | Reconciliation publication observer | COMPLETE |
+| 76 | G | Newer mutation keeps dirty and recovery metadata after old completion — §7.10.3 | G/G+1 race | COMPLETE |
+| 77 | C | Old-page completion cannot mutate later frame identity — §§7.10.3, 7.12.2 | Injected stale completion token | COMPLETE |
+| 78 | H | Explicit overlapping/current-content flush joins/repeats to current clean generation — §7.10.2 | Two explicit callers | COMPLETE |
+| 79 | H | Optional background writeback skips/requeues safely and remains optional — §§7.9, 7.10.2 | Conditional background case | COMPLETE |
+| 80 | H | Pinned flush preserves mapping/identity and coherent copy — §§7.9, 7.10.2 | Held-pin stable flush | COMPLETE |
+| 81 | R | Flush failure preserves mapping, dirty/recovery metadata, and retryability — §7.10.4 | WAL/write/sync failure table | COMPLETE |
+| 82 | Q | DPT/checkpoint capture observes complete dirty or safely clean state — §7.10.5 | Transition-gate observer cross-reference | COMPLETE |
+| 83 | L | CLOCK sets/tests reference state only for defined resident accesses — §7.12 | Reference-bit table | COMPLETE |
+| 84 | L | Referenced eligible frame receives second chance — §7.12 | Ordered small-pool traversal | COMPLETE |
+| 85 | L | Final victim reservation atomically rechecks all eligibility — §7.12.1 | Candidate-observed/final-recheck race | COMPLETE |
+| 86 | L | One complete unsuccessful ordinary pass returns `NO_REPLACEABLE_FRAME` — §7.12.3 | Logical visit-count fixture | COMPLETE |
+| 87 | L | Ordinary no-victim operation neither waits indefinitely nor steals ineligible frame — §7.12.3 | Barrier/progress-state oracle | COMPLETE |
+| 88 | L | Optional bounded/cancellable wait path cannot weaken eligibility — §7.12.3 | Conditional interface contract test | COMPLETE |
+| 89 | L | Clean eviction removes mapping and resets before reuse — §§7.12.1–7.12.2 | Clean-eviction ordering trace | COMPLETE |
+| 90 | L | Dirty eviction completes WAL/write/sync before removal/reuse — §§7.11, 7.12.1 | Dirty-success trace | COMPLETE |
+| 91 | R | Dirty-eviction failure restores old mapping/dirty state — §§7.10.4, 7.12.1 | Four-fault restoration matrix | COMPLETE |
+| 92 | R | Failed dirty eviction fails requesting load and its joiners — §7.12.1 | Captured-error waiter case | COMPLETE |
+| 93 | C | Complete reset removes every old identity/metadata influence — §7.12.2 | Post-reset field inspection | COMPLETE |
+| 94 | S | Buffer exhaustion remains distinct from disk/numeric/page-space outcomes — §§7.12.3, 7.12.7 | Paired classification fixtures | COMPLETE |
+| 95 | M | Registered owner and published bound validate before load — §§7.6.3–7.6.4 | Validation-order barrier | COMPLETE |
+| 96 | M | Exact transfer completes before byte trust — §§7.4.2, 7.6.4 | Short-read failure | COMPLETE |
+| 97 | M | Family/version dispatch precedes family-specific v1 parsing — §§7.6.4, 4.14 | Current/future paired fixtures | COMPLETE |
+| 98 | M | Checksum/common validation precedes page_lsn trust — §§7.6.4, 4.12–4.13 | Bad-checksum/plausible-LSN fixture | COMPLETE |
+| 99 | M | PageId/FileKind/PageType identity validates before publication — §7.6.4 | One-fault-per-field matrix | COMPLETE |
+| 100 | M | Complete nonfetching L1/applicable L2 owner validation precedes publication — §7.6.4 | Cross-family owner fixtures | COMPLETE |
+| 101 | M | Owner validator cannot recursively fetch or weaken missing context — §7.6.4 | Validator dependency/capability observer | COMPLETE |
+| 102 | M | Any validation failure cleans LOADING and publishes no guard — §7.6.4 | Failure/joiner/retry fixture | COMPLETE |
+| 103 | M | Malformed v1 and unsupported future format remain distinct — §§7.12.7, 4.14 | Paired corruption/unsupported table | COMPLETE |
+| 104 | M | HEAP/FSM/BTREE/catalog/status families use their registered validators — §§4.13, 7.6.4 | Parameterized family harness | COMPLETE |
+| 105 | K | New page begins private LOADING and cannot be ordinarily fetched — §7.12.4 | Private-frame/concurrent-fetch barrier | COMPLETE |
+| 106 | K | Pre-WAL new-page failure resets frame/bound and restores tail — §7.12.4 | PAGE_INIT failure specialization | COMPLETE |
+| 107 | K | Post-authorizing-WAL failure finishes publication or becomes noncontinuable — §7.12.4 | Post-append fault boundary | COMPLETE |
+| 108 | K | PAGE_INIT bytes, owner bound, RESIDENT mapping, and creator pin co-publish — §7.12.4 | One publication observer | COMPLETE |
+| 109 | Q | Concurrent fetch cannot access private unpublished new page — §7.12.4 | Before/after publication race | COMPLETE |
+| 110 | K | Crash discards runtime frame state; recovery uses persistent WAL/file state — §§7.6.5, 7.12.4 | PAGE_INIT crash specialization | COMPLETE |
+| 111 | N | ACTIVE/RETIRING gate linearizes new-fetch admission — §7.12.5 | Retirement/fetch race | COMPLETE |
+| 112 | N | Existing guards remain valid and drain before close/unlink — §7.12.5 | Held-guard retirement fixture | COMPLETE |
+| 113 | N | Existing writeback/I/O drains before fd close/unlink — §7.12.5 | Retirement/writeback barrier | COMPLETE |
+| 114 | N | Dirty discard requires proven higher semantic retirement authority — §7.12.5 | Authorized/unauthorized paired fixtures | COMPLETE |
+| 115 | R | Retirement failure preserves RETIRING state and prevents unlink/CLOSED — §7.12.5 | Drain/writeback fault injection | COMPLETE |
+| 116 | N | CLOSED has no frame/mapping/pin/I/O; old FileId cannot rebind — §7.12.5 | Post-close inventory/nonreuse check | COMPLETE |
+| 117 | O | Quiescing rejects new work, drains claims/I/O, flushes required dirty pages, and tears down before WAL — §7.12.6 | Existing shutdown procedure plus BufferPool observer | COMPLETE |
+| 118 | P | WAL segments remain under specialized WalManager I/O/durability — §§7.3, 7.5 | WAL exception capability trace | COMPLETE |
+| 119 | P | `database.control` remains under specialized lifecycle/recovery I/O — §§7.3, 7.5 | Control exception fixture | COMPLETE |
+| 120 | P | Initial FileSuperblock/page-zero access is bounded to identity establishment — §§7.3.1, 7.5 | Open/registration boundary fixture | COMPLETE |
+| 121 | P | Bootstrap/create private access ends at canonical publication — §§7.3.1, 7.5 | Bootstrap private-publication fixture | COMPLETE |
+| 122 | P | Recovery-private torn-page access ends at validated reconstruction — §§7.6.4, 13.14 | Torn-page recovery fixture | COMPLETE |
+| 123 | P | Namespace create/rename/unlink bypasses page interpretation only — §§7.3–7.4.8 | Namespace capability/durability trace | COMPLETE |
+| 124 | P | Ordinary managed pages have no generic raw-I/O escape hatch — §7.5 | Direct-I/O capability trace | COMPLETE |
+| 125 | C | Persistent page publication and frame publication are independent dimensions — §§7.6.3, 7.12.4 | Existing-page/new-page paired observer | COMPLETE |
+| 126 | R | BufferPool errors preserve exact storage/format/exhaustion/lifecycle distinctions — §7.12.7 | Failure-classification matrix | COMPLETE |
+| 127 | S | Frame/page-table/pin/latch/CLOCK state is process-local and not recovered — §7.6.5 | Crash specialization and post-reopen inventory | COMPLETE |
+
+Coverage inventory: `127 COMPLETE`, `0 PARTIAL`, `0 MISSING`, and
+`0 CONTRADICTORY`.
 
 ### Heap tests
 
