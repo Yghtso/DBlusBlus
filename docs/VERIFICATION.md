@@ -3760,23 +3760,422 @@ Logical committed results must match.
 
 ### MVCC Visibility Tests
 
-Build table-driven tests for:
+This section is the detailed procedural owner for `ARCHITECTURE.md` §§10.1–10.6.
+It verifies the visibility decision and its error boundary using Chapter 5's validated
+physical tuple metadata and Chapter 9's snapshot/status inputs. Transaction-status lookup
+precedence remains owned by Transaction identity, snapshot, and status verification;
+write-conflict/current-owner decisions remain §11.10.4 and the Locking/UNIQUE sections;
+physical reclamation remains the Vacuum and Reclamation Tests.
 
-- committed creator before snapshot,
-- creator active at snapshot then commits,
-- creator starts after snapshot,
-- creator aborts,
-- committed deleter before snapshot,
-- deleter active at snapshot then commits,
-- deleter starts after snapshot,
-- deleter aborts,
-- own insert previous command,
-- own insert current command,
-- own delete previous command,
-- own delete current command,
-- frozen creator.
+#### Deterministic harness, fixture canonicality, and independent oracle
 
-Test exact `xmin/xmax/cmin/cmax` combinations, not only end-to-end SQL.
+The table-driven visibility harness controls these architecture-level inputs without
+requiring a production function name or return type:
+
+```text
+tuple xmin / xmax / cmin / cmax
+physical tuple/RID owner and persisted-versus-runtime-only provenance
+snapshot owner_txn_id / command_id / xmax / sorted active
+canonical Status(xmin/xmax) result or one injected lower-layer failure
+scan source: direct heap candidate, sequential scan, or B+ candidate RID
+```
+
+The observable result domain is exactly:
+
+```text
+VISIBLE
+INVISIBLE
+ERROR with the canonical error family
+```
+
+An implementation may represent that result with a status return, tagged/expected-like
+value, or another compatible mechanism. Tests assert semantics and exact propagated error,
+not a C++ type, exception choice, or helper name.
+
+Every fixture is canonical except for the single dimension under test. A semantic-status
+fixture has a valid HEAP owner, checksum, PageId, NORMAL slot, complete §§5.7–5.13 tuple,
+normal referenced TxnId, valid snapshot, and canonical TXN_STATUS/runtime lookup inputs. A
+future-command fixture introduces no unrelated status or structure failure. An index case
+uses a valid B+ path, exact relation/RID identity, and a structurally valid heap tuple. A
+malformed tuple-header case is instead routed to the existing Storage Verification / §4.13.3
+validation oracle before Chapter-10 semantic evaluation.
+
+The independent reference evaluator uses mathematical fixture values rather than calling
+the production visibility routine. It performs, in order:
+
+1. structural/owner precondition classification by the existing heap validator;
+2. SELF command-causality checks, including future fields and same-owner `cmax < cmin`;
+3. creator classification as visible, invisible, or exact error;
+4. deleter classification only for a visible creator, as visible, invisible, or exact
+   error;
+5. exact error propagation to the scan/query owner.
+
+The causality precheck occurs before creator invisibility can short-circuit. Status lookup
+calls are instrumented so the oracle can also require that FROZEN/SELF cases bypass
+persistent lookup and that a lower-layer error is neither converted to a Boolean nor
+followed by a different status source. Concurrency, retry, and status-publication fixtures
+use deterministic barriers; sleeps and repeated random reproduction are insufficient.
+
+#### Creator and deleter valid-state regression
+
+Use direct values around one valid snapshot, for example owner `50`, command `C=10`,
+`xmax=100`, and controlled sorted `active`. Use separate TxnIds for every status source so
+one lookup result cannot accidentally satisfy another row.
+
+The creator matrix is:
+
+| Creator fixture | Status/snapshot relation | Expected creator result | Deleter consulted? |
+|---|---|---|---:|
+| `xmin=FROZEN_TXN_ID` | no status-page access | VISIBLE | yes |
+| `xmin=owner`, `cmin=C-1` | earlier SELF command | VISIBLE | yes |
+| `xmin=owner`, `cmin=C` | current SELF command | INVISIBLE | no, after causality precheck |
+| other creator | COMMITTED, `xmin < xmax`, absent from `active` | VISIBLE | yes |
+| other creator | COMMITTED, `xmin < xmax`, present in `active` | INVISIBLE | no |
+| other creator | COMMITTED, `xmin == xmax` | INVISIBLE | no |
+| other creator | COMMITTED, `xmin > xmax` | INVISIBLE | no |
+| other creator | IN_PROGRESS | INVISIBLE | no |
+| other creator | ABORTED | INVISIBLE | no |
+
+The active-at-capture COMMITTED case first captures the TxnId in `active`, then publishes
+COMMITTED through the Chapter-9 barrier. The immutable snapshot must retain membership and
+the creator remains invisible. This distinguishes terminal status from snapshot-visible
+history.
+
+For every creator-visible row, apply the complete deleter matrix:
+
+| Deleter fixture | Status/snapshot relation | Expected tuple result |
+|---|---|---|
+| `xmax=INVALID_TXN_ID` | canonical no-delete sentinel; no lookup | VISIBLE |
+| `xmax=owner`, `cmax=C-1` | earlier SELF command | INVISIBLE |
+| `xmax=owner`, `cmax=C` | current SELF command | VISIBLE |
+| other deleter | COMMITTED, `xmax < snapshot.xmax`, absent from `active` | INVISIBLE |
+| other deleter | COMMITTED, `xmax < snapshot.xmax`, present in `active` | VISIBLE |
+| other deleter | COMMITTED, `xmax >= snapshot.xmax` | VISIBLE |
+| other deleter | IN_PROGRESS | VISIBLE; no visibility wait |
+| other deleter | ABORTED | VISIBLE |
+
+Compose every creator-visible normal case with each deleter row and separately assert that
+creator-invisible normal cases remain invisible without status-dependent deleter lookup.
+The causality precheck still runs first, so impossible SELF deleter metadata cannot be hidden
+by this short-circuit. These tables preserve every normal Boolean result while the error
+tables below exercise the non-Boolean branches.
+
+#### Status-result and lookup-failure propagation
+
+Construct separate creator and creator-visible/deleter fixtures for each unusable status.
+The TXN_STATUS decoder must succeed for `INVALID` and `RESERVED`; semantic rejection occurs
+only after Chapter-9 precedence returns that decoded result to visibility. `RETIRED` is
+constructed only by a durably published Chapter-14 cutoff; the negative fixture then
+retains a visibility-dependent tuple reference in deliberate violation of the retirement
+proof.
+
+| Side | Controlled result/failure | Provenance | Expected result/error | May be treated as invisible/ineffective? | Continuation owner |
+|---|---|---|---|---:|---|
+| creator | RETIRED | persisted dependent tuple | ERROR `CORRUPT_HEAP` | no | §39.1 |
+| creator | INVALID | persisted dependent tuple | ERROR `CORRUPT_HEAP` | no | §39.1 |
+| creator | RESERVED | recognized v1 bits plus persisted dependent tuple | ERROR `CORRUPT_HEAP` | no | §39.1 |
+| creator | status-page I/O failure | lower layer | propagate exact I/O error | no | §39.1 and lower owner |
+| creator | checksum/owner/corruption failure | lower layer | propagate exact corruption error | no | §39.1 and §§4.13–4.14 |
+| creator | recognizable future format | lower layer | propagate exact unsupported-format error | no | §§4.14, 39.1 |
+| creator | recovery/storage failure | lower layer | propagate exact lower-layer error | no | Chapters 13 and 39 |
+| deleter | RETIRED | persisted dependent tuple | ERROR `CORRUPT_HEAP` | no | §39.1 |
+| deleter | INVALID | persisted dependent tuple | ERROR `CORRUPT_HEAP` | no | §39.1 |
+| deleter | RESERVED | recognized v1 bits plus persisted dependent tuple | ERROR `CORRUPT_HEAP` | no | §39.1 |
+| deleter | status-page I/O failure | lower layer | propagate exact I/O error | no | §39.1 and lower owner |
+| deleter | checksum/owner/corruption failure | lower layer | propagate exact corruption error | no | §39.1 and §§4.13–4.14 |
+| deleter | recognizable future format | lower layer | propagate exact unsupported-format error | no | §§4.14, 39.1 |
+| deleter | recovery/storage failure | lower layer | propagate exact lower-layer error | no | Chapters 13 and 39 |
+
+For each lookup failure, record one call and the exact returned diagnostic. The creator
+case must not become INVISIBLE; the deleter case must not become an ineffective delete and
+VISIBLE tuple. The §39.1 first-published-write matrix, rather than this visibility harness,
+decides whether a propagated operation failure leaves the transaction active, mandates
+ABORT, or makes storage noncontinuable.
+
+The sentinel/status distinction has direct coverage:
+
+| Condition | Decoder/lookup result | Valid? | Visibility consequence |
+|---|---|---:|---|
+| tuple `xmax == INVALID_TXN_ID` | no status lookup | yes | no deleter; creator-visible tuple is VISIBLE |
+| normal `xmin` resolves INVALID | valid `00` decode, required outcome absent | no semantic state | `CORRUPT_HEAP` |
+| normal `xmax` resolves INVALID | valid `00` decode, required outcome absent | no semantic state | `CORRUPT_HEAP` |
+
+The RESERVED fixture first proves successful v1 `11` decode through the Chapter-9 byte
+oracle, then passes the recognized nonterminal result to creator/deleter visibility and
+expects `CORRUPT_HEAP`. It must not report malformed bits or unsupported format. Conversely,
+a recognizable future status-file/page format fails during format dispatch and propagates
+its exact unsupported-format result; it is not relabeled `CORRUPT_HEAP` merely because no
+visibility decision can be made.
+
+The compact error/visibility summary prevents normal Boolean cases and error cases from
+sharing an oracle:
+
+| Input class | Side | Expected semantic result | Exact error family | May be treated as ordinary invisible/ineffective? | Architecture owner |
+|---|---|---|---|---:|---|
+| valid COMMITTED before snapshot | creator | VISIBLE | — | no | §10.2 |
+| valid IN_PROGRESS | creator | INVISIBLE | — | yes | §10.2 |
+| valid ABORTED | creator | INVISIBLE | — | yes | §§10.1–10.2 |
+| valid COMMITTED delete before snapshot | deleter | INVISIBLE tuple | — | yes, as an effective delete | §10.3.3 |
+| valid IN_PROGRESS | deleter | VISIBLE tuple | — | yes, as an ineffective delete | §10.3.3 |
+| valid ABORTED | deleter | VISIBLE tuple | — | yes, as an ineffective delete | §§10.1, 10.3.3 |
+| dependent RETIRED | either | ERROR | persisted `CORRUPT_HEAP` | no | §10.4 / §14.14 |
+| dependent INVALID | either | ERROR | persisted `CORRUPT_HEAP` | no | §10.4 |
+| dependent RESERVED | either | ERROR after valid decode | persisted `CORRUPT_HEAP` | no | §§9.11.1, 10.4 |
+| lower-layer lookup failure | either | ERROR | exact lower-layer family | no | §10.4 / §39.1 |
+| SELF `cmin>C` | creator | ERROR | persisted `CORRUPT_HEAP` or runtime invariant | no | §§10.2, 10.4 |
+| SELF `cmax>C` | deleter | ERROR | persisted `CORRUPT_HEAP` or runtime invariant | no | §§10.3.2, 10.4 |
+| same-owner `cmax<cmin` | precheck | ERROR | persisted `CORRUPT_HEAP` or runtime invariant | no | §10.4 |
+
+#### SELF command boundaries and causal precheck
+
+Use explicit `C=10` fixtures rather than arithmetic loops. Separate checked boundary cases
+cover CommandId zero/maximum through Numeric Exhaustion and Terminal-Boundary Verification;
+no fixture computes `C-1` or `C+1` at an overflow boundary.
+
+| Field | Relation to `C` | Valid? | Ordinary visibility meaning | Invalid error |
+|---|---|---:|---|---|
+| `cmin=9` | `< C` | yes | SELF creator visible | — |
+| `cmin=10` | `== C` | yes | SELF creator invisible to same-command rescan | — |
+| `cmin=11` | `> C` | no | no Boolean result | persisted `CORRUPT_HEAP`; runtime-only invariant failure |
+| `cmax=9` | `< C` | yes | SELF delete effective; old tuple invisible | — |
+| `cmax=10` | `== C` | yes | SELF delete not yet effective; old tuple visible | — |
+| `cmax=11` | `> C` | no | no Boolean result | persisted `CORRUPT_HEAP`; runtime-only invariant failure |
+
+Run each invalid relation once as a canonical persisted NORMAL tuple and once through
+abstract test-only instrumentation immediately before invalid runtime metadata could be
+published. The first must use `CORRUPT_HEAP`; the second must enter §39.1.3's internal
+invariant path. No public unsafe-construction API is required.
+
+The same-transaction causality matrix is:
+
+| Case | `xmin` owner? | `xmax` owner? | `cmin` | `cmax` | `C` | Valid? | Expected result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| earlier insert | yes | no | 9 | — | 10 | yes | creator visible |
+| current insert | yes | no | 10 | — | 10 | yes | creator invisible |
+| current-command delete of earlier version | no | yes | — | 10 | 10 | yes | old tuple visible |
+| later-command delete of self-created version | yes | yes | 8 | 9 | 10 | yes | old tuple invisible |
+| future creator | yes | no | 11 | — | 10 | no | error before Boolean result |
+| future deleter | no | yes | — | 11 | 10 | no | error before Boolean result |
+| delete precedes creation | yes | yes | 10 | 9 | 10 | no | error before creator-current invisibility short-circuit |
+
+The last fixture is the ordering oracle: creator evaluation alone would return INVISIBLE
+because `cmin == C`, but the required result is `CORRUPT_HEAP`. This proves command-causality
+validation precedes semantic short-circuiting. Do not add causal prohibitions beyond those
+listed by §10.4 and the compatible §11.10.4 current-owner rule.
+
+#### Statement effects and UPDATE version pairs
+
+Direct physical-pair tests use two NORMAL RIDs and evaluate each candidate independently;
+ordinary visibility does not infer a logical row identity from `prev`. Current-command
+INSERT (`cmin=C`) is invisible to ordinary rescan, while an earlier-command INSERT
+(`cmin<C`) is visible. Current-command DELETE (`cmax=C`) leaves the old tuple visible,
+while an earlier-command DELETE (`cmax<C`) hides it.
+
+The mandatory UPDATE matrix is:
+
+| Updater relation | Status/snapshot relation | Old `xmax` interpretation | New `xmin` interpretation | Old visible? | New visible? | Emitted ordinary version |
+|---|---|---|---|---:|---:|---|
+| SELF current command | owner, `cmax=C`, `cmin=C` | current delete ineffective | current creator hidden | yes | no | old |
+| SELF later command | owner, `cmax<C`, `cmin<C` | earlier delete effective | earlier creator visible | no | yes | new |
+| other IN_PROGRESS | status IN_PROGRESS | delete ineffective | creator invisible | yes | no | old |
+| other COMMITTED before snapshot | TxnId below `xmax`, absent from `active` | delete effective | creator visible | no | yes | new |
+| other COMMITTED at/after `xmax` | TxnId `>=xmax` | delete too new | creator too new | yes | no | old |
+| other active at capture, later COMMITTED | TxnId below `xmax`, retained in `active` | delete too new to snapshot | creator invisible to snapshot | yes | no | old |
+| other ABORTED | status ABORTED | delete ineffective | creator invisible | yes | no | old |
+
+Each row asserts exactly one emitted ordinary version. The active-at-capture case pauses
+commit after snapshot capture and proves later terminal publication does not rewrite the
+captured set. Aborted cases retain both physical versions and index entries to prove logical
+selection does not require physical undo.
+
+#### Isolation, retry, recovery, and retirement cross-checks
+
+The existing Snapshot registration, representation, and lifetime procedures plus Isolation
+Tests remain the detailed isolation owners. Add Chapter-10 result assertions at their
+existing barriers:
+
+| Case | Existing procedure | Chapter-10 result oracle |
+|---|---|---|
+| READ COMMITTED stable attempt | Chapter-9 RC snapshot lifetime | one snapshot for all tuples/operators; a commit after capture does not appear mid-attempt |
+| READ COMMITTED next statement | Isolation Tests | fresh snapshot may expose the later commit |
+| READ COMMITTED own writes | SELF matrix | earlier-command writes visible; current-command ordinary rescan hidden as specified |
+| allowed pre-write retry | Statement Failure / Chapter-9 retry fixture | fresh snapshot, same logical CommandId, no published SELF metadata to trigger a future-command error |
+| conflict after published write | Statement Failure and Transaction-State Tests | no same-TxnId retry; canonical MUST_ABORT/ABORT path |
+| REPEATABLE READ first statement | Chapter-9 RR fixture | first ordinary statement captures the transaction snapshot |
+| REPEATABLE READ later statements | Isolation Tests | external snapshot fields stable; later external commits remain invisible |
+| REPEATABLE READ own later writes | SELF matrix | updated command boundary exposes own earlier commands without changing external membership |
+| isolation identity | Chapter-9 isolation identity / Isolation Tests | REPEATABLE READ is snapshot isolation, not SERIALIZABLE |
+
+Recovery Property Tests use known WAL prefixes and add direct tuple outcomes: a crash loser
+creator is ABORTED/invisible; a crash loser deleter is ABORTED/ineffective; a durable
+committed updater is classified from reconstructed terminal authority without requiring
+heap/status-page force; and no precrash active registry or terminal cache is consulted after
+reopen. The old/new matrix is rerun after READY against a newly captured snapshot.
+
+Vacuum and Reclamation Tests remain the positive proof owner for §§14.13.1–14.14.3. They
+must show that aborted-`xmax` normalization and creator freezing preserve visibility, that
+their page mutations follow the existing WAL/page-LSN procedure, and that status retirement
+is published only after all surviving visibility-dependent metadata is independent. The
+negative RETIRED fixture above deliberately violates that proof and must fail; a missing
+status page alone must never synthesize RETIRED. SQL invisibility is not global
+reclaimability, and a persisted HEAP `DEAD` slot is not merely a synonym for an invisible
+NORMAL version.
+
+#### Heap and index candidate error propagation
+
+Sequential scans validate each candidate NORMAL tuple through Chapter 5/§4.13.3 and then
+apply the same visibility oracle under the statement's one registered snapshot. A semantic
+visibility error terminates through the canonical query/§39 path; it is not a skipped row.
+All operators/subqueries in one statement share the same snapshot and command boundary as
+the existing Scan, Pipeline, and Subquery tests require.
+
+For B+ scans, §8.22.2 remains authoritative: an index hit is a physical RID candidate. The
+index/recheck matrix is:
+
+| B+ candidate | Heap visibility result | Scan/query action | May silently skip? | Expected error |
+|---|---|---|---:|---|
+| valid RID | VISIBLE | emit decoded row | no | — |
+| valid RID | INVISIBLE | skip this physical candidate and continue | yes | — |
+| valid RID | creator/deleter RETIRED | stop and propagate | no | `CORRUPT_HEAP` |
+| valid RID | creator/deleter INVALID | stop and propagate | no | `CORRUPT_HEAP` |
+| valid RID | creator/deleter RESERVED | stop and propagate | no | `CORRUPT_HEAP` |
+| valid RID | status lookup I/O/corruption/unsupported failure | stop and propagate | no | exact lower-layer error |
+| valid RID | future SELF `cmin/cmax` or invalid causal order | stop and propagate | no | persisted `CORRUPT_HEAP` |
+
+Repeat the error rows through an ordinary sequential scan. Include valid later candidates
+after the failing one and assert none are emitted as a successful continuation. An
+INVISIBLE or ERROR result for one physical candidate must not cause ordinary visibility to
+follow `prev`; ERROR especially must not become “try predecessor.” Chapter 5 owns the
+persisted link and Chapter 14 owns maintenance/splicing/reuse. Randomized MVCC and scan
+stress remains complementary to these deterministic fixtures.
+
+#### Chapter 10 high-level domain/case matrix
+
+| Domain/case | Deterministic fixture/oracle | Architecture reference | Verification owner | Status |
+|---|---|---|---|---|
+| creator normal truth table | direct creator matrix plus active-at-capture barrier | §§10.2, 10.6 | MVCC Visibility Tests | COMPLETE |
+| creator unusable status | canonical RETIRED/INVALID/RESERVED inputs | §§10.2, 10.4 | Status propagation matrix | COMPLETE |
+| deleter normal truth table | creator-visible tuple crossed with deleter matrix | §§10.3–10.4 | MVCC Visibility Tests | COMPLETE |
+| deleter unusable status | canonical RETIRED/INVALID/RESERVED inputs | §§10.3.3–10.4 | Status propagation matrix | COMPLETE |
+| lookup error propagation | one injected lower-layer error per side | §10.4 | Status propagation matrix | COMPLETE |
+| future `cmin` | persisted/runtime-only `C+1` | §§10.2, 10.4 | SELF command matrix | COMPLETE |
+| future `cmax` | persisted/runtime-only `C+1` | §§10.3.2, 10.4 | SELF command matrix | COMPLETE |
+| same-owner causal order | `cmin=C`, `cmax=C-1` precheck oracle | §§10.4, 10.6 | Causality matrix | COMPLETE |
+| current/later INSERT | SELF `cmin==C` and `<C` | §10.2 | Statement-effects fixtures | COMPLETE |
+| current/later DELETE | SELF `cmax==C` and `<C` | §10.3.2 | Statement-effects fixtures | COMPLETE |
+| UPDATE old/new pair | all seven updater rows | §§10.1–10.4 | UPDATE matrix | COMPLETE |
+| READ COMMITTED | stable attempt, next statement, retry | §§9.9, 10.2–10.4 | Snapshot and Isolation Tests cross-reference | COMPLETE |
+| REPEATABLE READ | retained external snapshot plus SELF writes | §§9.10, 10.2–10.4 | Snapshot and Isolation Tests cross-reference | COMPLETE |
+| index candidate recheck | visible/invisible/error rows | §§8.22.2, 10.4 | Index recheck matrix / Scan Tests | COMPLETE |
+| heap scan | valid NORMAL candidates with Boolean/error outcomes | §§5.17, 10.4 | Heap scan propagation fixture | COMPLETE |
+| recovery | loser/committed updater after READY | §§10.1, 13.13–13.19 | Recovery Property Tests cross-reference | COMPLETE |
+| retirement boundary | positive proof plus dependent-RETIRED negative | §§10.4–10.5, 14.13–14.14 | Vacuum/Reclamation cross-reference | COMPLETE |
+| no predecessor fallback | invisible and error candidates with valid `prev` | §§5.7.4, 10.4, 14.10 | Heap/index propagation fixture | COMPLETE |
+
+#### Chapter 10 architecture-obligation coverage map
+
+The atomic inventory contains 96 obligations. `COMPLETE` means a deterministic procedure
+or a precise existing procedural owner supplies an independent oracle; an architecture
+statement alone is not coverage.
+
+| # | Domain | Atomic obligation | Architecture owner | Verification owner / procedure/reference | Status |
+|---:|---|---|---|---|---|
+| 1 | STRUCTURAL PRECONDITION | A candidate is a validated NORMAL tuple before semantic visibility | §§4.13.3, 5.17, 10.4 | Fixture canonicality plus Storage Verification | COMPLETE |
+| 2 | STRUCTURAL PRECONDITION | `xmin` structural domain is FROZEN or normal TxnId | §§4.13.3, 5.7.1 | Heap validation cross-reference | COMPLETE |
+| 3 | STRUCTURAL PRECONDITION | `xmax` domain is INVALID sentinel or normal non-FROZEN TxnId | §§4.13.3, 5.7.2 | Heap validation cross-reference | COMPLETE |
+| 4 | STRUCTURAL PRECONDITION | Snapshot owner, command, horizon, and active inputs are canonical | §§9.7–9.8, 10.4 | Chapter-9 snapshot fixture | COMPLETE |
+| 5 | STRUCTURAL PRECONDITION | Structural/owner failure precedes status semantics | §10.4 | Malformed-header routing fixture | COMPLETE |
+| 6 | STRUCTURAL PRECONDITION | Visibility observable domain is VISIBLE/INVISIBLE/ERROR | §10.4 | Harness result-domain assertion | COMPLETE |
+| 7 | STRUCTURAL PRECONDITION | API representation remains implementation-free | §10.4 | Semantic-result assertion only | COMPLETE |
+| 8 | SELF COMMAND CAUSALITY | SELF causality validation precedes creator short-circuit | §10.4 | `cmin=C,cmax=C-1` ordering oracle | COMPLETE |
+| 9 | CREATOR / XMIN | FROZEN creator is visible without status lookup | §§10.2, 10.6 | Creator matrix plus lookup-call assertion | COMPLETE |
+| 10 | CREATOR / XMIN | SELF creator with `cmin<C` is visible | §10.2 | SELF creator trichotomy | COMPLETE |
+| 11 | CREATOR / XMIN | SELF creator with `cmin==C` is invisible | §10.2 | SELF creator trichotomy | COMPLETE |
+| 12 | SELF COMMAND CAUSALITY | SELF creator with `cmin>C` is error | §§10.2, 10.4 | Future-cmin persisted/runtime fixtures | COMPLETE |
+| 13 | CREATOR / XMIN | Other creator consumes canonical Chapter-9 status lookup | §§9.13, 10.2 | Controlled lookup source/assertion | COMPLETE |
+| 14 | CREATOR / XMIN | COMMITTED creator below `xmax` and absent from active is visible | §10.2 | Creator normal matrix | COMPLETE |
+| 15 | CREATOR / XMIN | COMMITTED creator captured active remains invisible after commit | §§9.7.2, 10.2 | Active-at-capture barrier | COMPLETE |
+| 16 | CREATOR / XMIN | COMMITTED creator at `xmax` is invisible | §10.2 | Exact equality fixture | COMPLETE |
+| 17 | CREATOR / XMIN | COMMITTED creator above `xmax` is invisible | §10.2 | Above-horizon fixture | COMPLETE |
+| 18 | CREATOR / XMIN | Other IN_PROGRESS creator is invisible | §10.2 | Creator normal matrix | COMPLETE |
+| 19 | CREATOR / XMIN | ABORTED creator is invisible while bytes may remain | §§10.1–10.2 | Creator matrix plus retained-bytes fixture | COMPLETE |
+| 20 | CREATOR / XMIN | Normal creator invisibility suppresses deleter semantic lookup | §§10.2, 10.4 | Instrumented short-circuit fixture | COMPLETE |
+| 21 | CREATOR STATUS ERROR | Dependent creator RETIRED is persisted corruption | §§10.2, 10.4 | Creator RETIRED fixture | COMPLETE |
+| 22 | CREATOR STATUS ERROR | Dependent creator INVALID is persisted corruption | §§10.2, 10.4 | Creator INVALID fixture | COMPLETE |
+| 23 | CREATOR STATUS ERROR | Creator RESERVED decodes but is semantic corruption | §§9.11.1, 10.2, 10.4 | Decoder-then-visibility fixture | COMPLETE |
+| 24 | ERROR PROPAGATION | Creator status I/O failure propagates exactly | §10.4 | Creator lookup-failure matrix | COMPLETE |
+| 25 | ERROR PROPAGATION | Creator status corruption/ownership failure propagates exactly | §10.4 | Creator lookup-failure matrix | COMPLETE |
+| 26 | ERROR PROPAGATION | Creator unsupported format propagates distinctly | §§4.14, 10.4 | Future-format dispatch fixture | COMPLETE |
+| 27 | ERROR PROPAGATION | Creator recovery/storage failure is not Boolean invisibility | §10.4 | Lower-layer injected-failure fixture | COMPLETE |
+| 28 | DELETER / XMAX | `xmax=INVALID_TXN_ID` is valid no-delete sentinel | §10.3.1 | Deleter normal/sentinel matrix | COMPLETE |
+| 29 | DELETER / XMAX | SELF deleter with `cmax<C` hides tuple | §10.3.2 | SELF deleter trichotomy | COMPLETE |
+| 30 | DELETER / XMAX | SELF deleter with `cmax==C` leaves tuple visible | §10.3.2 | SELF deleter trichotomy | COMPLETE |
+| 31 | SELF COMMAND CAUSALITY | SELF deleter with `cmax>C` is error | §§10.3.2, 10.4 | Future-cmax persisted/runtime fixtures | COMPLETE |
+| 32 | DELETER / XMAX | COMMITTED deleter below `xmax` and absent from active is effective | §10.3.3 | Deleter normal matrix | COMPLETE |
+| 33 | DELETER / XMAX | COMMITTED deleter captured active is ineffective | §10.3.3 | Active-at-capture deleter fixture | COMPLETE |
+| 34 | DELETER / XMAX | COMMITTED deleter at/above `xmax` is ineffective | §10.3.3 | At/above-horizon fixtures | COMPLETE |
+| 35 | DELETER / XMAX | Other IN_PROGRESS deleter is ineffective without visibility wait | §10.3.3 | Deleter normal matrix | COMPLETE |
+| 36 | DELETER / XMAX | ABORTED deleter is ineffective while `xmax` may remain | §§10.1, 10.3.3 | Deleter matrix plus retained-header fixture | COMPLETE |
+| 37 | DELETER STATUS ERROR | Dependent deleter RETIRED is persisted corruption | §§10.3.3–10.4 | Deleter RETIRED fixture | COMPLETE |
+| 38 | DELETER STATUS ERROR | Dependent deleter INVALID is persisted corruption | §§10.3.3–10.4 | Deleter INVALID fixture | COMPLETE |
+| 39 | DELETER STATUS ERROR | Deleter RESERVED decodes but is semantic corruption | §§9.11.1, 10.3.3–10.4 | Decoder-then-visibility fixture | COMPLETE |
+| 40 | ERROR PROPAGATION | Deleter lookup I/O/corruption/unsupported/storage failure propagates | §10.4 | Deleter lookup-failure matrix | COMPLETE |
+| 41 | DELETER STATUS ERROR | INVALID status is distinct from INVALID_TXN_ID sentinel | §§10.3.1, 10.3.3 | Explicit sentinel/status matrix | COMPLETE |
+| 42 | SELF COMMAND CAUSALITY | Same-owner `cmax<cmin` is causally impossible | §§10.4, 10.6 | Same-owner causality matrix | COMPLETE |
+| 43 | SELF COMMAND CAUSALITY | Persisted impossible command metadata yields `CORRUPT_HEAP` | §10.4 | Persisted future/causal fixtures | COMPLETE |
+| 44 | SELF COMMAND CAUSALITY | Runtime-only impossible command metadata uses internal-invariant path | §§10.4, 39.1.3 | Abstract prepublication instrumentation | COMPLETE |
+| 45 | SELF COMMAND CAUSALITY | Valid equal command identities remain permitted | §§10.2–10.4 | Current INSERT/DELETE/UPDATE fixtures | COMPLETE |
+| 46 | CREATOR / XMIN | Creator result composes before deleter result | §10.4 | Cartesian normal composition | COMPLETE |
+| 47 | UPDATE OLD/NEW PAIR | Current-command INSERT is invisible to ordinary rescan | §10.2 | Statement-effects fixture | COMPLETE |
+| 48 | UPDATE OLD/NEW PAIR | Later-command INSERT is visible | §10.2 | Statement-effects fixture | COMPLETE |
+| 49 | UPDATE OLD/NEW PAIR | Current-command DELETE leaves old tuple visible | §10.3.2 | Statement-effects fixture | COMPLETE |
+| 50 | UPDATE OLD/NEW PAIR | Later-command DELETE hides old tuple | §10.3.2 | Statement-effects fixture | COMPLETE |
+| 51 | UPDATE OLD/NEW PAIR | SELF current UPDATE selects old, not new | §§10.2–10.3 | UPDATE matrix | COMPLETE |
+| 52 | UPDATE OLD/NEW PAIR | SELF later UPDATE selects new, not old | §§10.2–10.3 | UPDATE matrix | COMPLETE |
+| 53 | UPDATE OLD/NEW PAIR | IN_PROGRESS updater selects old, not new | §§10.2–10.3 | UPDATE matrix | COMPLETE |
+| 54 | UPDATE OLD/NEW PAIR | COMMITTED-before updater selects new, not old | §§10.2–10.3 | UPDATE matrix | COMPLETE |
+| 55 | UPDATE OLD/NEW PAIR | COMMITTED at/after horizon selects old, not new | §§10.2–10.3 | UPDATE matrix | COMPLETE |
+| 56 | UPDATE OLD/NEW PAIR | Active-at-capture updater remains old after later commit | §§9.7.2, 10.2–10.3 | Barrier plus UPDATE matrix | COMPLETE |
+| 57 | UPDATE OLD/NEW PAIR | ABORTED updater selects old, not new | §§10.1–10.3 | UPDATE matrix | COMPLETE |
+| 58 | UPDATE OLD/NEW PAIR | Every valid UPDATE row emits exactly one ordinary version | §§10.1–10.4 | Pair-output cardinality assertion | COMPLETE |
+| 59 | READ COMMITTED | One statement attempt uses one stable snapshot | §§9.9, 10.4 | Chapter-9 RC fixture plus scan assertion | COMPLETE |
+| 60 | READ COMMITTED | Commit after capture does not appear during the attempt | §§9.9, 10.2–10.3 | Mid-attempt terminal barrier | COMPLETE |
+| 61 | READ COMMITTED | Next statement captures fresh state | §9.9 | Isolation Tests cross-reference | COMPLETE |
+| 62 | READ COMMITTED | Own earlier/current command effects follow SELF rules | §§9.6, 10.2–10.3 | SELF and statement-effects matrices | COMPLETE |
+| 63 | RETRY | Pre-write retry refreshes snapshot and retains CommandId | §§9.9, 15.7.1 | Existing retry fixture plus no-future-error assertion | COMPLETE |
+| 64 | RETRY | Post-write retry cannot continue in same TxnId | §§15.7.2, 39.1 | Statement Failure tests | COMPLETE |
+| 65 | REPEATABLE READ | First ordinary statement captures RR snapshot | §9.10 | Chapter-9 RR fixture | COMPLETE |
+| 66 | REPEATABLE READ | Later statements retain external snapshot fields | §9.10 | RR multi-statement fixture | COMPLETE |
+| 67 | REPEATABLE READ | External commits after capture remain invisible | §§9.10, 10.2–10.3 | Isolation Tests barrier | COMPLETE |
+| 68 | REPEATABLE READ | Own later writes become visible through updated command boundary | §§9.10, 10.2–10.3 | RR plus SELF matrix | COMPLETE |
+| 69 | REPEATABLE READ | V1 RR is snapshot isolation, not SERIALIZABLE | §§9.5, 10.2–10.4 | Isolation identity/write-skew tests | COMPLETE |
+| 70 | SCAN / SNAPSHOT CONSISTENCY | SeqScan validates then evaluates every NORMAL candidate | §§5.17, 10.4 | Heap scan fixture | COMPLETE |
+| 71 | ERROR PROPAGATION | Heap-scan visibility error terminates rather than skips | §10.4 | Heap error-propagation fixture | COMPLETE |
+| 72 | INDEX HEAP RECHECK | B+ entry is only physical candidate RID | §8.22.2 | Scan Tests plus index matrix | COMPLETE |
+| 73 | INDEX HEAP RECHECK | Visible candidate is emitted | §§8.22.2, 10.4 | Index matrix visible row | COMPLETE |
+| 74 | INDEX HEAP RECHECK | Invisible candidate alone is silently skipped | §§8.22.2, 10.4 | Index matrix invisible row | COMPLETE |
+| 75 | INDEX HEAP RECHECK | Candidate visibility error propagates and stops success | §§8.22.2, 10.4 | Index error rows | COMPLETE |
+| 76 | CROSS-OWNER | Visibility does not follow `prev` after INVISIBLE or ERROR | §§5.7.4, 10.4, 14.10 | No-predecessor-fallback fixture | COMPLETE |
+| 77 | SCAN / SNAPSHOT CONSISTENCY | All candidates/operators in one attempt share snapshot/command | §§9.9–9.10, 10.4 | Scan/Pipeline/Subquery cross-reference | COMPLETE |
+| 78 | RECOVERY | Aborted INSERT bytes may remain but version is invisible | §§10.1, 13.15 | Retained-bytes recovery fixture | COMPLETE |
+| 79 | RECOVERY | Aborted DELETE header may remain but delete is ineffective | §§10.1, 13.15 | Retained-header recovery fixture | COMPLETE |
+| 80 | RECOVERY | Aborted UPDATE selects old and ignores new | §§10.1, 13.15 | Post-READY UPDATE matrix | COMPLETE |
+| 81 | RECOVERY | Crash loser creator/deleter resolves through ABORTED authority | §§13.15–13.19 | Recovery Property Tests specialization | COMPLETE |
+| 82 | RECOVERY | Durable COMMIT remains visible without heap/status-page force | §§7.11, 10.1, 13.13 | Durable-WAL/unflushed-pages fixture | COMPLETE |
+| 83 | RECOVERY | Precrash runtime active/cache state is not trusted after reopen | §§9.13, 13.19 | Reopen lookup-source instrumentation | COMPLETE |
+| 84 | STATUS / RECLAMATION BOUNDARY | Aborted-`xmax` normalization preserves visibility | §§10.5, 14.13.1 | Vacuum normalization cross-reference | COMPLETE |
+| 85 | STATUS / RECLAMATION BOUNDARY | Creator freezing preserves visibility and removes lookup need | §§10.5, 14.13.2 | Freeze fixture | COMPLETE |
+| 86 | STATUS / RECLAMATION BOUNDARY | Hint cleanup mutation follows WAL/page-LSN rules | §§10.5, 12.10–12.12 | Vacuum crash/fault cross-reference | COMPLETE |
+| 87 | STATUS / RECLAMATION BOUNDARY | RETIRED requires durable Chapter-14 proof | §§10.4, 14.14.1–14.14.3 | Positive retirement procedure | COMPLETE |
+| 88 | STATUS / RECLAMATION BOUNDARY | Dependent metadata surviving RETIRED is negative corruption case | §§10.4, 14.14.3 | RETIRED visibility fixture | COMPLETE |
+| 89 | STATUS / RECLAMATION BOUNDARY | Missing status page alone never means RETIRED | §§9.13, 14.14.3 | Chapter-9 lookup plus retirement fixture | COMPLETE |
+| 90 | STATUS / RECLAMATION BOUNDARY | Snapshot invisibility is not global reclaimability/DEAD | §§5.4.3, 10.5, 14.3–14.12 | Vacuum horizon and slot-state tests | COMPLETE |
+| 91 | CROSS-OWNER | Ordinary visibility acquires no tuple-write lock | §§10.4, 10.6 | Lock instrumentation on read fixtures | COMPLETE |
+| 92 | CROSS-OWNER | Chapter 11 remains write-conflict/UNIQUE owner | §§10.3.3, 11.10.4 | Locking/UNIQUE cross-reference | COMPLETE |
+| 93 | CROSS-OWNER | HeapPage supplies metadata but does not decide visibility | §§5.17, 10.4, 10.6 | Direct tuple versus visibility component fixture | COMPLETE |
+| 94 | CROSS-OWNER | Chapter 9 status/snapshot is the sole visibility input authority | §§9.7–9.13, 10.4 | Controlled input and lookup-call assertions | COMPLETE |
+| 95 | CROSS-OWNER | Read-only transactions cannot create persistent status-dependent tuple metadata | §§9.15, 10.4 | Read-only Chapter-9 specialization cross-reference | COMPLETE |
+| 96 | FAILURE TAXONOMY | §39.1 owns continuation and no new visibility error enum is invented | §§10.4, 39.1 | Error matrix plus statement-failure cross-reference | COMPLETE |
 
 ---
 
