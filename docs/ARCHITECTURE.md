@@ -7579,7 +7579,9 @@ STEAL + NO-FORCE
 
 without requiring physical ordinary-user-DML undo or compensation-log-record-style restoration of heap/index bytes.
 
-Later WAL/recovery chapters define loser-transaction reconstruction and system/structural recovery actions without changing these visibility semantics.
+Section 12.10.4 defines abort's treatment of B+ structural shape, while
+§§13.13–13.16 define redo, loser resolution, and the no-user-DML-CLR recovery
+model without changing these visibility semantics.
 
 ## 10.2 Creator visibility
 
@@ -7592,23 +7594,40 @@ if T.xmin == FROZEN_TXN_ID:
     creator_visible = true
 
 else if T.xmin == S.owner_txn_id:
-    creator_visible =
-        (T.cmin < S.command_id)
+    if T.cmin < S.command_id:
+        creator_visible = true
+    else if T.cmin == S.command_id:
+        creator_visible = false
+    else:
+        visibility evaluation fails: impossible future-command metadata
 
 else:
-    status = Status(T.xmin)
+    status_result = Status(T.xmin)
 
-    if status != COMMITTED:
+    if status lookup failed:
+        propagate the exact lookup failure
+
+    else if status_result == COMMITTED:
+        if T.xmin >= S.xmax:
+            creator_visible = false
+
+        else if T.xmin is in S.active:
+            creator_visible = false
+
+        else:
+            creator_visible = true
+
+    else if status_result == IN_PROGRESS:
         creator_visible = false
 
-    else if T.xmin >= S.xmax:
+    else if status_result == ABORTED:
         creator_visible = false
 
-    else if T.xmin is in S.active:
-        creator_visible = false
+    else if status_result is RETIRED, INVALID, or RESERVED:
+        visibility evaluation fails: status-dependent invariant violation
 
     else:
-        creator_visible = true
+        visibility evaluation fails: impossible status result
 ```
 
 If:
@@ -7626,6 +7645,17 @@ cmin < snapshot.command_id
 ```
 
 means a tuple created by the current statement is not rediscovered through ordinary snapshot visibility during that same statement.
+
+Equality is the valid current-command case. A self creator with:
+
+```text
+cmin > snapshot.command_id
+```
+
+claims creation by a command in the evaluator's future and is not an ordinary
+invisible case. Persisted tuple metadata with that relation is `CORRUPT_HEAP`;
+an impossible runtime-only form detected before persistence is an internal
+invariant failure under §39.1.
 
 Operations such as `RETURNING` SHOULD use the operation's produced values rather than depending on an ordinary snapshot rescan of a just-created tuple.
 
@@ -7658,24 +7688,33 @@ then:
 ```text
 if T.cmax < S.command_id:
     tuple is no longer visible
-else:
+else if T.cmax == S.command_id:
     tuple remains visible to the current statement
+else:
+    visibility evaluation fails: impossible future-command metadata
 ```
 
 Thus a delete/update performed by the current statement does not retroactively remove the old version from that same statement snapshot.
+
+A self deleter with `cmax > S.command_id` claims deletion or supersession by a
+command in the evaluator's future. Persisted tuple metadata with that relation
+is `CORRUPT_HEAP`; an impossible runtime-only form detected before persistence
+is an internal invariant failure under §39.1.
 
 ### 10.3.3 Deleted/superseded by another transaction
 
 Let:
 
 ```text
-status = Status(T.xmax)
+status_result = Status(T.xmax)
 ```
+
+If status lookup fails, visibility propagates the exact lookup failure.
 
 If:
 
 ```text
-status == ABORTED
+status_result == ABORTED
 ```
 
 the delete/update never became logically effective, so the tuple remains visible.
@@ -7683,7 +7722,7 @@ the delete/update never became logically effective, so the tuple remains visible
 If:
 
 ```text
-status == IN_PROGRESS
+status_result == IN_PROGRESS
 ```
 
 the tuple remains visible to this snapshot.
@@ -7695,7 +7734,7 @@ Write-conflict handling is owned by Chapter 11.
 If:
 
 ```text
-status == COMMITTED
+status_result == COMMITTED
 ```
 
 the tuple is deleted for snapshot `S` only when:
@@ -7708,19 +7747,78 @@ T.xmax not in S.active
 
 Otherwise the deleting/updating transaction is too new for the snapshot, so the old tuple remains visible.
 
+If `status_result` is `RETIRED`, `INVALID`, or `RESERVED`, visibility fails with
+the canonical invariant/corruption result. `INVALID_TXN_ID` as `T.xmax` remains
+the valid no-deleter sentinel handled by §10.3.1; a status lookup result of
+`INVALID` for a normal referenced TxnId is not that sentinel. `RESERVED` remains
+a recognized v1 encoding, but neither it nor `INVALID` is a terminal outcome.
+Any other status result in this non-self branch is likewise an invariant error.
+
 ## 10.4 Visibility evaluation order
 
-Ordinary MVCC visibility is evaluated conceptually as:
+Ordinary MVCC visibility is an error-capable semantic decision, not a total
+Boolean function over arbitrary tuple/status inputs. It is evaluated
+conceptually as:
 
 ```text
-creator committed/visible before snapshot?
-        no  -> invisible
-        yes
-         ↓
-deleter absent/aborted/in-progress/too-new?
-        yes -> visible
-        no  -> invisible
+1. validate tuple structure and ownership
+       failure   -> propagate canonical validation error
+2. validate same-transaction command causality
+       failure   -> canonical corruption/internal-invariant error
+3. evaluate creator
+       invisible -> invisible
+       error     -> propagate error
+       visible   -> evaluate deleter
+4. evaluate deleter
+       visible   -> visible
+       invisible -> invisible
+       error     -> propagate error
 ```
+
+Step 2 occurs before creator invisibility may short-circuit the decision and
+rejects each of these impossible SELF relations:
+
+```text
+T.xmin == S.owner_txn_id and T.cmin > S.command_id
+T.xmax == S.owner_txn_id and T.cmax > S.command_id
+T.xmin == S.owner_txn_id and T.xmax == S.owner_txn_id and T.cmax < T.cmin
+```
+
+When both transaction fields identify the owner, the tuple therefore MUST
+satisfy:
+
+```text
+T.cmin <= T.cmax
+```
+
+`T.cmax < T.cmin` would claim deletion or supersession before creation and is
+therefore causally impossible. Impossible persisted tuple metadata is
+`CORRUPT_HEAP`; an impossible unpublished runtime-only form is an internal
+invariant failure under §39.1.3. A recognizable unsupported future format
+retains its §4.14 unsupported-format result rather than being relabeled as
+corruption.
+
+`RETIRED` does not substitute for a terminal outcome. Under §§14.14.1–14.14.3,
+it is returned only after durable reclamation proof establishes that no valid
+persistent correctness object still requires that transaction's outcome. A
+status-dependent creator or deleter that still resolves to `RETIRED` therefore
+violates that ownership contract. Likewise, `INVALID` and `RESERVED` are valid
+decoded status codes but are not terminal visibility outcomes. Ordinary
+visibility MUST fail rather than guess visible or invisible in any of these
+status-dependent cases.
+
+For ordinary visibility over a validated persisted tuple, such an impossible
+status-dependent reference is `CORRUPT_HEAP`. If the incoherence is detected as
+a runtime-only invariant failure before persisted tuple metadata is implicated,
+§39.1.3's internal-invariant rule applies. These classifications refine the
+`CORRUPTION_OR_INTERNAL_ERROR` family used by §11.10.4 without introducing a
+new error category.
+
+Transaction-status I/O, checksum, ownership, corruption, recovery/storage, and
+unsupported-format failures are propagated with their canonical lower-layer
+classification. Converting such a failure into a Boolean could expose
+uncommitted or aborted data, suppress committed data, or change snapshot
+semantics. Section 39.1 owns the resulting continuation policy.
 
 Readers do not acquire logical tuple locks merely to evaluate MVCC visibility.
 
@@ -7757,7 +7855,7 @@ cmax = 0
 
 ### Frozen creator
 
-When later freeze rules establish that the original committed creator need no longer be distinguished, maintenance may rewrite:
+When §14.13.2 establishes that the original committed creator need no longer be distinguished, maintenance may rewrite:
 
 ```text
 xmin = FROZEN_TXN_ID
@@ -7768,9 +7866,11 @@ These are physical cleanup optimizations.
 
 They do not change the logical history that made the cleanup safe.
 
-Because they modify persistent page bytes, they participate in WAL/page-LSN rules once WAL is active.
+Because they modify persistent page bytes, they follow the WAL/page-LSN mutation
+rules in §§12.10–12.12.
 
-The exact freeze horizon and status-page truncation rules are defined in Chapter 14.
+Aborted-`xmax` normalization is defined by §14.13.1. The freeze and
+transaction-status retirement rules are §§14.13.2–14.14.3.
 
 ## 10.6 MVCC invariants
 
@@ -7779,8 +7879,8 @@ The exact freeze horizon and status-page truncation rules are defined in Chapter
 3. An aborted creator makes its physical version invisible.
 4. An aborted `xmax` does not delete the old version.
 5. `FROZEN_TXN_ID` is creator-visible as committed.
-6. A self-created version is visible only when `cmin < snapshot.command_id`.
-7. A self-deleted/superseded version becomes invisible only when `cmax < snapshot.command_id`.
+6. A self-created version is visible when `cmin < snapshot.command_id`, is invisible to ordinary rescan when equal, and is an error when `cmin > snapshot.command_id`.
+7. A self-deleted/superseded version becomes invisible when `cmax < snapshot.command_id`, remains visible to the current-command ordinary rescan when equal, and is an error when `cmax > snapshot.command_id`.
 8. A committed creator with `xmin >= snapshot.xmax` is too new.
 9. A committed creator present in `snapshot.active` remains invisible to that snapshot.
 10. An in-progress or aborted other-transaction deleter does not make the old tuple invisible.
@@ -7788,6 +7888,9 @@ The exact freeze horizon and status-page truncation rules are defined in Chapter
 12. Read visibility does not acquire tuple-write locks.
 13. HeapPage does not decide visibility.
 14. Hint cleanup is a physical page mutation and does not invent transaction outcome.
+15. Ordinary MVCC visibility returns visible or invisible only for architecture-valid tuple/status inputs; it MUST NOT guess a transaction outcome or swallow a status-lookup failure.
+16. A status-dependent `RETIRED`, `INVALID`, or `RESERVED` result is an invariant/error condition, not an ordinary visible/invisible state; Chapter 14 owns the proof that permits status retirement.
+17. SELF command metadata MUST NOT point into the evaluator's future, and same-transaction creation/deletion command order MUST be causally valid; impossible values are corruption/internal errors rather than visibility states.
 
 ---
 
