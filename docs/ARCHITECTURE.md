@@ -9119,6 +9119,13 @@ The structural existence of a newly initialized page may survive a user abort ev
 | `18` | 2 | `reserved16 = 0` |
 | `20` | 4 | `patch_count` |
 
+`patch_count` MUST be at least `1`. V1 writers MUST NOT emit a zero-patch
+`PAGE_DELTA`. A decoder that encounters `patch_count = 0` in an otherwise
+complete recognized-v1 `PAGE_DELTA` MUST reject it as malformed WAL through the
+canonical corruption path in §§4.14 and 13.11. It is not a torn tail, an
+unsupported future format, or a legal no-op, and it MUST NOT reach redo or
+advance `page_lsn`.
+
 Each patch follows as:
 
 | Size | Field |
@@ -9140,7 +9147,7 @@ using checked arithmetic.
 
 Delta patches MUST NOT overlap common-header bytes `8..19` (`page_lsn` and checksum). Recovery manages those fields centrally.
 
-The mutation code must ensure the patch set describes every other persistent byte changed by that logical page mutation.
+The mutation code must ensure the nonempty patch set describes every other persistent byte changed by that logical page mutation. `PAGE_DELTA` represents an actual existing-page mutation; v1 does not assign mutation meaning to a framing-only record with no patches.
 
 The payload is valid only when parsing exactly `patch_count` entries consumes exactly `payload_length` bytes; trailing payload bytes are forbidden.
 
@@ -9234,6 +9241,12 @@ The exact payload prefix is 16 bytes:
 | `8` | 4 | `page_count` |
 | `12` | 4 | `reserved32 = 0` |
 
+`page_count` MUST be at least `1`. V1 writers MUST NOT emit a zero-page
+`BTREE_MTR`. A decoder that encounters `page_count = 0` in an otherwise
+complete recognized-v1 `BTREE_MTR` MUST reject it as malformed WAL through the
+canonical corruption path in §§4.14 and 13.11. It is not an empty structural
+transaction, a legal no-op, a barrier, or an unsupported future format.
+
 Affected-page entries are serialized in ascending `(file_id,page_no)` order and every PageId appears at most once.
 
 Each affected-page entry begins with exactly 24 bytes:
@@ -9276,9 +9289,20 @@ uint32 patch_count
 uint32 reserved32 = 0
 ```
 
-followed by the same patch entry grammar/rules as PAGE_DELTA. `data_length` must equal exactly `8 + sum(8 + patch.length)` for those entries.
+`patch_count` MUST be at least `1`. V1 writers MUST NOT emit a zero-patch
+`PATCH_SET`; a decoder MUST reject that form as malformed recognized-v1 WAL
+through the canonical corruption path. Because the containing recognized-v1
+record is complete, this violation is neither a torn tail nor an unsupported
+future format. The count is followed by the same patch entry grammar/rules as
+PAGE_DELTA. `data_length` must equal exactly
+`8 + sum(8 + patch.length)` for those entries.
 
 After exactly `page_count` affected-page entries are parsed, no trailing MTR payload bytes are permitted.
+
+`BTREE_MTR` represents an actual atomic structural mutation with at least one
+page or persistent metadata participant, and `PATCH_SET` represents actual byte
+patches. V1 assigns no no-op, heartbeat, position-marker, or barrier semantics
+to either forbidden zero-count form.
 
 Persistent allocation/free/root metadata changes are represented by including the affected metadata/free pages in the MTR; there is no second hidden persistent side channel.
 
@@ -9661,13 +9685,14 @@ The storage layer automatically retries syscall-level `EINTR` as specified in §
 
 ### 12.12.5 WAL append buffer
 
-`WalManager` owns an in-memory append buffer with an initial configurable target capacity of:
-
-```text
-8 MiB
-```
-
-The initial implementation MAY serialize candidate reservation, private-record completion, append-buffer copy, and valid-end publication under one mutex. Later measured alternatives such as completion-marked atomic reservations, per-thread staging, or a larger/ring-style buffer are allowed only if they preserve §§12.12.1–12.12.4 exactly. Lock-free WAL append is not required for correctness.
+`WalManager` owns an in-memory append buffer that retains the exact bytes needed
+for contiguous logical append, physical WAL writing, durability, and exact
+retry after a valid append. Its runtime data structures, capacity policy, and
+synchronization strategy are not architecturally fixed. Every realization MUST
+preserve §§12.12.1–12.12.4 exactly, including private record construction,
+total append order, no holes, atomic valid-end publication, retained-byte
+lifetime, concurrent append/flush safety, shutdown draining, and uncertainty
+handling. Lock-free WAL append is not required for correctness.
 
 ## 12.13 WAL writer and durable LSN
 
@@ -9686,13 +9711,8 @@ A durability request spanning a segment boundary synchronizes every segment cont
 
 Background WAL may be written periodically without an explicit commit request.
 
-The initial background flush interval is approximately:
-
-```text
-10 ms
-```
-
-as a tuning default, not a persistent-format invariant.
+The scheduling mechanism and cadence for background WAL writing are not
+architecturally fixed.
 
 The WAL subsystem, not DiskManager's logical API, owns WAL durability scheduling and `durable_lsn`.
 
@@ -9704,16 +9724,16 @@ Conceptually, if waiting commits target:
 
 ```text
 T1 -> 1000
-T2 -> 1100
-T3 -> 1250
+T2 -> 1104
+T3 -> 1256
 ```
 
 the flusher may:
 
 ```text
-write WAL through the record at 1250
+write WAL through the record at 1256
 fdatasync
-publish durable_lsn >= 1250
+publish durable_lsn >= 1256
 wake T1, T2, T3
 ```
 
@@ -9840,11 +9860,11 @@ The complete copied-image, file-synchronization, generation-reconciliation, and 
 5. The v1 WAL header is exactly 48 bytes with zero flags/reserved fields.
 6. Persisted record-type codes are explicit and stable.
 7. WAL PageId encoding is exactly 16 bytes and independent of ABI layout.
-8. PAGE_DELTA patch entries are canonical, ordered, nonoverlapping, bounds checked, and never patch page_lsn/checksum bytes.
+8. PAGE_DELTA contains at least one nonempty patch; its patch entries are canonical, ordered, nonoverlapping, bounds checked, and never patch page_lsn/checksum bytes.
 9. PAGE_INIT/PAGE_IMAGE carry canonical complete 8192-byte after-images.
 10. Every clean-to-dirty page transition begins with a full page image and sets `rec_lsn` to that image LSN.
 11. The first post-checkpoint-epoch modification also carries a full image when required by the FPI epoch rule.
-12. Every physical B+ mutation is an atomic redoable MTR system action.
+12. Every physical B+ mutation is an atomic redoable MTR system action with at least one affected page; every nested PATCH_SET contains at least one nonempty patch.
 13. Every MTR-modified page receives one common MTR LSN.
 14. A frame protected by an MTR no-flush barrier cannot be written before the complete MTR record exists.
 15. Heap tuple-version redo precedes index MTR redo that references the new RID.
