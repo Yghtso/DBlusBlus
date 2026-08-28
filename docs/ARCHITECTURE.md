@@ -8417,13 +8417,8 @@ This prevents another writer from acting as though a still-unresolved transactio
 
 ## 11.12 Lock table
 
-The initial LockManager MAY use:
-
-```text
-hash map<LockKey, LockQueue>
-```
-
-protected by a conventional mutex.
+LockManager maintains a process-local runtime mapping from each exact `LockKey`
+to one conceptual `LockQueue`.
 
 Because every v1 logical lock mode is exclusive, each queue conceptually contains:
 
@@ -8432,7 +8427,7 @@ current owner
 FIFO waiter list
 ```
 
-The initial compatibility rule is therefore:
+The compatibility rule is:
 
 ```text
 unowned key      -> grant exclusive lock
@@ -8440,13 +8435,13 @@ owned by self    -> same-transaction handling / no competing owner
 owned by another -> wait
 ```
 
-The abstraction must allow later:
-
-- sharding,
-- shared lock modes,
-- intention/table/schema/range lock families.
-
-A lock-free lock table is not required by the baseline architecture.
+The runtime realization MAY use any data structures and synchronization
+mechanisms that preserve complete lock-key equality, the FIFO queue and
+same-owner semantics above, atomic grant/cancellation with no late grant after
+a transaction becomes ineligible, §11.13 wait-for-graph integration, and
+§11.11 terminal-duration ownership and coherent wake-up behavior. It MUST
+preserve these semantics under concurrent access and remain compatible with the
+parallel-ready architecture.
 
 ## 11.13 Unified transaction-level gates and deadlock detection
 
@@ -8634,8 +8629,8 @@ in the resulting finite transaction graph, the victim is:
 the highest normal TxnId in that cyclic component
 ```
 
-This is the existing youngest-transaction policy, now applied across every
-registered resource family. The graph algorithm/data structure is not fixed,
+This deterministic victim policy applies uniformly across every registered
+resource family. The graph algorithm/data structure is not fixed,
 but an implementation may not defer detection such that a known cycle can wait
 indefinitely. A detector thread may perform additional diagnostics or catch
 stale bookkeeping, but is not the only correctness mechanism. Timeouts may
@@ -8797,7 +8792,7 @@ page-latch dependency edges.
 17. Tuple-write and unique-key locks are held through terminal outcome publication, including while `MUST_ABORT` cleanup is pending.
 18. A wait invalidates all prior UNIQUE candidate conclusions and requires a fresh range/status/heap recheck under RID protection.
 19. Exact physical replay is distinct from SQL uniqueness; unproven duplicate `(key,RID)` storage is an invariant/corruption error.
-20. Deadlock correctness uses a wait-for graph; the initial victim is the highest TxnId in the cycle.
+20. Deadlock correctness uses a wait-for graph; each cyclic strongly connected component selects its highest normal TxnId as the victim.
 21. Page/B+ latches never become LockManager locks.
 22. Logical transaction locks never substitute for physical B+ page-structure protection.
 23. SchemaLock, both TableWriterGate modes, both object-publication modes, TUPLE_WRITE, and UNIQUE_KEY share §11.13's one cross-resource wait-for graph.
