@@ -10733,7 +10733,7 @@ It owns:
 - version-chain splicing before reused storage can be referenced,
 - cleanup of aborted `xmax`,
 - freezing of sufficiently old committed creators,
-- transaction-status retention/truncation eligibility,
+- transaction-status retention/reclamation eligibility,
 - FSM maintenance after reclamation,
 - vacuum maintenance counters.
 
@@ -11370,10 +11370,10 @@ To advance the cutoff to page-aligned value `C`:
        wait for existing pins/I/O to drain without holding unrelated page latches
        mark the frame retired/non-writeback
        remove it from BufferPool/DPT ownership without flushing obsolete contents
-5. only then optionally punch the corresponding full-page byte ranges from txn_status.dat using a keep-size sparse-file operation
+5. only then optionally sparsely deallocate the corresponding full-page byte ranges from txn_status.dat while preserving logical file length and absolute PageNos
 ```
 
-For status PageNo `P`, the physical punch range is exactly:
+For status PageNo `P`, the physical sparse-deallocation range is exactly:
 
 ```text
 [P * PAGE_SIZE, (P + 1) * PAGE_SIZE)
@@ -11383,9 +11383,9 @@ The order is deliberate:
 
 - `fdatasync(database.control)` does not make unrelated WAL files durable, so step 1's WAL
   durability observation necessarily precedes step 2,
-- crash after step 2 but before frame invalidation/punching leaks physical space only,
-- no retired dirty frame can later rewrite a punched page,
-- the architecture never permits punching pages that the durable cutoff still says may be needed.
+- crash after step 2 but before frame invalidation/sparse deallocation leaks physical space only,
+- no retired dirty frame can later rewrite a sparsely deallocated page,
+- the architecture never permits sparsely deallocating pages that the durable cutoff still says may be needed.
 
 Cutoff publication does not itself release ordinary dirty-page recovery dependencies. In
 particular, §12.10.5's preparatory TXN_STATUS image `F = rec_lsn` and every later required
@@ -11414,23 +11414,18 @@ forbidden. Likewise, no physical status-page retirement that depends on `C` may 
 step 2, because a torn new slot can select the old cutoff. Failure or uncertainty while
 establishing required WAL durability prevents step 2; ordinary §12.12 failure handling
 retains already-authorized page progress, and uncertain storage authority follows its
-noncontinuable/no-guessing path. Failure after durable `C` to punch a status page does not
-roll the cutoff backward.
+noncontinuable/no-guessing path. Failure after durable `C` to sparsely deallocate a status
+page does not roll the cutoff backward.
 
 Checkpoint publication may occur before or after cutoff publication. In either order, the
 selected checkpoint/control generations and the §13.10 retention floor MUST preserve every
 reconstruction source needed by the authoritative cutoff. Neither ordering requires a
 checkpoint-per-cutoff serialization or changes checkpoint format.
 
-On Linux the baseline physical optimization may use:
-
-```text
-fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)
-```
-
-for whole status-page byte ranges.
-
-If hole punching is unsupported or fails, correctness is unaffected; the old blocks may remain physically allocated and reclamation can be retried later.
+The storage layer MAY use any platform-supported sparse-deallocation mechanism for whole
+status-page byte ranges, provided it preserves logical file length and absolute PageNo
+mapping. If no such mechanism is available or the operation fails, correctness is
+unaffected; the old blocks may remain physically allocated and reclamation may be retried.
 
 The logical file size is not shrunk and later PageNos are never renumbered.
 
@@ -11492,7 +11487,8 @@ bytes reclaimed
 frozen tuples
 ```
 
-Optimizer statistics remain the responsibility of ANALYZE, though vacuum may later trigger or assist that subsystem.
+Optimizer statistics remain the responsibility of ANALYZE. Vacuum MAY trigger or assist
+that subsystem without assuming ownership of its published state.
 
 ## 14.17 Vacuum execution baseline
 
@@ -11506,7 +11502,8 @@ or an equivalent internal maintenance invocation.
 
 A sophisticated autovacuum scheduler is not required for the baseline.
 
-Background scheduling may later react to measured dead-version ratio, aborted-version pressure, freezing/status pressure, or table growth.
+Background scheduling MAY react to measured dead-version ratio, aborted-version pressure,
+freezing/status pressure, or table growth.
 
 The scheduling policy is operational, not part of tuple-reclamation correctness.
 

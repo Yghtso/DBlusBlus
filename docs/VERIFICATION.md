@@ -5860,57 +5860,680 @@ CONTRADICTORY:   0
 
 ### Vacuum and Reclamation Tests
 
-Correctness testing is separate from Vacuum Benchmarks. Exercise the reclamation protocols
-in `ARCHITECTURE.md` §§14.2–14.12 and their invariants in §14.18. Build indexed version
-chains with known creator/deleter outcomes, retain controllable snapshots and read epochs,
-and expose deterministic barriers around every reclamation publication unit.
+This section is the detailed procedural owner for `ARCHITECTURE.md` §§14.1–14.18. It
+specializes, without redefining, the independent owners for slots and tuple headers
+(§§5.3–5.8), FSM (§6), pins/latches/writeback (§§7.6–7.12), index RID references
+(§§8.20–8.23), transaction status/snapshots/lifecycle (§§9.4–9.15), visibility and
+`RETIRED` (§§10.2–10.5), `TUPLE_WRITE` (§§11.2–11.13), WAL/page publication
+(§§12.8–12.17), control/checkpoint/recovery (§§13.2–13.19), DML handoff (§§15.3–15.6),
+and failures (§39.1). Correctness procedures remain separate from Vacuum Benchmarks.
 
-#### Index cleanup and persistent DEAD
+#### Deterministic reclamation harness and independent oracles
 
-For one reclaimable NORMAL RID with several secondary indexes:
+Core races use barriers at semantic events, never elapsed-time sleeps. Instrumentation may
+observe these conceptual events without requiring production function or container names:
 
-1. derive keys through the historical schema;
-2. remove each exact `(key,RID)` entry with independently injectable crashes/retries;
-3. re-fetch and revalidate the heap identity/header under the page latch;
-4. publish `NORMAL -> DEAD` only after every required index entry is known absent;
-5. retire the RID in the ReadEpochManager after the persistent DEAD transition.
+```text
+TxnId issued / transaction registration begins / write-status dependency becomes visible
+transaction admitted / C4 or A2 publishes / dependency releases at C5 or A3
+SQL snapshot or StatusHistoryGuard registers/releases / status lookup begins/reads result
+tuple validated / creator or deleter status resolved / freeze or normalization proven
+maintenance WAL privately encoded / authorized / durable / page mutation and page_lsn publish
+cutoff candidate computed / dependency proof revalidated / required WAL target fixed
+control-slot write begins / control fdatasync completes / runtime cutoff publishes
+status frame retirement begins / sparse deallocation begins/completes
+read epoch requested/visible/exits / RID retires at E / grace becomes true
+TUPLE_WRITE request begins/becomes queued/granted/canceled/releases
+index cleanup / prev_RID splice / NORMAL -> DEAD / zero-claim check / DEAD -> UNUSED
+same-slot allocation / crash / recovery / READY
+```
 
-Assert idempotence when some or all index entries were removed before a crash. A recovered
-NORMAL slot repeats exact cleanup; a recovered DEAD slot proves cleanup preceded its
-transition and is not returned to ordinary visibility. Close/reopen/recover with persistent
-DEAD pages and verify each recovered DEAD RID is conservatively re-enqueued with a fresh
-retirement epoch before reuse.
+Crash fixtures construct exact persistent prefixes: choose the complete WAL prefix, data
+page images, valid or torn control slot, and sparse page presence independently; omit later
+operations; then reopen through the normal recovery gate. Runtime races use barriers and
+state snapshots. Stress/random scheduling is complementary, never the correctness oracle.
 
-#### Grace period and RID reuse
+Every negative fixture is canonical except for one missing proof or injected defect. In
+particular, the epoch-only test clears lock/index/predecessor barriers, the lock-only test
+clears epochs and persistent references, and the durability test completes semantic
+normalization in memory while withholding only required WAL durability.
 
-Register readers before, during, and after RID retirement. Control registration and release
-with barriers rather than elapsed-time sleeps. Assert that `DEAD -> UNUSED`, free-list
-publication, slot reuse, and whole-page recycling remain forbidden while any active reader
-epoch is less than or equal to the RID's retirement epoch. Readers registered after
-retirement must not recover the removed index entry through normal traversal.
+The independent oracles are:
 
-After all blocking readers release, verify the complete §14.12 eligibility test before
-reuse, including version-chain proof and candidate revalidation. Assert canonical UNUSED
-coordinates/free-list membership and prove that an old index-derived RID cannot observe a
-new tuple identity.
+- **visibility:** evaluate §§10.2–10.4 directly from fixture snapshot/status/header values;
+- **status mapping:** compute `ordinal=T-2`, `PageNo=1+ordinal/32640`, and entry position
+  with widened checked arithmetic, independently of production helpers;
+- **cutoff alignment:** enumerate whole status pages and choose the greatest legal
+  page-aligned exclusive cutoff satisfying every independently modeled bound;
+- **epoch grace:** for retire epoch `R`, require no active `E <= R`;
+- **RID reuse:** explicitly conjoin global deadness, index absence, persistent DEAD,
+  predecessor absence, epoch grace, zero live `TUPLE_WRITE` claims, frame/page eligibility,
+  and canonical UNUSED publication;
+- **WAL prefix:** derive `durable_lsn` and retained reconstruction records from exact
+  persisted complete records and DPT `rec_lsn`, not a production flush result;
+- **control authority:** decode/CRC-check both §13.2 slots and independently select the
+  greatest valid usable generation.
 
-#### Version-chain splicing and long-running snapshots
+The harness must not require one vacuum thread, mutex, claim counter, epoch container,
+checkpoint cadence, scheduling interval, or sparse-deallocation API. Observable ordering
+and persistent results are the oracle.
 
-Construct chains with removable middle, head-adjacent, and multiple consecutive obsolete
-versions plus surviving direct successors. Vacuum must rewrite each surviving successor's
-`prev` link to the removed version's predecessor through WAL-backed mutation. Inject a
-state change before revalidation and require deferral rather than an unproven splice. After
-restart, assert that no surviving version points to storage eligible for reuse.
+#### Protection-domain matrix
 
-Hold a long-running snapshot and associated read-epoch protection while vacuum executes.
-Versions and physical RID identities required by that snapshot must remain available;
-versions become reclaimable only after the architecture horizon and epoch predicates permit
-it. Repeat with transaction-status normalization/freezing where relevant so reclamation
-never guesses a missing status outcome.
+| Protection | What the fixture protects | Lifetime | Kind | Logical-deadness effect | Cutoff effect | Same-RID reuse effect | Crash | Substitute? |
+|---|---|---|---|---|---|---|---|---|
+| SQL snapshot | logical visibility history | RC attempt or retained RR snapshot | runtime | may block | contributes persistent-proof horizon | only through deadness | not replayed | no |
+| page latch | page bytes/structure | short critical section | runtime | none after release | none | not a substitute | absent | no |
+| BufferPool pin | resident frame binding | guard lifetime | runtime | none | coordinates status-frame retirement | not a substitute | absent | no |
+| read epoch | retained physical RID identity | RID-retaining operation | runtime | none | none | blocks grace/reuse | absent | no |
+| live `TUPLE_WRITE` request | one exact writer-target RID | queued/granted request through cancellation or C5/A3 | runtime | none by itself | none by itself | blocks reuse | absent | no |
+| `StatusHistoryGuard(G)` | status lookups for normal TxnIds `>=G` | maintenance lookup/recheck | runtime | none | blocks cutoff above `G` | none | absent | no |
+| write-status dependency | transaction's own possible future TxnId publication | registration through C5/A3 | runtime | none | blocks retirement of own TxnId | none | absent | no |
 
-Connect the existing crash points for index cleanup, `NORMAL -> DEAD`, and
-`DEAD -> UNUSED` to these end-to-end assertions. Page-local state-transition success alone
-is not complete vacuum verification.
+No row substitutes for another outside its stated domain.
+
+#### Write-status registration, lifetime, and snapshot contrast
+
+Pause write-capable transaction registration before and after its own write-status
+dependency becomes coordinator-visible and before transaction admission. Assert that no
+persistent write can begin before both active registration and the dependency are visible;
+there is no first-write admission path. Race the pause with cutoff calculation in both
+orders:
+
+1. dependency first: any candidate that would retire `T` is clamped to the greatest legal
+   aligned cutoff not passing `T`;
+2. cutoff `C` first: the subsequently issued/admitted TxnId is `>=C` and registers before
+   write admission;
+3. pause between assignment and registration: exactly one of those orders wins, never
+   `T<C` followed by unpinned write-capable admission.
+
+For an idle READ COMMITTED transaction, unregister the statement snapshot while retaining
+write capability; cutoff still cannot pass its own TxnId, while
+`global_oldest_snapshot_xmin` excludes it. An explicitly read-only transaction has no
+write-status dependency, may separately hold an RC/RR snapshot, and rejects every
+persistent-write attempt rather than changing mode after admission.
+
+Pause commit at C3, C4, and before/after C5, and abort at MUST_ABORT, A2, and before/after
+A3. The dependency remains through C4/A2 and failed ACTIVE statements and disappears only
+during C5/A3. After release, prohibit any new self-TxnId publication, but independently
+retain the cutoff blocker while an existing tuple/catalog `xmin` or effective `xmax` still
+needs the outcome.
+
+The mandatory race/lifetime matrix is:
+
+| Case | SQL snapshot | Write-status dependency | Cutoff may pass own T? | Existing persistent dependency | Expected |
+|---|---|---|---|---|---|
+| write-capable T registers first | optional | yes | no | optional | aligned candidate clamps |
+| cutoff C publishes first | none yet | registered before admission | only because new `T>=C` | none yet | no retired-self TxnId |
+| assignment/registration race | optional | one legal linearization | never while `T<C` is admitted | optional | no gap |
+| idle RC write-capable T | none | yes | no | optional | own status pinned only |
+| RR write-capable T | retained | yes | no | optional | two independent bounds |
+| explicit read-only T | optional | no | according to snapshot/persistent proof | none creatable | write rejected |
+| C4 before C5 | none required | yes | no | maybe | terminal publication insufficient |
+| after C5, persisted xmin | none required | no | no | yes | persistent proof still blocks |
+| A2 before A3 | none required | yes | no | maybe | terminal publication insufficient |
+| after A3, persisted metadata | none required | no | no | yes | normalization/removal still required |
+
+The Chapter-9 snapshot procedures remain the owner of RC/RR fields. This matrix asserts
+only that snapshot-horizon and status-history bounds are never conflated.
+
+#### StatusHistoryGuard, lookup, and `RETIRED`
+
+Acquire `StatusHistoryGuard(G)` before a status-dependent scan and pause before reading a
+terminal value. A candidate cutoff greater than `G`, runtime publication, and physical page
+retirement must remain blocked until guard release and revalidation. In the opposite order,
+publish `C`, then begin lookup for `T<C`; lookup returns `RETIRED` from cutoff precedence
+without page access and no new guard resurrects retired history. Boundary fixtures use
+`T=G-1`, `T=G`, and larger values to prove the architecture's lower-bounded protected
+range, not an invented global or half-open interval.
+
+For otherwise valid persisted metadata that still requires `Status(T)`, force `RETIRED`
+separately for creator `xmin` and effective deleter `xmax`. Both take the §9.13/§10.4
+reclamation-invariant failure path; neither outcome is guessed. Repeat with persisted
+`INVALID`, recognized `RESERVED`, status I/O failure, checksum corruption, and unsupported
+status format. Assert no freeze, normalization, DEAD decision, or page mutation is
+authorized. The Transaction-status lookup and MVCC Visibility sections remain the detailed
+owners of precedence and exact failure classification.
+
+#### Creator freezing, aborted-xmax normalization, and status independence
+
+Creator-freeze fixtures use a valid committed creator at the exact §14.13.2 horizon:
+just eligible, equality boundary, and one relation too new. Independently evaluate every
+legal future snapshot before and after WAL-backed `xmin=FROZEN_TXN_ID,cmin=0`; visibility
+must be identical and only the creator dependency disappears. A normal `xmax` remains a
+separate dependency. ABORTED, IN_PROGRESS, required-RETIRED, INVALID, RESERVED, and lookup
+failure creator results prohibit freeze and leave bytes unchanged.
+
+Normalization fixtures use a valid still-live tuple with `Status(xmax)=ABORTED`; publish
+the WAL-backed `xmax=INVALID_TXN_ID,cmax=0` rewrite and independently prove pre/post
+visibility equivalence. Creator dependency is unchanged and deleter dependency disappears.
+COMMITTED, IN_PROGRESS, unsafe SELF, required-RETIRED, INVALID, RESERVED, and lookup
+failure cases prohibit normalization. Pre-authorization failure restores/leaves the old
+canonical bytes; post-authorization failure follows the existing §12.12 publication and
+§39.1 rules without fabricated rollback.
+
+The existing PAGE_DELTA/PAGE_IMAGE procedures remain the owner of record-family bytes and
+assert that each authorized maintenance mutation installs its authorizing record-start LSN
+as `page_lsn`, updates dirty/DPT state, and obeys WAL-before-data. Reclamation assumes no new
+WAL record family or maintenance-commit record.
+
+The status-independence matrix is:
+
+| Persisted state | Creator dependency | Deleter dependency | Freeze? | Normalize? | Removal needed for represented dependency? | Cutoff may pass referenced T? | `RETIRED` legal afterward? |
+|---|---|---|---|---|---|---|---|
+| normal committed xmin | yes | as xmax says | when §14.13.2 eligible | no | freeze or removal | no before action | yes after crash-recoverable action |
+| FROZEN xmin | no | as xmax says | already frozen | no | no creator removal | yes for old creator if other bounds clear | yes |
+| aborted xmin | yes until version removal | as xmax says | no | no | yes | no before removal | yes after removal |
+| normal committed xmax | as xmin says | yes | creator only | no | removal/authorized independence | no | yes only afterward |
+| normal aborted xmax | as xmin says | yes | creator only | yes | normalization or removal | no | yes after recoverable action |
+| normalized aborted xmax | as xmin says | no | creator only | already normalized | no deleter removal | yes for deleter if other bounds clear | yes |
+| physically removed version | no | no | no | no | complete | yes if no other reference | yes |
+| catalog MVCC tuple | same tuple rules | same tuple rules | when eligible | when aborted xmax | same as user tuple | only after equivalent proof | only afterward |
+
+Freezing is also tested against a live physical tuple: it does not mark DEAD, remove an
+index, satisfy epoch grace, or clear a lock claim. Normalizing aborted `xmax` generally
+makes a tuple semantically more live and never authorizes DEAD/reuse. A two-axis fixture
+permits status retirement for status-independent metadata while a stale index, epoch, or
+lock claim still forbids physical RID reuse.
+A write-capable transaction's own write-status dependency, when it retains no RID, likewise
+does not block reuse of an unrelated RID.
+
+#### Cutoff domain, prerequisite durability, and second-crash retention
+
+For candidate `C`, build the dependency set independently, round down to the greatest legal
+exclusive status-page boundary using the 32,640-entry mapping, and test `T=C-1`, `T=C`, a
+candidate inside a page, the greatest legal aligned cutoff, and attempted overflow. `T<C`
+is retired only after proof; `T=C` remains outside the retired range. No arithmetic wraps
+or partially retires a status page.
+
+For every freeze, normalization, or removal prerequisite at authorizing record-start LSN
+`L`, select exactly one proof:
+
+```text
+durable page: the status-independent page image is stably stored and no longer needs L
+durable WAL:  the old disk image remains, but the complete reconstructive WAL is durable
+              and retained through the page's DPT rec_lsn dependency
+```
+
+With multiple prerequisites at `L1<L2<L3`, independently exclude already-durable pages and
+set `required_wal_target` to the maximum authorizing LSN among the remaining WAL-dependent
+pages. Pause WAL flush below and at that complete-record target. A successful
+`fdatasync(database.control)` is never accepted as evidence that unrelated WAL reached
+durability.
+
+The mandatory durability matrix is:
+
+| State | Semantically independent in memory? | Crash-recoverable? | Cutoff may publish? | WAL retained afterward? | READY after crash? |
+|---|---:|---:|---:|---:|---:|
+| dirty freeze, WAL undurable | yes | no | no | required but absent | old cutoff only |
+| dirty freeze, WAL durable/retained | yes | yes | yes if other proofs hold | yes | yes after redo |
+| durable frozen page | yes | yes | yes | only ordinary remaining dependencies | yes |
+| dirty normalized xmax, WAL undurable | yes | no | no | required but absent | old cutoff only |
+| dirty normalized xmax, WAL durable/retained | yes | yes | yes if other proofs hold | yes | yes after redo |
+| control write pending | according to page/WAL proof | yes | not authoritative | yes | old valid slot selected |
+| control durable, old data page | yes | yes via WAL | already published | yes | redo before READY |
+| recycling crosses required rec_lsn | yes | would become no | forbidden | yes | not constructible |
+| recovered dirty page before second crash | yes | yes only while WAL retained | already published | yes until dependency clears | yes |
+
+Direct fixtures include:
+
+1. volatile-only freeze and volatile-only normalization: control publication remains old;
+2. durable status-independent page: publication needs neither a page force nor a checkpoint;
+3. dirty old disk page plus durable retained WAL: publish `C`, crash, redo before READY;
+4. required WAL durable but control publication fails: old cutoff remains authoritative and
+   authorized maintenance progress remains valid;
+5. control `C` durable plus old disk page plus missing/recycled WAL: impossible because the
+   recycling floor refuses to cross the page's `rec_lsn`;
+6. second crash: recover the dirty page after the first crash, leave it dirty under
+   NO-FORCE, attempt recycling, crash again, and require the same reconstruction source.
+
+WAL flush failure before control publication leaves the old cutoff. WAL authority
+uncertainty follows the existing noncontinuable/no-guessing procedure. A torn or failed
+new control slot is independently decoded on reopen; a complete durable new slot may be
+selected only because every prerequisite was already recoverable. Runtime cutoff
+publication is observed after durable control publication and before any physical status
+page retirement that relies on it.
+
+The checkpoint/retention matrix composes the Checkpoint/Recovery and WAL procedures:
+
+| Case | Required `rec_lsn`/WAL | Cutoff publication | Recycling | Crash oracle |
+|---|---|---|---|---|
+| dirty frozen heap page | freeze dirty-interval `rec_lsn` | allowed after WAL durable | no crossing dependency | redo freeze |
+| dirty normalized heap/catalog page | normalization dirty-interval `rec_lsn` | allowed after WAL durable | no crossing dependency | redo normalization |
+| dirty TXN_STATUS page, `F/T` | `rec_lsn=F`, `page_lsn=T` | cutoff alone changes nothing | retain F until durable or safely retired | reconstruct from F then T |
+| checkpoint before cutoff | captured DPT floor | later cutoff uses it | only installed floor | old/new cutoff both recoverable |
+| checkpoint after cutoff | every still-dirty prerequisite represented | already authoritative | no premature advance | selected pair recoverable |
+| cutoff durable, page dirty | prerequisite `rec_lsn` retained | yes | forbidden past it | old disk page repaired |
+| WAL segment candidate | minimum of all DPT/writer/checkpoint needs | irrelevant by itself | only if below complete floor | no lost source |
+| page durable/dependency cleared | no page need | yes | ordinary recycling allowed | stable page sufficient |
+
+Race freeze, normalization, and status-page retirement independently against checkpoint
+DPT capture. Force both legal linearizations and assert that the installed checkpoint
+either captures the old recovery dependency or the new dirty interval. Then combine durable
+cutoff, dirty page, checkpoint, recycling attempt, and second crash. No fixture introduces
+a cutoff WAL record, forces a checkpoint, or forces the affected data page.
+
+#### Read epochs, `TUPLE_WRITE` handoff, and claim lifetime
+
+Pause read-epoch registration before and after the reader becomes visible to the reclaimer,
+then race RID retirement/final reuse. Registration first blocks grace; reuse first means the
+reader cannot validate/retain the old identity. For retire epoch `R`, independently test
+active epochs `R-1`, `R`, and `R+1`: either of the first two blocks, while `R+1` alone does
+not. A long-lived epoch may cause wait or deferral but never forced reuse. After the last
+blocking exit, the candidate is revalidated before final publication; no notification
+mechanism is assumed.
+
+At `current_epoch=UINT64_MAX-1`, retire once and observe the last legal increment state;
+the next retirement attempt fails/requires maintenance restart before reuse and never wraps
+to zero or aliases an old reader. Page latches and pins are tested separately: a latch
+protects bytes, a pin protects frame binding, and neither replaces an epoch once a RID is
+retained outside that operation.
+
+For a writer, pause request registration while the discovery epoch remains active. Reuse is
+blocked by the epoch until the request becomes a canonical live queued or granted claim;
+only then may the epoch release, and it releases before blocking. Cover immediate grant,
+one queued waiter, three queued waiters, same-owner effective ownership, and resource
+failure before the request becomes live. Failure leaves the epoch held and permits only the
+existing fail/retry path.
+
+The mandatory `TUPLE_WRITE` matrix is:
+
+| State | Epoch active? | Live claim? | Grant possible? | Reuse? | Claim release | Revalidation? |
+|---|---:|---:|---:|---:|---|---:|
+| no request, no retained RID | no | no | no | other barriers decide | n/a | at reuse |
+| registration in progress | yes | not yet | no | no | n/a | yes |
+| immediate grant before epoch exit | yes, then no | yes | granted | no | C5/A3 | yes |
+| queued waiter | no after registration | yes | yes | no | cancellation or grant | yes after grant |
+| multiple waiters | no | yes for each | yes | no until all gone | individually linearized | yes |
+| granted holder | no | yes | granted | no | C5/A3 | yes |
+| C4 before C5 | no | yes | granted | no | C5 | yes |
+| A2 before A3 | no | yes | granted | no | A3 | yes |
+| cancellation/grant race | no | exactly winner's state | exactly winner | no if grant wins | cancellation or C5/A3 | if granted |
+| queued deadlock victim | no | until canonical removal | until removal | no while possible | removal with no late grant | no continuation |
+| granted deadlock victim | no | yes | granted | no | A3 | no ordinary continuation |
+| crash with waiter | process ends | no after reopen | no | persistent barriers decide | process death | fresh discovery only |
+
+Cancellation and grant are forced in both orders. Grant first converts continuously to
+owner claim; cancellation first simultaneously removes grant eligibility and the claim.
+No ended request may receive a late grant. A granted deadlock victim and every MUST_ABORT
+holder remain through A3. Commit remains pinned through C4 until C5.
+
+Race request registration against the reclaimer's zero-claim/reuse publication while the
+writer still holds its epoch. Registration first blocks reuse. If reuse has already won,
+epoch-protected identity revalidation prevents old-identity request admission. Post-wait
+revalidation remains mandatory: mutate `xmax`, visibility, current-owner, or key state while
+the waiter sleeps and require the existing Chapter-11/15 outcome despite stable RID
+identity.
+
+The read-epoch matrix is:
+
+| Case | DEAD allowed? | UNUSED allowed? | Same-RID reuse? | Reclaimer action | Proof |
+|---|---:|---:|---:|---|---|
+| reader registered before retirement | yes after index cleanup | no | no | wait/defer | active `E<=R` |
+| registration races reuse | legal winner only | only reuse-first | only reuse-first | revalidate | shared linearization |
+| old epoch active | yes | no | no | wait/defer | minimum active `<=R` |
+| grace complete | yes | other barriers decide | other barriers decide | continue/revalidate | no active `E<=R` |
+| no old epoch, lock claim remains | yes | no | no | wait/defer | independent claim |
+| long reader | yes | no | no | wait/defer indefinitely | no forced reuse |
+| crash | persistent DEAD remains | only after fresh retirement/grace and other proof | only after every proof | re-enqueue | runtime epochs absent |
+
+#### Index cleanup, predecessor links, DEAD/UNUSED, and complete reuse
+
+For one reclaimable NORMAL RID referenced by at least two indexes, derive every historical
+key, remove exact `(key,RID)` entries through ordinary B+ MTRs, and publish DEAD only after
+all are known absent. Crash after zero, one, or all removals: a recovered NORMAL repeats
+idempotent cleanup; recovered DEAD proves cleanup preceded publication. Any index failure
+leaves the candidate NORMAL or DEAD-but-unreused according to the already-authorized prefix;
+it never permits first-index-only success. Include a UNIQUE index to prove vacuum removes
+the physical stale entry without rerunning SQL uniqueness admission.
+
+Construct removable middle/head-adjacent/consecutive chain versions and surviving direct
+successors. WAL-backed splicing must replace each `S.prev=V` with `S.prev=V.prev`; state
+change or cleanup failure defers reuse. A stale index or `prev_RID` is isolated as the sole
+remaining barrier and must prevent new-identity aliasing.
+
+The complete one-missing-barrier matrix is:
+
+| Fixture | Global dead | Indexes absent | DEAD durable | `prev_RID` absent | Epoch grace | Zero lock claims | Frame/page valid | DEAD allowed? | UNUSED allowed? | Same-RID reuse? |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| not globally dead | no | yes | no | yes | yes | yes | yes | no | no | no |
+| one stale index | yes | no | no | yes | yes | yes | yes | no | no | no |
+| DEAD not durable | yes | yes | no | yes | yes | yes | yes | publication pending | no | no |
+| stale predecessor | yes | yes | yes | no | yes | yes | yes | yes | no | no |
+| old epoch | yes | yes | yes | yes | no | yes | yes | yes | no | no |
+| queued/granted claim | yes | yes | yes | yes | yes | no | yes | yes | no | no |
+| frame/page transition ineligible | yes | yes | yes | yes | yes | yes | no | yes | no | no |
+| every barrier clear | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+
+For the positive row, compact while still DEAD if needed, assert zero tuple coordinates,
+publish exactly one free-list link and `UNUSED`, then allocate a new tuple into that same
+SlotId. The independent reuse oracle proves no old reader, waiter, index entry, predecessor,
+or resident-frame transition can treat the numeric RID as the old tuple. `NORMAL->UNUSED`
+bypass and direct allocation from DEAD are rejected.
+
+Crash fixtures cover: waiter present with DEAD persisted; legal UNUSED before crash; and a
+WAL-valid new same-RID allocation. Reopen has no pre-crash epoch, guard, write-status claim,
+or lock request. DEAD remains DEAD and is freshly retired before reuse; UNUSED retains its
+canonical free-list semantics; new allocation never resurrects an old runtime identity.
+
+Hold an old RR snapshot to prevent global deadness, then separately hold only a long read
+epoch after logical death. The first blocks tuple garbage eligibility; the second permits
+status-independent maintenance but blocks physical reuse. Old committed normal `xmin` and
+surviving normal committed `xmax` independently block status cutoff until freeze,
+normalization/removal, or another authorized status-independent representation becomes
+crash-recoverable. Positive cases then allow retirement after FROZEN creator, normalized
+aborted `xmax`, or fully removed version, subject to all other cutoff bounds.
+
+#### Status-page reclamation, control crashes, and sparse deallocation
+
+Use the independent status mapping to select a page wholly below `C`, the boundary page
+containing `C`, and an interior page followed by later populated pages. Only the wholly
+retired page may proceed through guard exclusion, pin/I/O drain, frame retirement,
+BufferPool/DPT removal, and optional sparse deallocation. Later PageNos and file length
+remain address-stable. `T<C` returns `RETIRED` without page access; a missing page required
+for `T>=C` follows the owning I/O/corruption result.
+
+Run two abstract storage capabilities:
+
+1. keep-size sparse deallocation succeeds for an interior whole-page range; allocated
+   backing may disappear while logical size and offsets remain unchanged;
+2. deallocation is unavailable or fails; bytes remain safe extra storage, durable cutoff
+   stays authoritative, and ordinary retry/resource policy applies.
+
+No test requires a platform syscall or block-allocation granularity. Crash during the
+physical optimization may leave any platform-valid allocation state wholly below the
+already-authoritative cutoff, but the logical file remains correctly sized/addressable.
+
+The mandatory cutoff/control/status-page crash matrix is:
+
+| Persistent boundary | Selected cutoff | Status page required? | Maintenance WAL required? | Page absence legal? | Recovery action | READY? |
+|---|---|---:|---:|---:|---|---:|
+| old cutoff, old dependent page | old | yes | according to old DPT | no | ordinary recovery | yes if valid |
+| maintenance WAL durable, control old | old | yes | retained/replayable | no premature reclaim | replay extra progress | yes |
+| torn new control | older valid slot | yes under old cutoff | retained | no if old cutoff needs it | select old slot | yes if inputs present |
+| new cutoff durable, status page present | new `C` | no below C | as pages require | yes but unnecessary | ignore stale status bytes | yes |
+| new cutoff durable, page sparsely reclaimed | new `C` | no below C | as pages require | yes | `RETIRED` precedence | yes |
+| crash during sparse deallocation | new `C` | no below C | unchanged | yes wholly below C | preserve logical mapping | yes |
+| new `C`, dirty frozen heap page | new `C` | no below C | yes | yes | redo heap before READY | yes |
+| second crash before heap writeback | new `C` | no below C | retained dirty-page source | yes | redo again | yes |
+| failed candidate, old-control fallback | old | yes | old recovery floor | no premature absence | select old slot | yes if inputs remain |
+
+Directly prohibit physical status-page retirement whose legality depends on `C` before the
+new control generation is durable. Publish `C` while retaining the old status page and
+verify stale storage is harmless; then retire it after every guard/frame/DPT condition and
+verify absence is accepted. Pin a status frame and race retirement: the frame remains bound
+until canonical drain and cannot later rewrite sparsely deallocated storage. Hold a
+`StatusHistoryGuard` and prove the same page cannot be invalidated until guard release.
+
+For a dirty TXN_STATUS page with `rec_lsn=F,page_lsn=T`, cutoff publication alone never
+releases `F`. Case A keeps the page semantically required and retains F. Case B makes the
+whole page retired below durable `C`, drains pins/I/O, and removes its BufferPool/DPT
+ownership through §14.14.2 before its own reconstruction dependency may clear. Heap/catalog
+`rec_lsn` dependencies are never cleared by status-page retirement.
+
+#### FSM, lifecycle, scheduling, and failure methodology
+
+After authoritative heap reclamation, inject stale-low and stale-high FSM values. Stale-low
+may miss space; stale-high must be rejected by heap-page geometry recheck. FSM update
+failure leaves legal heap state authoritative and the FSM rebuildable. Page compaction may
+move tuple bytes while preserving SlotIds and cannot substitute for DEAD/UNUSED proof.
+If retained status blocks contribute to a later storage-full condition, the next legitimate
+write receives the existing storage/resource error; the fixture never permits status-page
+compaction, renumbering, or a weakened cutoff proof.
+
+Every permitted manual or background trigger runs the same safety procedures. Tests do not
+assert cadence, threshold, worker count, fairness, or prompt progress. A guard, epoch, lock
+claim, stale reference, or insufficient durability may produce wait, skip, or defer where
+§14.17 leaves policy free; the oracle is only that unsafe cutoff/reuse does not publish.
+
+Lifecycle barriers map to Database Lifecycle Tests: maintenance is admitted only in READY;
+DRAINING admits no new pass and drives active transactions through ordinary C5/A3 while
+maintenance completes/restores its current unit and quiesces; CLOSING, RECOVERING, and
+NONCONTINUABLE admit no new reclamation mutation. After crash, epochs, guards,
+write-status dependencies, and lock requests are absent; only persistent page/control/WAL/
+index/predecessor state governs recovery. No runtime claim is replayed.
+
+The failure matrix is:
+
+| Failure/blocker | Mutation authorized? | Cutoff changes? | RID reusable? | Continuation/result owner |
+|---|---:|---:|---:|---|
+| candidate not globally reclaimable | no | no | no | benign skip/defer, §14.3 |
+| active snapshot | no reclaim action | no past dependency | no | wait/defer, §§14.2–14.3 |
+| active epoch | DEAD may exist | unaffected | no | wait/defer, §14.6 |
+| live `TUPLE_WRITE` claim | DEAD may exist | unaffected | no | wait/defer, §§11.12, 14.12 |
+| status lookup I/O | no dependent rewrite | no | no new permission | owning status I/O result, §39.1 |
+| tuple/page corruption | no | no | no | corruption owner, §§4.13, 39.1 |
+| required `RETIRED` dependency | no | no | no | reclamation invariant/noncontinuable, §§9.13, 14.17.1 |
+| required INVALID/RESERVED | no | no | no | existing invariant result, §§9.11–9.13 |
+| WAL failure before authorization | no publication | no | no new permission | existing pre-authorization result, §12.12 |
+| WAL failure after authorization | authoritative progress | only if later proofs finish | only after all barriers | §12.12/§39.1 outcome |
+| prerequisite WAL flush failure | page progress may exist | no new cutoff | unaffected | maintenance fails/defers |
+| WAL authority uncertainty | uncertain unit | no new cutoff | no | existing noncontinuable path |
+| control publication failure | prerequisites may remain valid | old cutoff | unaffected | old slot authority / I/O result |
+| sparse deallocation failure | cutoff already authoritative | unchanged | unrelated | safe extra storage / retry policy |
+| index cleanup failure | partial MTR prefix may exist | unaffected | no | exact B+ error; retry idempotently |
+| `prev_RID` splice failure | authorized prefix only | unaffected | no | defer/error owner |
+| runtime workspace exhaustion | no unsafe partial publication | no | no | existing resource result; fail/defer |
+| claim-registration exhaustion | no live request | unaffected | epoch still blocks | Chapter-11/§39 result |
+| shutdown cancellation | only completed/restored unit | no unsafe advance | no unsafe reuse | lifecycle owner |
+
+#### High-level reclamation domain/case matrix
+
+| Domain/case | Deterministic fixture/fault | Independent oracle | Architecture | Verification owner | Status |
+|---|---|---|---|---|---|
+| write-status registration | pause before admission | coordinator event order | §§9.4, 14.17.1 | registration procedure | COMPLETE |
+| idle RC writer | no snapshot, candidate past T | separate horizon/dependency sets | §§14.2, 14.17.1 | write-status matrix | COMPLETE |
+| explicit read-only | retained snapshot/no dependency | mode/write-admission oracle | §§9.15, 14.2 | write-status matrix | COMPLETE |
+| C5/A3 release | pause each terminal stage | lifecycle stage oracle | §§9.14, 14.14 | lifetime procedure | COMPLETE |
+| persistent dependency after release | stored normal xmin/xmax | status-dependency table | §14.14 | status matrix | COMPLETE |
+| creator freeze | eligible committed creator | visibility oracle | §14.13.2 | freeze procedure | COMPLETE |
+| aborted xmax | ABORTED deleter | visibility oracle | §14.13.1 | normalization procedure | COMPLETE |
+| required RETIRED | valid dependent field | status precedence oracle | §§9.13, 14.14.3 | negative lookup | COMPLETE |
+| cutoff alignment | inside-page candidate | widened page arithmetic | §14.14.1 | cutoff procedure | COMPLETE |
+| candidate clamp | active dependency/guard | independent bound set | §14.17.1 | coordinator races | COMPLETE |
+| guard race | pause guarded lookup | event order | §14.17.1 | guard procedure | COMPLETE |
+| volatile freeze | dirty memory, WAL omitted | persistent-prefix oracle | §14.14.2 | durability matrix | COMPLETE |
+| dirty freeze, durable WAL | old disk page | WAL/DPT oracle | §14.14.2 | crash fixture | COMPLETE |
+| second crash | recovered page still dirty | retention-floor oracle | §§13.10, 14.14.2 | second-crash fixture | COMPLETE |
+| epoch registration | registration/reuse barriers | epoch-set oracle | §14.6 | epoch procedure | COMPLETE |
+| grace boundary | E=R-1/R/R+1 | mathematical predicate | §14.6.3 | epoch matrix | COMPLETE |
+| queued waiter | live request, epoch released | claim-state oracle | §§11.12, 14.12 | lock matrix | COMPLETE |
+| granted owner | pause C4/A2 | lifecycle/claim oracle | §§11.11, 14.12 | lock matrix | COMPLETE |
+| waiter cancellation | cancel/grant both orders | no-late-grant oracle | §11.12 | cancellation procedure | COMPLETE |
+| DEAD with waiter | all other barriers clear | reuse conjunction | §§14.5, 14.12 | reuse matrix | COMPLETE |
+| stale index | only index barrier missing | exact B+ entry set | §§8.23, 14.9 | reuse matrix | COMPLETE |
+| stale predecessor | only link barrier missing | decoded link set | §14.10 | reuse matrix | COMPLETE |
+| complete reuse | every barrier true | explicit conjunction | §14.12 | positive reuse | COMPLETE |
+| sparse status reclaim | interior page below C | mapping/file-length oracle | §14.14 | sparse procedure | COMPLETE |
+| torn control | invalid new slot | independent slot selection | §§13.2, 14.14.2 | crash matrix | COMPLETE |
+| reclaimed lookup below C | absent page | cutoff precedence | §14.14.3 | lookup fixture | COMPLETE |
+| missing required page | absent page at/above C | mapping/status oracle | §§9.13, 14.14.3 | negative fixture | COMPLETE |
+
+All core negative cases isolate one defect, use barriers or exact persistent prefixes, and
+remain valid under any conforming scheduling, lock-table, epoch-registry, BufferPool, WAL,
+checkpoint, or sparse-storage implementation.
+
+#### Chapter 14 atomic architecture-obligation coverage map
+
+The inventory below is derived from the final live §§14.1–14.18 contract. A row is
+`COMPLETE` only when the named direct procedure or precise existing owner supplies a
+deterministic fixture and independent oracle.
+
+| # | Domain | Atomic obligation | Architecture owner | Verification owner / deterministic procedure | Status |
+|---:|---|---|---|---|---|
+| 1 | A STATUS-DEPENDENCY MODEL | Normal committed xmin requires creator outcome | §§14.13–14.14 | Status-independence matrix | COMPLETE |
+| 2 | A | Effective normal xmax requires deleter outcome | §§14.13–14.14 | Status-independence matrix | COMPLETE |
+| 3 | A | Opaque numeric occurrences do not automatically pin status | §14.14 | Status table plus Statistics verification | COMPLETE |
+| 4 | A | Runtime future-publication and persisted dependencies are distinct | §14.14 | Write-status lifetime contrast | COMPLETE |
+| 5 | B WRITE-STATUS REGISTRATION | Every write-capable normal transaction registers own dependency | §§9.4, 14.17.1 | Registration barrier fixture | COMPLETE |
+| 6 | B | Registration precedes persistent-write admission | §§9.4, 14.17.1 | Pre-admission event assertion | COMPLETE |
+| 7 | B | Registration is not lazy first-write work | §§9.4, 14.17.1 | No-first-write-path oracle | COMPLETE |
+| 8 | B | Explicit read-only transaction may omit dependency | §§9.15, 14.17.1 | Read-only contrast | COMPLETE |
+| 9 | B | Assignment-to-registration admits no cutoff gap | §§9.8, 14.17.1 | Two-order barrier fixture | COMPLETE |
+| 10 | C WRITE-STATUS LIFETIME | ACTIVE and failed-ACTIVE retain dependency | §§9.4, 14.17.1 | Statement-failure pause | COMPLETE |
+| 11 | C | MUST_ABORT and ABORTING retain dependency | §§9.14, 14.17.1 | Abort-stage fixture | COMPLETE |
+| 12 | C | COMMITTING retains through C4 | §§9.14, 14.17.1 | Commit-stage fixture | COMPLETE |
+| 13 | C | Commit release occurs only during C5 | §§9.14, 14.17.1 | C4/C5 cutoff probes | COMPLETE |
+| 14 | C | Abort release occurs only during A3 | §§9.14, 14.17.1 | A2/A3 cutoff probes | COMPLETE |
+| 15 | D SQL SNAPSHOT HORIZON | Horizon is minimum registered snapshot xmin | §14.2 | Snapshot registry oracle | COMPLETE |
+| 16 | D | Idle RC writer does not pin logical horizon | §14.2 | RC no-snapshot contrast | COMPLETE |
+| 17 | D | Retained RR snapshot pins logical horizon | §14.2 | Long-RR fixture | COMPLETE |
+| 18 | D | Snapshot and write-status bounds remain independent | §§14.2, 14.17.1 | Three-case contrast matrix | COMPLETE |
+| 19 | E STATUSHISTORYGUARD | Guard registers before dependent lookup | §14.17.1 | Guard event order | COMPLETE |
+| 20 | E | Guard clamps cutoff above G | §14.17.1 | Guard-first race | COMPLETE |
+| 21 | E | Cutoff-first guard cannot resurrect retired history | §14.17.1 | Cutoff-first race | COMPLETE |
+| 22 | E | Multiple guards use minimum bound | §14.17.1 | Multi-guard boundary fixture | COMPLETE |
+| 23 | F STATUS LOOKUP / RETIRED | Below-cutoff lookup returns RETIRED without page read | §§9.13, 14.14.3 | Access-instrumented lookup | COMPLETE |
+| 24 | F | RETIRED dependent xmin is invariant failure | §§10.2, 14.14.3 | Creator negative fixture | COMPLETE |
+| 25 | F | RETIRED dependent xmax is invariant failure | §§10.3, 14.14.3 | Deleter negative fixture | COMPLETE |
+| 26 | F | INVALID/RESERVED required outcome is rejected | §§9.13, 14.17.1 | Status negative matrix | COMPLETE |
+| 27 | F | Status I/O/corruption/format errors propagate | §§9.13, 39.1 | Lookup failure injection | COMPLETE |
+| 28 | G CREATOR FREEZING | Only committed eligible creator freezes | §14.13.2 | Positive freeze fixture | COMPLETE |
+| 29 | G | Freeze writes xmin FROZEN and cmin zero | §14.13.2 | Independent tuple-byte oracle | COMPLETE |
+| 30 | G | Freeze preserves visibility for legal future snapshots | §§10.2, 14.13.2 | Independent visibility comparison | COMPLETE |
+| 31 | G | Freeze horizon boundary is exact | §§14.2, 14.13.2 | B-1/B/B+1 snapshot fixture | COMPLETE |
+| 32 | G | Invalid creator statuses never freeze | §§10.2, 14.13.2 | Creator negative matrix | COMPLETE |
+| 33 | G | Freeze leaves normal xmax dependency independent | §§14.13–14.14 | FROZEN+xmax fixture | COMPLETE |
+| 34 | H XMAX NORMALIZATION | Only proven ABORTED xmax normalizes | §14.13.1 | Positive normalization fixture | COMPLETE |
+| 35 | H | Normalization writes INVALID xmax and cmax zero | §14.13.1 | Independent tuple-byte oracle | COMPLETE |
+| 36 | H | Normalization preserves visibility | §§10.3, 14.13.1 | Independent visibility comparison | COMPLETE |
+| 37 | H | Normalization removes only deleter dependency | §§14.13–14.14 | Dependency table | COMPLETE |
+| 38 | H | Committed/in-progress/unsafe SELF xmax does not normalize | §§10.3, 14.13.1 | Xmax negative matrix | COMPLETE |
+| 39 | H | RETIRED/INVALID/RESERVED/failure does not normalize | §§10.3, 14.17.1 | Xmax negative matrix | COMPLETE |
+| 40 | I DEADNESS / RECLAIMABILITY | Aborted creator is garbage candidate | §14.3.1 | Status/garbage fixture | COMPLETE |
+| 41 | I | Committed delete is garbage only below snapshot horizon | §14.3.2 | Long-RR and boundary fixtures | COMPLETE |
+| 42 | I | IN_PROGRESS creator/deleter is skipped without latch wait | §14.4 | Barrier/latch event assertion | COMPLETE |
+| 43 | I | Garbage eligibility is global, not vacuum snapshot visibility | §§14.2–14.3 | Divergent-snapshot fixture | COMPLETE |
+| 44 | I | DEAD is semantically cleaned but not reusable | §§14.5, 14.8 | State-transition fixture | COMPLETE |
+| 45 | J STATUS-INDEPENDENCE | FROZEN creator removes creator dependency | §§14.13–14.14 | Positive retirement fixture | COMPLETE |
+| 46 | J | Normalized aborted xmax removes deleter dependency | §§14.13–14.14 | Positive retirement fixture | COMPLETE |
+| 47 | J | Physical removal removes tuple status dependencies | §14.14 | Removal/dependency fixture | COMPLETE |
+| 48 | J | Catalog MVCC metadata follows same proof | §14.14 | Catalog tuple specialization | COMPLETE |
+| 49 | J | Runtime dependency release alone is insufficient | §14.14 | C5/A3 persisted-reference fixture | COMPLETE |
+| 50 | J | Status-independent in memory is not crash proof | §14.14 | Volatile-page fixture | COMPLETE |
+| 51 | K STATUS CUTOFF DOMAIN | Cutoff is exclusive | §14.14.1 | T=C-1/C oracle | COMPLETE |
+| 52 | K | Cutoff is whole-page aligned | §14.14.1 | Independent 32640 arithmetic | COMPLETE |
+| 53 | K | Initial cutoff is first normal TxnId | §14.14.1 | Initial control fixture | COMPLETE |
+| 54 | K | Maximum aligned cutoff does not wrap | §§4.3, 14.14.1 | Synthetic exhaustion fixture | COMPLETE |
+| 55 | K | Cutoff is monotonic | §§14.14, 14.17.1 | C1/C2/control-generation fixture | COMPLETE |
+| 56 | L CUTOFF COORDINATION | Candidate accounts for every persistent dependency | §§14.14, 14.17.1 | Independent dependency-set oracle | COMPLETE |
+| 57 | L | Candidate accounts for write-status dependencies | §14.17.1 | Transaction-first race | COMPLETE |
+| 58 | L | Candidate accounts for SQL snapshots | §§14.2, 14.17.1 | Snapshot clamp fixture | COMPLETE |
+| 59 | L | Candidate accounts for guards | §14.17.1 | Guard-first race | COMPLETE |
+| 60 | L | Exactly one cutoff publisher wins | §14.17.1 | Two-reclaimer serialization fixture | COMPLETE |
+| 61 | L | Candidate is revalidated before publication | §§14.11, 14.17.1 | State-change barrier fixture | COMPLETE |
+| 62 | M CUTOFF PREREQUISITE DURABILITY | Volatile freeze with undurable WAL cannot authorize cutoff | §14.14.2 | Durability matrix | COMPLETE |
+| 63 | M | Volatile normalization with undurable WAL cannot authorize cutoff | §14.14.2 | Durability matrix | COMPLETE |
+| 64 | M | Durable status-independent page is sufficient | §14.14 | Durable-page fixture | COMPLETE |
+| 65 | M | Durable retained reconstructive WAL is sufficient | §14.14 | Dirty-page crash fixture | COMPLETE |
+| 66 | M | Checkpoint is not inherently required | §14.14 | No-checkpoint positive fixture | COMPLETE |
+| 67 | M | Data-page force is not inherently required | §14.14 | Dirty-page positive fixture | COMPLETE |
+| 68 | M | Required WAL target is max needed authorizing LSN | §14.14 | L1/L2/L3 independent oracle | COMPLETE |
+| 69 | N CUTOFF CONTROL PUBLICATION | Required WAL durability precedes control sync | §14.14.2 | Held-WAL/control-sync race | COMPLETE |
+| 70 | N | Control fdatasync does not durabilize WAL | §14.14.2 | Separate persistence fault domains | COMPLETE |
+| 71 | N | Durable control precedes runtime cutoff publication | §14.14.2 | Event-order assertion | COMPLETE |
+| 72 | N | Failed control publication leaves old cutoff | §14.14.2 | Alternating-slot fault fixture | COMPLETE |
+| 73 | N | Torn control selects a safe valid slot | §§13.2, 14.14.2 | Independent control oracle | COMPLETE |
+| 74 | N | Physical status retirement cannot precede durable C | §14.14.2 | Pre-cutoff reclaim rejection | COMPLETE |
+| 75 | O WAL RETENTION / SECOND CRASH | Dirty prerequisite retains DPT rec_lsn | §§13.7–13.10, 14.14 | DPT snapshot assertion | COMPLETE |
+| 76 | O | Cutoff publication does not clear rec_lsn | §14.14.2 | Before/after DPT comparison | COMPLETE |
+| 77 | O | Required WAL cannot recycle while page depends on it | §§13.10, 14.14.2 | Recycling refusal fixture | COMPLETE |
+| 78 | O | Recovery before READY reconstructs status independence | §§13.13, 14.14 | Dirty-old-page crash | COMPLETE |
+| 79 | O | Recovered dirty page retains WAL for second crash | §14.14.2 | Two-crash fixture | COMPLETE |
+| 80 | O | Durable page may clear ordinary WAL dependency | §§7.10, 13.10, 14.14 | Stable-page fixture | COMPLETE |
+| 81 | O | TXN_STATUS F remains retention base until cleared/safely retired | §§12.10.5, 13.10, 14.14.2 | F/T matrix | COMPLETE |
+| 82 | P TXN_STATUS PAGE RECLAMATION | Only page wholly below cutoff is eligible | §§14.14.1–14.14.2 | Whole/boundary page fixture | COMPLETE |
+| 83 | P | Guard exclusion precedes page retirement | §14.17.1 | Guard/page race | COMPLETE |
+| 84 | P | Pins and I/O drain before frame retirement | §14.14.2 | BufferPool retirement fixture | COMPLETE |
+| 85 | P | Retired frame cannot write obsolete contents | §14.14.2 | Delayed-writeback assertion | COMPLETE |
+| 86 | P | Reclaimed page below C is semantically unnecessary | §14.14.3 | Missing-below-C lookup | COMPLETE |
+| 87 | P | Missing required page at/above C is error | §§9.13, 14.14.3 | Missing-required-page fixture | COMPLETE |
+| 88 | Q SPARSE DEALLOCATION | Sparse reclaim preserves file length | §§14.14.2–14.14.3 | File-length oracle | COMPLETE |
+| 89 | Q | Sparse reclaim preserves absolute PageNos | §§9.12, 14.14 | Interior-page fixture | COMPLETE |
+| 90 | Q | Later pages are not shifted/renumbered | §14.14.2 | Offset/mapping comparison | COMPLETE |
+| 91 | Q | Unsupported sparse deallocation permits safe extra storage | §14.14.2 | Capability-absent fixture | COMPLETE |
+| 92 | Q | Failed sparse deallocation does not roll back cutoff | §14.14.2 | Post-cutoff failure fixture | COMPLETE |
+| 93 | R READ-EPOCH REGISTRATION | Reader registers before retaining index RID | §14.6.1 | Cursor event-order fixture | COMPLETE |
+| 94 | R | Registration/reuse race has two legal orders | §§14.6.1, 14.12 | Two-order barrier fixture | COMPLETE |
+| 95 | R | New reader after retirement cannot obtain removed entry | §14.6.2 | Post-retirement traversal fixture | COMPLETE |
+| 96 | R | Pure reader needs no TUPLE_WRITE claim | §§14.6.1, 14.7 | Reader-only fixture | COMPLETE |
+| 97 | S READ-EPOCH GRACE | Retirement records pre-increment epoch | §14.6.2 | Event/value assertion | COMPLETE |
+| 98 | S | Active E less than retire R blocks | §14.6.3 | Mathematical matrix | COMPLETE |
+| 99 | S | Active E equal R blocks | §14.6.3 | Mathematical matrix | COMPLETE |
+| 100 | S | Only E greater than R permits epoch component | §14.6.3 | Mathematical matrix | COMPLETE |
+| 101 | S | Long epoch may delay but never permit unsafe reuse | §§14.6.3, 14.17 | Long-reader fixture | COMPLETE |
+| 102 | T TUPLE_WRITE CLAIMS | Every queued grant-eligible request is a RID claim | §§11.12, 14.5 | Queued-waiter fixture | COMPLETE |
+| 103 | T | Every granted owner is a RID claim | §§11.11–11.12, 14.5 | Granted-holder fixture | COMPLETE |
+| 104 | T | Queue position does not change claim status | §11.12 | Multi-waiter fixture | COMPLETE |
+| 105 | T | Empty lock-table container is not a claim | §§11.12, 14.12 | Empty-container semantic fixture | COMPLETE |
+| 106 | T | Claim protects identity, not visibility/status | §§14.5, 14.7 | Changed-semantics revalidation fixture | COMPLETE |
+| 107 | U EPOCH-TO-LOCK HANDOFF | Discovery epoch remains through request registration | §§11.3, 14.6.1 | Paused-registration fixture | COMPLETE |
+| 108 | U | Immediate grant exists before epoch release | §§11.3, 14.6.1 | Immediate-grant fixture | COMPLETE |
+| 109 | U | Queued claim exists before epoch release | §§11.3, 14.6.1 | Queued-handoff fixture | COMPLETE |
+| 110 | U | Blocking wait retains no epoch/page latch | §§11.3, 14.7 | Wait-entry ownership assertion | COMPLETE |
+| 111 | V CLAIM CANCELLATION / RELEASE | Cancellation removes claim with grant eligibility | §§11.12, 14.12 | Cancellation-first fixture | COMPLETE |
+| 112 | V | Grant-first race preserves owner claim | §11.12 | Grant-first fixture | COMPLETE |
+| 113 | V | Queued deadlock victim claims until canonical removal | §§11.13.4, 14.12 | Victim-removal fixture | COMPLETE |
+| 114 | V | Granted deadlock victim retains claim through A3 | §§11.11, 11.13.4 | Paused-abort fixture | COMPLETE |
+| 115 | V | Commit holder retains through C4 and releases C5 | §§11.11, 14.12 | C4/C5 reuse probes | COMPLETE |
+| 116 | V | Abort holder retains through A2 and releases A3 | §§11.11, 14.12 | A2/A3 reuse probes | COMPLETE |
+| 117 | W INDEX RID CLEANUP | Every required exact index entry is absent before DEAD | §14.9 | Multi-index cleanup fixture | COMPLETE |
+| 118 | W | Exact erase is idempotent across crash/retry | §14.9 | Prefix crash matrix | COMPLETE |
+| 119 | W | One remaining index blocks DEAD/reuse | §§14.5, 14.9 | One-defect fixture | COMPLETE |
+| 120 | W | Unique residual cannot alias new tuple | §§8.23, 14.9 | Unique-index alias fixture | COMPLETE |
+| 121 | W | B+ cleanup occurs without heap latch | §14.9 | Latch event assertion | COMPLETE |
+| 122 | X PREV_RID CLEANUP | Surviving successor cannot point to reusable RID | §14.10 | Decoded-link oracle | COMPLETE |
+| 123 | X | Splice rewrites direct successor to predecessor | §14.10 | WAL/page-byte fixture | COMPLETE |
+| 124 | X | Unproven or failed splice defers reuse | §§14.10–14.12 | Failure/state-change fixture | COMPLETE |
+| 125 | X | Consecutive removable versions splice safely | §14.10 | Multi-version chain fixture | COMPLETE |
+| 126 | Y DEAD-TO-UNUSED / REUSE | NORMAL cannot bypass DEAD to UNUSED | §§5.4, 14.5 | Invalid-transition fixture | COMPLETE |
+| 127 | Y | DEAD persistence precedes retirement/reuse | §§14.5, 14.8 | Crash-prefix fixture | COMPLETE |
+| 128 | Y | Payload coordinates are zero before UNUSED | §§5.4.3, 14.12 | Independent page-byte oracle | COMPLETE |
+| 129 | Y | UNUSED publishes exactly one free-list link | §§5.3.2, 14.12 | Free-list graph oracle | COMPLETE |
+| 130 | Y | Epoch grace is independently required | §§14.6.3, 14.12 | One-missing-barrier matrix | COMPLETE |
+| 131 | Y | Zero lock claims is independently required | §14.12 | One-missing-barrier matrix | COMPLETE |
+| 132 | Y | Index and predecessor absence remain required | §§14.9–14.12 | One-missing-barrier matrix | COMPLETE |
+| 133 | Y | Positive same-slot allocation requires all barriers | §14.12 | Complete conjunction fixture | COMPLETE |
+| 134 | Y | Whole-page recycling cannot bypass per-RID proof | §§14.5, 14.18 | Whole-page fixture | COMPLETE |
+| 135 | Z CRASH / RESTART | Pre-crash epochs are not replayed | §14.6.4 | Recovery runtime-state snapshot | COMPLETE |
+| 136 | Z | Pre-crash guards/write dependencies/locks are not replayed | §§14.6.4, 14.17.1 | Recovery reset fixture | COMPLETE |
+| 137 | Z | Persistent DEAD remains DEAD after reopen | §14.8 | DEAD crash fixture | COMPLETE |
+| 138 | Z | Recovered DEAD receives fresh retirement before reuse | §§14.6.4, 14.8 | Re-enqueue event assertion | COMPLETE |
+| 139 | Z | Legal UNUSED remains canonical after reopen | §§5.4, 14.12 | UNUSED crash fixture | COMPLETE |
+| 140 | Z | Post-reuse recovery never resurrects old identity | §§14.6.4, 14.12 | New-allocation crash fixture | COMPLETE |
+| 141 | AA BUFFERPOOL / FRAME | Reclaimer does not invalidate pinned status frame | §§7.9, 14.14.2 | Pin/drain fixture | COMPLETE |
+| 142 | AA | Retired frame is non-writeback before sparse reclaim | §14.14.2 | Delayed-writeback race | COMPLETE |
+| 143 | AA | Heap final transition revalidates under page latch | §§14.11–14.12 | State-change barrier fixture | COMPLETE |
+| 144 | AA | Pin/latch never substitute for RID epoch | §§7.7–7.9, 14.7 | Protection matrix fixtures | COMPLETE |
+| 145 | AB FSM / FREE SPACE | Heap state remains free-space authority | §§6.10–6.12, 14.16 | Stale-high/low fixtures | COMPLETE |
+| 146 | AB | FSM update may be batched/stale | §14.16 | Delayed-update fixture | COMPLETE |
+| 147 | AB | FSM update failure does not roll back heap reclaim | §§6.10, 14.16 | Failure fixture | COMPLETE |
+| 148 | AB | Compaction preserves SlotIds and is not reuse | §§5.5, 14.12 | Compaction/RID fixture | COMPLETE |
+| 149 | AC SHUTDOWN / LIFETIME | Maintenance is admitted only in READY | §14.17.1 | Lifecycle admission matrix | COMPLETE |
+| 150 | AC | DRAINING rejects new work and quiesces active units | §14.17.1 | Drain event sequence | COMPLETE |
+| 151 | AC | Active transactions retain dependencies through C5/A3 during drain | §14.17.1 | Drain/terminal fixture | COMPLETE |
+| 152 | AC | NONCONTINUABLE admits no new maintenance mutation | §14.17.1 | Lifecycle failure fixture | COMPLETE |
+| 153 | AC | Scheduling policy never weakens safety predicates | §§14.16–14.17 | Trigger-equivalence fixture | COMPLETE |
+| 154 | AD FAILURE / EXHAUSTION | Vacuum workspace exhaustion publishes no unsafe partial state | §§14.11, 39.1 | Resource fault fixture | COMPLETE |
+| 155 | AD | Claim-registration exhaustion retains epoch | §§11.3, 14.6 | Handoff resource fault | COMPLETE |
+| 156 | AD | Status-history pressure cannot force cutoff | §§14.14, 14.17 | Pressure/defer fixture | COMPLETE |
+| 157 | AD | Sparse-storage pressure cannot authorize renumbering | §14.14.2 | Full-storage fixture | COMPLETE |
+| 158 | AD | Corrupt tuple/page authorizes no maintenance mutation | §§14.11, 39.1 | Single-defect corruption fixture | COMPLETE |
+| 159 | AD | Pre-authorization failure leaves old canonical state | §§12.12, 14.13 | WAL fault fixture | COMPLETE |
+| 160 | AD | Post-authorization failure preserves authoritative progress | §§12.12, 14.17.1 | WAL fault fixture | COMPLETE |
+| 161 | AE OTHER / SEPARATION | Status retirement and RID reuse are independent axes | §§14.7, 14.14 | Two-axis matrix | COMPLETE |
+| 162 | AE | No new old TxnId can be introduced below cutoff | §§9.4, 14.14 | Post-cutoff write-admission fixture | COMPLETE |
+| 163 | AE | Maintenance scheduling correctness is trigger-independent | §§14.16–14.17 | Trigger-equivalence fixture | COMPLETE |
+| 164 | AE | Verification uses semantic events, not implementation containers | §§14.6, 14.17.1 | Harness implementation-freedom assertions | COMPLETE |
+
+Coverage totals for this 164-obligation inventory are:
+
+```text
+COMPLETE:      164
+PARTIAL:         0
+MISSING:         0
+CONTRADICTORY:   0
+```
 
 ---
 
