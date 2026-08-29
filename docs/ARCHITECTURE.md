@@ -11082,6 +11082,13 @@ cmin = 0
 
 Future visibility then treats the creator as committed without requiring the original transaction-status entry.
 
+These normalization/freezing rewrites are ordinary WAL-backed page mutations. When one is
+used to justify advancing the transaction-status cutoff, changing only a volatile dirty
+frame is insufficient: the resulting status-independent state must satisfy the
+crash-recoverability proof in §14.14.2. The proof is independent of whether the canonical
+page mutation used `PAGE_DELTA`, `PAGE_IMAGE`, or another already-defined Chapter-12 page
+record.
+
 ## 14.14 Transaction-status retention and physical reclamation
 
 After sufficiently complete vacuum/freezing proves a cutoff `X` such that no persistent correctness object still requires transaction-outcome lookup for a normal TxnId below `X`, whole transaction-status pages below that cutoff may be retired.
@@ -11101,6 +11108,57 @@ The cutoff may pass a normal TxnId only when both classes are absent. C5/A3 rele
 write-status dependency removes only the first class; creator freezing, aborted-`xmax`
 normalization, physical version removal, or another already-authorized status-independent
 rewrite must eliminate the second class.
+
+A persistent dependency is **crash-recoverably status-independent for cutoff `C`** only
+when, after a crash at or after durable publication of `C`, recovery can reconstruct before
+READY a state in which no correctness metadata requires the terminal outcome of any normal
+TxnId `T < C`. For every page mutation used in that proof, one of these conditions MUST
+hold:
+
+```text
+durable-page proof:
+    the resulting status-independent page state is already durably stored under
+    the ordinary stable-image page-writeback rules in §7.10 and §12.17
+
+durable-WAL reconstruction proof:
+    the WAL sufficient to reconstruct the status-independent state is durable
+    and remains retained until the page no longer depends on it
+```
+
+Either proof is sufficient; both are not required. A volatile frozen/normalized/removed
+state in a dirty frame is not a proof. If its data-file image still contains a below-cutoff
+`xmin` or effective `xmax`, the authorizing WAL must be durable and the page's DPT/
+`rec_lsn` plus installed-checkpoint retention state must continue to preserve a complete
+reconstruction path under §12.16 and §§13.7–13.10. The same rule applies to heap, catalog,
+system, or other persistent pages and to physical version removal when removal is the
+status-independence proof. It does not change the eligibility rules for freezing,
+aborted-`xmax` normalization, DEAD classification, or physical reclamation.
+
+A DEAD/removal transition is not automatically a durability proof: the page state that
+makes the old metadata irrelevant must itself be durable or WAL-reconstructable. Every
+proof uses canonically validated page/tuple ownership, framing, checksum, and transaction
+status; a validation or status-lookup failure prevents advancement and retains its existing
+error classification.
+
+For all prerequisite mutations relying on WAL reconstruction, define:
+
+```text
+required_wal_target =
+    maximum authorizing record-start LSN among those mutations
+```
+
+If that set is nonempty, the existing §12.13 complete-record-prefix meaning requires
+`durable_lsn >= required_wal_target` before cutoff control publication. No record-end LSN or
+filesystem byte position is introduced. WAL durability establishes survival at the next
+crash boundary; DPT/checkpoint retention separately prevents later recycling while an old
+data-file image still requires that WAL. Durable cutoff publication never clears a dirty
+page's `rec_lsn` or releases its reconstruction WAL.
+
+This proof preserves NO-FORCE. A durably stored status-independent page may satisfy the
+proof without retaining WAL that the ordinary checkpoint/recovery rules have already made
+unnecessary. A dirty page may satisfy it through durable retained WAL without being forced.
+An installed checkpoint may participate in an ordinary durable-page or WAL-retention proof,
+but no checkpoint is inherently required for cutoff advancement.
 
 Status retirement is monotonic. A runtime terminal cache, a recreated status page, or a
 newly attempted write cannot make a below-cutoff TxnId usable again; the coordinator must
@@ -11163,8 +11221,16 @@ Initial value is `FIRST_NORMAL_TXN_ID`.
 To advance the cutoff to page-aligned value `C`:
 
 ```text
-1. prove all pages below C are semantically retireable
-2. durably update database.control.txn_status_reclaim_before = C
+1. under status-history coordination establish and revalidate the complete proof:
+       a. every runtime future-publication blocker and StatusHistoryGuard permits C
+       b. every existing persistent dependency below C has been eliminated by an
+          eligible freeze, normalization, removal, or other canonical rewrite
+       c. classify every prerequisite page state as already durable or WAL-dependent
+       d. for the WAL-dependent set, establish
+              durable_lsn >= required_wal_target
+       e. prove DPT/rec_lsn/checkpoint retention keeps every required reconstruction
+          record until the corresponding page no longer depends on it
+2. using §13.2.4, durably update database.control.txn_status_reclaim_before = C
 3. publish the same cutoff in the runtime TransactionStatusStore so no new lookup pins a retired page
 4. for each affected TXN_STATUS page:
        wait for existing pins/I/O to drain without holding unrelated page latches
@@ -11181,9 +11247,46 @@ For status PageNo `P`, the physical punch range is exactly:
 
 The order is deliberate:
 
+- `fdatasync(database.control)` does not make unrelated WAL files durable, so step 1's WAL
+  durability observation necessarily precedes step 2,
 - crash after step 2 but before frame invalidation/punching leaks physical space only,
 - no retired dirty frame can later rewrite a punched page,
 - the architecture never permits punching pages that the durable cutoff still says may be needed.
+
+Cutoff publication does not itself release ordinary dirty-page recovery dependencies. In
+particular, §12.10.5's preparatory TXN_STATUS image `F = rec_lsn` and every later required
+terminal record remain retained until the dirty status-page dependency clears under
+§13.10, or step 4 safely removes that wholly retired page from BufferPool/DPT ownership.
+The cutoff cannot be used to recycle reconstruction WAL for still-dirty heap, catalog, or
+system pages. This remains true after recovery: if redo reconstructs such a page and it
+remains dirty, its recovered DPT/checkpoint state retains the required WAL until ordinary
+stable writeback clears the dependency. The guarantee therefore covers a second crash, not
+only the crash immediately after control publication.
+
+The canonical crash outcomes are:
+
+| Boundary | Authoritative result |
+|---|---|
+| prerequisite WAL undurable, dirty page, control old | `C` cannot publish; the old cutoff and required old status history remain authoritative |
+| prerequisite WAL durable/retained, dirty page, control old | `C` may publish after all other proofs; a crash before publication selects the old cutoff and may replay harmless extra progress |
+| status-independent page durably stored, old WAL no longer required | `C` may publish after all other proofs without forcing a checkpoint |
+| prerequisite proof complete, control publication is known not to become authoritative | the older valid control slot remains authoritative; completed freeze/normalization progress remains valid |
+| control write/sync outcome uncertain or new slot torn | runtime does not guess; reopen's §13.2.3 selection chooses the old slot or a complete valid new slot, both of which are safe |
+| control `C` durable, old page image on disk, reconstruction WAL retained | recovery replays the retained WAL before READY and needs no status below `C` |
+| control `C` durable, physical status-page reclamation fails | `C` remains authoritative and the extra physical status storage is harmless |
+
+The state `control C durable + status-dependent old page image + missing required WAL` is
+forbidden. Likewise, no physical status-page retirement that depends on `C` may precede
+step 2, because a torn new slot can select the old cutoff. Failure or uncertainty while
+establishing required WAL durability prevents step 2; ordinary §12.12 failure handling
+retains already-authorized page progress, and uncertain storage authority follows its
+noncontinuable/no-guessing path. Failure after durable `C` to punch a status page does not
+roll the cutoff backward.
+
+Checkpoint publication may occur before or after cutoff publication. In either order, the
+selected checkpoint/control generations and the §13.10 retention floor MUST preserve every
+reconstruction source needed by the authoritative cutoff. Neither ordering requires a
+checkpoint-per-cutoff serialization or changes checkpoint format.
 
 On Linux the baseline physical optimization may use:
 
@@ -11525,16 +11628,26 @@ special-case the former pass's own guard.
 
 Exactly one reclaimer computes and publishes a cutoff. Under the same
 coordinator serialization, before advancing to page-aligned `C` it must account
-for the existing persistent freeze proof, registered SQL snapshots, every active
-write-status dependency, other explicitly registered status-correctness dependencies,
-every active StatusHistoryGuard, and any retained recovery/checkpoint correctness
-dependency.
+for the crash-recoverable persistent status-independence proof, registered SQL snapshots,
+every active write-status dependency, other explicitly registered status-correctness
+dependencies, every active StatusHistoryGuard, and any retained recovery/checkpoint
+correctness dependency.
 A write-capable transaction's registered dependency MUST prevent `C` from retiring its own
 TxnId; the reclaimer chooses the greatest legal page-aligned cutoff satisfying that and all
 other bounds. Transaction existence without this dependency does not itself constrain
 status retirement. Only an explicitly read-only transaction, which is incapable of
 creating a persistent status dependency, may omit the dependency. A StatsVersion
 occurrence is not a dependency.
+
+The coordinator's semantic phases are candidate calculation, dependency/guard exclusion,
+status-independence mutation and revalidation, §14.14.2 recovery-safety proof, durable
+control publication, matching runtime publication, and physical reclamation. Before the
+control phase, the reclaimer distinguishes already-durable page states from WAL-dependent
+states, establishes durability through the maximum required authorizing record-start LSN,
+and confirms that DPT/checkpoint retention cannot recycle the reconstruction source while
+any page still depends on it. Failure to establish WAL durability or retention abandons
+the candidate before control publication; it does not weaken the old cutoff or undo
+already-authorized maintenance progress.
 
 The coordinator excludes new guard registration and write-capable transaction registration
 from the final proof through §14.14.2 steps 2–3 (durable control publication and matching
@@ -11748,6 +11861,8 @@ V1 explicitly forbids:
 29. DROP may become semantically committed before maintenance owners drain, but physical unlink waits for every claim/guard/owner.
 30. Status-cutoff publication cannot retire the TxnId of a registered write-capable transaction that may still publish that TxnId into persistent correctness metadata.
 31. A TxnId may enter the retired range only after both its runtime future-publication blocker and every existing persistent status dependency are absent.
+32. A durably published status cutoff guarantees that every below-cutoff persistent dependency is already durable in status-independent form or reconstructable before READY from durable retained WAL.
+33. WAL/DPT recovery dependencies used by the cutoff proof remain retained until the corresponding page state no longer depends on them; cutoff publication alone never releases them.
 
 ---
 
