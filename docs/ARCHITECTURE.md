@@ -8024,6 +8024,13 @@ Two writers that begin from the same visible physical version therefore contend 
 
 Because UPDATE creates a new RID, a writer that waits for the old version's logical lock MUST re-fetch and revalidate the target after lock acquisition.
 
+Every live request for `TUPLE_WRITE(TableId,RID)` is also a runtime physical
+RID-retention claim for that exact key. A request is live while it is queued and still
+grant-eligible or while it is granted. While any such request for the old identity exists,
+Chapter 14 MUST NOT publish `DEAD -> UNUSED`, reuse the slot, or otherwise let the same RID
+identify a different logical tuple/version. This consequence does not change the exact
+`(TableId,RID)` key, add a RID/lock-key generation, or make the lock a visibility claim.
+
 ## 11.3 Lock/latch separation rule
 
 A transaction MUST NOT wait for a logical LockManager lock while holding:
@@ -8051,18 +8058,30 @@ perform mutation using short-lived physical latches
 
 This prevents transaction-duration waits from coupling to microsecond-scale page-structure latches.
 
+For a `TUPLE_WRITE` target, the caller retains the discovery `ReadEpochGuard` after
+releasing the short physical latches and through request registration. Registration either
+immediately grants the request or places it in the canonical grant-eligible queue before
+the epoch is released. No blocking LockManager wait retains the epoch. If registration
+fails before the claim becomes live, the caller still owns the read epoch and MUST fail or
+retry through the existing statement rules; it cannot release the epoch and continue or
+wait without a claim. Thus physical identity protection passes gap-free from the read epoch
+to the live request. This specialization does not change `UNIQUE_KEY` acquisition or its
+full post-wait candidate re-probe.
+
 The rule composes with the B+ tree's own page-latch ordering and optimistic root validation: LockManager waits occur outside those physical-latch critical sections.
 
 ## 11.4 UPDATE / DELETE write-conflict protocol
 
 For a candidate visible physical tuple version `R`:
 
-1. release short-lived heap/index latches,
-2. acquire exclusive `TUPLE_WRITE(TableId,RID)` on `R`,
-3. re-fetch `R`,
-4. re-check tuple identity and visibility,
-5. inspect the current `xmax`,
-6. apply the cases below.
+1. retain `R` under the discovery read epoch while releasing short-lived heap/index latches,
+2. establish the exclusive `TUPLE_WRITE(TableId,RID)` request on `R` as a live
+   RID-retention claim,
+3. release the read epoch before any blocking wait,
+4. after grant, re-fetch `R`,
+5. re-check tuple identity and visibility,
+6. inspect the current `xmax`,
+7. apply the cases below.
 
 ### 11.4.1 No competing xmax
 
@@ -8106,6 +8125,11 @@ re-fetch/revalidate
 ```
 
 Do not wait while retaining physical page latches.
+
+If the caller is still queued for `TUPLE_WRITE`, that queued request retains RID identity
+during the wait. If it already owns `TUPLE_WRITE` and must wait/recheck transaction state,
+the granted ownership remains the retention claim. Neither case retains a read epoch across
+the blocking interval, and both still perform the required post-wake target revalidation.
 
 ### 11.4.5 xmax belongs to a committed competing updater
 
@@ -8484,14 +8508,17 @@ TUPLE_WRITE
 UNIQUE_KEY
 ```
 
-locks are held until:
+locks remain held through:
 
 ```text
 the §9.14 COMMITTED
 or ABORTED terminal-publication linearization point
 ```
 
-They are not released immediately after the corresponding page modification or at statement end. `MUST_ABORT` retains them until ABORTED publication.
+They are not released immediately after the corresponding page modification or at statement
+end. They remain retained through terminal publication and are released only during §15.5
+C5 or §15.6 A3. `MUST_ABORT` and `ABORTING` retain granted ownership through A3;
+`COMMITTING` retains it through C5.
 
 This prevents another writer from acting as though a still-unresolved transaction outcome were final.
 
@@ -8522,6 +8549,19 @@ a transaction becomes ineligible, §11.13 wait-for-graph integration, and
 §11.11 terminal-duration ownership and coherent wake-up behavior. It MUST
 preserve these semantics under concurrent access and remain compatible with the
 parallel-ready architecture.
+
+For `TUPLE_WRITE`, every queued request that can still become owner and every granted owner
+counts as a live RID-retention claim. Queue position does not change that meaning. A
+same-owner idempotent/subsumed acquisition preserves one effective ownership claim without
+changing lock compatibility; an empty lock-table container with no live request is not a
+claim. Transition from queued request to granted ownership preserves the claim continuously.
+
+Cancellation/removal and loss of grant eligibility are one semantic event: after the claim
+ends, that request can never receive a late grant or resume ownership of the old RID, while
+any request that may still be granted remains a claim. This applies to ordinary
+cancellation, shutdown cancellation, and deadlock-victim waiter removal. A granted victim's
+claim instead remains through ordinary A3 release. The representation of this lifetime and
+the synchronization used to expose it to Chapter 14 are implementation-defined.
 
 ## 11.13 Unified transaction-level gates and deadlock detection
 
@@ -8723,6 +8763,9 @@ whether its current statement crossed the publication boundary. This is the
 transaction-fatal §39.1 matrix row, not `DATABASE_NONCONTINUABLE`. Its outgoing
 wait edges are canceled so it can abort, but all resources it owns remain
 protected until ABORTED terminal publication and are released only at A3.
+For a queued TUPLE_WRITE victim, edge cancellation alone does not end RID retention: the
+claim ends only when canonical request removal simultaneously makes any later grant
+impossible. A victim that already owns TUPLE_WRITE retains the granted claim through A3.
 Waiters wake on actual release, remove/rebuild their edges, and perform the full
 resource-specific revalidation before continuing. An internal inability to
 maintain graph/ownership coherence is an invariant failure and may be
@@ -8878,6 +8921,11 @@ page-latch dependency edges.
 23. SchemaLock, both TableWriterGate modes, both object-publication modes, TUPLE_WRITE, and UNIQUE_KEY share §11.13's one cross-resource wait-for graph.
 24. A transaction-level waiter installs every owner/queue dependency before sleeping and cannot leave a detected cycle waiting indefinitely.
 25. Deadlock victims retain all owned transaction gates through ABORTED publication and release them only during canonical abort cleanup.
+26. Every queued grant-eligible or granted `TUPLE_WRITE(TableId,RID)` request is a runtime physical RID-retention claim.
+27. A writer retains its discovery read epoch through TUPLE_WRITE request registration and releases the epoch before any blocking lock wait.
+28. Request cancellation/removal ends RID retention atomically with loss of grant eligibility; no ended claim can receive a late grant.
+29. Granted TUPLE_WRITE retention remains through C4/A2 and ends only with ordinary C5/A3 lock release.
+30. Chapter 14 cannot rebind a RID while any live TUPLE_WRITE request for its old identity exists.
 ---
 
 # 12. Write-Ahead Logging and Commit Durability
@@ -10790,6 +10838,8 @@ DEAD
     ↓
 read-epoch grace period
     ↓
+TUPLE_WRITE holder/waiter claim quiescence + version-chain reuse proof
+    ↓
 UNUSED / reusable
 ```
 
@@ -10801,11 +10851,24 @@ all required secondary-index entries have been removed
 the physical RID is still not reusable
 ```
 
-This rule also governs whole heap-page recycling when reinitialization would make old `(PageNo, SlotId)` identities reusable.
+`DEAD` may remain persistent while a live `TUPLE_WRITE(TableId,RID)` request blocks
+final reuse. The claim does not by itself make the tuple visible or forbid an otherwise
+eligible index cleanup, normalization, freeze, or `NORMAL -> DEAD` transition; it prevents
+only rebinding the RID to a different logical identity. Read-epoch grace, predecessor-link
+safety, and lock-claim quiescence are independent barriers.
+
+This rule also governs whole heap-page recycling when reinitialization would make old
+`(PageNo, SlotId)` identities reusable; every old RID on that page must satisfy the same
+epoch, TUPLE_WRITE-claim, index, predecessor, and slot-state barriers.
 
 ## 14.6 ReadEpochManager
 
 Physical RID identity safety uses a lightweight `ReadEpochManager`, separate from MVCC visibility.
+
+For a writer that retains a candidate RID after releasing its discovery page latch, the
+read epoch protects identity only until the gap-free §11.3 handoff establishes a live
+`TUPLE_WRITE` request. The request then protects the same RID through immediate ownership
+or a blocking wait. Neither mechanism substitutes for the other's lifetime.
 
 The v1 correctness baseline intentionally uses one mutex-protected epoch registry rather than a lock-free epoch scheme.
 
@@ -10836,6 +10899,11 @@ Guard destruction decrements that exact epoch count under the same mutex and rem
 A reader never changes epoch while one guard is alive.
 
 The §11.10 UNIQUE candidate scan is such a reader: it registers before consuming an index-derived RID and retains protection through that RID's heap/current-owner recheck. If it must wait for transaction outcome, it discards the candidate and guard first, then re-probes the entire key range under a fresh guard after wakeup.
+
+An UPDATE/DELETE candidate that will request `TUPLE_WRITE` retains its read-epoch guard
+through registration of that request, releases the guard only after the request is a live
+RID-retention claim, and releases it before any blocking wait. A pure reader continues to
+use only the read epoch and acquires no tuple lock merely for reclamation safety.
 
 ### 14.6.2 RID retirement
 
@@ -10875,11 +10943,20 @@ minimum active epoch > R
 
 No heuristic time delay substitutes for this predicate.
 
+This predicate completes only the read-epoch component of RID reuse. Even after it is
+satisfied, `DEAD -> UNUSED` remains forbidden while any live queued or granted
+`TUPLE_WRITE(TableId,RID)` claim exists. Conversely, zero lock claims never bypasses the
+epoch predicate.
+
 ### 14.6.4 Crash/restart
 
 Epochs and the retire queue are process-local and not WAL logged.
 
 After crash/restart there are no surviving pre-crash readers.
+
+There are likewise no surviving pre-crash `TUPLE_WRITE` owners or waiters; LockManager
+starts empty and no lock request is WAL-logged, checkpointed, or replayed. This is safe
+because the callers that could resume using those old RIDs also ceased to exist.
 
 A recovered persistent `DEAD` slot that is not represented in the new process retire queue is conservatively re-enqueued with a fresh retirement epoch before being converted to `UNUSED`.
 
@@ -10905,6 +10982,28 @@ The read-epoch grace period establishes:
 
 > a physical RID does not change identity while an already-running reader may still possess that old RID.
 
+A writer cannot retain that read epoch across a blocking transaction-lock wait. The live
+`TUPLE_WRITE` request therefore supplies the complementary guarantee:
+
+> a physical RID does not change identity while any queued or granted writer request still
+> names that old RID.
+
+Post-grant revalidation remains necessary because tuple visibility, `xmin`/`xmax`, command,
+key, and current-owner state may change while the RID's physical identity remains stable.
+The claim prevents identity aliasing; it does not prove that the write remains legal.
+
+The protection domains remain distinct:
+
+| Mechanism | Protects | RID-reuse effect | Status-cutoff effect | Crash persistence |
+|---|---|---|---|---|
+| SQL snapshot | logical MVCC visibility history | only through logical garbage eligibility | may constrain status proof through snapshot history | none; no pre-crash snapshot is replayed |
+| page latch | short-lived page bytes/structure | none after release | none | none |
+| BufferPool pin | frame residency and binding | not a logical RID-reuse substitute | none | none |
+| read epoch | retained physical RID identity | blocks grace completion | none | none |
+| live `TUPLE_WRITE` request | one writer's exact physical RID identity, queued or granted | blocks `DEAD -> UNUSED` and same-RID rebinding | none by itself | none |
+| `StatusHistoryGuard` | bounded transaction-status lookup range | none | blocks cutoff advancement past its range | none |
+| write-status dependency | write-capable transaction's own future TxnId publication | none | blocks retirement of that TxnId | none |
+
 ## 14.8 Persistent DEAD state and crash behavior
 
 `DEAD` is persistent.
@@ -10922,6 +11021,11 @@ DEAD
 Pre-crash epoch registrations do not survive.
 
 A recovered DEAD slot is re-enqueued in the new process ReadEpochManager before reuse, as §14.6.4 specifies.
+
+It may also have remained DEAD before the crash solely because a live TUPLE_WRITE claim
+blocked final reuse. That runtime claim disappears with its owner/waiter, but recovery still
+re-evaluates every persistent and new-process epoch prerequisite before publishing UNUSED;
+it does not replay the old lock request or infer that all other barriers are complete.
 
 ## 14.9 Vacuum index-cleanup protocol
 
@@ -11008,33 +11112,59 @@ If the expected candidate state changed, the operation is skipped/retried.
 
 Heap-page latches are not held while B+ tree cleanup occurs.
 
+Before final `DEAD -> UNUSED` publication, vacuum also obtains a zero-live-claim result for
+`TUPLE_WRITE(TableId,RID)` under a synchronization relationship that linearizes that result
+with request registration and RID reuse. It may defer the candidate or wait without a page
+latch/read epoch, then reacquire and revalidate before publication. Failure to establish
+zero claims is benign inability to reclaim: the slot remains DEAD.
+
 ## 14.12 DEAD to UNUSED and free-slot publication
 
-A slot may enter `UNUSED` only when **both** are true:
+A slot may enter `UNUSED` only when all are true:
 
 ```text
 read-epoch grace predicate satisfied
 required version-chain splicing complete
+no live queued or granted TUPLE_WRITE(TableId,RID) request exists
 ```
 
 Before final reuse publication, vacuum must prove that no surviving tuple version still has `prev` equal to this RID. If that proof cannot be reconstructed/revalidated, the slot remains DEAD.
 
+The zero-claim observation, prevention of a new old-identity request, and final reuse
+publication have one gap-free ordering relationship:
+
+```text
+request registration linearizes first:
+    the request is a retention claim and reuse cannot publish
+
+reuse linearizes first:
+    a writer remains under its discovery read epoch and must observe/revalidate the
+    reclaimed or changed identity; it cannot establish a request for the old identity
+```
+
+The check includes every grant-eligible waiter and granted owner, not merely the current
+owner or queue head. It concerns semantic request lifetime; an empty LockManager resource
+container may remain allocated. No specific counter, observer API, mutex, or waiting policy
+is required. If a claim exists, vacuum may skip/defer rather than block, and it MUST NOT
+wait for claim release while holding a page latch or read epoch.
+
 Then:
 
 ```text
-1. fetch and write-latch the heap page
-2. verify the slot is still DEAD
-3. revalidate that version-chain reuse prerequisites remain satisfied
-4. if its payload coordinates are nonzero:
+1. establish the gap-free zero-claim/request-registration ordering described above
+2. fetch and write-latch the heap page
+3. verify the slot is still DEAD
+4. revalidate that read-epoch, lock-claim, and version-chain reuse prerequisites remain satisfied
+5. if its payload coordinates are nonzero:
        compact/repack while the slot is still logically DEAD
        produce canonical DEAD coordinates (0,0)
-5. verify tuple_offset = 0 and tuple_length = 0
-6. prepare the free-list transition:
+6. verify tuple_offset = 0 and tuple_length = 0
+7. prepare the free-list transition:
        slot.state = UNUSED
        slot.aux   = old free_slot_head
        free_slot_head = this SlotId
-7. WAL-log/install the page mutation as one page redo unit
-8. update/rebuild advisory free-space metadata
+8. WAL-log/install the page mutation as one page redo unit
+9. update/rebuild advisory free-space metadata
 ```
 
 The slot is not observable as reusable between payload reclamation and free-list publication.
@@ -11051,6 +11181,10 @@ aux          = next free SlotId or INVALID_SLOT_ID
 Every v1 reusable slot is discovered through the persisted `free_slot_head` chain defined in §5.3.2.
 
 Insertion never reuses a DEAD slot directly.
+
+Because only canonical UNUSED slots enter `free_slot_head`, a later allocation may bind the
+same numeric RID to a new tuple only after no old read epoch, TUPLE_WRITE request, index
+entry, or predecessor link can legally use it as the prior identity.
 
 ## 14.13 Metadata normalization and freezing
 
@@ -11468,9 +11602,11 @@ claims after it wins ownership.
 
 Foreground operations and ANALYZE are protected from physical reclamation by
 ordinary MVCC snapshot registration, page/B+ latches and guards, and
-`ReadEpochGuard` whenever an index-derived RID may be retained. VACUUM performs
-the §14.11 recheck before each mutation and never waits for transaction,
-maintenance, schema, or unique-key ownership while holding a page/B+ latch.
+`ReadEpochGuard` whenever an index-derived RID may be retained. A foreground writer
+performs §11.3's gap-free handoff to a live TUPLE_WRITE RID-retention claim before
+releasing that epoch for a lock wait. VACUUM performs the §14.11 recheck before each
+mutation and never waits for transaction, maintenance, schema, or unique-key ownership
+while holding a page/B+ latch or read epoch.
 It does not need every `UNIQUE_KEY` lock to erase a terminally stale exact
 `(key,RID)` entry: B+ mutation ownership plus the ReadEpoch protocol protect the
 physical operation, while §11.10 current-owner recheck protects logical UNIQUE
@@ -11484,6 +11620,7 @@ globally reclaimable logical version
     -> persistent NORMAL -> DEAD
     -> ReadEpoch retirement/grace
     -> version-chain reuse proof
+    -> zero live queued/granted TUPLE_WRITE claims for the RID
     -> DEAD -> UNUSED / RID reuse
 ```
 
@@ -11492,6 +11629,12 @@ passes may run concurrently; their only global serialization is the narrow
 ReadEpoch mutex and status-history coordination defined here. FSM updates use
 ordinary FSM page synchronization and need no database-global maintenance
 lock; an FSM estimate may be stale while heap free space remains authoritative.
+
+TUPLE_WRITE request registration and the zero-claim/reuse publication in §14.12 have a
+gap-free per-RID ordering. Registration first blocks reuse. Reuse first prevents a caller,
+still protected by its discovery epoch, from registering a request for the old logical
+identity after rebinding. Vacuum may defer a claimed RID; if it waits, it retains no page
+latch or read epoch and revalidates the candidate before final publication.
 
 #### ANALYZE snapshot, immutable identity, and publication revalidation
 
@@ -11803,6 +11946,19 @@ or degrade plans, but correctness never depends on prompt VACUUM or ANALYZE.
     own write-status dependency.
 14. C4/A2 terminal publication alone does not remove the dependency; C5/A3 does, after
     which already-persistent references independently continue to pin status history.
+15. A writer holds a read epoch and has not registered TUPLE_WRITE: RID reuse remains
+    blocked by the epoch.
+16. TUPLE_WRITE registration completes before epoch release: both claims overlap, then the
+    queued or granted request alone blocks reuse.
+17. A queued TUPLE_WRITE waiter sleeps: its live request blocks `DEAD -> UNUSED` and
+    same-RID reuse.
+18. A granted TUPLE_WRITE owner retains the claim through C5/A3; C4/A2 is insufficient.
+19. TUPLE_WRITE cancellation/removal ends the claim only when grant becomes impossible;
+    no removed waiter can wake as owner of the old RID.
+20. Epoch grace with a remaining TUPLE_WRITE claim, or zero lock claims with an old epoch,
+    is insufficient; every independent barrier must clear.
+21. A process crashes with queued/granted TUPLE_WRITE requests: requests and callers vanish,
+    no lock state is replayed, and persistent DEAD plus remaining restart barriers govern reuse.
 
 #### Forbidden maintenance implementations
 
@@ -11826,6 +11982,7 @@ V1 explicitly forbids:
 16. treating a deadlock victim as permission to release publication/retirement ownership before §9.14 terminal publication.
 17. advancing status cutoff past a registered write-capable transaction's own TxnId;
 18. publishing persistent `xmin`/`xmax` for a transaction whose write-status dependency is absent or already released.
+19. rebinding a RID while any queued grant-eligible or granted TUPLE_WRITE request still names its old identity.
 
 ## 14.18 Vacuum/reclamation invariants
 
@@ -11863,6 +12020,10 @@ V1 explicitly forbids:
 31. A TxnId may enter the retired range only after both its runtime future-publication blocker and every existing persistent status dependency are absent.
 32. A durably published status cutoff guarantees that every below-cutoff persistent dependency is already durable in status-independent form or reconstructable before READY from durable retained WAL.
 33. WAL/DPT recovery dependencies used by the cutoff proof remain retained until the corresponding page state no longer depends on them; cutoff publication alone never releases them.
+34. Every live queued or granted TUPLE_WRITE request is a runtime physical RID-retention claim for its exact `(TableId,RID)`.
+35. Discovery read-epoch protection overlaps TUPLE_WRITE request registration; the epoch is released only after the claim exists and before any blocking wait.
+36. `DEAD -> UNUSED` and same-RID rebinding require both read-epoch grace and zero live TUPLE_WRITE claims, in addition to every index, predecessor-link, and page/slot prerequisite.
+37. Request registration and RID reuse have one gap-free ordering: registration first blocks reuse, while reuse first prevents admission of an old-identity request.
 
 ---
 
@@ -11956,10 +12117,11 @@ vacuum removes the garbage later
 For each target row:
 
 ```text
-1. obtain candidate visible old RID from the scan
-2. release short-lived page/index latches
-3. acquire TUPLE_WRITE(TableId, old RID)
-4. re-fetch and revalidate the old version
+1. obtain candidate visible old RID from the scan under read-epoch protection
+2. release short-lived page/index latches while retaining that read epoch
+3. register TUPLE_WRITE(TableId, old RID) as a live RID-retention claim
+4. release the read epoch before any blocking wait; after grant, re-fetch and
+   revalidate the old version
 5. apply isolation-specific write-conflict rules
 6. evaluate/type-check and canonically encode affected old/new unique keys
 7. acquire affected old/new fully non-NULL UNIQUE_KEY locks in §11.9's
@@ -12001,10 +12163,10 @@ UNIQUE is immediate per target. A same-key UPDATE excludes only its exact old RI
 For each target row:
 
 ```text
-1. obtain visible RID
-2. release page/index latches
-3. acquire TUPLE_WRITE(TableId, RID)
-4. re-fetch and revalidate
+1. obtain visible RID under read-epoch protection
+2. release page/index latches while retaining that read epoch
+3. register TUPLE_WRITE(TableId, RID) as a live RID-retention claim
+4. release the read epoch before any blocking wait; after grant, re-fetch and revalidate
 5. apply write-conflict rules
 6. acquire affected fully non-NULL UNIQUE_KEY locks before publishing xmax
 7. re-fetch/revalidate the target after unique-lock acquisition/wait
