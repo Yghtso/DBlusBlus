@@ -9895,7 +9895,7 @@ Crash recovery is ARIES-inspired in its use of:
 
 - LSNs,
 - page LSNs,
-- dirty-page recLSNs,
+- dirty-page `rec_lsn` values,
 - fuzzy checkpoints,
 - analysis,
 - redo,
@@ -10361,7 +10361,10 @@ That is intentional.
 
 ### 13.13.1 Page redo
 
-For PAGE_INIT/PAGE_IMAGE/PAGE_DELTA and BTREE_MTR page entries, apply the page-LSN/full-image rules from Chapter 12.
+For PAGE_INIT/PAGE_IMAGE/PAGE_DELTA and BTREE_MTR page entries, apply the
+page-record semantics in §§12.8–12.10.3 using §4.8.2's canonical `page_lsn`
+meaning. The WAL-before-data rule in §12.17 remains applicable to any resulting
+dirty-page writeback.
 
 A redo action targeting a TXN_STATUS page wholly below the durable reclaim cutoff is skipped as retired history.
 
