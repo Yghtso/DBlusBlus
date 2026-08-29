@@ -12090,6 +12090,58 @@ version `xmax`, DELETE's `xmax`, and transaction-owned catalog/system MVCC write
 established by write-capable transaction registration rather than by a lazy first-write
 check, and no such publication is legal after C5/A3 releases it.
 
+### 15.1.2 Affected-row result ownership
+
+The SQL affected-row count is a non-negative, statement-scoped runtime result. It is the
+logical cardinality produced by the final successful execution attempt of one SQL
+statement, under the operation-specific rules in §§15.2–15.4. Each logical row acted upon
+by that final attempt contributes at most once. The count is not candidate-discovery
+progress and is not derived from tuple versions, index entries, WAL records, page
+mutations, or internal retry count. This separation ensures that physical layout,
+index count, WAL shape, and otherwise legal execution optimizations cannot change
+SQL-visible behavior.
+
+An implementation MAY maintain an attempt-local provisional count, but it has no external
+authority. Every abandoned or internally retried attempt discards its entire provisional
+count, and replacement attempt accounting starts at zero. Under READ COMMITTED, the final
+attempt uses the fresh snapshot required by §§9.9 and 15.7.1 while retaining the same
+CommandId. REPEATABLE READ snapshot and conflict behavior remain governed by §§9.10, 11.6,
+and 39.1; no count reconciliation authorizes snapshot refresh or retry.
+
+For UPDATE and DELETE, the finalized target spool in §§31.1–31.2 supplies one
+occurrence of each logical target RID. A target contributes only if it survives the
+operation's required post-wait revalidation and the final successful attempt logically
+acts on it. An initially discovered target that is skipped as stale/nonqualifying
+contributes zero; if the existing
+READ COMMITTED rules instead restart the attempt, only the replacement attempt's result
+counts. Duplicate candidate production cannot double count one target. Separate SQL
+statements may each count the same logical row once; there is no transaction-wide
+deduplication.
+
+A statement that fails publishes its canonical error and no successful affected-row
+result. This applies to `FAILED_TRANSACTION_REMAINS_ACTIVE`,
+`FAILED_TRANSACTION_MUST_ABORT`, deadlock, serialization, constraint/evaluation/type
+failure, and database-noncontinuable outcomes without changing §39.1's classification.
+Published physical effects from a failed multirow statement remain governed by semantic
+ABORT, MVCC, and the no-user-DML-undo rules; they are not partial SQL success and their
+provisional count is not exposed. Internal diagnostic counts such as candidates visited,
+physical mutations, retries, or index entries written are not the SQL affected-row count.
+
+Affected-row count and any `RETURNING` rows belong to the same successful statement-result
+envelope in §§15.7.3 and 31.9:
+
+- in an explicit transaction, successful statement completion may publish the count while
+  the transaction remains `ACTIVE`; a later COMMIT or ROLLBACK is separate and does not
+  retroactively rewrite that statement result, which never implied transaction durability;
+- in autocommit, the count remains request-owned and externally unexposed through the
+  implicit §15.5 COMMIT's C4–C5 completion. A commit failure before successful response
+  publication exposes the canonical commit/error outcome, not a successful affected-row
+  count.
+
+The count is not persistent database state. It is not WAL-logged, checkpointed, stored in
+`database.control`, transaction status, or catalog metadata, and crash recovery does not
+reconstruct or replay it. A client disconnect does not create result-recovery state.
+
 ## 15.2 INSERT
 
 For an INSERT:
@@ -12121,6 +12173,12 @@ For an INSERT:
 ```
 
 Heap redo describing the referenced RID is established before any B+ MTR that references that RID.
+
+For the final successful statement attempt, each logical input row successfully inserted
+contributes exactly one affected row. A successful single-row INSERT therefore reports one,
+and a successful multirow INSERT of `N` logical input rows reports `N`; heap versions, index
+entries, WAL records, and page mutations do not multiply that logical count. Section 15.1.2
+owns retry, failure, and external-publication consequences.
 
 If the transaction aborts:
 
@@ -12177,6 +12235,14 @@ new index entries -> vacuumable garbage
 
 No physical rollback is required.
 
+For affected-row reporting, UPDATE counts each distinct §31.2 target that survives the
+required lock waits, revalidation, current-owner handling, and predicate qualification and
+is logically updated by the final successful statement attempt. The old-version mutation,
+replacement version, index work, WAL records, and page mutations together contribute one,
+not one each. A qualifying target contributes one even when every assigned value is equal
+to its existing value. Any otherwise legal physical no-op optimization MUST preserve that
+count; this rule does not independently authorize such an optimization.
+
 UNIQUE is immediate per target. A same-key UPDATE excludes only its exact old RID; another row updated earlier in this command remains an owner. A changed-key UPDATE checks the new key against all other current owners. Multirow key collisions and swaps therefore follow §11.10.6 rather than a deferred final-state permutation rule.
 
 ## 15.4 DELETE
@@ -12205,6 +12271,13 @@ Abort makes the `xmax` ineffective.
 The retained old-key lock ensures another transaction cannot treat this delete as freeing the key before COMMITTED publication. If DELETE aborts, a waiter rechecks after ABORTED publication and observes the old owner through §11.10.
 
 Vacuum removes tuple/index garbage only after Chapter 14's global reclamation rules are satisfied.
+
+For affected-row reporting, DELETE counts each distinct §31.2 target that survives the
+required lock waits, revalidation, current-owner handling, and predicate qualification and
+receives the final successful statement attempt's logical delete. Candidate discovery,
+`xmax/cmax` writes, retained or removed index entries, WAL records, and page mutations do
+not define or multiply the count. A successful UPDATE or DELETE with no such target reports
+zero.
 
 ## 15.5 COMMIT
 
@@ -12302,11 +12375,16 @@ then the engine may:
 ```text
 release attempt-local resources
 unregister the old statement snapshot
+discard the attempt-local provisional affected-row count
 capture a fresh statement snapshot
 restart candidate search/evaluation
 ```
 
 No database state from the abandoned attempt needs rollback.
+
+The restarted attempt begins provisional affected-row accounting at zero. It retains the
+logical statement's CommandId under §9.6 and may retain transaction-duration locks under
+Chapter 11, but neither retained resource carries an affected-row contribution forward.
 
 ### 15.7.2 Conflict after a persistent statement write
 
@@ -12353,6 +12431,7 @@ They MUST NOT redefine:
 - unique-key serialization,
 - WAL-before-data,
 - commit durability,
+- affected-row counting or publication,
 - vacuum/RID reuse safety.
 
 This chapter is the boundary between the persistent transactional storage core and upper semantic/execution layers.
@@ -12380,6 +12459,12 @@ This chapter is the boundary between the persistent transactional storage core a
 19. COMMIT is uncancellable after its publication-authorizing record append and irreversible after durable commit.
 20. Successful COMMIT acknowledgement follows runtime terminal publication and required coherent cleanup.
 21. DML publishes a fully non-NULL UNIQUE/PRIMARY KEY owner only after §11.10 returns `NO_CONFLICT` under the canonical transaction-lifetime key lock.
+22. The affected-row count belongs only to the final successful SQL statement attempt; abandoned retries contribute nothing.
+23. INSERT counts successful logical input rows once; UPDATE and DELETE count distinct finalized, revalidated logical targets once.
+24. A qualifying UPDATE target counts even when every assigned value is unchanged; physical work and optimization do not define the count.
+25. A failed statement publishes no successful or partial affected-row count, regardless of already-published physical effects.
+26. An explicit transaction may publish the count at statement success, while autocommit retains it through implicit COMMIT C4–C5 under §31.9's result envelope.
+27. Affected-row count is runtime result metadata and is never WAL-logged, checkpointed, or reconstructed by recovery.
 
 ---
 
