@@ -6939,66 +6939,879 @@ authorize support.
 
 ### Catalog Tests
 
-Preserve bootstrap/open and ordinary metadata coverage:
+These procedures prove the Chapter 16 catalog contract. They specialize the byte, lifecycle,
+MVCC, reclamation, DDL, and statistics procedures owned elsewhere; they do not make the
+catalog cache, a filename, a physical catalog RID, or a production decoder an authority.
+
+#### Deterministic catalog harness and independent oracles
+
+Use barriers and exact persisted-prefix construction around these semantic events:
 
 ```text
-bootstrap open
-create table metadata
-create index metadata
-reopen persistence
-name lookup by normalized identifier
-quoted identifiers
-stable object IDs
-schema version increment
-descriptor-cache invalidation
-transactional catalog visibility
-DROP retirement
+CREATE DATABASE:
+    candidate root created; catalog-object ID reserved; FileId reserved;
+    system relation initialized; bootstrap rows encoded; catalog.dat encoded;
+    startup-critical file synchronization complete; root rename complete;
+    external-parent fsync complete
+
+OPEN:
+    database owner acquired; control selected; recovery begins/completes;
+    catalog.dat superblock validated; CATALOG_DATA validated;
+    system files recovered; catalog rows decoded; fixed-point comparison completes;
+    immutable descriptors constructed; cache publication completes; READY publishes
+
+CATALOG MVCC/CACHE:
+    statement snapshot captured; row candidate read; status resolved;
+    snapshot-qualified cache lookup; descriptor assembled; terminal state publishes;
+    cache install/invalidate/bypass; descriptor reference released
+
+DDL/RETIREMENT:
+    SchemaLock acquired; target TableWriterGate acquired where required;
+    object/FileId allocated; final-name publication completes; catalog mutation publishes;
+    COMMIT/ABORT publishes; orphan/retirement begins; file drain/unlink completes
+
+HISTORICAL/STATISTICS:
+    tuple SchemaVer read; ResolveSchema begins/completes; old descriptor retained/released;
+    statistics rows selected; chunks assembled; candidate rejected; fallback selected
 ```
 
-Bootstrap tests create and reopen the minimal locator plus six self-hosted catalog
-relations, then cross-check built-in identities and reconstruct immutable descriptors. Use
-corrupt bootstrap/self-description mismatch fixtures only through the owning lifecycle/
-catalog validation procedures; do not reproduce persisted catalog layouts here.
+No race uses a sleep as evidence. A barrier releases one named event at a time; a crash
+fixture persists only its selected files, pages, control slot, directory entries, and WAL
+prefix before reopen. Primary negative fixtures start canonical and introduce exactly one
+defect.
 
-#### Identity and historical schema
+The independent reference package implements only test-side arithmetic and semantic models:
 
-Create table/index/constraint objects, record their durable IDs, drop/abort/retire them,
-create replacements, and reopen. Assert zero is never allocated, crash/abort gaps remain
-consumed, and TableId/IndexId/ConstraintId/FileId plus historical table-local ColumnIds are
-never reused. Do not assert a particular gap size or allocator implementation.
+| Oracle | Independent input and required comparison |
+|---|---|
+| `catalog.dat` file oracle | Two independently assembled 8192-byte pages; exact total length 16384; no trailing page or byte |
+| CATALOG superblock oracle | Chapter 4 field offsets, little-endian loads/stores, catalog FileKind/object specialization, and zero regions; no production superblock codec |
+| CATALOG_DATA oracle | Chapter 16 offsets, six entry encodings, zero suffix, and exact page number/type; no production catalog codec |
+| CRC oracle | A separately selected CRC32C implementation or known vectors, with checksum bytes logically zero |
+| built-in identity oracle | Literal relation-code/TableId/name registry and independently tracked allocator high-water |
+| descriptor oracle | Literal six-relation schema table below, sorted by explicit ordinals rather than production builder order |
+| carrier oracle | Widened unsigned arithmetic plus field-specific sentinel/writer-limit tables |
+| key/reference oracle | Set/multiset model over typed logical keys and explicit same-table ownership edges |
+| fixed-point oracle | Field-by-field equality between the literal built-in descriptors and descriptors reconstructed from MVCC-visible rows |
+| snapshot/cache oracle | Chapter 9/10 visibility reference plus an independently tagged descriptor version; cache contents are only candidates |
+| historical-schema oracle | Exact map keyed by `(TableId, SchemaVer)` plus independently retained tuple/descriptor dependencies |
+| DDL publication oracle | Durable namespace manifest + MVCC catalog rows + transaction outcome; runtime cache state is excluded |
+| statistics oracle | Exact chunk identity/order and Chapter 34 payload validator/selection model |
+| READY oracle | Conjunction of Chapter 3/13 recovery and every required Chapter 16 validation prerequisite |
 
-Build several SchemaVers for one TableId and retain tuples/descriptors requiring the older
-versions. Resolve current and historical valid versions and compare immutable ColumnIds,
-physical/logical positions, types, defaults, and index-key reconstruction inputs. An
-unavailable or corrupt required historical version produces its architecture-owned error;
-the cache never substitutes the current schema.
+Production serializers, decoders, descriptor builders, cache lookup, and cache invalidation
+cannot validate themselves. Differential comparison against a second invocation of the same
+production component is insufficient.
 
-#### Snapshot-aware cache and DDL visibility
+#### `catalog.dat` byte, checksum, and format verification
 
-Use two transactions with deterministic barriers around CREATE/DROP commit and abort.
-Assert the creator sees completed earlier DDL after its CommandId boundary, another
-transaction sees no uncommitted metadata, READ COMMITTED sees committed metadata at the
-appropriate statement snapshot, and an older REPEATABLE READ snapshot retains its prior
-view. Cache hits must produce the same result as snapshot-aware catalog relations.
+Create the canonical file independently. It is exactly 16384 bytes: page 0 is one CATALOG
+FileSuperblock and page 1 is one immutable CATALOG_DATA page. Reject a truncated file,
+missing page, swapped pages, any overlong byte/page, or a page at the wrong offset according
+to the owning corruption/missing-required-object result. The generic superblock decoder's
+ability to accept a larger input buffer does not authorize an overlong `catalog.dat` file.
 
-Borrow an immutable descriptor in the old snapshot, publish a newer committed descriptor,
-and invalidate/replace current cache ownership. Assert the borrowed object and its schema
-remain byte/field unchanged, a new eligible snapshot may receive a distinct new descriptor,
-and delayed invalidation/install cannot leak metadata across snapshots or regress current
-identity. Addresses may help prove non-mutation but are not semantic IDs.
+The page-0 fixture chooses one valid nonzero FileId and one explicit opaque
+`creation_epoch`, then compares every byte below. Its `page_lsn` uses an architecture-legal
+initial superblock value; the fixture does not assign new semantics to that generic field.
+The page-1 fixture uses `INVALID_LSN` exactly. All integers are encoded little-endian.
 
-#### CREATE abort and DROP retirement
+##### Mandatory `catalog.dat` byte matrix
 
-Abort CREATE after private allocation, after durable final-name publication, and after
-transaction-owned catalog rows. Assert catalog invisibility, consumed IDs, deterministic
-orphan-retirement ownership, and no treatment of filesystem existence as committed object
-publication. Reuse the §41.3 lifecycle/orphan tests for namespace cleanup details.
+| Structure | Offset | Width | Canonical value/rule | Positive fixture | One-defect fixture | Expected class | Architecture / verification owner |
+|---|---:|---:|---|---|---|---|---|
+| whole file | 0 | 16384 | exactly two pages | exact-length image | truncate or append one byte/page | corrupt/missing required catalog file | §§16.9, 4.14 / this section |
+| superblock common | 0 | 2 | `SUPERBLOCK=0` | literal LE code | `CATALOG_DATA` | `CORRUPT_FILE` | §§4.9–4.10, 16.9.1 / generic codec + specialization |
+| superblock common | 2 | 2 | `format_version=1` | v1 | zero; greater recognized version | corrupt; unsupported file format | §§4.10, 4.14.2 / format matrix |
+| superblock common | 4 | 4 | flags zero | zero | one set bit | corrupt | §§4.10.1, 4.14.3 / reserved fixture |
+| superblock common | 8 | 8 | generic valid page LSN | chosen legal value | illegal owner-specific value if applicable | owning result | §§4.8.2, 4.10 / generic page fixture |
+| superblock common | 16 | 4 | whole-page CRC32C | independent CRC | flip checksum bit | corrupt | §4.10.3 / CRC oracle |
+| superblock common | 20 | 2 | `header_size=72` | 72 | 128/other | corrupt | §§4.10, 16.9.1 / specialization |
+| superblock common | 22 | 2 | reserved zero | zero | one set bit | corrupt | §4.10.1 / reserved fixture |
+| superblock common | 24 | 8 | `page_no=0` | zero | one | corrupt | §4.10.1 / specialization |
+| superblock prefix | 32 | 8 | ASCII `DBLUSBLS` | exact bytes | one wrong byte | corrupt | §4.10 / byte oracle |
+| superblock prefix | 40 | 2 | `FileKind::CATALOG=4` | 4 | known wrong/unknown kind | corrupt | §§4.7, 16.9.1 / specialization |
+| superblock prefix | 42 | 2 | reserved zero | zero | one set bit | corrupt | §4.10.1 / reserved fixture |
+| superblock prefix | 44 | 4 | page size 8192 | 8192 | 4096 | corrupt | §4.10.1 / byte oracle |
+| superblock prefix | 48 | 4 | allocated nonzero FileId | chosen legal ID | zero/wrong catalog FileId | corrupt/identity mismatch | §§4.3.2, 16.9.1 / identity oracle |
+| superblock prefix | 52 | 4 | reserved zero | zero | one set bit | corrupt | §4.10.1 / reserved fixture |
+| superblock prefix | 56 | 8 | `object_id=0` | zero | nonzero | corrupt | §§4.10.2, 16.9.1 / specialization |
+| superblock prefix | 64 | 8 | opaque creation epoch | chosen bit pattern | altered pattern with recomputed CRC remains valid | valid opaque value | §4.10.2 / round-trip fixture |
+| superblock suffix | 72 | 8120 | all zero | zero | one nonzero byte | corrupt | §4.10.1 / reserved fixture |
+| CATALOG_DATA common | 0 | 2 | `CATALOG_DATA=6` | 6 | wrong/unknown PageType | corrupt page | §§4.9, 16.9.2 / byte oracle |
+| CATALOG_DATA common | 2 | 2 | `format_version=1` | 1 | zero; greater | corrupt; unsupported page format | §§4.8, 4.14.2 / format matrix |
+| CATALOG_DATA common | 4 | 4 | flags zero | zero | one set bit | corrupt | §§4.8, 16.9.2 / reserved fixture |
+| CATALOG_DATA common | 8 | 8 | `INVALID_LSN` | exact sentinel | another value | corrupt bootstrap | §16.9.2 / byte oracle |
+| CATALOG_DATA common | 16 | 4 | whole-page CRC32C | independent CRC | checksum/payload bit flip | corrupt | §§4.8, 16.9.3 / CRC oracle |
+| CATALOG_DATA common | 20 | 2 | `header_size=64` | 64 | other | corrupt | §16.9.2 / byte oracle |
+| CATALOG_DATA common | 22 | 2 | reserved zero | zero | one set bit | corrupt | §16.9.2 / reserved fixture |
+| CATALOG_DATA common | 24 | 8 | `page_no=1` | 1 | zero/two | corrupt | §16.9.2 / byte oracle |
+| CATALOG_DATA body | 32 | 8 | ASCII `DBLUSCAT` | exact bytes | one wrong byte | corrupt | §16.9.2 / byte oracle |
+| CATALOG_DATA body | 40 | 2 | `bootstrap_version=1` | 1 | zero; greater | corrupt; unsupported catalog format | §§16.9.2–16.9.3 / format matrix |
+| CATALOG_DATA body | 42 | 2 | `entry_count=6` | 6 | 5/7 | corrupt | §16.9.2 / entry oracle |
+| CATALOG_DATA body | 44 | 4 | `catalog_schema_version=1` | 1 | zero; greater | corrupt; unsupported catalog schema | §§16.5, 16.9.3 / format matrix |
+| CATALOG_DATA body | 48 | 8 | `bootstrap_generation=1` | 1 | zero/two | corrupt | §§16.9.2–16.9.3 / byte oracle |
+| CATALOG_DATA body | 56 | 8 | reserved zero | zero | one set bit | corrupt | §16.9.2 / reserved fixture |
+| entries | 64 | 192 | six 32-byte entries in code order | exact six | omit/duplicate/reorder | corrupt | §16.9.2 / entry oracle |
+| entry `i` | `64+32i` | 2 | relation code `i+1` | 1..6 | wrong/duplicate/out of order | corrupt | §16.9.2 / entry oracle |
+| entry `i` | `66+32i` | 2 | flags zero | zero | one set bit | corrupt | §16.9.2 / reserved fixture |
+| entry `i` | `68+32i` | 4 | relation SchemaVer 1 | 1 | zero; greater | corrupt; unsupported catalog schema | §§16.9.2–16.9.3 / format matrix |
+| entry `i` | `72+32i` | 8 | TableId equals relation code | 1..6 | mismatch | corrupt | §§16.5.1, 16.9.2 / identity oracle |
+| entry `i` | `80+32i` | 4 | nonzero unique HEAP FileId | chosen allocated ID | zero/duplicate/wrong owner | corrupt | §§16.5.2, 16.9.2 / file oracle |
+| entry `i` | `84+32i` | 4 | nonzero unique FSM FileId | chosen allocated ID | zero/duplicate/role reuse | corrupt | §§16.5.2, 16.9.2 / file oracle |
+| entry `i` | `88+32i` | 8 | reserved zero | zero | one set bit | corrupt | §16.9.2 / reserved fixture |
+| CATALOG_DATA suffix | 256 | 7936 | all zero | zero | one nonzero byte | corrupt | §§16.9.2–16.9.3 / reserved fixture |
 
-For DROP, test pre-commit visibility, abort restoration, committed disappearance from new
-snapshots, and continued safety for old snapshots/descriptors. Physical unlink waits for
-the architecture's snapshot/descriptor/page/file-owner retirement conditions; identity is
-not reused and cleanup failure does not mutate the committed catalog outcome. This section
-does not duplicate vacuum or file-retirement protocols.
+Instantiate the entry rows six times rather than testing only a generic entry:
+
+| Entry index | Absolute byte range | Code/TableId | Canonical relation | Relation SchemaVer |
+|---:|---:|---:|---|---:|
+| 0 | 64..95 | 1 | `sys_tables` | 1 |
+| 1 | 96..127 | 2 | `sys_columns` | 1 |
+| 2 | 128..159 | 3 | `sys_indexes` | 1 |
+| 3 | 160..191 | 4 | `sys_index_columns` | 1 |
+| 4 | 192..223 | 5 | `sys_constraints` | 1 |
+| 5 | 224..255 | 6 | `sys_statistics` | 1 |
+
+Give every entry distinguishable HEAP/FSM FileIds. Decode each entry independently, compare
+every byte and typed field, then run omission, duplication, adjacent swap, FileId role swap,
+and cross-entry FileId reuse as separate one-defect cases.
+
+Compute both page checksums independently with bytes `16..19` logically zero. For each page,
+compare a canonical image, a one-bit payload mutation, a checksum-field mutation, and a
+reserved-byte mutation. Dispatch family/version before applying v1 checksum/layout rules;
+once v1 is selected, validate its CRC before trusting dependent type-specific fields.
+
+Ordinary CREATE, DROP, schema, index, and ANALYZE activity must produce no write, WAL record,
+generation change, or checksum change in `catalog.dat`. Reopen after each operation and
+compare both pages byte-for-byte with their post-creation baseline. Ordinary evolution is
+present only in the six self-hosted relations.
+
+#### Built-in identities, carriers, and six descriptor fixtures
+
+Use a literal TypeId oracle:
+
+```text
+0 invalid/not stored; 1 BOOLEAN; 2 INT32; 3 INT64; 4 FLOAT64;
+5 DATE; 6 TIMESTAMP; 7 VARCHAR
+```
+
+Test every valid value, zero, `8`, the INT32 boundaries, and source-enum permutations. A
+required schema-v1 descriptor containing zero, NULL/UNKNOWN, or an unlisted TypeId is catalog
+corruption; the statistics-only fallback remains limited to Chapter 34's advisory grammar.
+
+##### Mandatory carrier and sentinel matrix
+
+| Logical domain | Physical carrier | Semantic domain / zero | Writer maximum | Negative fixture and result |
+|---|---|---|---:|---|
+| TableId | INT64 bit pattern | uint64; zero invalid; built-ins 1..6 | `UINT64_MAX-1` | zero or unreachable greater identity: corrupt committed row |
+| IndexId | INT64 bit pattern | uint64; zero invalid; later IDs at least 7 | `UINT64_MAX-1` | zero/wrong typed owner: corruption |
+| ConstraintId | INT64 bit pattern | uint64; zero invalid; later IDs at least 7 | `UINT64_MAX-1` | zero/wrong typed owner: corruption |
+| normal TxnId | INT64 bit pattern | exact normal §4.3.2 domain | `MAX_ALLOCATABLE_TXN_ID` | INVALID/FROZEN/unreachable value: invalid row/generation |
+| FileId | zero-extended INT64 | uint32; zero invalid | `UINT32_MAX-1` | negative SQL value, high bits, zero, or unreachable value: corruption |
+| ColumnId | zero-extended INT64 | table-local uint32; zero invalid | `UINT32_MAX` | negative/high bits/zero/duplicate: corruption |
+| SchemaVer | zero-extended INT64 | uint32; zero invalid | `UINT32_MAX` | zero/high bits: corruption; unavailable referenced version: required error |
+| CommandId | zero-extended INT64 | uint32; zero legal | `UINT32_MAX` | negative/high bits: invalid catalog/statistics row |
+| TypeId | INT32 | fixed registry 1..7; zero invalid | 7 | zero/unlisted: corruption in required descriptor |
+| ordinal/enum | INT32 | field-specific nonnegative range | field-specific | negative, gap, duplicate, unknown code: corruption |
+| chunk count/index | INT32 | count 1..1048576; index 0..count-1 | 1048576 / 1048575 | invalidates statistics generation |
+| BOOLEAN | BOOLEAN | canonical false/true only | N/A | noncanonical carrier: malformed tuple/catalog state |
+| name/blob | VARCHAR | exact bytes; names nonempty | ordinary tuple/blob limit | locale conversion, empty required name, malformed blob: owning result |
+
+For uint64 identities, include values whose INT64 carrier appears negative and assert that
+typed unsigned comparison/range checking—not signed SQL arithmetic—determines identity. A
+carrier shared by two domains never authorizes cross-domain substitution.
+
+##### Mandatory six-descriptor matrix
+
+Each fixture sets tuple-header `schema_version=1`, literal TableId/name, no unlisted fields,
+and the exact column sequence below. `NN` means nonnullable and `N` nullable.
+
+| Relation | TableId / columns in physical and logical ordinal order | Semantic keys and references | Special fixture assertions | Status |
+|---|---|---|---|---|
+| `sys_tables` | 1; `table_id:I64 NN`, `namespace:V NN`, `table_name:V NN`, `heap_file_id:I64 NN`, `fsm_file_id:I64 NN`, `schema_version:I64 NN`; ColumnIds 1..6 | unique table ID, `(namespace,name)`, HEAP FileId, FSM FileId; file identities agree with TableId | namespace `main`; SchemaVer 1 for built-ins; no flags/dropped bit | exact fixture |
+| `sys_columns` | 2; `table_id:I64 NN`, `schema_version:I64 NN`, `column_id:I64 NN`, `physical_ordinal:I32 NN`, `logical_ordinal:I32 NN`, `column_name:V NN`, `type_id:I32 NN`, `nullable:B NN`, `has_default:B NN`, `default_value:V N`; ColumnIds 1..10 | four `(table,version,...)` keys; visible table reference | complete 0..N-1 ordinal sets; default discriminator/blob agreement | exact fixture |
+| `sys_indexes` | 3; `index_id:I64 NN`, `table_id:I64 NN`, `index_name:V N`, `btree_file_id:I64 NN`, `is_unique:B NN`, `key_schema_version:I32 NN`; ColumnIds 1..6 | unique IndexId/FileId; table and managed BTREE reference | key version 1; named standalone versus unnamed constraint-owned | exact fixture |
+| `sys_index_columns` | 4; `index_id:I64 NN`, `key_ordinal:I32 NN`, `column_id:I64 NN`; ColumnIds 1..3 | unique `(index,key ordinal)` and `(index,column)`; index and same-table column refs | contiguous 0..K-1, K>=1; no repeated component | exact fixture |
+| `sys_constraints` | 5; `constraint_id:I64 NN`, `table_id:I64 NN`, `constraint_kind:I32 NN`, `constraint_name:V N`, `index_id:I64 NN`; ColumnIds 1..5 | unique ConstraintId/backing IndexId; same-table index; nonnull names unique within table | kind 1 UNIQUE or 2 PK; unnamed unique backing index; PK columns nonnullable | exact fixture |
+| `sys_statistics` | 6; `table_id:I64 NN`, `scope_kind:I32 NN`, `scope_id:I64 NN`, `stats_txn_id:I64 NN`, `stats_command_id:I64 NN`, `chunk_index:I32 NN`, `chunk_count:I32 NN`, `payload_fragment:V NN`; ColumnIds 1..8 | unique full row identity; TABLE/COLUMN/INDEX target rules | binary nonempty fragment; StatsVersion and chunk contract; narrow fallback only | exact fixture |
+
+For every built-in descriptor, permute physical catalog row order while retaining explicit
+ordinals and require identical reconstruction. Then remove, duplicate, or alter one
+ColumnId, physical/logical ordinal, name, TypeId, NULLability, default state, or SchemaVer
+and require the architecture-owned corruption result. The runtime descriptor builder is
+compared with this literal fixture, not used to generate it.
+
+Defaults use the §21.12.1 codec as a delegated byte oracle. Test `(has_default=false,
+SQL NULL)`, a valid typed `DEFAULT NULL`, and a valid folded non-NULL value. Reject false plus
+a blob, true plus SQL NULL, empty/overlong/bad-CRC/reserved/type-mismatched blobs, and typed
+NULL on a nonnullable column. `sys_columns.nullable=false` is the only NOT NULL catalog
+authority; no hidden constraint row may appear.
+
+For indexes and constraints, build standalone nonunique/unique indexes and normalized UNIQUE
+and PRIMARY KEY metadata. Verify the constraint-owned index is unnamed, same-table, and
+unique; its ordered columns come only from `sys_index_columns`; every PK column is
+nonnullable; at most one PK exists. Unknown/zero constraint kind is committed catalog
+corruption. CHECK and FOREIGN KEY rows are absent in schema v1 and tests do not invent their
+metadata.
+
+#### Logical keys, references, ordinals, and fixed point
+
+Use a set/multiset reference model over MVCC-visible committed catalog rows. For every exact
+logical key, begin with one valid row set, then introduce one duplicate, missing member,
+dangling edge, wrong-table edge, duplicate ID/name, or ordinal defect. Never accept first or
+last heap encounter as authority.
+
+##### Mandatory logical-reference matrix
+
+| Source | Required target/ownership | Nullable? | Dangling or wrong-owner fixture | Result |
+|---|---|---:|---|---|
+| `sys_columns.table_id` | visible `sys_tables.table_id` | no | absent table | corrupt required catalog |
+| `sys_indexes.table_id` | visible `sys_tables.table_id` | no | absent/wrong table | corrupt |
+| `sys_index_columns.index_id` | `sys_indexes.index_id` | no | absent index | corrupt |
+| `sys_index_columns.column_id` | column in that index's table/current indexed descriptor | no | another table's same numeric ColumnId | corrupt |
+| `sys_constraints.table_id` | visible owning table | no | absent/wrong owner | corrupt |
+| `sys_constraints.index_id` | same-table, unnamed, unique backing index | no | named/nonunique/other-table index | corrupt |
+| selected statistics COLUMN | manifest-named ColumnId of TableId | no | old/foreign/unlisted target | reject generation/fallback |
+| selected statistics INDEX | manifest-named IndexId of TableId | no | old/foreign/unlisted target | reject generation/fallback |
+| bootstrap heap/FSM FileIds | matching `sys_tables` row and matching file superblocks | no | missing/duplicate/wrong kind/object/FileId | corrupt; READY forbidden |
+
+##### Mandatory ordinal matrix
+
+| Collection | Valid | Duplicate | Missing middle | Out of range | Shuffled heap rows |
+|---|---|---|---|---|---|
+| physical column ordinals | exactly 0..N-1 | corrupt | corrupt | corrupt | reconstruct by ordinal |
+| logical column ordinals | exactly 0..N-1 | corrupt | corrupt | corrupt | reconstruct by ordinal |
+| index key ordinals | exactly 0..K-1, K>=1 | corrupt | corrupt | corrupt | reconstruct by ordinal |
+| statistics chunks | exactly 0..count-1 | invalid generation | invalid generation | invalid generation | assemble by index |
+
+Name fixtures apply §18.4 canonicalization before persistence. Unquoted equivalent spellings
+compare as the same lowercase binary name; quoted names preserve exact bytes/case. Table and
+index names may share bytes because they are distinct classes. Table names, index names, and
+per-version column names are unique only in their exact architectural scopes. No locale or
+filesystem spelling participates.
+
+Catalog schema v1 has no hidden persistent catalog index. Reconstruct over every heap-order
+permutation and after removing any hypothetical cache/access path. Semantic keys and
+references remain identical; a required user-index file named by `sys_indexes` remains a
+separate required object and must pass its own identity/format checks.
+
+Construct the positive bootstrap fixed point from three independently produced inputs: the
+canonical `catalog.dat`, MVCC-visible self-hosted rows, and the literal six-descriptor oracle.
+Recovery and row validation precede reconstruction. READY may proceed only when all exact
+fields compare equal.
+
+##### Mandatory fixed-point matrix
+
+| Case | Bootstrap valid? | Rows physically/MVCC valid? | Descriptor equality | Classification | READY |
+|---|---:|---:|---:|---|---:|
+| exact six-relation self-description | yes | yes | yes | valid | yes, after all other gates |
+| missing built-in row | yes | yes | no | committed catalog corruption | no |
+| duplicate semantic row | yes | yes | no | committed catalog corruption | no |
+| wrong TableId or canonical name | yes | yes | no | committed catalog corruption | no |
+| wrong ColumnId/ordinal | yes | yes | no | committed catalog corruption | no |
+| wrong TypeId/NULLability/default | yes | yes | no | committed catalog corruption | no |
+| wrong relation/table SchemaVer | yes | yes | no | corruption or unsupported selector per field | no |
+| wrong heap/FSM FileId, kind, basename, or object owner | yes | yes | no | required-object corruption/missing | no |
+| wrong constraint/index relation or hidden catalog index | yes | yes | no | committed catalog corruption | no |
+
+Neither the built-in side nor self-hosted rows win a mismatch. No row is synthesized and no
+arbitrary duplicate is selected. Validation proceeds in Chapter 16's order: physical tuple,
+scalar/field, then cross-row/fixed-point checks. Instrument each layer and assert that a
+failure prevents later descriptor/cache publication.
+
+#### Database creation, open, recovery, and READY
+
+Compose the §41.3 root-lifecycle harness with Chapter 16. Persist only the named prefix,
+reopen through the ordinary owner, and record whether a final root is authoritative,
+recovery work is required, fixed-point validation runs, cleanup/adoption owns residue, and
+READY may publish.
+
+##### Mandatory creation/open crash matrix
+
+| Persisted boundary | Root authoritative? | Required action | READY |
+|---|---:|---|---:|
+| before system files initialize | no | private-root cleanup/adoption owner | no |
+| system files initialized; no `catalog.dat` | no live publication | private-root handling | no |
+| valid `catalog.dat` and files; root private | no | private-root handling; catalog bytes do not publish root | no |
+| final rename visible; parent fsync absent | uncertain | §4.7.8 adoption/reconciliation before inspection | no before reconciliation |
+| parent fsync complete | yes | ordinary ownership, control selection, recovery, catalog validation | not yet |
+| recovery incomplete | yes | finish redo/loser/status/file classification | no |
+| recovery complete; fixed point fails | yes but invalid | corruption/unsupported result | no |
+| fixed point succeeds; descriptors not published | valid opening state | complete coherent cache/descriptor publication | no |
+| atomic READY publication | yes | admit ordinary consumers | yes |
+
+Test missing `catalog.dat`, missing page 0/1, missing system HEAP/FSM file, wrong basename,
+wrong FileId, wrong FileKind, wrong object ID, and a stale system page whose required WAL is
+durable. The stale-page case must redo before catalog interpretation. No bootstrap/catalog
+fact may be read to drive recovery before its referenced pages are recovered, and no binder,
+DDL, ANALYZE, cache consumer, or DML operation may run before READY.
+
+The positive database-creation fixture independently verifies allocations 1..6 in relation
+order, `next_catalog_object_id=7`, unique system FileIds, exact FROZEN seed headers
+`(xmin=1,cmin=0,xmax=0,cmax=0)`, all startup-critical syncs, complete bootstrap validation,
+no-replace root rename, and external-parent fsync before success.
+
+#### Descriptor immutability, cache, and catalog MVCC
+
+Treat every cache entry as a candidate requiring proof against the caller's catalog snapshot.
+Obtain an old descriptor, publish a new descriptor, invalidate/replace name/current-version
+entries, and retain the old object across the race. Compare all semantic fields before and
+after; a runtime address or cache slot is never identity.
+
+##### Mandatory cache/snapshot matrix
+
+| Case | Catalog snapshot | Legal result/cache behavior | Global publication | Old descriptor free? |
+|---|---|---|---|---:|
+| RC statement A before DDL commit | statement A | old descriptor or snapshot-aware reconstruction | no new entry for A | no while referenced |
+| RC statement B after DDL commit | fresh statement B | new eligible descriptor | committed entry legal | no while referenced |
+| RR across DDL commit | retained transaction snapshot | old descriptor; new cache entry cannot override | new entry may coexist | no while referenced |
+| creator SELF, later command | owner + later CommandId | transaction-local MVCC descriptor | never global before commit | no |
+| other transaction before commit | its snapshot | no uncommitted descriptor | forbidden | no |
+| other eligible snapshot after COMMITTED | qualifying snapshot | new descriptor/cache or authoritative reconstruction | allowed after terminal publication | old refs retained |
+| DDL abort | any other transaction | aborted rows ignored; no global descriptor | forbidden | old object unchanged |
+| COMMITTED before cache install | eligible snapshot | persistent rows remain authority; miss/rebuild is legal | install or coherent bypass | no reversal of commit |
+| cache install fails after COMMIT | eligible snapshot | invalidate/bypass/rebuild; noncontinuable if coherence cannot be established | no partial entry | existing refs valid |
+| invalidation races old reference acquisition | snapshot-tagged | old or new descriptor only when snapshot-valid | atomic semantic outcome | only after reference drains |
+
+After durable COMMIT, inject allocation, delayed callback, and install failure. COMMIT remains
+COMMITTED. The coordinator must expose the new catalog state through a valid immutable cache
+entry or authoritative snapshot-aware bypass; inability to establish either exact state uses
+the existing database-noncontinuable result. Never publish a partial descriptor or regress a
+newer applicable entry with a delayed older install.
+
+Destroy all runtime cache state, crash/reopen, recover, and rebuild. The resulting descriptor
+set must equal the independent descriptor/fixed-point oracle. No cache invalidation record,
+pointer, generation object, or SQL DDL replay is recovered.
+
+Inject a volatile cache entry whose stable IDs/version or fields disagree with authoritative
+catalog rows. It must never be returned as catalog truth. Assert the existing internal
+invariant/noncontinuable classification where coherence cannot be recovered, without
+reclassifying the persistent rows as corrupt merely because volatile derived state was bad.
+
+Catalog-row visibility uses the Chapter 9/10 reference oracle. Cover RC statements around a
+DDL commit, RR retention, SELF earlier/current-command boundaries, aborted creators, aborted
+DROP deleters, lookup failures, and dependent `RETIRED`/INVALID/RESERVED status results. A
+normal aborted row is invisible garbage rather than catalog corruption; a persisted required
+row whose status dependency has already retired is the existing invariant failure.
+
+Freeze a legally eligible committed catalog creator and normalize an eligible aborted
+deleter. Descriptor reconstruction and MVCC results remain equivalent while the status
+dependency disappears. Catalog row removal/reuse follows the complete Chapter 14
+index/predecessor/DEAD/UNUSED/epoch/claim barriers; stable catalog IDs, never the catalog row
+RID, carry semantic identity.
+
+#### Historical schemas, ColumnIds, and retirement
+
+Build an exact `(TableId, SchemaVer)` reference map independently. Persist a tuple under V1,
+publish a legal V2 fixture where the architecture permits schema evolution, and resolve both
+descriptors. The old tuple, an old RR snapshot, and an old plan each continue to obtain V1;
+new eligible work obtains V2. A missing, never-existent, corrupt, or wrong-table referenced
+SchemaVer yields its owning required-metadata error—never current/nearest-version fallback.
+
+##### Mandatory historical-schema matrix
+
+| Case | ResolveSchema result | Persistent reclamation | Runtime descriptor release | File retirement |
+|---|---|---|---|---|
+| current tuple/current schema | exact current descriptor | no while tuple needs it | after refs | no while object live |
+| old tuple after V2 commit | exact old descriptor | forbidden | after refs | forbidden if object/file needed |
+| old RR snapshot | snapshot-visible old descriptor | forbidden while snapshot can require metadata | after snapshot/query | forbidden |
+| old schema + live plan reference | exact immutable descriptor | persistent rows follow other dependencies | forbidden until release | forbidden if file referenced |
+| no tuple but old snapshot remains | old descriptor | forbidden | after snapshot | forbidden |
+| all persistent/runtime dependencies clear | no required lookup | permitted through owning vacuum/catalog protocol | permitted | permitted after complete drain |
+| missing referenced SchemaVer | failure | no | N/A | no |
+| removed ColumnId rebound in later version | invalid construction/corruption | no | N/A | no |
+| old tuple used for index cleanup | old descriptor drives Chapter 8 key codec | forbidden until cleanup proof | retained for operation | no early retirement |
+
+Change physical and logical positions while retaining a ColumnId in a model fixture; add or
+remove another column without reusing its historical ID. Decoding, default lookup, logical
+presentation, and index-key reconstruction must follow explicit fields. An index-only
+metadata change leaves tuple SchemaVer unchanged. If a v1 SQL ALTER form is unsupported, the
+fixture exercises the metadata/history model directly and does not claim SQL support.
+
+Direct SQL ALTER-based column removal/reorder and object RENAME are N/A for v1 because
+Chapter 16 and Chapter 21 define no such executable SQL operation. Synthetic persisted-row
+and descriptor fixtures still prove the history-capable invariants; same-name DROP/CREATE
+proves identity nonreuse without inventing RENAME behavior.
+
+Compose DROP with one outstanding dependency at a time: old SQL snapshot, immutable
+descriptor/query handle, OBJECT_USE claim, BufferPool pin/frame/file owner, historical tuple
+or index cleanup, and namespace durability. Unlink is forbidden while any required barrier
+remains. After all barriers clear, retirement may proceed through §§7.12.5, 4.7.7, 14.17.1,
+and 21.9; FileId and semantic object IDs remain consumed. Recreating the same canonical name
+must allocate new identities and cannot rebind an old descriptor.
+
+#### Statistics catalog integration
+
+Chapter 34 owns payload bytes, numerical validity, and generation selection; this section
+owns their catalog-row envelope and composition with Chapter 16 visibility, identity, and
+fallback boundaries.
+
+##### Mandatory statistics matrix
+
+| Case | Outer catalog MVCC | Chunk/generation result | Fallback/selection | Core catalog result |
+|---|---|---|---|---|
+| valid one-chunk generation | visible committed | complete | select if greatest applicable | valid |
+| valid multi-chunk generation | visible committed | assemble 0..N-1 | select if complete/applicable | valid |
+| duplicate/missing/out-of-range chunk | decodable | incomplete | older valid or missing statistics | core remains valid |
+| wrong StatsVersion or mixed generation | decodable | reject complete generation | older/missing | core remains valid |
+| malformed known payload | decodable | invalid | older/missing + diagnostic | core remains valid |
+| positive greater payload version | decodable stable family/version | unsupported advisory generation | older/missing | READY allowed |
+| older complete generation available | visible | valid | select older | valid |
+| no complete generation | visible/none | none | missing-statistics behavior | planning allowed |
+| outer tuple aborted/invisible | not visible | not a candidate | prior/missing | ordinary MVCC |
+| outer creator frozen | visible committed | identity unchanged | normal selection | valid |
+| creator status retired after global publication | visible status-independent outer state | payload identity does not query status | normal selection | valid |
+| target/manifest TableId, ColumnId, IndexId mismatch | visible/decodable | reject generation | older/missing | no core-descriptor weakening |
+
+Assert exact StatsVersion `(TxnId, CommandId)` equality across outer row identity and payload,
+unsigned lexicographic selection, same-TxnId/different-command and different-TxnId cases, and
+normal TxnId/CommandId numeric domains. Once ordinary catalog MVCC has admitted a committed
+row, the payload `stats_txn_id` is opaque generation identity and must not pin or query
+transaction-status history. Freezing changes outer MVCC metadata only.
+
+The narrow fallback starts only after ordinary page/tuple decoding yields decodable
+`sys_statistics` rows. Repeat the same defect in `sys_tables`, `sys_columns`, bootstrap,
+defaults, or required index metadata and require corruption/unsupported failure instead of
+statistics fallback.
+
+#### CREATE, DROP, allocation, and failure composition
+
+Use the Chapter 21 lock/publication order and §39.1 statement boundary without restating
+their internal lock or WAL algorithms. Observe object/FileId allocation, private/final file
+state, catalog-row publication, transaction outcome, cache state, and retirement ownership.
+
+##### Mandatory CREATE/DROP matrix
+
+| Case | Catalog visibility | File authority | Transaction/cache result | Retirement/identity result |
+|---|---|---|---|---|
+| CREATE before final-name publication | none | private/unpublished | no catalog reference allowed | IDs consumed if allocated; deterministic cleanup |
+| final file published; catalog row absent | none | final durable uncommitted | pre-catalog recoverable failure may remain ACTIVE after orphan transfer | never a live object |
+| catalog row published; transaction aborts | aborted/invisible | final uncommitted residue | mandatory ABORT; no global cache entry | orphan retirement; IDs consumed |
+| COMMIT; cache install succeeds | visible to eligible snapshots | required file already durable | COMMITTED; immutable cache entry | IDs retained forever |
+| COMMIT; cache install fails | visible through catalog | required file durable | COMMITTED; coherent bypass/rebuild or noncontinuable | no rollback/reuse |
+| crash before durable COMMIT | creator recovered loser/ABORTED | private/final orphan | no SQL replay/cache recovery | classify before READY |
+| crash after durable COMMIT | committed after recovery | required final file present | rebuild descriptor/cache | object remains live |
+| DROP marker publishes then aborts | old row visible; xmax ineffective | file retained | no committed-drop cache invalidation | object remains LIVE |
+| DROP commits with old snapshot | invisible to new, visible to old | file retained | current name removed; old descriptor valid | retirement waits |
+| DROP commits with descriptor/pin | logically dropped | file retained | descriptor immutable | retirement waits |
+| DROP dependencies clear | dropped | may unlink after durable drain | cache no longer authority | IDs not reused |
+| crash after DROP commit before unlink | committed drop after recovery | file may remain | no resurrection | resume/defer retirement |
+| same-name recreation | new visible object | new managed files | new descriptors | new object IDs and FileIds |
+
+Directly forbid a catalog row from naming a file whose §4.7.4 final-name publication is not
+complete. Inject failure before and after the first transaction-owned catalog mutation:
+before it, ACTIVE is legal only after deterministic orphan ownership and attempt-only lock
+release; after it, the statement must abort under §39.1. Crash before COMMIT recovers no SQL
+DDL action and classifies the creator as a loser; crash after COMMIT rebuilds from persistent
+catalog rows even if no cache install occurred.
+
+The allocation specialization starts a canonical database with built-in TableIds 1..6 and
+`next_catalog_object_id=7`. TableId, IndexId, and ConstraintId allocations draw from one
+durably advanced uint64 high-water while remaining typed domains. Reserve an ID and crash or
+abort before catalog publication; reopen must preserve the gap. Model the final legal
+`UINT64_MAX-1` allocation and failing successor with widened arithmetic. Repeat FileId at
+`UINT32_MAX-1`. Neither control fallback nor catalog reconstruction may regress a durable
+high-water, and no dropped/aborted identity is reused.
+
+#### Format, error, and READY matrices
+
+##### Mandatory format/error matrix
+
+| Fixture | User error | Corruption | Unsupported | Rebuildable | Transaction/open consequence | READY | Canonical owner |
+|---|---:|---:|---:|---:|---|---:|---|
+| duplicate CREATE name after current-state recheck | yes | no | no | no | prepublication DDL failure | unchanged | §§21.6, 39.1 |
+| missing user-requested object | yes | no | no | no | semantic lookup failure | unchanged | §21.16 |
+| duplicate committed stable ID/name/ordinal | no | yes | no | no | required catalog failure | no | §16.5.10 |
+| missing required system row/file | no | yes/missing-required | no | no | open/required-object failure | no | §§13.19, 16.9 |
+| malformed recognized-v1 bootstrap/catalog tuple | no | yes | no | no | required format failure | no | §§4.14, 16.9.3 |
+| recognized greater bootstrap/catalog version | no | no | yes | no | unsupported open | no | §§4.14.2, 16.9.3 |
+| TypeId zero/unlisted in required descriptor | no | yes | no | no | descriptor publication fails | no | §§4.14.4, 16.4 |
+| constraint kind outside 1/2 in schema v1 | no | yes | no | no | descriptor publication fails | no | §16.5.6 |
+| committed index key version <=0 / >1 | no | <=0 | >1 | no | required index unusable | no | §§4.14.6, 16.5.4 |
+| malformed/greater statistics payload after safe row decoding | no | no | advisory greater only | yes | older/missing statistics | yes if core valid | §§4.14.5, 34.14.5 |
+| catalog page I/O/checksum failure | no | owning I/O/corruption | no | no | required I/O/access failure | no when required | §§3.3, 39.1 |
+| object/FileId exhaustion | no | no | no | no | DDL fails before publication | unchanged | §§4.3.2, 13.2 |
+| cache install failure after COMMIT | no | no | no | derived cache bypass/rebuild | COMMITTED remains; NC if incoherent | yes if coherent | §§21.10, 39.1 |
+| orphan unlink/directory-sync failure | no | no | no | retryable physical residue | semantic outcome retained | owner-dependent | §§4.7.7, 21.5/21.9 |
+| shutdown/cancellation | no | no | no | no | existing lifecycle/FA-MA rule | no new admission | §§3.3.6, 39.1 |
+| uncertain required namespace/WAL/cache authority | no | no | no | no | database noncontinuable | no | §§3.3.5, 39.1 |
+
+The READY prohibition oracle is the explicit conjunction of valid supported control/WAL
+recovery, exact `catalog.dat`, all required system files and owners, decodable required
+catalog tuples, complete logical keys/references/ordinals, exact bootstrap fixed point,
+resolvable required historical schemas, coherent derived-cache publication, and resolved
+orphan/retirement classification where the lifecycle owner requires it. Remove one conjunct
+at a time and assert that no ordinary admission event follows. The all-valid fixture must
+reach one atomic READY event and admit ordinary work only afterward.
+
+##### Mandatory cross-chapter composition matrix
+
+| Architecture owner | Existing verification reused | Chapter-16 specialization | Status |
+|---|---|---|---|
+| Chapter 3 | lifecycle/READY tests | no catalog consumer before validated fixed point | complete |
+| Chapter 4 | superblock, CRC, format, root publication, FileId | CATALOG/file/page exact bytes and required-file identity | complete |
+| Chapter 5 | tuple codec/SchemaVer | six relation headers and historical interpretation | complete |
+| Chapter 7 | pins/frames/file drain | DROP descriptor/file retirement conjunction | complete |
+| Chapter 8 | key codec/MTR/index identity | historical descriptor key reconstruction and required index owner | complete |
+| Chapter 9 | TxnId/CommandId/snapshots | catalog RC/RR and StatsVersion carriers | complete |
+| Chapter 10 | MVCC/SELF/status failures | catalog-row visibility specialization | complete |
+| Chapter 11 | UNIQUE and unified gates | normalized metadata plus Chapter 21 lock composition | complete |
+| Chapter 12 | WAL publication/WAL-before-data | catalog mutation boundary; no `catalog.dat` DDL WAL | complete |
+| Chapter 13 | control allocators/recovery | built-in high-water and recovery-before-decode | complete |
+| Chapter 14 | freezing/history/RID/file claims | historical metadata and catalog-row reclamation | complete |
+| Chapter 15 | DML statement publication/no undo | internal catalog mutation failure boundary | complete |
+| Chapter 16 | catalog contract | all direct fixtures/matrices in this section | complete |
+| Chapter 21 | DDL lock/file/catalog/cache protocol | CREATE/DROP persistent-state composition | complete |
+| Chapter 34 | statistics payload/selection | `sys_statistics` row/chunk/MVCC integration | complete |
+| §39.1 | FA/MA/NC and durable COMMIT | cache/orphan/catalog failure outcomes | complete |
+| §41.4 | broad catalog obligations | exact byte, fixed-point, cache, history, DDL procedures | complete |
+
+##### High-level catalog domain/case matrix
+
+| Fixture | Deterministic fault/order | Independent oracle | Owner | Status |
+|---|---|---|---|---|
+| canonical `catalog.dat` | exact two-page image | byte + CRC | §§16.9, 4.10 | complete |
+| reserved byte / future version | one-bit or discriminator change | format classifier | §§4.14, 16.9.3 | complete |
+| each canonical descriptor | literal schema row | descriptor oracle | §§16.4–16.5 | complete |
+| invalid carrier/TypeId | one boundary value | widened typed-domain oracle | §§4.3.2, 16.5.1 | complete |
+| duplicate ordinal/reference | one row defect | set/ordinal oracle | §§16.5.2–16.5.10 | complete |
+| fixed-point mismatch | one descriptor field | independent equality | §16.5.9 | complete |
+| missing/wrong system file | omit or alter owner | durable file manifest | §§16.5.2, 16.9 | complete |
+| canonical open | release recovery/fixed-point/READY barriers | READY conjunction | §§3.3, 13.19, 16.9.4 | complete |
+| RC/RR cache | DDL commit between lookups | MVCC snapshot oracle | §§16.10, 21.3 | complete |
+| post-COMMIT cache failure | fail install after terminal publication | persistent catalog authority | §§16.10, 21.10, 39.1 | complete |
+| old tuple after schema change | retain V1 tuple while V2 publishes | `(TableId,SchemaVer)` map | §§16.7–16.8 | complete |
+| vacuum/old descriptor | clear dependencies one at a time | retention conjunction | §§14.17.1, 16.7 | complete |
+| same-name recreation | DROP then CREATE after legal name reuse | stable-ID history | §§16.2–16.3, 21.9 | complete |
+| CREATE abort/crash | persist selected file/catalog prefix | DDL publication oracle | §§21.5–21.6, 39.1 | complete |
+| DROP old snapshot/crash | commit deletion before unlink | MVCC + retirement oracle | §§16.10, 21.9 | complete |
+| malformed statistics | one chunk/payload/manifest defect | Chapter 34 generation model | §§16.5.7, 34.14 | complete |
+| catalog-object crash gap | durable high-water, no row | allocator arithmetic | §§13.2.6, 16.5.1 | complete |
+
+#### Chapter 16 atomic architecture-obligation coverage map
+
+`Catalog Tests` in this section means the Chapter-16-specialized procedures and matrices in this
+section. A referenced lower-layer section supplies the reusable deterministic mechanism;
+the listed catalog procedure supplies the Chapter-16 composition. Every row is required.
+
+| ID | Domain | Atomic obligation | Architecture owner | Verification procedure | Status |
+|---:|---|---|---|---|---|
+| 1 | A | Catalog is semantic metadata between storage and SQL | §16.1 | descriptor/boundary assertions | COMPLETE |
+| 2 | A | Parser does not consume physical catalog storage | §16.1 | front-end dependency fixture | COMPLETE |
+| 3 | A | Binder resolves semantic IDs without choosing physical algorithms | §16.1 | binder/catalog boundary fixture | COMPLETE |
+| 4 | A | Descriptors expose no heap/B+/BufferPool implementation state | §16.1 | descriptor field oracle | COMPLETE |
+| 5 | B | V1 namespace is exactly `main` | §16.2 | name namespace fixtures | COMPLETE |
+| 6 | B | Qualified and unqualified `main` lookup agree | §16.2 | binder name fixture | COMPLETE |
+| 7 | B | Live table names are unique | §16.2 | logical-key matrix | COMPLETE |
+| 8 | B | Live named indexes are unique | §16.2 | logical-key matrix | COMPLETE |
+| 9 | B | Column names are unique per table schema version | §16.2 | logical-key matrix | COMPLETE |
+| 10 | B | Table and index names are separate classes | §16.2 | same-bytes cross-class fixture | COMPLETE |
+| 11 | C | TableId is uint64 semantic identity | §16.3 | carrier/identity oracle | COMPLETE |
+| 12 | C | IndexId is uint64 semantic identity | §16.3 | carrier/identity oracle | COMPLETE |
+| 13 | C | ConstraintId is uint64 semantic identity | §16.3 | carrier/identity oracle | COMPLETE |
+| 14 | C | ColumnId is uint32 table-local identity | §16.3 | carrier/ColumnId fixtures | COMPLETE |
+| 15 | C | TypeId is uint32 fixed-registry identity | §§16.3–16.4 | TypeId fixture | COMPLETE |
+| 16 | C | Bound references use stable IDs rather than names | §16.3 | recreation/name-rebinding fixture | COMPLETE |
+| 17 | C | Catalog IDs differ from BindingId/slots/positions | §16.3 | typed-domain negative fixtures | COMPLETE |
+| 18 | D | TableId/IndexId/ConstraintId share one allocator | §§13.2.6, 16.3 | allocation sequence model | COMPLETE |
+| 19 | D | Typed wrappers remain distinct in shared allocator | §§13.2.6, 16.3 | cross-domain substitution negatives | COMPLETE |
+| 20 | D | Shared allocator never returns zero | §§13.2.6, 16.3 | zero boundary fixture | COMPLETE |
+| 21 | D | Durable high-water advances before returning an ID | §13.2.6 | control allocation prefix | COMPLETE |
+| 22 | D | Crash gaps are legal and retained | §§13.2.6, 16.3 | object-ID crash-gap fixture | COMPLETE |
+| 23 | D | Any possibly persisted object ID is never reused | §§13.2.6, 16.3 | abort/drop/reopen fixture | COMPLETE |
+| 24 | D | Final catalog-object allocation is `UINT64_MAX-1` | §§4.3.2, 13.2.6 | widened terminal arithmetic | COMPLETE |
+| 25 | D | Catalog-object allocation never wraps | §§4.3.2, 13.2.6 | failing-successor fixture | COMPLETE |
+| 26 | E | Required FileIds are nonzero | §§4.3.2, 16.5.1 | carrier/sentinel matrix | COMPLETE |
+| 27 | E | FileId is distinct from catalog-object domains | §§4.3, 16.5.1 | typed-domain negatives | COMPLETE |
+| 28 | E | Managed filenames agree with catalog IDs and FileSuperblocks | §§4.7, 16.5.2, 16.5.4 | required-file identity fixture | COMPLETE |
+| 29 | E | FileIds consumed by failed/aborted DDL are not reused | §§4.7, 13.2.5, 21.5 | DDL allocation/reopen fixture | COMPLETE |
+| 30 | E | Final FileId allocation is `UINT32_MAX-1` without wrap | §§4.3.2, 13.2.5 | widened terminal arithmetic | COMPLETE |
+| 31 | F | V1 CREATE assigns ColumnIds 1..N | §16.3 | literal descriptor fixture | COMPLETE |
+| 32 | F | ColumnId zero is invalid | §§4.3.2, 16.3 | sentinel fixture | COMPLETE |
+| 33 | F | ColumnIds never derive from row/ordinal position | §§16.3, 16.8 | shuffled/changed-position fixture | COMPLETE |
+| 34 | F | Historical ColumnIds are not reused | §§16.3, 16.7 | historical schema fixture | COMPLETE |
+| 35 | F | ColumnId exhaustion rejects schema before publication | §4.3.2 | model boundary fixture | COMPLETE |
+| 36 | G | TypeIds 1..7 map exactly to built-in types | §16.4 | literal TypeId registry | COMPLETE |
+| 37 | G | TypeId zero is invalid/not stored | §16.4 | zero fixture | COMPLETE |
+| 38 | G | NULL/UNKNOWN are not persisted column TypeIds | §16.4 | descriptor negative fixture | COMPLETE |
+| 39 | G | TypeIds do not derive from source enum order | §16.4 | permuted source-registry fixture | COMPLETE |
+| 40 | H | `catalog_schema_version=1` selects exact six descriptors | §16.5 | selector/descriptor oracle | COMPLETE |
+| 41 | H | Catalog schema selector differs from table SchemaVer | §16.5 | selector substitution negative | COMPLETE |
+| 42 | H | Every built-in tuple header has SchemaVer 1 | §16.5 | tuple/descriptor fixture | COMPLETE |
+| 43 | H | Catalog schema version zero is corruption | §§4.14.2, 16.5 | version matrix | COMPLETE |
+| 44 | H | Greater catalog schema version is unsupported | §§4.14.2, 16.5 | version matrix | COMPLETE |
+| 45 | H | A newer catalog is never decoded as v1 | §§4.14.2, 16.5 | dispatch-stop assertion | COMPLETE |
+| 46 | I | uint64 domains persist unchanged INT64 bit patterns | §16.5.1 | signed/unsigned carrier fixtures | COMPLETE |
+| 47 | I | uint32 domains persist zero-extended in INT64 | §16.5.1 | high-bit/range fixtures | COMPLETE |
+| 48 | I | Type/ordinal/enum/count domains use nonnegative INT32 | §16.5.1 | carrier matrix | COMPLETE |
+| 49 | I | BOOLEAN catalog fields use canonical BOOLEAN | §16.5.1 | tuple scalar fixture | COMPLETE |
+| 50 | I | Names/blobs use ordinary binary VARCHAR | §§16.5.1, 17.4.6 | binary-byte fixture | COMPLETE |
+| 51 | I | Shared carrier does not merge typed domains | §16.5.1 | cross-domain substitution fixture | COMPLETE |
+| 52 | I | Signed INT64 order is not unsigned identity order | §16.5.1 | high-bit identity fixture | COMPLETE |
+| 53 | I | Writer maxima are enforced after typed decode | §§4.3.2, 16.5.1 | carrier boundary oracle | COMPLETE |
+| 54 | I | Names are nonempty binder-canonical bytes | §§16.5.1, 18.4 | canonical name fixtures | COMPLETE |
+| 55 | I | No separate identifier-length rule bypasses tuple size | §16.5.1 | tuple-size boundary mapping | COMPLETE |
+| 56 | J | `sys_tables` has exact TableId/name/schema | §§16.5.1–16.5.2 | six-descriptor matrix | COMPLETE |
+| 57 | J | `sys_tables` has exact six columns/IDs/order/types/nullability | §16.5.2 | literal descriptor fixture | COMPLETE |
+| 58 | J | `table_id` is semantically unique | §16.5.2 | logical-key matrix | COMPLETE |
+| 59 | J | `(namespace,table_name)` is semantically unique | §16.5.2 | logical-key matrix | COMPLETE |
+| 60 | J | HEAP and FSM FileIds are each unique and role-distinct | §16.5.2 | file-reference matrix | COMPLETE |
+| 61 | J | Managed HEAP/FSM identity matches TableId | §16.5.2 | wrong-owner fixture | COMPLETE |
+| 62 | J | Six built-in rows use bootstrap FileIds and SchemaVer 1 | §16.5.2 | fixed-point oracle | COMPLETE |
+| 63 | J | DROP uses MVCC/retirement, not flags | §16.5.2 | DROP matrix/field absence | COMPLETE |
+| 64 | K | `sys_columns` has exact TableId/name/schema | §§16.5.1, 16.5.3 | six-descriptor matrix | COMPLETE |
+| 65 | K | `sys_columns` has exact ten columns/IDs/order/types/nullability | §16.5.3 | literal descriptor fixture | COMPLETE |
+| 66 | K | Rows form a complete descriptor per `(TableId,SchemaVer)` | §16.5.3 | completeness fixture | COMPLETE |
+| 67 | K | Physical ordinals are exactly 0..N-1 | §16.5.3 | ordinal matrix | COMPLETE |
+| 68 | K | Logical ordinals are exactly 0..N-1 | §16.5.3 | ordinal matrix | COMPLETE |
+| 69 | K | ColumnId/name/physical/logical keys are unique | §16.5.3 | logical-key matrix | COMPLETE |
+| 70 | K | Every column row references a visible table | §16.5.3 | reference matrix | COMPLETE |
+| 71 | K | Current schema rows reconstruct completely | §16.5.3 | descriptor oracle | COMPLETE |
+| 72 | K | No-default is false plus SQL NULL | §16.5.3 | default matrix | COMPLETE |
+| 73 | K | Typed DEFAULT NULL is distinct and valid only when nullable | §16.5.3 | DefaultValueBlob fixture | COMPLETE |
+| 74 | K | Non-NULL default blob is canonical and type-matched | §§16.5.3, 21.12.1 | delegated blob codec + row fixture | COMPLETE |
+| 75 | K | Invalid discriminator/blob/nullability combinations are corruption | §16.5.3 | single-defect defaults | COMPLETE |
+| 76 | K | Built-in self-description has no defaults | §16.5.3 | fixed-point fixture | COMPLETE |
+| 77 | L | `sys_indexes` has exact TableId/name/schema | §§16.5.1, 16.5.4 | six-descriptor matrix | COMPLETE |
+| 78 | L | `sys_indexes` has exact six columns/IDs/order/types/nullability | §16.5.4 | literal descriptor fixture | COMPLETE |
+| 79 | L | IndexId and BTREE FileId are each unique | §16.5.4 | logical-key matrix | COMPLETE |
+| 80 | L | Index row references one existing table | §16.5.4 | reference matrix | COMPLETE |
+| 81 | L | Managed BTREE file identity/fingerprint agrees | §§8.2–8.3, 16.5.4 | index identity fixture | COMPLETE |
+| 82 | L | Key schema version 1 is required | §16.5.4 | format matrix | COMPLETE |
+| 83 | L | Nonpositive key version is corruption; greater is unsupported | §§4.14.6, 16.5.4 | format matrix | COMPLETE |
+| 84 | L | Named index is standalone and unique in index-name class | §16.5.4 | name/ownership fixture | COMPLETE |
+| 85 | L | NULL index name means exactly one constraint owner | §16.5.4 | constraint normalization fixture | COMPLETE |
+| 86 | L | `is_unique` and constraint kind are separate authorities | §16.5.4 | cross-check negative fixture | COMPLETE |
+| 87 | M | `sys_index_columns` exact descriptor is fixed | §16.5.5 | six-descriptor matrix | COMPLETE |
+| 88 | M | Key ordinals are exactly 0..K-1 with K>=1 | §16.5.5 | ordinal matrix | COMPLETE |
+| 89 | M | `(IndexId,key_ordinal)` is unique | §16.5.5 | logical-key matrix | COMPLETE |
+| 90 | M | `(IndexId,ColumnId)` is unique | §16.5.5 | repeated-component fixture | COMPLETE |
+| 91 | M | Index reference exists | §16.5.5 | reference matrix | COMPLETE |
+| 92 | M | Column belongs to indexed table/current descriptor | §16.5.5 | wrong-table fixture | COMPLETE |
+| 93 | M | Reconstruction sorts by key ordinal, not row order | §16.5.5 | permutation fixture | COMPLETE |
+| 94 | M | V1 rejects unsupported key-component forms and oversized keys | §§8.6, 16.5.5 | descriptor creation negatives | COMPLETE |
+| 95 | N | `sys_constraints` exact descriptor is fixed | §16.5.6 | six-descriptor matrix | COMPLETE |
+| 96 | N | Kind 1 is UNIQUE and kind 2 PRIMARY_KEY | §16.5.6 | literal kind registry | COMPLETE |
+| 97 | N | Any other schema-v1 kind is corruption | §16.5.6 | format/error matrix | COMPLETE |
+| 98 | N | CHECK/FK have no schema-v1 rows | §16.5.6 | forbidden-row fixture | COMPLETE |
+| 99 | N | NOT NULL authority is `sys_columns.nullable=false` | §16.5.6 | metadata normalization fixture | COMPLETE |
+| 100 | N | ConstraintId and backing IndexId are unique | §16.5.6 | logical-key matrix | COMPLETE |
+| 101 | N | Non-NULL constraint names are per-table unique | §16.5.6 | name fixture | COMPLETE |
+| 102 | N | Constraint references same-table unnamed unique index | §16.5.6 | reference matrix | COMPLETE |
+| 103 | N | Constraint columns come only from index-column rows | §16.5.6 | duplicate-source negative | COMPLETE |
+| 104 | N | At most one PK exists per table | §16.5.6 | duplicate-PK fixture | COMPLETE |
+| 105 | N | Every PK component is nonnullable | §§16.5.6, 21.7 | nullable-PK fixture | COMPLETE |
+| 106 | N | Standalone unique index has no constraint owner | §16.5.6 | ownership fixture | COMPLETE |
+| 107 | O | `sys_statistics` exact descriptor is fixed | §16.5.7 | six-descriptor matrix | COMPLETE |
+| 108 | O | Statistics row identity includes table/scope/StatsVersion/chunk | §16.5.7 | statistics matrix | COMPLETE |
+| 109 | O | StatsVersion is exact `(TxnId,CommandId)` | §§16.5.7, 34.3 | identity fixture | COMPLETE |
+| 110 | O | Original outer `xmin/cmin` equals StatsVersion | §16.5.7 | insertion fixture | COMPLETE |
+| 111 | O | Later freezing does not alter StatsVersion columns | §16.5.7 | freeze/reload fixture | COMPLETE |
+| 112 | O | Globally admitted StatsVersion does not pin status history | §§14.14.3, 16.5.7, 34.3.1 | status-retirement fixture | COMPLETE |
+| 113 | O | Chunk count/index domains are exact | §§4.3.2, 16.5.7 | carrier/ordinal matrix | COMPLETE |
+| 114 | O | Nonfinal/final fragment lengths are exact | §16.5.7 | chunk boundary fixtures | COMPLETE |
+| 115 | O | Chunks are contiguous and never mixed across versions | §16.5.7 | statistics defect matrix | COMPLETE |
+| 116 | O | TABLE/COLUMN/INDEX scope identity is exact | §16.5.7 | target/manifest fixtures | COMPLETE |
+| 117 | O | Unknown scope invalidates only advisory generation | §16.5.7 | narrow-fallback fixture | COMPLETE |
+| 118 | O | Malformed statistics row framing remains core corruption | §§4.14.5, 16.5.7 | outer-framing negative | COMPLETE |
+| 119 | O | Valid prior generation or missing-statistics fallback is selected | §§16.5.7, 34.14 | selection fixture | COMPLETE |
+| 120 | P | All core cross-row references are validated | §16.5.8 | logical-reference matrix | COMPLETE |
+| 121 | P | Current core rows reference current committed objects | §16.5.8 | current-owner fixture | COMPLETE |
+| 122 | P | Stale statistics do not become core constraints | §16.5.8 | DDL/manifest fallback fixture | COMPLETE |
+| 123 | P | Catalog meaning is independent of heap row order | §16.5.8 | row permutation fixture | COMPLETE |
+| 124 | P | Column/index/statistics collections sort by explicit ordinal | §16.5.8 | ordinal matrix | COMPLETE |
+| 125 | Q | Schema v1 has no hidden persistent catalog indexes | §16.5.8 | access-path absence fixture | COMPLETE |
+| 126 | Q | Semantic uniqueness holds without a physical catalog index | §16.5.8 | heap-scan permutation fixture | COMPLETE |
+| 127 | Q | No hidden built-in IndexId/bootstrap root exists | §§16.5.1, 16.5.8 | allocation/bootstrap manifest fixture | COMPLETE |
+| 128 | R | Built-in decoder is the only schema-v1 bootstrap decoder | §16.5.9 | fixed-point positive fixture | COMPLETE |
+| 129 | R | Reconstructed descriptors exactly equal built-ins | §16.5.9 | independent fixed-point oracle | COMPLETE |
+| 130 | R | Bootstrap entry identity/FileIds cross-check self-hosted rows | §16.5.9 | fixed-point field matrix | COMPLETE |
+| 131 | R | Self-description includes every exact built-in column | §16.5.9 | missing/field mismatch fixtures | COMPLETE |
+| 132 | R | No bootstrap-only index/constraint rows exist | §16.5.9 | hidden-row negative | COMPLETE |
+| 133 | R | Initial statistics relation is empty | §16.5.9 | creation fixture | COMPLETE |
+| 134 | R | Every fixed-point mismatch is corruption and blocks READY | §16.5.9 | fixed-point matrix | COMPLETE |
+| 135 | S | Tuple physical validation precedes catalog-field validation | §16.5.10 | validation event order | COMPLETE |
+| 136 | S | Field validation precedes cross-row reconstruction | §16.5.10 | validation event order | COMPLETE |
+| 137 | S | Duplicate/missing/unknown core state is corruption | §16.5.10 | single-defect matrices | COMPLETE |
+| 138 | S | Internal writers validate before cache publication | §16.5.10 | prepublication fault fixture | COMPLETE |
+| 139 | S | Required corruption after READY is noncontinuable | §§3.3, 16.5.10 | online detection fixture | COMPLETE |
+| 140 | T | Cache reconstruction reads one committed catalog snapshot | §16.5.10 | snapshot/cache oracle | COMPLETE |
+| 141 | T | Reconstruction groups by typed identity and explicit ordinal | §16.5.10 | permutation fixture | COMPLETE |
+| 142 | T | File/built-in cross-checks precede complete cache publication | §16.5.10 | publication barrier | COMPLETE |
+| 143 | T | No partial replacement cache publishes | §16.5.10 | one-defect publication fixture | COMPLETE |
+| 144 | T | Cache can be rebuilt deterministically after restart | §§16.5.10, 16.10 | cache destruction/reopen fixture | COMPLETE |
+| 145 | U | Canonical CREATE TABLE rows match normalized schema | §16.5.11 | creation-trace fixture | COMPLETE |
+| 146 | U | Canonical UNIQUE/PK rows cross-check all authorities | §16.5.11 | constraint creation fixture | COMPLETE |
+| 147 | U | Standalone index has no constraint row | §16.5.11 | index creation fixture | COMPLETE |
+| 148 | U | ANALYZE writes one complete manifest/chunk family | §16.5.11 | statistics creation fixture | COMPLETE |
+| 149 | U | DROP removes current authorities transactionally | §16.5.11 | DROP matrix | COMPLETE |
+| 150 | V | No alternative built-in IDs/order/source-struct layout is accepted | §16.5.12 | forbidden-interpretation negatives | COMPLETE |
+| 151 | V | No default/NULL or column/order inference shortcut is accepted | §16.5.12 | descriptor/default negatives | COMPLETE |
+| 152 | V | No duplicate PK/index authority or hidden catalog index is accepted | §16.5.12 | normalization negatives | COMPLETE |
+| 153 | V | Unknown codes/flags are not forward-compatible v1 data | §§4.14, 16.5.12 | format matrix | COMPLETE |
+| 154 | V | Cache cannot publish before complete validation | §16.5.12 | publication barrier | COMPLETE |
+| 155 | W | TableDescriptor contains exact stable table/file/schema metadata | §16.6 | descriptor field oracle | COMPLETE |
+| 156 | W | SchemaDescriptor identity is `(TableId,SchemaVer)` | §16.6 | descriptor equality fixture | COMPLETE |
+| 157 | W | IndexDescriptor contains exact table/file/key/constraint metadata | §16.6 | descriptor field oracle | COMPLETE |
+| 158 | W | Published descriptors are immutable | §§16.6, 16.10 | invalidation/reference race | COMPLETE |
+| 159 | W | Derived/precomputed layout cannot alter descriptor meaning | §16.6 | two-representation differential | COMPLETE |
+| 160 | W | Runtime address is not descriptor identity | §16.6 | rebuild-at-new-address fixture | COMPLETE |
+| 161 | X | ResolveSchema returns exact historical descriptor | §16.7 | historical-schema matrix | COMPLETE |
+| 162 | X | Tuple SchemaVer selects tuple interpretation | §§5.13, 16.7 | old-tuple fixture | COMPLETE |
+| 163 | X | Vacuum resolves historical schema before old-key decode | §16.7 | Chapter 8/14 composition | COMPLETE |
+| 164 | X | Required historical metadata cannot be reclaimed early | §16.7 | dependency-at-a-time fixture | COMPLETE |
+| 165 | X | Schema-changing DDL monotonically increases SchemaVer | §16.7 | checked-next model fixture | COMPLETE |
+| 166 | X | Index-only metadata change need not alter tuple SchemaVer | §16.7 | index-only change fixture | COMPLETE |
+| 167 | X | Unsupported rewrite DDL rejection does not weaken history model | §16.7 | metadata-model fixture | COMPLETE |
+| 168 | X | Missing referenced historical version is never substituted | §16.7 | missing-version negative | COMPLETE |
+| 169 | Y | ColumnId differs from physical/logical position | §16.8 | changed-position fixture | COMPLETE |
+| 170 | Y | `SELECT *` follows logical presentation order | §16.8 | binder/descriptor fixture | COMPLETE |
+| 171 | Y | Old tuples remain interpretable across position evolution | §§16.7–16.8 | historical decode fixture | COMPLETE |
+| 172 | Z | `catalog.dat` page 0 is CATALOG FileSuperblock | §§16.9, 16.9.1 | byte matrix | COMPLETE |
+| 173 | Z | CATALOG superblock uses kind 4/object 0/header 72 | §16.9.1 | specialized superblock fixture | COMPLETE |
+| 174 | Z | Catalog FileId is ordinary nonzero durable identity | §16.9.1 | carrier/file fixture | COMPLETE |
+| 175 | Z | CATALOG superblock reserved/trailing bytes and CRC are exact | §§4.10, 16.9.1 | byte/CRC matrix | COMPLETE |
+| 176 | AA | `catalog.dat` is exactly two 8192-byte pages | §16.9 | exact-file fixture | COMPLETE |
+| 177 | AA | Page 1 is exact CATALOG_DATA v1 common header | §16.9.2 | byte matrix | COMPLETE |
+| 178 | AA | `DBLUSCAT`, versions, count, generation are exact | §16.9.2 | byte matrix | COMPLETE |
+| 179 | AA | Six entries occupy bytes 64..255 | §16.9.2 | entry oracle | COMPLETE |
+| 180 | AA | Entries occur once in relation-code order 1..6 | §16.9.2 | entry permutation negatives | COMPLETE |
+| 181 | AA | Every entry TableId equals relation code | §16.9.2 | identity fixture | COMPLETE |
+| 182 | AA | Every entry has unique nonzero HEAP/FSM FileIds | §16.9.2 | entry/file fixture | COMPLETE |
+| 183 | AA | Entry flags/reserved bytes are zero | §16.9.2 | single-bit negatives | COMPLETE |
+| 184 | AA | Bytes 256..8191 are zero | §16.9.2 | zero-suffix fixture | COMPLETE |
+| 185 | AA | All bootstrap integers are little-endian | §16.9.2 | byte-swapped negatives | COMPLETE |
+| 186 | AB | Bootstrap page checksum is mandatory from creation | §16.9.3 | independent CRC fixture | COMPLETE |
+| 187 | AB | Every reserved region is validated | §§4.14.3, 16.9.3 | reserved-byte matrix | COMPLETE |
+| 188 | AB | v1 exact versions are accepted | §16.9.3 | format matrix | COMPLETE |
+| 189 | AB | Zero/malformed v1 is corruption | §§4.14.2, 16.9.3 | format matrix | COMPLETE |
+| 190 | AB | Recognized greater bootstrap/catalog/relation version is unsupported | §§4.14.2, 16.9.3 | format matrix | COMPLETE |
+| 191 | AB | Unsupported format is not parsed through v1 grammar | §§4.14.2, 16.9.3 | dispatch-stop assertion | COMPLETE |
+| 192 | AC | Built-in decoder contains only exact schema-v1 facts | §16.9.4 | fixed-point oracle | COMPLETE |
+| 193 | AC | Open validates `catalog.dat` before bootstrap decode | §16.9.4 | open event order | COMPLETE |
+| 194 | AC | System files recover before catalog row decode | §16.9.4 | stale-page redo fixture | COMPLETE |
+| 195 | AC | Self-description cross-check precedes cache publication | §16.9.4 | open event order | COMPLETE |
+| 196 | AC | No ordinary catalog consumer runs before READY | §16.9.4 | admission barriers | COMPLETE |
+| 197 | AC | Bootstrap mismatch prevents normal open | §16.9.4 | fixed-point matrix | COMPLETE |
+| 198 | AD | Creation allocates built-ins first and high-water 7 | §16.9.5 | creation/allocator fixture | COMPLETE |
+| 199 | AD | Creation seeds exact FROZEN committed tuple headers | §16.9.5 | byte-exact tuple fixture | COMPLETE |
+| 200 | AD | Complete startup-critical files/directories are synchronized | §§4.7.8, 16.9.5 | creation prefix matrix | COMPLETE |
+| 201 | AD | Root rename is no-replace | §§4.7.8, 16.9.5 | lifecycle harness | COMPLETE |
+| 202 | AD | Parent-directory fsync precedes create success | §§4.7.8, 16.9.5 | root publication barriers | COMPLETE |
+| 203 | AD | Incomplete creation is not an open target | §16.9.5 | crash-prefix matrix | COMPLETE |
+| 204 | AD | `catalog.dat` is immutable after creation | §16.9.5 | post-DDL byte/WAL comparison | COMPLETE |
+| 205 | AD | Bootstrap changes require explicit new format/migration | §16.9.5 | ordinary-DDL mutation absence | COMPLETE |
+| 206 | AE | Cache is derived and nonauthoritative | §16.10 | destroy/rebuild fixture | COMPLETE |
+| 207 | AE | Cache keys use stable IDs/versions and qualified names | §16.10 | key/identity fixture | COMPLETE |
+| 208 | AE | Cache hit must be proven visible to caller snapshot | §16.10 | cache/snapshot matrix | COMPLETE |
+| 209 | AE | Older descriptors remain alive while referenced | §16.10 | invalidation/reference race | COMPLETE |
+| 210 | AE | Ownership mechanism remains implementation-specific | §16.10 | observable-lifetime-only assertions | COMPLETE |
+| 211 | AF | RC uses statement-qualified catalog visibility | §§16.10, 21.3 | RC cache matrix | COMPLETE |
+| 212 | AF | RR retains transaction-qualified catalog visibility | §§16.10, 21.3 | RR cache matrix | COMPLETE |
+| 213 | AF | New cache entries cannot override old snapshots | §16.10 | old-snapshot/new-cache race | COMPLETE |
+| 214 | AF | Cache miss may reconstruct without changing semantics | §16.10 | cache-off differential | COMPLETE |
+| 215 | AG | Owner sees completed earlier DDL through SELF/CommandId | §§10, 16.10, 21.3 | SELF catalog fixture | COMPLETE |
+| 216 | AG | Other transactions never see uncommitted DDL | §§16.10, 21.3 | concurrent visibility fixture | COMPLETE |
+| 217 | AG | Uncommitted DDL is never globally cached | §16.10 | aborted/uncommitted cache fixture | COMPLETE |
+| 218 | AH | Current cache entries change only after terminal publication | §16.10 | COMMIT barrier | COMPLETE |
+| 219 | AH | Committed descriptor publication is complete/immutable | §§16.10, 21.10 | install observer | COMPLETE |
+| 220 | AH | Aborted DDL publishes no global descriptor | §§16.10, 21.10 | abort fixture | COMPLETE |
+| 221 | AH | Delayed older install cannot regress current identity | §§16.10, 34.15 | delayed callback race | COMPLETE |
+| 222 | AI | Cache install failure cannot reverse durable COMMIT | §§16.10, 21.10, 39.1 | post-COMMIT fault | COMPLETE |
+| 223 | AI | Coherent invalidate/bypass/rebuild preserves catalog authority | §§16.10, 21.10 | cache failure fixture | COMPLETE |
+| 224 | AI | Inability to establish cache coherence is noncontinuable | §§21.10, 39.1 | failure matrix | COMPLETE |
+| 225 | AJ | DDL allocates IDs only during execution under exclusivity | §§21.2, 21.4 | binding/execution event trace | COMPLETE |
+| 226 | AJ | Required files are final-name durable before catalog reference | §§21.5–21.6 | CREATE publication oracle | COMPLETE |
+| 227 | AJ | Filesystem existence alone is not committed catalog authority | §21.5 | file-only prefix fixture | COMPLETE |
+| 228 | AJ | Pre-catalog failure transfers deterministic orphan ownership | §§21.5, 39.1 | failure prefix | COMPLETE |
+| 229 | AJ | Post-catalog failure mandates ABORT | §§21.5, 39.1 | failure prefix | COMPLETE |
+| 230 | AK | CREATE revalidates name/current state before allocation | §21.6 | DDL race fixture | COMPLETE |
+| 231 | AK | CREATE publishes exact schema-v1 rows | §§16.5.11, 21.6 | creation trace | COMPLETE |
+| 232 | AK | CREATE retains DDL ownership to terminal outcome | §§21.2, 21.6 | gate/terminal barriers | COMPLETE |
+| 233 | AK | CREATE abort leaves invisible rows and orphan files | §§21.5–21.6 | abort/reopen fixture | COMPLETE |
+| 234 | AK | Durable CREATE survives crash without SQL replay | §§13.20, 21.6 | post-COMMIT crash fixture | COMPLETE |
+| 235 | AL | DROP publishes MVCC deletion, not a dropped bit | §§16.5.2, 21.9 | DROP matrix | COMPLETE |
+| 236 | AL | Aborted DROP leaves deletion ineffective/object live | §§10.3, 21.9 | abort fixture | COMPLETE |
+| 237 | AL | Committed DROP hides object from new snapshots | §21.9 | snapshot fixture | COMPLETE |
+| 238 | AL | Old snapshots/descriptors retain dropped object | §§16.10, 21.9 | retention fixture | COMPLETE |
+| 239 | AL | File unlink waits for snapshots/descriptors/page/file owners | §§7.12.5, 21.9 | one-barrier-missing matrix | COMPLETE |
+| 240 | AL | Unlink/fsync failure does not reverse committed DROP | §§4.7.7, 21.9 | retirement failure fixture | COMPLETE |
+| 241 | AL | Crash after DROP commit does not resurrect object | §§13.20, 21.9 | post-commit/pre-unlink prefix | COMPLETE |
+| 242 | AM | Same-name recreation receives new catalog-object identity | §§16.2–16.3, 21.9 | recreation fixture | COMPLETE |
+| 243 | AM | Recreated physical object receives new FileId and cannot alias old descriptor | §§4.7, 16.10 | recreation/file fixture | COMPLETE |
+| 244 | AN | New tuple-interpreting schema monotonically advances SchemaVer | §16.7 | checked-next model | COMPLETE |
+| 245 | AN | SchemaVer never wraps or overwrites historical identity | §§4.3.2, 16.7 | terminal boundary model | COMPLETE |
+| 246 | AN | V1 unsupported ALTER forms remain unsupported | §§4.3.2, 16.7, 21.19 | no-SQL-support assertion | COMPLETE |
+| 247 | AO | Catalog rows use ordinary heap MVCC | §§16.5.10, 21.3 | catalog visibility fixtures | COMPLETE |
+| 248 | AO | RC catalog visibility follows statement snapshots | §§9.9, 21.3 | RC matrix | COMPLETE |
+| 249 | AO | RR catalog visibility follows retained snapshot | §§9.10, 21.3 | RR matrix | COMPLETE |
+| 250 | AO | SELF catalog visibility follows cmin/cmax | §§9.6, 10, 21.3 | CommandId fixture | COMPLETE |
+| 251 | AO | Aborted catalog creator is invisible garbage | §§10.2, 16.5.10 | aborted creator fixture | COMPLETE |
+| 252 | AO | Aborted catalog deleter is ineffective | §§10.3, 21.9 | aborted DROP fixture | COMPLETE |
+| 253 | AO | Cache cannot alter any MVCC result | §16.10 | cache-on/off differential | COMPLETE |
+| 254 | AP | Dependent RETIRED/INVALID/RESERVED status is an invariant failure | §§10, 14.14.3 | status negative fixture | COMPLETE |
+| 255 | AP | Legal creator freezing preserves descriptor semantics | §§10.5, 14.13, 16.5.7 | freeze/reconstruct fixture | COMPLETE |
+| 256 | AP | Legal aborted-xmax normalization preserves catalog visibility | §§10.5, 14.13 | normalize/reconstruct fixture | COMPLETE |
+| 257 | AP | Opaque StatsVersion does not retain status pages | §§14.14.3, 16.5.7 | status cutoff fixture | COMPLETE |
+| 258 | AQ | Persisted old tuple retains historical schema metadata | §§14.17.1, 16.7 | historical retention matrix | COMPLETE |
+| 259 | AQ | Live query/descriptor reference retains runtime descriptor | §§16.7, 16.10 | reference barrier | COMPLETE |
+| 260 | AQ | Vacuum uses old descriptor for exact index cleanup | §§14.15, 16.7 | historical key fixture | COMPLETE |
+| 261 | AQ | Metadata may reclaim only after all persistent/runtime dependencies clear | §§14.17.1, 16.7 | conjunction oracle | COMPLETE |
+| 262 | AQ | Catalog row RID reuse follows complete Chapter 14 barriers | §§14.6–14.12, 16.11 | reclamation composition | COMPLETE |
+| 263 | AR | File retirement blocks new fetch/pin and drains frames | §§7.12.5, 21.9 | BufferPool retirement fixture | COMPLETE |
+| 264 | AR | Cached descriptor alone is not a lifetime/publication claim | §§14.17.1, 16.10 | object-claim negative | COMPLETE |
+| 265 | AR | Open descriptor/file owners prevent unlink | §§7.12.5, 21.9 | one-missing-barrier fixture | COMPLETE |
+| 266 | AR | Durable unlink preserves nonreuse and directory durability | §§4.7.7, 21.9 | retirement prefix fixture | COMPLETE |
+| 267 | AS | Open ownership precedes control/recovery/catalog work | §§3.3, 16.9.4 | open event order | COMPLETE |
+| 268 | AS | Recovery reconstructs system pages before decode | §§13.19, 16.9.4 | stale-page WAL fixture | COMPLETE |
+| 269 | AS | Required files and fixed point are READY prerequisites | §§13.19, 16.9.4 | READY matrix | COMPLETE |
+| 270 | AS | Unsupported required catalog state prevents READY | §§4.14.6, 16.9.3 | format/READY matrix | COMPLETE |
+| 271 | AS | Valid open publishes READY atomically after coherent cache | §§3.3.4, 16.9.4 | positive READY barrier | COMPLETE |
+| 272 | AS | Recovery rebuilds descriptors/cache without SQL or cache replay | §§13.20, 16.10 | crash/reopen fixture | COMPLETE |
+| 273 | AT | Statistics chunks integrate with outer catalog MVCC | §§16.5.7, 34.3.1 | statistics MVCC matrix | COMPLETE |
+| 274 | AT | TABLE manifest names complete exact COLUMN/INDEX members | §§16.5.7, 34.14 | manifest fixture | COMPLETE |
+| 275 | AT | Statistics rows/payload identities cross-check exactly | §§16.5.7, 34.14 | row/payload differential | COMPLETE |
+| 276 | AT | Invalid generations never mix or partly salvage | §§16.5.7, 34.14.5 | chunk defect matrix | COMPLETE |
+| 277 | AT | Statistics fallback cannot weaken core catalog validation | §§4.14.5, 16.5.7 | same-defect core/advisory contrast | COMPLETE |
+| 278 | AU | Catalog-object exhaustion is explicit prepublication failure | §§4.3.2, 13.2.6 | terminal arithmetic fixture | COMPLETE |
+| 279 | AU | FileId exhaustion is explicit prepublication failure | §§4.3.2, 13.2.5 | terminal arithmetic fixture | COMPLETE |
+| 280 | AU | ColumnId/SchemaVer exhaustion rejects schema construction | §4.3.2 | model fixture | COMPLETE |
+| 281 | AU | Resource/I/O failure cannot publish guessed metadata | §§39.1, 16.5.10 | error matrix | COMPLETE |
+| 282 | AV | Malformed recognized-v1 bootstrap is corruption | §§4.14, 16.9.3 | format matrix | COMPLETE |
+| 283 | AV | Recognized future bootstrap/catalog is unsupported | §§4.14, 16.9.3 | format matrix | COMPLETE |
+| 284 | AV | Duplicate user CREATE name differs from committed catalog corruption | §§16.5.10, 21.6 | error contrast fixture | COMPLETE |
+| 285 | AV | Missing user object differs from missing required system metadata | §§16.5.10, 21.16 | error contrast fixture | COMPLETE |
+| 286 | AV | Required catalog I/O/checksum failure prevents READY/use | §§3.3, 16.5.10 | I/O fault fixture | COMPLETE |
+| 287 | AV | Orphan cleanup failure remains retryable when ownership is coherent | §§4.7.6–4.7.7, 21.5 | cleanup fault fixture | COMPLETE |
+| 288 | AV | Uncertain required publication/coherence is noncontinuable | §§3.3.5, 39.1 | noncontinuable fixture | COMPLETE |
+| 289 | AV | No arbitrary duplicate/fallback/repair makes authoritative state usable | §§4.14, 16.5.10 | single-defect negative suite | COMPLETE |
+
+Coverage totals for this 289-obligation Chapter-16 inventory are:
+
+```text
+COMPLETE:       289
+PARTIAL:          0
+MISSING:          0
+CONTRADICTORY:    0
+```
+
+| Required family | Direct ownership in this section | Status |
+|---|---|---|
+| V16-1 byte-exact `catalog.dat` | byte/entry/CRC/version matrices and immutability comparison | CLOSED |
+| V16-2 descriptors and carriers | TypeId/carrier/default and six-descriptor fixtures | CLOSED |
+| V16-3 logical validation/fixed point | reference/ordinal/fixed-point matrices | CLOSED |
+| V16-4 creation/open/READY | persisted-prefix and READY conjunction matrices | CLOSED |
+| V16-5 cache/descriptors | snapshot/cache/terminal-failure races | CLOSED |
+| V16-6 historical schemas | retention/reclamation/key-reconstruction matrix | CLOSED |
+| V16-7 statistics integration | catalog-envelope/chunk/MVCC/fallback matrix | CLOSED |
+| V16-8 CREATE/DROP composition | DDL publication/crash/retirement matrix | CLOSED |
+
+All catalog races and crash cases use the common deterministic harness. The procedures make
+no assumption about descriptor container type, cache class, allocator data structure,
+thread count, row/vector execution, or sparse-file API. They assert only architecture-
+visible bytes, typed identities, snapshots, durable namespace/WAL prefixes, terminal states,
+and publication/lifetime relationships.
 
 ---
 
