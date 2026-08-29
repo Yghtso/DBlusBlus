@@ -6739,6 +6739,7 @@ ReadEpochManager
 This chapter owns:
 
 - transaction identifiers and reservation,
+- transaction registration and write-status-dependency lifetime,
 - transaction lifecycle state,
 - isolation-level identity,
 - command IDs,
@@ -6884,10 +6885,39 @@ optional<Snapshot> statement_snapshot
 Lsn last_wal_lsn
 bool has_persistent_writes
 bool current_statement_has_published_write
+write-capable or explicitly read-only classification
+registered write-status dependency when write-capable
 held logical locks
 held SchemaLock/TableWriterGate/object-publication modes
 cancellation/deadlock flag
 ```
+
+Every normal transaction is classified at registration as either:
+
+```text
+write-capable
+explicitly read-only
+```
+
+Ordinary transactions are write-capable unless the transaction contract explicitly
+establishes read-only mode. The classification is immutable for that transaction. Absence
+of a prior write does not make a transaction read-only.
+
+A **write-status dependency** is a runtime status-history-retention claim for one
+write-capable transaction's own normal TxnId. Every write-capable transaction MUST register
+that dependency as part of transaction registration, before admission of any operation
+that may publish the TxnId in persistent `xmin`, `xmax`, or other correctness metadata.
+The dependency is not a SQL snapshot, `StatusHistoryGuard`, or read epoch.
+
+The dependency remains registered while the transaction is `ACTIVE`, `MUST_ABORT`,
+`COMMITTING`, or `ABORTING`, and through terminal publication. COMMIT releases it during
+C5; ABORT releases it during A3. A recoverable statement failure that leaves the
+transaction ACTIVE does not release it, and entry into MUST_ABORT retains it through the
+ordinary abort cleanup. Releasing this runtime future-publication blocker does not retire
+existing persistent metadata: Chapter 14 must still prove every surviving reference to
+the TxnId status-independent before the cutoff may pass it. Failure to complete safe C5/A3
+cleanup follows the existing failure/noncontinuable policy and never authorizes an early
+dependency release.
 
 The conceptual runtime transaction states are:
 
@@ -7117,6 +7147,33 @@ active transaction IDs below that high-water mark
 ```
 
 The protocol MUST prevent a transaction from becoming ambiguously active/inactive relative to a snapshot that has already chosen `xmax`.
+
+For a write-capable normal transaction, registration is one conceptual publication that:
+
+```text
+assigns its stable TxnId
+registers it in the active transaction registry
+registers write-status dependency(TxnId)
+```
+
+The transaction is not admitted between these effects. This registration publication and
+§14.17.1 cutoff candidate calculation/publication share a gap-free ordering relationship:
+
+```text
+transaction registration linearizes first:
+    its write-status dependency constrains the cutoff
+
+cutoff C linearizes first:
+    the subsequently registered transaction is assigned a normal TxnId >= C
+    and registers that dependency before admission
+```
+
+Thus no assigned-but-unregistered write-capable TxnId may fall below an authoritative
+cutoff. This is an architectural linearization requirement, not a required mutex or
+container. It does not change snapshot `xmin`, whose owner-exclusion and active-set meaning
+remain §9.7.3. The TxnId is stable once this registration publication assigns it; a
+below-cutoff candidate is not issued, no assigned TxnId is replaced, and retired status is
+not resurrected.
 
 The snapshot/registry synchronization is held only for capture/registration bookkeeping.
 
@@ -7378,6 +7435,10 @@ The runtime terminal-outcome cache dominates a stale/nonremoved active-registry 
 
 `RETIRED` is a runtime lookup result, not a persisted two-bit state. It means the architecture has durably proven that no valid persistent correctness object still requires the transaction outcome for that old status range.
 
+A write-status dependency does not add a lookup result or override this precedence. It
+prevents §14.17.1 from legally advancing the cutoff past a write-capable transaction while
+that transaction can still create a persistent reference to its own TxnId.
+
 Persisted:
 
 ```text
@@ -7440,6 +7501,11 @@ Transaction-lifetime logical locks and the transaction-owned SchemaLock,
 TableWriterGate, and object-publication modes MUST NOT become acquirable by
 another transaction until this terminal publication point has completed.
 
+A write-capable transaction's write-status dependency is likewise retained through this
+terminal publication point. Terminal publication alone does not release it: the COMMIT
+path releases it during C5 and the ABORT path during A3 together with the transaction's
+other retained correctness resources.
+
 Thus another writer observes either:
 
 ```text
@@ -7480,7 +7546,13 @@ Known/uncertain abort-publication failures and mandatory cleanup from `MUST_ABOR
 
 ## 9.15 Read-only transactions
 
-A transaction that never creates persistent state:
+An explicitly read-only transaction is classified as such at transaction registration and
+is forbidden from publishing its TxnId in persistent `xmin`, `xmax`, or other correctness
+metadata that requires its terminal outcome. It cannot be silently upgraded to
+write-capable. Because it cannot create such a future status dependency, it does not
+register a write-status dependency for its own TxnId.
+
+Such a transaction:
 
 ```text
 does not require a transaction-commit WAL record
@@ -7493,6 +7565,11 @@ It still:
 - participates in the active transaction registry,
 - owns/registers snapshots according to its isolation level,
 - may pin the vacuum horizon.
+
+Its registered SQL snapshots may constrain logical history independently of the omitted
+write-status dependency. Conversely, a write-capable READ COMMITTED transaction remains
+protected by its write-status dependency between statements even when it has no registered
+SQL snapshot.
 
 Durable TxnId block reservation prevents harmful TxnId reuse even when a read-only transaction leaves no WAL/status record.
 
@@ -7517,6 +7594,9 @@ Durable TxnId block reservation prevents harmful TxnId reuse even when a read-on
 17. A referenced normal TxnId with no legal active/terminal/frozen/retired interpretation is an invariant failure, not implicitly committed.
 18. `MUST_ABORT` is runtime-only, remains nonterminal for visibility, forbids ordinary statements/COMMIT, and can transition only toward ABORTED.
 19. A publication-authorizing commit-record append makes COMMIT uncancellable; durable commit makes the semantic outcome irreversibly COMMITTED.
+20. Every write-capable normal transaction registers its own write-status dependency as part of gap-free transaction registration and retains it through C5 or A3.
+21. An explicitly read-only transaction has no write-status dependency and cannot publish persistent correctness metadata containing its TxnId.
+22. Releasing a write-status dependency removes only the possibility of future self-TxnId publication; existing persistent references retain status history until Chapter 14 proves them status-independent.
 
 ---
 
@@ -10641,6 +10721,14 @@ This distinction matters because:
 
 A long-running registered snapshot may intentionally delay reclamation of versions it could still observe.
 
+SQL-snapshot lifetime and transaction-status retention are distinct. An ACTIVE READ
+COMMITTED transaction between statements may have no registered snapshot and therefore
+does not constrain `global_oldest_snapshot_xmin`; if it is write-capable, its §9.4
+write-status dependency continuously prevents retirement of its own TxnId. A REPEATABLE
+READ transaction may independently constrain both mechanisms through different claims:
+its retained SQL snapshot protects logical history, while its write-status dependency
+protects possible future persistence of its own TxnId.
+
 ## 14.3 Tuple-version garbage eligibility
 
 A physical tuple version is a vacuum garbage candidate when either rule below is satisfied.
@@ -10998,6 +11086,27 @@ Future visibility then treats the creator as committed without requiring the ori
 
 After sufficiently complete vacuum/freezing proves a cutoff `X` such that no persistent correctness object still requires transaction-outcome lookup for a normal TxnId below `X`, whole transaction-status pages below that cutoff may be retired.
 
+Cutoff proof has two distinct status-dependency classes:
+
+```text
+runtime future-publication blocker:
+    a registered write-capable transaction may still create persistent metadata
+    containing its own TxnId
+
+existing persistent dependency:
+    already-published tuple/catalog correctness metadata still requires Status(TxnId)
+```
+
+The cutoff may pass a normal TxnId only when both classes are absent. C5/A3 release of a
+write-status dependency removes only the first class; creator freezing, aborted-`xmax`
+normalization, physical version removal, or another already-authorized status-independent
+rewrite must eliminate the second class.
+
+Status retirement is monotonic. A runtime terminal cache, a recreated status page, or a
+newly attempted write cannot make a below-cutoff TxnId usable again; the coordinator must
+prevent a write-capable transaction's own TxnId from entering that range in the first
+place.
+
 Concurrent vacuum lookup and cutoff advancement are ordered by the canonical
 `StatusHistoryGuard`/reclaimer protocol in §14.17.1; proof of a cutoff without
 that runtime coordination is insufficient.
@@ -11010,6 +11119,11 @@ generation value and does not pin status history. Historical WAL `txn_id` fields
 remain governed by WAL retention/recycling and likewise are not, merely by
 occurring in retained WAL, status-page pins. This classification is field-specific
 and does not create a general exception for ordinary MVCC metadata.
+
+Write-status dependencies are runtime-only and are not replayed after a crash. This is safe
+because no pre-crash transaction can publish new metadata after restart, surviving
+already-persistent references remain subject to the proof above, and Chapter 13 resolves
+terminal outcomes/losers before READY.
 
 The absolute §9.12 TxnId-to-PageNo mapping is preserved permanently.
 
@@ -11411,14 +11525,24 @@ special-case the former pass's own guard.
 
 Exactly one reclaimer computes and publishes a cutoff. Under the same
 coordinator serialization, before advancing to page-aligned `C` it must account
-for the existing persistent freeze proof, registered SQL snapshots and other
-explicitly registered status-correctness dependencies, every active
-StatusHistoryGuard, and any retained recovery/checkpoint correctness dependency.
-Transaction existence without such a dependency does not pin the cutoff, and a
-StatsVersion occurrence is not a dependency. The coordinator excludes new guard registration from the final
-proof through §14.14.2 steps 2–3 (durable control publication and matching
-runtime cutoff publication). BufferPool retirement and optional hole punching
-then proceed under §14.14.2 without holding the registration coordinator.
+for the existing persistent freeze proof, registered SQL snapshots, every active
+write-status dependency, other explicitly registered status-correctness dependencies,
+every active StatusHistoryGuard, and any retained recovery/checkpoint correctness
+dependency.
+A write-capable transaction's registered dependency MUST prevent `C` from retiring its own
+TxnId; the reclaimer chooses the greatest legal page-aligned cutoff satisfying that and all
+other bounds. Transaction existence without this dependency does not itself constrain
+status retirement. Only an explicitly read-only transaction, which is incapable of
+creating a persistent status dependency, may omit the dependency. A StatsVersion
+occurrence is not a dependency.
+
+The coordinator excludes new guard registration and write-capable transaction registration
+from the final proof through §14.14.2 steps 2–3 (durable control publication and matching
+runtime cutoff publication). Transaction registration and cutoff publication obey §9.8's
+gap-free ordering: a registered dependency first clamps the cutoff, while a cutoff `C`
+first causes a subsequently registered write-capable transaction to receive a TxnId at or
+above `C`. BufferPool retirement and optional hole punching then proceed under §14.14.2
+without holding the registration coordinator.
 
 The race is exact:
 
@@ -11429,7 +11553,21 @@ guard registers first:
 reclaimer publishes C first:
     a later guard observes G=C and may use only status at/above C; it must
     re-evaluate/fail rather than assume older history exists
+
+write-capable transaction T registers first:
+    C cannot retire T while write-status dependency(T) remains registered
+
+reclaimer publishes C first:
+    a later write-capable transaction receives T >= C and registers its
+    write-status dependency before admission
 ```
+
+An idle write-capable READ COMMITTED transaction therefore pins its own status even when it
+has no SQL snapshot. An explicitly read-only transaction may omit this claim, while any SQL
+snapshot it registers continues to constrain the independent logical reclamation horizon.
+`StatusHistoryGuard` remains a bounded maintenance lookup-range claim; it is not replaced by
+the one-TxnId transaction-lifetime write-status dependency. Neither mechanism is a
+ReadEpoch, which protects physical RID identity rather than transaction-status history.
 
 Status lookup absence/`RETIRED` is never interpreted as ABORTED or COMMITTED.
 A below-cutoff tuple field that is frozen or otherwise canonically
@@ -11456,7 +11594,7 @@ admission.
 | ANALYZE | CREATE INDEX or another applicable schema/index-manifest publication | `WAIT/REVALIDATE` | the same publication gate makes either ANALYZE's immutable manifest or the DDL publish first |
 | TXN_STATUS_RECLAIM | VACUUM, any table | `WAIT/REVALIDATE` | guard/cutoff coordinator orders history use and cutoff publication |
 | TXN_STATUS_RECLAIM | TXN_STATUS_RECLAIM | `SERIALIZED` | one global monotonic cutoff owner |
-| TXN_STATUS_RECLAIM | foreground SQL | `CONCURRENT` | snapshot/correctness dependencies and status-page pins are included before cutoff/page retirement |
+| TXN_STATUS_RECLAIM | foreground SQL | `CONCURRENT` | SQL snapshots, write-status/correctness dependencies, and status-page pins are included before cutoff/page retirement |
 | VACUUM | foreground SELECT/INSERT/UPDATE/DELETE | `CONCURRENT` | online reclamation predicate, revalidation, latches, and ReadEpoch protocol |
 | ANALYZE | foreground DML/SELECT | `CONCURRENT` | one fixed SQL snapshot; concurrent changes make statistics stale, not incorrect |
 | DROP TABLE/INDEX | target foreground DML | `SERIALIZED` | existing SchemaLock/TableWriterGate transaction protocol |
@@ -11475,6 +11613,10 @@ under §3.3.6. During `RECOVERING` no normal maintenance exists. At
 workers only release safe volatile ownership for non-clean teardown, and no
 vacuum, ANALYZE row publication, status-cutoff advance, statistics GC, or new
 cleanup write continues.
+
+During drain, every existing write-capable transaction retains its write-status dependency
+through its ordinary C5/A3 cleanup, and any concurrent status reclaimer remains constrained
+by those registrations. Shutdown introduces no separate early-release path.
 
 A VACUUM pass is a sequence of system-maintenance publication units. An exactly
 restored provisional unit may fail the pass safely; earlier successful WAL-backed
@@ -11540,6 +11682,14 @@ or degrade plans, but correctness never depends on prompt VACUUM or ANALYZE.
 9. DROP marks RETIRING before VACUUM admission: the pass is not admitted.
 10. DROP commits while VACUUM still has pages/guards: logical DROP is effective,
     but those physical files remain linked/owned until all claims and guards drain.
+11. A write-capable transaction registers before a cutoff attempt: the greatest legal
+    page-aligned cutoff cannot retire that transaction's TxnId.
+12. A cutoff `C` publishes before a new write-capable transaction registers: its newly
+    assigned TxnId is at least `C`, and its dependency is registered before admission.
+13. An idle READ COMMITTED write-capable transaction with no SQL snapshot still retains its
+    own write-status dependency.
+14. C4/A2 terminal publication alone does not remove the dependency; C5/A3 does, after
+    which already-persistent references independently continue to pin status history.
 
 #### Forbidden maintenance implementations
 
@@ -11561,6 +11711,8 @@ V1 explicitly forbids:
 14. physically deleting old statistics without ordinary catalog MVCC/snapshot safety.
 15. placing STATS_PUBLISH waits in a graph that cannot see SchemaLock, TableWriterGate, manifest-change, tuple-lock, or unique-key dependencies;
 16. treating a deadlock victim as permission to release publication/retirement ownership before §9.14 terminal publication.
+17. advancing status cutoff past a registered write-capable transaction's own TxnId;
+18. publishing persistent `xmin`/`xmax` for a transaction whose write-status dependency is absent or already released.
 
 ## 14.18 Vacuum/reclamation invariants
 
@@ -11594,6 +11746,8 @@ V1 explicitly forbids:
 27. ANALYZE publishes only after current table/schema/index-manifest revalidation under a terminal-lifetime publication claim.
 28. Statistics cache install is monotonic by applicable object identity and StatsVersion and cannot reinstall after DROP.
 29. DROP may become semantically committed before maintenance owners drain, but physical unlink waits for every claim/guard/owner.
+30. Status-cutoff publication cannot retire the TxnId of a registered write-capable transaction that may still publish that TxnId into persistent correctness metadata.
+31. A TxnId may enter the retired range only after both its runtime future-publication blocker and every existing persistent status dependency are absent.
 
 ---
 
@@ -11635,6 +11789,13 @@ Section 11.13 is authoritative for cross-statement retained ownership. In
 particular, a shared writer gate does not globally prohibit later unrelated DDL:
 its SchemaLock wait is legal and enters the same graph as the writer-gate wait.
 The same-table upgrade remains the explicit proactive rejection.
+
+Publishing the current normal TxnId in persistent MVCC correctness metadata is
+authorized only while the transaction retains its §9.4 write-status dependency. This
+transaction-lifetime precondition covers INSERT's new `xmin`, UPDATE's new `xmin` and old
+version `xmax`, DELETE's `xmax`, and transaction-owned catalog/system MVCC writes. It is
+established by write-capable transaction registration rather than by a lazy first-write
+check, and no such publication is legal after C5/A3 releases it.
 
 ## 15.2 INSERT
 
@@ -11771,7 +11932,8 @@ C4. execute the §9.14 runtime terminal-publication linearization, including
 C5. put catalog/statistics caches in a coherent installed-or-invalidated state,
     release TUPLE_WRITE/UNIQUE_KEY locks and
     TableWriterGate/SchemaLock/STATS_PUBLISH/MANIFEST_CHANGE holdings,
-    unregister snapshots, and finish required transaction cleanup
+    unregister snapshots, release any registered write-status dependency, and finish
+    required transaction cleanup
 C6. only now return/send successful COMMIT acknowledgement
 ```
 
@@ -11799,7 +11961,8 @@ A2. execute the §9.14 runtime terminal-publication linearization, including
     runtime outcome cache ABORTED, state ABORTED, and active removal
 A3. release logical locks and
     TableWriterGate/SchemaLock/STATS_PUBLISH/MANIFEST_CHANGE holdings, unregister
-    snapshots, transfer private/orphan cleanup ownership, and finish cleanup
+    snapshots, release any registered write-status dependency, transfer private/orphan
+    cleanup ownership, and finish cleanup
 A4. only then acknowledge explicit ROLLBACK or return the transaction-fatal
     statement's original error with transaction outcome ABORTED
 ```
