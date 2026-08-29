@@ -4211,10 +4211,359 @@ The root-removal result matrix is:
 
 #### Control slots and required recovery inputs
 
-Build fixtures for one valid control slot, two valid slots, and no valid slots. Exercise
-the selection, unsupported-version, corruption, and legal older-generation fallback cases
-defined by §3.3.3 and §13.2. Assert the selected checkpoint/control generation and exact
-structured open result; do not duplicate the control-slot truth table here.
+This subsection is the detailed persistent-codec and selection-verification owner for
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §§13.2–13.3. It specializes the independent-oracle
+rules already used for WAL without replacing the byte layout, allocator, checkpoint, or
+open semantics owned by Architecture. Numeric Exhaustion and Terminal-Boundary Verification
+remains the owner of terminal allocator behavior; the Crash Injection Framework remains the
+owner of checkpoint-installation and torn-publication prefixes.
+
+##### Independent byte, endian, CRC, and decode oracles
+
+Build each candidate slot in a test-owned 4096-byte array initialized to zero. Write every
+field from the mathematical fixture value by explicit byte shifts, not by copying a host
+structure or calling a production control encoder. Assemble the complete file by placing
+slot 0 at file bytes `0..4095` and slot 1 at `4096..8191`, then assert a file length of
+exactly 8192 bytes. Independently reject 4095-byte and 4097-byte slot representations and
+whole files shorter or longer than 8192 bytes; a malformed whole-file frame cannot be made
+canonical by finding a plausible slot prefix inside it.
+
+The endian oracle compares every uint16, uint32, and uint64 byte individually against
+least-significant-byte-first expectations. The decode oracle reads those bytes with a
+separate test-side routine and compares the resulting values with the fixture constants.
+A production encode/decode round trip is useful additional coverage but is never the byte
+or semantic oracle because both directions may share the same offset or endian defect.
+
+The CRC oracle uses an independent CRC32C implementation or independently generated fixed
+vectors. First require the standard check value:
+
+```text
+CRC32C("123456789") = 0xE3069283
+```
+
+Then compute over all 4096 slot bytes while supplying logical zero for offsets `80..83`,
+regardless of the stored checksum bytes, and store the result little-endian at offset 80.
+Whole-slot CRC detects torn or random changes; exact reserved-zero and relational checks
+separately enforce the supported-v1 grammar, so a checksum-valid malformed v1 slot remains
+invalid.
+
+Every primary negative fixture changes exactly one independent contract. Recompute and
+store a correct CRC after changing a semantic field or reserved byte; retain every semantic
+field when testing the CRC itself. This prevents checksum failure from masking a format or
+relational validator. Expected classifications come from §§4.14 and 13.2, never from the
+production decoder's returned category or validator execution order.
+
+##### Distinctive valid-slot byte fixture
+
+The canonical byte-oracle vector uses the following legal non-palindromic values. Its
+checkpoint-bearing form is paired with independently framed retained WAL containing a
+complete checkpoint whose BEGIN and END records occur at the listed aligned record starts,
+whose END redo value is `0x0000000001020308`, and whose DPT justifies that redo bound. The
+slot-level vector can also be tested before the checkpoint usability layer so those two
+validation stages remain observable.
+
+| Offset | Width | Field | Encoding | Canonical value/domain | Positive fixture / expected bytes | Single-defect negative fixture | Oracle |
+|---:|---:|---|---|---|---|---|---|
+| 0 | 8 | family magic | exact ASCII | `DBLUSCTL` | `44 42 4C 55 53 43 54 4C` | changed, shifted, lowercase, or embedded-NUL magic, one case at a time | byte comparison before version dispatch |
+| 8 | 2 | `format_version` | LE uint16 | `1` | `01 00` | `0`; separately `2` for future dispatch | byte/endian and version-class oracle |
+| 10 | 2 | `header_size` | LE uint16 | `88` | `58 00` | `0`, `87`, `89`, and another representable value separately | exact supported-v1 grammar |
+| 12 | 4 | `flags` | LE uint32 | `0` | `00 00 00 00` | one assigned bit set | exact zero mask with recomputed CRC |
+| 16 | 8 | `generation` | LE uint64 | `0x0102030405060708` | `08 07 06 05 04 03 02 01` | zero | byte/endian plus nonzero semantic check |
+| 24 | 8 | `latest_checkpoint_lsn` | LE uint64 LSN | `0x0000000011223348` | `48 33 22 11 00 00 00 00` | zero while either other checkpoint field remains nonzero | byte/endian, triplet, then referenced-WAL oracle |
+| 32 | 8 | `latest_checkpoint_end_lsn` | LE uint64 LSN | `0x0000000022334458` | `58 44 33 22 00 00 00 00` | value below BEGIN | byte/endian, relation, then referenced-WAL oracle |
+| 40 | 8 | `checkpoint_redo_lsn` | LE uint64 LSN | `0x0000000001020308` | `08 03 02 01 00 00 00 00` | zero while BEGIN/END remain nonzero | byte/endian, triplet, then END/DPT oracle |
+| 48 | 8 | `reserved_txn_id_end` | LE uint64 exclusive end | `1,048,578 = 2 + 2^20` | `02 00 10 00 00 00 00 00` | `1` | byte/endian plus §9.3 reservation oracle |
+| 56 | 8 | `txn_status_reclaim_before` | LE uint64 exclusive cutoff | `97,922 = 2 + 3 * 32,640` | `82 7E 01 00 00 00 00 00` | below 2, above reservation end, or misaligned, separately | byte/endian plus §13.2.3 relation oracle |
+| 64 | 4 | `next_file_id` | LE uint32 next value | `0x12345678` | `78 56 34 12` | zero | byte/endian plus FileId-domain oracle |
+| 68 | 4 | `reserved32` | four zero bytes | `0` | `00 00 00 00` | one bit set | exact reserved-zero check with recomputed CRC |
+| 72 | 8 | `next_catalog_object_id` | LE uint64 next value | `0x1122334455667788` | `88 77 66 55 44 33 22 11` | zero | byte/endian plus shared-ID-domain oracle |
+| 80 | 4 | `crc32c` | LE uint32 | independent whole-slot checksum | `0x9673EF23` -> `23 EF 73 96` | one stored bit changed | independent CRC oracle; field logically zero during computation |
+| 84 | 4 | `reserved32` | four zero bytes | `0` | `00 00 00 00` | one bit set | exact reserved-zero check with recomputed CRC |
+| 88 | 4008 | reserved suffix | exact zero byte sequence | every byte zero | `00` repeated 4008 times through byte 4095 | set byte 88, a middle byte, or byte 4095, separately | full-range byte scan with recomputed CRC |
+
+The positive oracle compares all 4096 bytes, not only the listed nonzero runs, and then
+compares an independently decoded semantic object with every chosen value. The expected
+checksum `0x9673EF23` is derived from exactly this vector, including 4008 suffix zeros and
+logical zeros at bytes `80..83` during calculation.
+
+##### Canonical initial-file fixture
+
+Construct the fresh-control state independently from §13.2.2 rather than by invoking a
+create path. Slot 0 uses generation 1, three zero checkpoint fields,
+`reserved_txn_id_end=2`, `txn_status_reclaim_before=2`, `next_file_id=1`, and
+`next_catalog_object_id=1`; all flags/reserved bytes are zero. Its independent CRC32C is
+`0x530BD55D`, stored as `5D D5 0B 53`. Slot 1 is exactly 4096 zero bytes and is a
+noncandidate, not a reason to reject the valid initial file.
+
+| File region / fact | Exact initial fixture | Independent assertion |
+|---|---|---|
+| file framing | 8192 bytes | no short/long/trailing data accepted |
+| slot 0 | canonical v1 bytes at `0..4095` | full byte comparison; CRC `5D D5 0B 53` |
+| checkpoint state | BEGIN/END/redo all zero | no installed checkpoint relation accepted |
+| allocator state | TxnId end 2, reclaim cutoff 2, FileId next 1, catalog-object next 1 | decoded values equal the four architecture constants |
+| slot 1 | zero at every byte `4096..8191` | invalid/noncandidate slot without corrupting slot 0 |
+| selected state | slot 0, generation 1 | open/control selection has one semantic authority |
+
+##### Field grammar, checkpoint usability, and high-water procedures
+
+Magic tests compare all eight bytes exactly. Mutate one byte, shift the sequence within the
+slot, use lowercase, and inject an embedded NUL as separate fixtures; no fuzzy prefix or
+substring match establishes ownership. Contrast a wrong-magic candidate paired with a valid
+v1 slot against an exact-magic positive version greater than 1 paired with an older valid
+v1 slot. The former permits ordinary independent-slot fallback; the latter returns
+`UNSUPPORTED_DATABASE_FORMAT` before supported-slot fallback. This fail-closed future
+dispatch prevents a v1 owner from selecting and later overwriting older state after a
+recognized newer owner has published control metadata.
+
+For supported version 1, vary `header_size`, `flags`, generation, both reserved32 fields,
+and the three suffix locations independently. Version zero is an invalid/corrupt claimed
+control slot. Generation zero is likewise invalid; generation `UINT64_MAX` is a valid
+selected terminal value, but every operation requiring another control publication must
+fail before wrap, slot write, or dependent state publication. The existing control-
+generation procedure under Numeric Exhaustion and Terminal-Boundary Verification remains
+the no-wrap owner.
+
+Checkpoint testing has two explicit layers:
+
+1. **Structural slot validity.** Accept exactly the all-zero no-checkpoint triplet, or three
+   nonzero fields with `latest_checkpoint_lsn <= latest_checkpoint_end_lsn`. Reject each
+   mixed-zero combination and END-before-BEGIN with a recomputed valid CRC.
+2. **Recovery usability.** For a structurally valid checkpoint-bearing slot, independently
+   decode the referenced retained BEGIN/DATA/END sequence and apply §§13.5–13.9: record
+   starts and cross-links, complete contiguous DATA indexes, totals, CRC/framing, END redo
+   value, and valid WAL range must agree. Test a complete sequence, an incomplete or
+   malformed sequence, an unaligned/non-record-start pointer, and a pointer beyond valid WAL.
+
+A newer structurally valid but checkpoint-unusable slot may fall back to an older candidate
+only when all recovery objects referenced by the older candidate are retained and valid.
+The checkpoint codecs in WAL Persistent Codec Verification and the checkpoint boundaries in
+the Crash Injection Framework remain the complete sequence and installation procedures;
+this subsection supplies their exact control-slot bytes and selection input.
+
+Exercise high-water fields with the following matrix. “Persisted maximum” is a legal
+terminal next-value state; the next allocation/update is the separately tested exhaustion
+operation, not persisted wraparound. TxnId writers additionally prove exact `2^20` block
+progression even though slot validation's local lower-bound check is stated separately.
+
+| Field / case | Values | Byte-valid? | Relationally valid? | Slot usable? | Required observation / exhaustion owner |
+|---|---|---:|---:|---:|---|
+| TxnId initial minimum | `reserved_txn_id_end=2` | yes | yes | yes | no range reserved yet |
+| TxnId normal block | `1,048,578 = 2 + 2^20` | yes | yes | yes | durable exact block precedes issue; lost suffix is never reused |
+| TxnId maximum block end | `18,446,744,073,708,503,042` | yes | yes | yes | next exact block returns `TXN_ID_EXHAUSTED` without partial block or wrap |
+| TxnId below minimum | `reserved_txn_id_end=1` | yes | no | no | invalid supported-v1 slot |
+| reclaim initial | cutoff `2`, reservation end `2` | yes | yes | yes | first normal boundary |
+| reclaim normal aligned | cutoff `32,642 = 2 + 32,640`, reservation end at least cutoff | yes | yes | yes | one complete status-page range retired at slot level |
+| reclaim maximum aligned under terminal reservation | cutoff `18,446,744,073,708,474,242`; reservation end `18,446,744,073,708,503,042` | yes | yes | yes | largest representable page-aligned cutoff not above authority |
+| reclaim below minimum | cutoff `1` | yes | no | no | invalid supported-v1 slot |
+| reclaim misaligned | cutoff `3`, reservation end greater | yes | no | no | modulo-32,640 relation rejected |
+| reclaim beyond reservation | cutoff `32,642`, reservation end `2` | yes | no | no | cutoff cannot outrun reserved TxnId authority |
+| FileId initial/normal | `next_file_id=1` / another nonzero value | yes | yes | yes | durable next value precedes returned candidate |
+| FileId exhausted next state | `next_file_id=UINT32_MAX` | yes | yes | yes | last returned ID was `UINT32_MAX-1`; next request returns `FILE_ID_EXHAUSTED` |
+| FileId invalid | `next_file_id=0` | yes | no | no | invalid supported-v1 slot |
+| catalog ID initial/normal | `next_catalog_object_id=1` / another nonzero value | yes | yes | yes | one shared TableId/IndexId/ConstraintId sequence |
+| catalog ID exhausted next state | `next_catalog_object_id=UINT64_MAX` | yes | yes | yes | last returned ID was `UINT64_MAX-1`; next request returns `ID_EXHAUSTED` |
+| catalog ID invalid | `next_catalog_object_id=0` | yes | no | no | invalid supported-v1 slot |
+
+The byte fixture proves representation and slot-level relations. The persistent high-water
+crash matrix proves durable consumption and nonreuse; full status-history reclamation proof
+remains with the Chapter-14 procedures rather than being inferred from a control value.
+
+##### CRC and format-classification matrices
+
+| CRC fixture | Independent expected CRC | Stored CRC | CRC-valid? | Semantic-valid? | Required result |
+|---|---|---|---:|---:|---|
+| distinctive canonical bytes | `0x9673EF23` | `0x9673EF23` | yes | yes | valid candidate, subject to checkpoint usability |
+| covered field bit flipped, checksum unchanged | independently changed `C'` | `0x9673EF23` | no | otherwise yes | invalid candidate / CRC corruption |
+| stored CRC bit flipped | `0x9673EF23` | one-bit-different value | no | otherwise yes | invalid candidate / CRC corruption |
+| semantic field invalid, CRC recomputed | independently changed `C'` | same `C'` | yes | no | invalid supported-v1 candidate; checksum does not legalize grammar |
+| suffix byte invalid, CRC recomputed | independently changed `C'` | same `C'` | yes | no | invalid supported-v1 candidate; proves full suffix validation |
+| checker includes stored bytes instead of logical zeros | `0x9673EF23` under canonical rule | implementation's self-referential result | no oracle agreement | otherwise yes | test fails; canonical slot is not redefined by the wrong calculation |
+
+The format matrix uses “fallback” only for another independently valid/usable supported-v1
+slot. A short/long whole file fails control-file framing even if one prefix looks plausible.
+
+| Fixture | Owning format recognized? | CRC valid under applicable grammar? | v1 semantic grammar valid? | Candidate valid/usable? | Fallback allowed? | Required result |
+|---|---:|---:|---:|---:|---:|---|
+| canonical v1 slot | yes | yes | yes | yes, then checkpoint usability | N/A | accept candidate |
+| wrong magic | no | N/A | N/A | no | yes | invalid/non-owning candidate; lifecycle identity rule decides if none remain |
+| exact magic, version 0 | yes | valid v1-shaped checksum in isolated fixture | no | no | yes | invalid/corrupt candidate |
+| exact magic, positive version greater than 1 | yes | not interpreted with v1 CRC | N/A | no | no | `UNSUPPORTED_DATABASE_FORMAT` |
+| wrong `header_size` | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| flags nonzero | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| generation zero | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| checkpoint triplet structurally inconsistent | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| checkpoint sequence missing/malformed/beyond valid WAL | yes | yes | yes at slot layer | no for recovery | yes, only to retained valid older authority | control/checkpoint corruption if no usable candidate |
+| `reserved_txn_id_end < 2` | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| reclaim cutoff below 2, misaligned, or above reservation | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| `next_file_id=0` | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| reserved field at 68 nonzero | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| `next_catalog_object_id=0` | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| stored CRC invalid | yes | no | otherwise yes | no | yes | invalid/corrupt candidate |
+| reserved field at 84 nonzero | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| any suffix byte nonzero | yes | yes | no | no | yes | invalid/corrupt v1 candidate |
+| 4095/4097-byte standalone slot or non-8192-byte file | insufficient canonical framing | N/A | no | no | no whole-file salvage | control framing/open failure |
+| two valid slots, equal generation, identical bytes | yes | yes | yes | equivalent authority | N/A | deterministic semantic acceptance; no physical-slot choice is observable |
+| two valid slots, equal generation, different legal contents | yes | yes | yes individually | no unique authority | no | `CORRUPT_DATABASE`/control corruption |
+
+##### Slot selection, update, and crash procedures
+
+Construct each slot independently, then assemble the pair in both physical orders where
+applicable. Selection is by supported validity, checkpoint usability, and generation—not by
+slot number.
+
+| Slot 0 | Slot 1 | Selected authority | Open allowed? | Classification / reason |
+|---|---|---|---:|---|
+| valid generation G | all-zero initial noncandidate | slot 0 G | yes | canonical initial/one-valid case |
+| valid G | valid G+1 | slot 1 G+1 | yes | highest valid usable generation |
+| valid G+1 | valid G | slot 0 G+1 | yes | physical position is irrelevant |
+| valid G | CRC-invalid current-v1 candidate | valid G | yes | ordinary independent-slot fallback |
+| valid G | semantic-invalid current-v1 candidate | valid G | yes | ordinary independent-slot fallback |
+| invalid current-v1 candidate | invalid current-v1 candidate | none | no | no usable control authority; no default recreation |
+| valid G, bytes X | valid G, identical bytes X | semantic state X; either copy equivalent | yes | equal generation has one byte-identical authority |
+| valid G, legal bytes X | valid G, different legal bytes Y | none | no | equal-generation split authority is corruption |
+| valid older v1 G | exact-magic positive future version | none | no | `UNSUPPORTED_DATABASE_FORMAT`; downgrade fallback forbidden |
+| valid v1 G | wrong-magic candidate | valid v1 G | yes | non-owning invalid candidate differs from future owner |
+| older valid/usable G | newer structurally valid but checkpoint-unusable G+1 | older G only if all its objects remain retained and valid | conditional | descending usable-candidate rule; otherwise control/checkpoint corruption |
+
+Map alternating publication to the persistent high-water crash matrix and add byte-exact
+assertions at each boundary:
+
+```text
+select the nonselected physical slot
+derive every unchanged field from the latest selected in-memory state
+checked generation + 1
+encode the complete 4096-byte vector and independent expected CRC
+one exact-position 4096-byte write
+successful fdatasync(database.control)
+only then runtime publication of the new generation
+```
+
+Pause before the write, before the CRC field, inside the reserved suffix, after all bytes
+but before known synchronization, after successful synchronization, and before/after runtime
+publication. A partial slot is invalid and the old slot remains authority. If a crash occurs
+after complete bytes but before the caller knows synchronization, select only from the bytes
+that independently survive as a complete valid slot; either old or new authority is legal
+according to that exact durable image, never according to the interrupted call's return path.
+The old slot remains a fallback until a complete newer slot survives. Two independently
+validated slots are necessary because a torn candidate update must not destroy the previous
+durable authority.
+
+The control-write event trace also proves §13.3: ordinary transaction begin/commit/abort
+within an already reserved TxnId block causes no control write or sync, while TxnId block
+reservation, FileId/catalog-object allocation, and successful checkpoint installation use
+the serialized alternating path. The test observes architecture events and does not require
+a particular mutex or production function name.
+
+##### Cross-owner exhaustion and checkpoint mappings
+
+The existing procedures remain primary owners for these dimensions:
+
+| Control-field/protocol concern | Existing detailed procedure | Byte-exact specialization supplied here |
+|---|---|---|
+| generation terminal value | Numeric Exhaustion — control generation | exact generation bytes, valid `UINT64_MAX` selected slot, and no attempted wrapped slot |
+| FileId terminal allocation | Numeric Exhaustion — FileId specialization | exact `next_file_id` bytes and zero-field corruption case |
+| shared catalog-object terminal allocation | Numeric Exhaustion — shared catalog-object IDs | exact uint64 bytes, zero-field corruption, and one shared carrier |
+| TxnId durable reservation | Numeric Exhaustion — TxnId terminal block and persistent crash matrix | exact `reserved_txn_id_end` bytes and relations to reclaim cutoff |
+| alternating/torn update | Persistent high-water crash procedure and Crash Injection Framework | complete independent slot bytes, CRC, physical placement, and partial-prefix cases |
+| checkpoint record validity | WAL persistent checkpoint codecs | exact control triplet bytes and structural-versus-usable distinction |
+| checkpoint installation | Crash Injection Framework and shutdown/recovery lifecycle procedures | WAL-durable-before-control and control-sync-before-runtime-selection assertions |
+
+##### Atomic control-file obligation coverage map
+
+The inventory below splits §§13.2–13.3 when a separately corruptible byte range,
+classification, durability boundary, or observable allocator result exists. No target count
+is imposed. `COMPLETE` means this subsection or the named existing owner supplies an
+independent deterministic procedure, not merely that Architecture states the rule.
+
+| # / domain | Atomic obligation | Architecture owner | Verification owner | Deterministic procedure/reference | Status |
+|---:|---|---|---|---|---|
+| 1 A | control basename is exactly `database.control` | §13.2 | this subsection — file fixture | exact owner-path fixture | COMPLETE |
+| 2 A | complete control file is exactly 8192 bytes | §13.2 | independent byte oracle | exact/short/long whole-file fixtures | COMPLETE |
+| 3 A | file contains exactly two slots | §13.2 | independent byte oracle | two-region assembly and no third/trailing region | COMPLETE |
+| 4 A | slot 0 and slot 1 occupy `0..4095` and `4096..8191` | §13.2 | independent byte oracle | absolute-offset comparison | COMPLETE |
+| 5 A | each slot representation is exactly 4096 bytes | §13.2.1 | independent byte oracle | 4095/4096/4097 cases | COMPLETE |
+| 6 B | family magic occupies bytes `0..7` exactly | §13.2.1 | slot-format matrix | exact ASCII and four isolated mutations | COMPLETE |
+| 7 B | format version occupies bytes `8..9` | §13.2.1 | slot-format matrix | distinctive LE uint16 vector | COMPLETE |
+| 8 B | header size occupies bytes `10..11` and equals 88 | §13.2.1 | slot-format/classification matrices | 0/87/88/89 cases | COMPLETE |
+| 9 B | flags occupy bytes `12..15` and equal zero | §13.2.1 | slot-format matrix | recomputed-CRC one-bit mutation | COMPLETE |
+| 10 B | generation occupies bytes `16..23` | §13.2.1 | distinctive vector | independent LE uint64 bytes | COMPLETE |
+| 11 B | checkpoint BEGIN LSN occupies bytes `24..31` | §13.2.1 | distinctive vector / checkpoint procedure | independent LE uint64 bytes | COMPLETE |
+| 12 B | checkpoint END LSN occupies bytes `32..39` | §13.2.1 | distinctive vector / checkpoint procedure | independent LE uint64 bytes | COMPLETE |
+| 13 B | checkpoint redo LSN occupies bytes `40..47` | §13.2.1 | distinctive vector / checkpoint procedure | independent LE uint64 bytes | COMPLETE |
+| 14 B | reserved TxnId end occupies bytes `48..55` | §13.2.1 | distinctive vector / high-water matrix | independent LE uint64 bytes | COMPLETE |
+| 15 B | status reclaim cutoff occupies bytes `56..63` | §13.2.1 | distinctive vector / high-water matrix | independent LE uint64 bytes | COMPLETE |
+| 16 B | next FileId occupies bytes `64..67` | §13.2.1 | distinctive vector / high-water matrix | independent LE uint32 bytes | COMPLETE |
+| 17 B | bytes `68..71` are reserved zero | §13.2.1 | slot-format matrix | one-bit defect with valid recomputed CRC | COMPLETE |
+| 18 B | next catalog-object ID occupies bytes `72..79` | §13.2.1 | distinctive vector / high-water matrix | independent LE uint64 bytes | COMPLETE |
+| 19 B | CRC field occupies bytes `80..83` | §13.2.1 | CRC matrix | exact expected LE CRC bytes | COMPLETE |
+| 20 B | bytes `84..87` are reserved zero | §13.2.1 | slot-format matrix | one-bit defect with valid recomputed CRC | COMPLETE |
+| 21 B | bytes `88..4095` are all zero | §13.2.1 | slot-format matrix | first/middle/final isolated defects | COMPLETE |
+| 22 C | every uint16 is explicit little-endian | §13.2.1 | endian oracle | non-palindromic uint16 values | COMPLETE |
+| 23 C | every uint32 is explicit little-endian | §13.2.1 | endian oracle | non-palindromic uint32 values, including CRC | COMPLETE |
+| 24 C | every uint64 is explicit little-endian | §13.2.1 | endian oracle | non-palindromic uint64 values | COMPLETE |
+| 25 C | codec does not depend on host struct layout/endianness | §§4.2, 13.2.1 | byte oracle | byte-shift builder and full-array comparison | COMPLETE |
+| 26 C | decoded semantic values are independently checked | §13.2.1 | decode oracle | test-side read compared with chosen constants | COMPLETE |
+| 27 D | CRC32C covers all 4096 slot bytes | §13.2.1 | CRC oracle | distinctive fixed vector | COMPLETE |
+| 28 D | CRC bytes are logically zero during calculation | §13.2.1 | CRC oracle | canonical-versus-self-referential calculation | COMPLETE |
+| 29 D | CRC implementation is independent | §13.2.1 | CRC oracle | standard check vector plus test-side implementation | COMPLETE |
+| 30 D | stored CRC is little-endian | §13.2.1 | slot-format/CRC matrices | `23 EF 73 96` and initial `5D D5 0B 53` | COMPLETE |
+| 31 D | covered-byte or stored-CRC corruption is detected | §§13.2.1, 13.2.3 | CRC matrix | separate payload/stored-bit flips | COMPLETE |
+| 32 D | CRC-valid malformed v1 remains invalid | §§4.14, 13.2.3 | single-defect policy / CRC matrix | semantic mutation with recomputed CRC | COMPLETE |
+| 33 E | exact magic plus version 1 selects v1 grammar | §§4.14.2, 13.2.3 | format-classification matrix | canonical positive slot | COMPLETE |
+| 34 E | exact magic plus version 0 is invalid/corrupt | §§4.14.2, 13.2.3 | format-classification matrix | isolated zero-version slot | COMPLETE |
+| 35 E | exact magic plus positive future version is unsupported | §§4.14.2, 4.14.6, 13.2.3 | format-classification matrix | version-2 discriminator fixture | COMPLETE |
+| 36 E | future owning version blocks fallback to older v1 | §§4.14.6, 13.2.3 | slot-selection matrix | future-plus-valid-v1 pair | COMPLETE |
+| 37 E | wrong magic/current-v1 invalidity differs from future ownership | §§4.14.6, 13.2.3 | magic procedure / selection matrix | wrong-magic-plus-valid-v1 contrast | COMPLETE |
+| 38 F | supported-v1 flags and all reserved bytes are exact zero | §§4.14.3, 13.2.1–13.2.3 | slot-format matrix | isolated recomputed-CRC mutations | COMPLETE |
+| 39 F | generation must be nonzero | §13.2.3 | format-classification matrix | generation-zero fixture | COMPLETE |
+| 40 F | highest valid usable generation is selected | §13.2.3 | slot-selection matrix | G/G+1 in both positions | COMPLETE |
+| 41 F | physical slot number does not determine authority | §13.2.3 | slot-selection matrix | reversed generation pair | COMPLETE |
+| 42 F | equal-generation identical slots are one equivalent authority | §13.2.3 | slot-selection matrix | byte-identical valid pair | COMPLETE |
+| 43 F | equal-generation different contents are corruption | §13.2.3 | slot-selection matrix | CRC-correct legal X/Y pair | COMPLETE |
+| 44 F | generation never wraps | §§4.3.2, 13.2.3 | Numeric Exhaustion — control generation | selected `UINT64_MAX`, next update rejected | COMPLETE |
+| 45 G | no-checkpoint triplet is exactly all zero | §13.2.3 | checkpoint structural procedure | all-zero positive and mixed-zero negatives | COMPLETE |
+| 46 G | installed-checkpoint triplet is entirely nonzero | §13.2.3 | checkpoint structural procedure | complete positive and each mixed-zero case | COMPLETE |
+| 47 G | checkpoint BEGIN is not after END | §13.2.3 | checkpoint structural procedure | END-before-BEGIN fixture | COMPLETE |
+| 48 G | checkpoint-bearing slot is usable only with a valid retained sequence | §§13.2.3, 13.5–13.9 | checkpoint usability procedure / WAL codec | complete, malformed, absent, and out-of-tail cases | COMPLETE |
+| 49 G | older fallback requires all referenced objects retained and valid | §13.2.3 | slot-selection matrix / Crash Injection Framework | usable and unusable older-candidate variants | COMPLETE |
+| 50 H | initial slot 0 has the exact canonical field values | §13.2.2 | initial-file matrix | full 4096-byte vector and CRC | COMPLETE |
+| 51 H | initial slot 1 is all zero and a noncandidate | §13.2.2 | initial-file matrix | full 4096-byte zero comparison | COMPLETE |
+| 52 I | reserved TxnId end is at least 2 | §13.2.3 | high-water matrix | values 2 and 1 | COMPLETE |
+| 53 I | TxnId reservation uses durable exact blocks and forbids reuse | §§9.3, 13.2.4 | Numeric Exhaustion — TxnId / high-water mapping | first, normal, terminal, and crash-gap cases | COMPLETE |
+| 54 I | reclaim cutoff is at least 2 | §13.2.3 | high-water matrix | values 2 and 1 | COMPLETE |
+| 55 I | reclaim cutoff does not exceed reserved TxnId end | §13.2.3 | high-water matrix | isolated beyond-end fixture | COMPLETE |
+| 56 I | reclaim cutoff obeys `(value-2) mod 32640 = 0` | §13.2.3 | high-water matrix | aligned and misaligned fixtures | COMPLETE |
+| 57 I | next FileId is nonzero | §§13.2.3, 13.2.5 | high-water matrix | values 1 and 0 | COMPLETE |
+| 58 I | FileId next value is durable before return and never reused | §13.2.5 | Numeric Exhaustion — persistent high-water | crash before/after sync and terminal state | COMPLETE |
+| 59 I | next catalog-object ID is nonzero | §§13.2.3, 13.2.6 | high-water matrix | values 1 and 0 | COMPLETE |
+| 60 I | catalog IDs share one durable no-reuse sequence | §13.2.6 | Numeric Exhaustion — shared catalog IDs | alternating typed requests and crash gaps | COMPLETE |
+| 61 J | one valid and one zero/invalid slot selects the valid slot | §§13.2.2–13.2.3 | slot-selection matrix | zero, CRC-invalid, semantic-invalid variants | COMPLETE |
+| 62 J | two invalid slots provide no default/recreated authority | §13.2.3 | slot-selection matrix / lifecycle open faults | paired invalid fixtures | COMPLETE |
+| 63 J | checkpoint-unusable newer candidate uses descending fallback rules | §13.2.3 | slot-selection/checkpoint usability procedures | newer bad reference plus older variants | COMPLETE |
+| 64 K | updates target the nonselected slot | §13.2.4 | alternating update procedure | physical-slot event trace | COMPLETE |
+| 65 K | update derives from latest state so unrelated fields are preserved | §13.2.4 | alternating update procedure | concurrent distinct-field transitions | COMPLETE |
+| 66 K | update uses checked old generation plus one | §§13.2.3–13.2.4 | alternating update / Numeric Exhaustion | normal and terminal generation cases | COMPLETE |
+| 67 K | update encodes a complete slot and canonical CRC | §13.2.4 | alternating update / byte oracle | prewrite vector comparison | COMPLETE |
+| 68 K | control write is one exact-position 4096-byte transfer request | §13.2.4 | alternating update procedure | exact/short transfer instrumentation | COMPLETE |
+| 69 K | control file is synchronized before runtime publication | §13.2.4 | alternating update / crash framework | barriers before/after `fdatasync` | COMPLETE |
+| 70 K | torn candidate preserves prior valid authority | §13.2.4 | alternating update procedure | stops before CRC/in suffix and reopen | COMPLETE |
+| 71 K | complete uncertain write is judged from surviving bytes, not call outcome | §§13.2.3–13.2.4 | persistent high-water crash procedure | exact surviving old/new images | COMPLETE |
+| 72 K | concurrent control transitions are serialized without lost fields | §13.2.4 | alternating update procedure | TxnId/FileId/checkpoint/reclaim contenders | COMPLETE |
+| 73 L | generation exhaustion prevents dependent publication | §§4.3.2, 13.2.3 | Numeric Exhaustion — control generation | selected maximum fixture | COMPLETE |
+| 74 L | FileId exhaustion preserves terminal next value | §§4.3.2.1, 13.2.5 | Numeric Exhaustion — FileId | last candidate and next failure | COMPLETE |
+| 75 L | catalog-object exhaustion preserves terminal next value | §§4.3.2.1, 13.2.6 | Numeric Exhaustion — shared IDs | last candidate and next failure | COMPLETE |
+| 76 L | TxnId exact-block exhaustion preserves nonreuse | §§4.3.2.1, 9.3 | Numeric Exhaustion — TxnId | terminal block and next failure | COMPLETE |
+| 77 M | ordinary transactions do not rewrite/sync control within a reserved block | §13.3 | update-frequency event trace | ordinary begin/commit/abort positive control | COMPLETE |
+| 78 M | global high-water/checkpoint transitions use durable control publication | §13.3 | update-frequency event trace / existing crash owners | each listed transition routed through alternating path | COMPLETE |
+| 79 N | checkpoint WAL is durable before control installation | §13.5 | Crash Injection Framework / checkpoint codec | before/after END durability boundary | COMPLETE |
+| 80 N | control sync precedes in-memory checkpoint/FPI publication | §§13.2.4, 13.5 | Crash Injection Framework / alternating update | before/after control sync and runtime epoch boundary | COMPLETE |
+| 81 O | short/long file or slot framing cannot be salvaged | §§13.2–13.2.1 | independent byte oracle | exact 4095/4097 and 8191/8193 fixtures | COMPLETE |
+| 82 O | corrupt v1, unsupported future owner, and checkpoint-unusable state remain distinct | §§4.14, 13.2.3 | classification and selection matrices | three isolated pair/file fixtures | COMPLETE |
+
+Control-file coverage totals: **COMPLETE 82; PARTIAL 0; MISSING 0;
+CONTRADICTORY 0.**
+
+##### Required recovery inputs
 
 Separately remove, replace, truncate, or corrupt each architecture-required recovery input:
 
