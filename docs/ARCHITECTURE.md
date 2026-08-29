@@ -12162,17 +12162,27 @@ For an INSERT:
    input rows are owners and are not ordinary-snapshot-hidden for this purpose
 5. choose/validate a heap page using the advisory FSM
 6. construct/append the required heap PAGE_INIT/PAGE_IMAGE/PAGE_DELTA redo
-7. install the heap tuple version and corresponding page_lsn
+7. publish the heap tuple version and corresponding page_lsn under the heap
+   write guard, then release that guard latch-before-pin under §§5.14, 7.7,
+   7.10.1, and 12.12
 
 8. for every index:
        perform the B+ MTR inserting
        (encoded_user_key, RID)
+       using that MTR's own B+ page guards and §8.19 latch ordering
+       release those guards under §§7.7 and 8.25 after successful MTR
+       publication
 
-9. release short-lived heap/B+ page latches/pins
-10. retain UNIQUE_KEY locks through terminal COMMITTED/ABORTED publication
+9. retain UNIQUE_KEY locks through terminal COMMITTED/ABORTED publication
 ```
 
 Heap redo describing the referenced RID is established before any B+ MTR that references that RID.
+
+The heap write guard is not retained into an index MTR. Releasing either heap or B+
+physical protection does not release transaction-duration TableWriterGate or UNIQUE_KEY
+ownership; the same physical/logical distinction applies to TUPLE_WRITE on DML paths that
+use it. Section 11.3 remains authoritative for the prohibition on transaction-lock waits
+under short-lived physical protection.
 
 For the final successful statement attempt, each logical input row successfully inserted
 contributes exactly one affected row. A successful single-row INSERT therefore reports one,
@@ -12404,7 +12414,10 @@ automatically execute §15.6 ABORT
 return a retryable serialization/write-conflict outcome to the transaction-owning layer
 ```
 
-V1 does not transparently rerun an aborted autocommit transaction. It returns the retryable conflict after ABORT; the client/application may submit a new request, which receives a **new TxnId**. A future explicit opt-in retry policy may do the same but cannot reuse this transaction identity.
+V1 does not transparently rerun an aborted autocommit transaction. It returns the retryable
+conflict after ABORT; the client/application may submit a new request, which receives a
+**new TxnId**. The v1 architecture does not define an explicit opt-in whole-request retry
+policy, and no separate request may reuse this transaction identity.
 
 An explicit user transaction is terminally aborted by this failure and the client/application decides whether to begin a new transaction and retry.
 
@@ -12418,7 +12431,8 @@ Even a pre-write-retryable statement MUST NOT expose irreversible external rows/
 
 Physical DML applies the stronger §31.9 publication rule: no partial RETURNING prefix is exposed from a statement that later fails, so external emission begins only after successful statement completion.
 
-Future statement savepoints/subtransactions could relax this v1 restriction, but they are not implicitly present.
+Statement savepoints, subtransactions, and statement-local physical undo are outside the
+v1 architecture baseline; they do not relax this publication or retry boundary.
 
 ## 15.8 Cross-layer contract
 
@@ -12444,7 +12458,9 @@ This chapter is the boundary between the persistent transactional storage core a
 4. Logical lock waits occur outside physical page/B+ latch waits.
 5. Index entries never decide MVCC visibility by themselves.
 6. UPDATE/DELETE revalidate the target after logical-lock acquisition.
-7. READ COMMITTED may internally restart only before the current statement attempt has installed its first persistent write.
+7. READ COMMITTED may internally restart only while
+   `current_statement_has_published_write == false`, before §39.1.2's first
+   transaction-owned mutation publication at the §12.12 publication point.
 8. A retry-requiring READ COMMITTED conflict after a persistent statement write aborts the transaction.
 9. Any higher-level automatic rerun after such an abort uses a new transaction identity.
 10. REPEATABLE READ aborts on a conflicting committed post-snapshot write.
