@@ -2350,7 +2350,7 @@ no NORMAL/DEAD/REDIRECT slot visited
 
 An INVALID head with any UNUSED slot, an unlisted UNUSED slot, duplicate membership, cycle, or noncanonical link is `CORRUPT_HEAP`; validation cannot loop indefinitely.
 
-Tuple-header transaction fields receive their existing structural domain checks without performing status lookup: `xmin` is `FROZEN_TXN_ID` or a normal TxnId, `xmax` is `INVALID_TXN_ID` or a normal TxnId, and `FROZEN_TXN_ID` is not a deleter. The previous-version sentinel pair must be both invalid or both present. A present previous PageNo is an ordinary published page `>=1` in the same heap file and its SlotId is non-sentinel; an obvious self-reference to the current RID is invalid. Same-page targets can be bounded-checked immediately. Cross-page target state/version-chain acyclicity is L2/L3 and is checked when traversed or by the verifier.
+Tuple-header transaction fields receive their existing structural domain checks without performing status lookup: `xmin` is `FROZEN_TXN_ID` or a normal TxnId, `xmax` is `INVALID_TXN_ID` or a normal TxnId, `FROZEN_TXN_ID` is not a deleter, and `xmax == INVALID_TXN_ID` requires `cmax == 0`. The previous-version sentinel pair must be both invalid or both present. A present previous PageNo is an ordinary published page `>=1` in the same heap file and its SlotId is non-sentinel; an obvious self-reference to the current RID is invalid. Same-page targets can be bounded-checked immediately. Cross-page target state/version-chain acyclicity is L2/L3 and is checked when traversed or by the verifier.
 
 RID dereference always occurs under the existing ReadEpochGuard/reuse protocol and checks expected heap FileId, published PageNo domain, embedded PageId, `slot < slot_count`, and caller-permitted state before exposing bytes. Query/index lookup requires NORMAL; vacuum/diagnostic operations may explicitly accept retained DEAD. UNUSED, reclaimed DEAD, REDIRECT_RESERVED, wrong-relation, or out-of-range targets return controlled stale/corruption classification according to the caller-specific protocol, never undefined access.
 
@@ -3165,6 +3165,25 @@ They exist because transaction identity and statement/command visibility are dis
 
 is valid and MUST NOT be interpreted as an invalid sentinel.
 
+For every persisted tuple header, the canonical no-deleter representation is:
+
+```text
+xmax = INVALID_TXN_ID
+cmax = 0
+```
+
+Therefore `xmax == INVALID_TXN_ID` requires `cmax == 0`. `xmax` is the
+discriminator for whether a deleting transaction exists, so `cmax` carries no
+independent MVCC meaning in this branch. The zero does not mean deletion by
+`CommandId{0}`; it is the canonical value of the semantically inactive field.
+
+Writers MUST establish this pair before publishing a recognized-v1 tuple.
+A persisted tuple with `xmax == INVALID_TXN_ID` and nonzero `cmax` is
+noncanonical heap metadata and MUST be classified as `CORRUPT_HEAP`; ordinary
+reads neither normalize it nor treat it as an unsupported future format.
+Requiring one representation prevents stale command bytes and makes page
+bytes, checksums, WAL page images, and structural validation deterministic.
+
 The exact visibility interpretation of `xmin`, `xmax`, `cmin`, and `cmax` is defined by §§9.6–9.7 and 10.2–10.4.
 
 ### 5.7.4 Previous-version pointer
@@ -3848,8 +3867,9 @@ No long-lived naked pointer/span into a buffer frame may survive after the prote
 29. A NULL VARCHAR descriptor is exactly `(0,0)`.
 30. Present VARCHAR payloads are packed consecutively in physical schema order with no gaps or overlaps.
 31. Present empty VARCHAR is distinct from NULL.
-32. `HeapPage` owns physical page mechanics, not SQL visibility.
-33. Physical heap scan order does not imply SQL result ordering.
+32. A persisted no-deleter tuple header has `xmax=INVALID_TXN_ID` and `cmax=0`; a nonzero `cmax` in that branch is `CORRUPT_HEAP`.
+33. `HeapPage` owns physical page mechanics, not SQL visibility.
+34. Physical heap scan order does not imply SQL result ordering.
 ---
 
 # 6. Free-Space Management and Physical Reclamation
@@ -12081,6 +12101,8 @@ For an INSERT:
        xmin = current TxnId
        xmax = INVALID_TXN_ID
        cmin = current CommandId
+       cmax = 0
+       prev = no previous version under §5.7.4
 
 3. encode every unique/primary user key and acquire required fully non-NULL
    UNIQUE_KEY locks in §11.9 order
@@ -12129,7 +12151,9 @@ For each target row:
 
 10. create new tuple version:
        xmin = current TxnId
+       xmax = INVALID_TXN_ID
        cmin = current CommandId
+       cmax = 0
        prev = old RID
 
 11. WAL-log/install the new tuple version
