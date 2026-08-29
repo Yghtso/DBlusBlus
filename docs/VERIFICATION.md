@@ -7727,6 +7727,331 @@ UPDATE t SET x = x + 1 WHERE x < 100;
 
 Run through an index access path and verify each qualifying logical target is updated once.
 
+This section is the procedural owner for the Chapter-15 composition contract. It uses the
+component procedures above for tuple bytes, page guards, B+ MTRs, transaction state, MVCC,
+logical locks, WAL publication, recovery, and reclamation; it does not restate those
+subsystem rules. Every DML fixture identifies one statement, one or more execution attempts,
+the attempt's snapshot and CommandId, and the exact first transaction-owned publication
+event, then compares the observed outcome with independent test-side models.
+
+#### Deterministic DML harness and independent oracles
+
+The harness records and can pause these implementation-independent semantic events:
+
+```text
+statement admitted / CommandId assigned / attempt begins / snapshot registered
+candidate produced / target-spool append / target finalized / predicate rechecked
+TableWriterGate acquired
+read epoch entered / TUPLE_WRITE request made live / epoch released
+tuple-lock waiter blocks / grant occurs / post-grant revalidation completes
+UNIQUE_KEY acquired / exact-key scan begins / candidate heap-rechecked / scan completes
+RID selected / tuple encoded / heap write guard acquired
+WAL record or MTR privately encoded / publication-authorizing append completes
+heap bytes and page_lsn publish / heap guard latch releases / heap pin releases
+index MTR begins / index entry and page_lsn publish / index guards release
+clean retry requested / attempt abandoned / replacement snapshot registered
+statement success reached / provisional count finalized / result envelope publishes
+MUST_ABORT publishes / automatic ABORT reaches A2 and A3
+implicit COMMIT reaches C3, C4, C5, and response publication
+```
+
+Fault points exist immediately before and after every publication-authorizing append and
+page/MTR publication, after each successful row, before and after every wait, during result
+spool finalization, and at each relevant C0–C6/A0–A4 boundary. Crash fixtures persist an
+explicit selected WAL prefix and selected old or new page images, omit all later operations,
+then reopen. Barriers and persisted-prefix construction, never sleeps, establish order.
+
+The independent oracles are:
+
+- a **statement ledger** that assigns one CommandId per admitted SQL statement, nests all
+  internal attempts beneath it, records the snapshot registration for each attempt, and
+  independently computes reuse, consumption, retry eligibility, and terminal state from
+  §§9.6, 9.9–9.10, 15.7, and 39.1;
+- the Chapter-10 **visibility oracle**, evaluated from fixture bytes, snapshot fields, and an
+  independent transaction-status map rather than through the production visibility path;
+- a **current-owner oracle** that maps the exact `xmax` sentinel/SELF/terminal/nonterminal/
+  invalid result and isolation level to wait, proceed, clean retry, serialization failure,
+  or corruption without consulting the DML implementation;
+- a **uniqueness oracle** that sorts canonical `(IndexId, encoded_key)` claims, enumerates
+  the complete physical equal-key run, heap-rechecks every RID, and applies §11.10's
+  current-state creator/deleter and exact `excluded_old_rid` rules;
+- a **header-byte oracle** that constructs the 48-byte little-endian tuple header from
+  field values and validates relational invariants independently of `TupleCodec`;
+- a **publication-prefix oracle** that starts from exact pre-operation page/frame/WAL state,
+  applies only validly appended records in order, and predicts published bytes, `page_lsn`,
+  `rec_lsn`, dirty/FPI state, and recovery outcome;
+- a **RID-retention oracle** that independently evaluates read-epoch registration/grace,
+  live queued/granted TUPLE_WRITE claims, index and predecessor cleanup, and slot state as
+  the Chapter-14 same-RID reuse conjunction;
+- a **transaction-state oracle** that combines the first-published-write flag, the
+  independently classified causal error, and terminal-publication stage to derive FA, MA,
+  NC, COMMIT eligibility, and required ownership lifetime from §39.1;
+- an **affected-row oracle** that uses only the final successful attempt's distinct finalized
+  logical inputs/targets and operation kind, never physical mutation or diagnostic counts;
+- a **result-envelope oracle** that separates statement success, transaction outcome, and
+  client observation for explicit transactions, autocommit, and transport failure.
+
+Negative fixtures alter one condition at a time while preserving every unrelated invariant.
+Instrumentation reports semantic events and ownership sets; container shape, worker count,
+batching, tuple-builder API, and lock implementation are not oracles.
+
+#### Statement attempts, CommandId, snapshots, and retry
+
+Create a statement object with CommandId `C` and place a barrier at each attempt start. For
+READ COMMITTED, force a current-owner conflict before the first transaction-owned
+publication. Assert that the first attempt unregisters its snapshot, discards its target and
+result spools and provisional count, and that the replacement attempt registers a fresh
+snapshot while retaining `C`. The fixture changes committed data between registrations so
+snapshot reuse and snapshot refresh produce distinguishable results. Retained transaction
+locks are allowed, but the replacement attempt repeats target discovery, revalidation, and
+every current-state uniqueness scan; no retained lock carries a prior semantic decision or
+row-count contribution.
+
+Repeat with the conflict after the first publication event. Assert no replacement attempt
+begins, `ACTIVE -> MUST_ABORT`, automatic A0–A4 cleanup occurs, and the client receives the
+canonical retryable conflict only after ABORT. A later request, if submitted by the fixture,
+has a new TxnId. For REPEATABLE READ, force the same committed post-snapshot conflict and
+assert the retained transaction snapshot is never replaced and the serialization path is
+transaction-fatal.
+
+The CommandId fixture starts at `0`, performs successful, clean-retried, recoverably failed,
+and MUST_ABORT-producing statements, and records allocation/consumption at statement and
+attempt boundaries. It proves that internal retry does not consume another ID, whereas every
+admitted success or failure consumes the statement's ID. A multirow statement uses one ID.
+Reuse the Numeric Exhaustion and Terminal-Boundary Verification procedure for
+`UINT32_MAX`: it is the final legal ID and no statement is admitted after exhaustion or
+wraparound.
+
+#### DML lock order, RID handoff, and post-wait revalidation
+
+Compose the logical-lock harness with the Chapter-14 reclamation harness. For UPDATE and
+DELETE, pause after candidate discovery while the read epoch is active, then exercise both
+legal registration/reuse orders:
+
+```text
+TUPLE_WRITE request becomes live first -> old RID reuse remains blocked
+same-RID rebinding becomes authoritative first -> old-identity request cannot be admitted
+```
+
+In the first order, release the epoch only after the request is live and before any blocking
+wait. Queue the request, mutate or retire the candidate while it waits, grant it, and require
+a fresh pin/latch, exact `(TableId,RID)` identity check, tuple-header validation, visibility/
+current-owner decision, and required predicate recheck. The stale pre-wait bytes cannot
+authorize a mutation. Immediate-grant and no-wait paths perform the same revalidation.
+
+Event-log assertions establish:
+
+```text
+shared TableWriterGate before TUPLE_WRITE/UNIQUE_KEY and before persistent write
+TUPLE_WRITE before sorted affected UNIQUE_KEY claims for UPDATE
+old-key UNIQUE_KEY before DELETE xmax publication
+no transaction wait while a page/B+ latch or read epoch is held
+fresh page pin/latch after lock grant; logical lock is not physical protection
+TUPLE_WRITE and UNIQUE_KEY survive statement completion and C4/A2
+release only at C5/A3 after terminal publication
+```
+
+The D14-M3 request remains a live RID-retention claim while queued, granted, canceled in a
+deadlock, or owned by a transaction being committed/aborted, until its architecture-defined
+removal. The complete reuse conjunction remains owned by Vacuum and Reclamation Tests.
+
+#### Current-owner and current-state uniqueness composition
+
+Drive each current-owner status through the lock/re-fetch path rather than calling the
+status helper alone. The fixture distinguishes the no-deleter sentinel from a persisted
+status value, constructs SELF command boundaries, and forces IN_PROGRESS terminal outcomes
+on both sides of the wait. RC COMMITTED is run before and after the first publication;
+RR COMMITTED uses the retained snapshot. `RETIRED`, recognized `INVALID`/`RESERVED`, status
+I/O/checksum/format failure, future SELF command metadata, `DEAD`, `UNUSED`, and rebound RID
+all prohibit a guessed write.
+
+For each fully non-NULL unique key, assert lock acquisition in canonical sorted
+`(IndexId, encoded_key)` order before any conflicting publication. The index fixture places
+one equal-key run across at least three leaves with stale but structurally valid candidates
+before, between, and after live owners. Require complete enumeration and a heap recheck of
+every candidate before `NO_CONFLICT` or `UniqueViolation`; first-hit and caller-snapshot
+answers deliberately differ from the independent oracle.
+
+Cover committed/frozen, active-then-commit, active-then-abort, and aborted creators; absent,
+committed, active-then-commit, active-then-abort, and aborted deleters; exact UPDATE
+`SELF_EXCLUDED`; same-transaction other row; same-command other-row delete; and
+earlier-command self delete. A NULL-containing ordinary UNIQUE key creates no ordinary
+UNIQUE_KEY request. PRIMARY KEY NULL rejects before uniqueness admission. A malformed,
+dangling, wrong-key, wrong-table, or reused candidate is corruption rather than conflict or
+free space. A second intentional physical `(key,RID)` insertion is rejected except through
+the already-complete idempotent recovery fixture.
+
+#### Byte-exact DML tuple headers
+
+Encode the complete 48-byte header with the independent header oracle, compare every byte
+with the published page and WAL/page-image payload, then decode it through the ordinary
+reader. Required cases are:
+
+```text
+INSERT command 0: xmin=T, xmax=0, cmin=0, cmax=0, prev=invalid
+INSERT command 7: xmin=T, xmax=0, cmin=7, cmax=0, prev=invalid
+UPDATE replacement command 9: xmin=T, xmax=0, cmin=9, cmax=0, prev=old RID
+actual DELETE/self-deleter command 9: xmax=T, cmax=9
+```
+
+Starting from otherwise valid recognized-v1 bytes, set invalid `xmax` with `cmax=1`,
+`UINT32_MAX`, and a stale prior deleting command. Each must be `CORRUPT_HEAP`, not an
+alternate encoding or unsupported format, and ordinary read must not rewrite it. For an
+eligible aborted deleter, run the Chapter-14 normalization procedure and assert the exact
+post-WAL pair `(INVALID_TXN_ID,0)`. These fixtures leave tuple width, offsets, creator
+`cmin`, actual-deleter `cmax`, flags, schema version, body, WAL grammar, and checksum
+coverage unchanged.
+
+#### INSERT publication and failure prefixes
+
+Use one single-row and one multirow input. Reject NOT NULL, PRIMARY KEY NULL, invalid type,
+and encoded size `8136` before publication; accept size `8135` when all other constraints
+hold. Run unique admission before selecting/publishing a conflicting tuple. Force stale-low
+and stale-high FSM hints: both lead to authoritative heap geometry checks, never overwrite;
+the search may select another page or create one through the existing PAGE_INIT procedure.
+
+At heap publication, record exact tuple/page bytes, `page_lsn`, statement flag, and RID.
+Place a barrier after the heap guard latch and pin are released but before the first B+ MTR;
+assert no heap physical guard is held and transaction gate/key ownership remains. For every
+index, publish exactly one `(encoded_user_key,RID)` through its own MTR/guards. Heap redo for
+the RID must precede every referring B+ MTR.
+
+Inject before heap publication, immediately after heap publication, and after each index
+MTR. The first reachable recoverable failure is FA and leaves no transaction-owned row
+effect. Every later statement failure is MA and automatic ABORT; no same-TxnId retry or
+successful partial count/RETURNING prefix is legal. Reopen each valid WAL prefix and use
+MVCC plus heap-rechecked index scans to prove that an aborted creator is invisible even
+when physical heap/index bytes remain. A successful statement in an explicit transaction
+remains distinct from COMMIT.
+
+#### UPDATE version publication and failure prefixes
+
+Finalize the target spool before any target mutation, then execute one target through the
+read-epoch/TUPLE_WRITE/current-owner/UNIQUE protocol above. Compare the replacement header
+and predecessor pointer byte-for-byte; its RID must be fresh and `prev` must be the exact
+old RID. Follow the live §15.3 publication order: publish the new version first, then the old
+version's `xmax=current TxnId,cmax=current CommandId`, then one new physical entry for every
+index while retaining every old entry. An unchanged indexed key therefore has old and new
+RIDs under the same key; a changed key has retained old-key and new-key candidates. Both are
+resolved through heap recheck.
+
+Inject before the new-version publication, after it, after the old-header publication, and
+after each index MTR. The direct “old xmax only, no replacement publication” runtime prefix
+is N/A: §15.3 publishes the replacement first. The after-old-header fixture necessarily
+contains both tuple effects. Every post-publication non-success is MA and uses semantic
+ABORT, not physical repair or same-TxnId retry. Reopen each prefix and prove independently:
+
+```text
+ABORTED updater: old xmax ineffective; new creator invisible; old row remains visible
+COMMITTED updater: old deleter effective; new creator visible to qualifying snapshots
+old RR snapshot: Chapter-10 snapshot rules select the legal historical version
+same transaction later command: SELF cmin/cmax causality selects the legal current version
+```
+
+The uniqueness fixture separately covers old key equal to new key with only the exact old
+RID excluded, changed keys with all affected claims sorted, same-command collisions, and
+immediate key-swap rejection. Failure in one of multiple index MTRs leaves no successful
+statement result; recovery repeats physical WAL only and heap recheck keeps retained or
+aborted candidates from becoming semantic aliases.
+
+#### DELETE publication and failure prefixes
+
+Finalize and revalidate each target through the same epoch/TUPLE_WRITE protocol. Acquire
+every required old-key UNIQUE_KEY claim, repeat current-state revalidation, then publish
+only `xmax=current TxnId,cmax=current CommandId`. Assert that ordinary DELETE performs no
+physical index erase; every old index entry remains until Chapter-14 cleanup.
+
+Inject immediately before and after the header publication and after several targets. A
+pre-publication recoverable failure is FA; a post-publication statement failure is MA and
+automatic ABORT. On abort, the deleter is ineffective and old index candidates still lead
+to the live row. On commit, new qualifying snapshots treat the version as deleted while
+the retained candidate is heap-rechecked as non-owning. A deterministic DELETE/INSERT race
+holds the old-key claim through terminal publication, then proves commit frees the key and
+abort preserves its owner.
+
+#### First-publication failures, semantic abort, and recovery
+
+For each INSERT, UPDATE, and DELETE fault prefix, snapshot exact pages, frame metadata, WAL
+end, logical ownership, transaction state, provisional count, and output spool. The
+Statement Failure and Transaction-State Tests remain the owner of the complete §39.1.3
+table. This section specializes it by proving that the flag changes only at §12.12
+transaction-owned publication, not at LSN reservation, private encoding, provisional page
+mutation, WAL durability, page durability, or COMMIT.
+
+Run representative user/constraint, resource, cancellation, deadlock, RR serialization,
+known WAL/BufferPool failure, append uncertainty, and corruption cases. Assert FA, MA, or
+NC exactly as §39.1 requires, preserving the original structured diagnostic. FA leaves the
+explicit transaction ACTIVE and consumes the statement CommandId; clean RC retry is an
+internal attempt outcome, not FA. MA retains locks/dependencies through automatic ABORT and
+publishes no success result. NC closes ordinary database admission and is never downgraded.
+
+No fixture expects user-DML physical undo. After crash/reopen, the Recovery Property Tests
+replay only physical WAL, classify losers ABORTED, and compare logical committed contents.
+They do not reconstruct SQL attempts, locks, snapshots, affected-row counts, or RETURNING
+results. Aborted INSERT, UPDATE, and DELETE bytes remain legal garbage until their existing
+vacuum owners remove or normalize them.
+
+#### Affected-row and result-envelope verification
+
+The affected-row oracle consumes the final successful attempt only:
+
+```text
+INSERT       number of successfully inserted logical input rows
+UPDATE       number of distinct finalized/revalidated targets logically updated
+DELETE       number of distinct finalized/revalidated targets logically deleted
+failed DML   no successful affected-row result
+```
+
+Run exact cardinality fixtures for single INSERT `1`, five-row INSERT `5`, UPDATE eight
+distinct targets `8`, `SET x=x` over six finalized targets `6`, zero-target UPDATE `0`,
+DELETE four targets `4`, and zero-target DELETE `0`. Vary replacement-version count, index
+count, MTR count, page splits, batching, and optional legal no-op physical work while holding
+logical inputs fixed; the result must not change. Duplicate candidate production finalized
+once contributes one. A stale/nonqualifying target contributes zero unless a replacement
+attempt later acts on it.
+
+For RC retry, force provisional `5 -> 3` and `4 -> 0` attempts and assert final results `3`
+and `0`, never `5`, `8`, or `4`. Force provisional `2` followed by transaction-fatal
+failure, and seven published rows followed by row-eight MA; both publish an error and no
+successful partial count. Locks may remain transaction-owned across a clean retry, but the
+counter, candidate set, and output spool reset.
+
+In an explicit transaction, pause after statement success and assert the complete count and
+RETURNING spool may publish while state remains ACTIVE; later ROLLBACK does not rewrite the
+already returned statement result and the result never claimed durability. In autocommit,
+pause at statement success and C3/C4/C5. No count, RETURNING row, or success escapes before
+C4–C5 completion. A pre-success COMMIT failure withholds the result; after successful C5,
+count and RETURNING share one response envelope. A transport failure during delivery cannot
+change the COMMITTED outcome. Assert no row-count WAL, checkpoint/control/status/catalog
+state, or recovery reconstruction exists.
+
+#### Cross-owner concurrency, resources, and lifecycle
+
+Compose DML with vacuum by pausing an UPDATE/DELETE at candidate discovery, request
+registration, wait, grant, and post-grant revalidation. The Chapter-14 epoch/claim oracle
+must prevent reuse until handoff and claim lifetime permit it; DML never treats an index
+candidate, pin, latch, snapshot, or status dependency as a substitute. Keep a write-capable
+transaction idle between statements and verify its write-status dependency prevents cutoff
+from retiring a TxnId it may still publish; DML publication after C5/A3 is impossible.
+
+Run checkpoint while each heap/index mutation is provisional, fully published, dirty, and
+flushed. Reuse the WAL/DPT oracle to prove old-or-new publication only, WAL-before-data,
+correct `rec_lsn`, and no statement-level checkpoint/page-force requirement. Recovery runs
+with ordinary DML admission disabled and performs no SQL, lock, uniqueness, or result replay.
+
+Hold the shared TableWriterGate while changing the catalog/schema/index set from a competing
+DDL owner. DDL cannot publish an incompatible set mid-operation. Invalid schema version,
+stale descriptor, and catalog lookup failure stop before unsafe encoding/publication or
+follow the current statement's §39 boundary; no cached name substitutes for stable identity.
+
+Specialize resource/error procedures for `NO_REPLACEABLE_FRAME`, WAL-position exhaustion,
+known WAL ENOSPC/I/O, heap corruption, index corruption, status lookup failure, invalid RID,
+and `DEAD`/`UNUSED`/rebound targets. Each fixture records whether the failure is before or
+after publication and applies the exact §39 result; corruption and uncertain ownership are
+never converted to row-not-found, free key, or retry. READY admits the statement; DRAINING,
+RECOVERING, CLOSING, and NONCONTINUABLE reject new DML. Shutdown drains in-flight owners
+through their canonical terminal path without inventing DML-specific lifecycle state.
+
 #### Target spool and one-target-once behavior
 
 Run UPDATE and DELETE with an in-memory target spool and with a tiny memory budget that
@@ -7783,6 +8108,507 @@ READ COMMITTED statement retry
 REPEATABLE READ conflict abort
 RETURNING buffering
 unique-key update
+```
+
+#### Chapter-15 procedural matrices
+
+The tables below are compact indexes into the deterministic procedures above and the
+already-complete component procedures. “Published” always means §12.12 publication of a
+transaction-owned logical mutation, not reservation, durability, page flush, or COMMIT.
+
+##### Statement-attempt matrix
+
+| Case | Snapshot | CommandId | Published? / retry | Transaction and locks | Provisional count / external result |
+|---|---|---|---|---|---|
+| First attempt | RC statement snapshot or retained RR snapshot | Assigned once | No initially; retry depends on later boundary | ACTIVE; acquired terminal locks remain owned | Starts zero; unexposed |
+| RC clean pre-publication retry | Fresh registration | Same ID | No; legal internal retry | ACTIVE; transaction locks may remain | Old count discarded; new zero; no old output |
+| Successful attempt | Its effective snapshot | Same statement ID | Any legal completed writes; no retry remains | Explicit transaction remains ACTIVE | Final count/result envelope becomes authoritative |
+| Recoverable failed statement | Registered attempt snapshot released | Consumed | No published write; no internal success | FA, ACTIVE; transaction locks retain normal lifetime | Discarded; error only |
+| MA/MUST_ABORT attempt | No replacement snapshot | Consumed | Published or independently fatal; no retry | MUST_ABORT -> A0–A4; locks through A2/A3 | Discarded; canonical error only |
+| NC/uncertain attempt | No continuation snapshot | Consumed if admitted | No retry | Database noncontinuable; ownership retained for stop/recovery | No success result; causal/fatal error chain |
+
+##### CommandId matrix
+
+| Case | Current C | Reused? | Consumed? | Next C / state / result |
+|---|---:|---:|---:|---|
+| First statement | `0` | No | On completion/failure | `1` if ACTIVE; ordinary result |
+| Success | `C` | Across its attempts only | Yes | `C+1` if legal; success |
+| Clean internal retry | `C` | Yes | Not by abandoned attempt | Still `C`, ACTIVE, no external result |
+| Recoverable failed statement | `C` | No later reuse | Yes | `C+1`, ACTIVE, error |
+| MUST_ABORT-producing statement | `C` | No | Yes | No ordinary next statement; automatic ABORT |
+| Final legal ID | `UINT32_MAX` | Only internal attempts | Yes | No representable successor |
+| After maximum | None | No | No | Statement admission fails; no wrap or execution |
+
+##### Lock and protection matrix
+
+| Protection | Protects | Lifetime / blocking | Held across wait? | DML stage | Crash | RID reuse / status cutoff |
+|---|---|---|---|---|---|---|
+| TableWriterGate shared | Stable target schema/index set | Terminal transaction; may block | Yes as logical ownership, but acquired without forbidden physical guards | Before tuple/key locks and first write | No replay | No / no |
+| TUPLE_WRITE | Exact `(TableId,RID)` writer and retention claim | C5/A3; may block | Request survives its own wait | UPDATE/DELETE handoff | No replay | Yes while live / no |
+| UNIQUE_KEY | Current-state admission for one canonical key | C5/A3; may block | Yes | Before conflicting DML publication | No replay | No / no |
+| Page latch | Stable in-frame bytes | Short; never a transaction wait | No | Re-fetch, encode, publish | Recreated | No / no |
+| BufferPool pin | Frame lifetime | Short or operation-scoped; not a logical wait authority | May outlive latch, but not substitute for lock/epoch | Physical access/writeback | Recreated | No / no |
+| Read epoch | Prevents reuse while a RID is retained before claim handoff | Read-side critical section; registration does not block | Released before transaction wait | Discovery through live request registration | Recreated | Yes through grace / no |
+| Write-status dependency | Own future publication of transaction TxnId | Registration through C5/A3; nonblocking dependency | Yes across transaction waits | All write-capable DML | Recreated by new transactions only | No / yes |
+
+##### Current-owner matrix
+
+| Current owner | RC action | RR action | Wait / retry | Write? | State consequence / oracle |
+|---|---|---|---|---:|---|
+| No `xmax` sentinel | Revalidate and proceed | Revalidate and proceed | No / no | Yes | Current-owner oracle |
+| SELF | Apply exact command causality | Same | No / no | Only if exact SELF rule permits | Chapter-10 visibility/current-owner oracle |
+| IN_PROGRESS other | Wait, grant, re-fetch | Same | Yes / recheck | Not before recheck | Terminal-status barrier |
+| COMMITTED other | Clean fresh-snapshot retry before publication; MA after | Serialization failure | No further owner wait / isolation result | No stale write | Statement ledger + visibility oracle |
+| ABORTED other | Re-fetch and proceed if still valid | Same | No / no | Yes after revalidation | Status map |
+| RETIRED required outcome | Corruption/invariant result | Same | No / no | No | Status precedence oracle |
+| Persisted INVALID status | Error | Same | No / no | No | Status precedence oracle |
+| RESERVED | Error | Same | No / no | No | Status precedence oracle |
+| Lookup I/O/checksum/format failure | Propagate exact failure | Same | No guessed retry | No | Independent injected lower-layer result |
+
+##### Uniqueness matrix
+
+| Candidate/key state | UNIQUE_KEY? | Heap recheck / wait | Conflict? | Exact result and oracle |
+|---|---:|---|---:|---|
+| NULL-containing ordinary UNIQUE | No | No duplicate admission | No | NULL-domain rule |
+| PRIMARY KEY NULL | No ordinary admission | Reject before scan | N/A | Constraint result |
+| Committed creator, live | Yes | Every candidate | Yes | `UniqueViolation` |
+| Frozen creator, live | Yes | Every candidate | Yes | `UniqueViolation` |
+| In-progress creator | Yes | Recheck after terminal wait | Outcome-dependent | Current-state oracle |
+| Aborted creator | Yes | Status-proven | No | Continue complete scan |
+| Committed effective deleter | Yes | Status-proven | No owner | Continue complete scan |
+| Aborted deleter | Yes | Status-proven ineffective | Yes if creator owns | Current-state oracle |
+| In-progress deleter | Yes | Wait and complete rescan | Outcome-dependent | Current-state oracle |
+| SELF exact old UPDATE target | Yes | Exact RID only | Excluded | `SELF_EXCLUDED` |
+| SELF other row | Yes | Full recheck | Yes if owner | `UniqueViolation` |
+| Same-command other-row delete | Yes | Full recheck | Yes | Immediate uniqueness rule |
+| Earlier-command self delete | Yes | Full recheck | No if deletion effective | Command-aware oracle |
+| Dangling/malformed/rebound candidate | Yes | Identity proof fails | Not a duplicate answer | Corruption |
+| Exact physical duplicate | N/A SQL admission | Physical-key model | Forbidden | Reject except authorized idempotent redo |
+
+##### INSERT protocol matrix
+
+| Stage | May wait / physical guard | Published yet? | Injected failure and state | Affected result / procedure |
+|---|---|---:|---|---|
+| Input/type/NOT NULL/size/PK-NULL validation | No / none | No | FA if statement error | No success count; input fixtures |
+| Shared writer gate | May wait / none | No | §39 pre-boundary result | Zero provisional authority; lock harness |
+| Sorted UNIQUE_KEY claims | May wait / no page latch | No | Deadlock MA or ordinary pre-boundary error | No success; lock matrix |
+| Complete current-state scan | Status wait only outside physical latch | No | UniqueViolation FA before first row publication | No success; uniqueness oracle |
+| RID/page selection | No transaction wait / heap guard only for check | No logical row yet | FSM/resource result | No success; FSM/BufferPool procedures |
+| Heap WAL/publication | No logical wait / heap write guard | Becomes yes at publication | Before=FA; after=MA | Attempt-local only; prefix oracle |
+| Heap guard release | No / latch then pin released | Yes | Ownership invariant failure if retained into B+ wait | Logical locks remain; event order |
+| Each index MTR | No transaction wait / MTR-owned B+ guards | Yes | Failure=MA or NC by lower layer | No partial count; MTR prefix fixture |
+| Statement success | No / no leaked physical guard | Complete | N/A | One per logical input; result-envelope oracle |
+
+##### UPDATE protocol matrix
+
+| Stage | Wait / physical protection | Published? | Finalized / RID retained | Failure outcome | Count / procedure |
+|---|---|---:|---|---|---|
+| Candidate discovery | No transaction wait / epoch plus short guards | No | Not finalized / epoch | Discard/FA as applicable | Zero; target-spool procedure |
+| Epoch-to-request handoff | No wait until request live | No | Finalized spool RID / epoch then claim | Registration failure per §39 | Zero; D14-M3 composition |
+| TUPLE_WRITE wait | Yes / no epoch or page latch | No | Claim retains RID | Deadlock MA; cancellation FA/MA | Zero; lock harness |
+| Post-grant revalidation | No / fresh pin+latch | No | Valid only after checks | RC retry, RR MA, or error | Stale target zero |
+| Sorted UNIQUE_KEY claims | Yes / no physical guard | No | Revalidated target / claim | Deadlock or §39 result | Still provisional |
+| Complete exact-key scan | Status waits outside guards | No | Target revalidated again | Conflict/error by oracle | Still provisional |
+| Replacement version publication | No logical wait / heap guard | First write for target | Yes / TUPLE_WRITE | Later failure MA | One logical target provisionally |
+| Old `xmax/cmax` publication | No logical wait / heap guard | Yes; replacement already published | Yes / claim | Later failure MA | Still one, not two |
+| Every new index MTR | No logical wait / MTR guards | Yes | Yes / claim | Partial-index failure MA/NC | Still one |
+| Result success | No leaked guards | Complete | Distinct finalized target | N/A | Final attempt count; envelope oracle |
+
+##### DELETE protocol matrix
+
+| Stage | Wait / physical protection | Published? | Failure state | Index policy / count |
+|---|---|---:|---|---|
+| Candidate discovery | No transaction wait / epoch+short guard | No | Attempt-local/FA | No count |
+| TUPLE_WRITE handoff | Request live before epoch release | No | Registration result by §39 | No count |
+| Wait and grant | May block / no epoch/latch | No | Deadlock MA; cancellation FA/MA | No count |
+| Post-grant revalidation | No / fresh pin+latch | No | Skip, RC retry, RR MA, or error | Stale target zero |
+| Old-key UNIQUE_KEY | May block / no physical guard | No | §39/deadlock outcome | Retained terminally |
+| Current-state recheck | Status wait outside guard | No | Exact owner/error result | No count yet |
+| `xmax/cmax` publication | No logical wait / heap guard | Yes | Later failure MA | One finalized delete provisionally |
+| Index-policy step | No erase operation | Yes | N/A | Entries retained for vacuum; no count multiplication |
+| Statement success | No leaked guard | Complete | N/A | Distinct deletes once; envelope oracle |
+
+##### FA / MA / NC matrix
+
+| Case | Published flag | Retry | ACTIVE / MA / NC | Physical undo | Count / client result |
+|---|---:|---|---|---:|---|
+| User/constraint failure before publication | False | No internal success; later statement allowed | FA / ACTIVE | No need | No success count; error |
+| Resource failure before publication | False | Only existing policy | Usually FA, exact §39 row | No | No success count; error |
+| Clean RC conflict before publication | False | Yes, fresh snapshot/same ID | ACTIVE | No | Old count discarded; no output |
+| Failure immediately after first publication | True | No | MA -> automatic ABORT | No | Error; no partial count |
+| Failure after heap plus one index | True | No | MA or NC if lower layer uncertain | No | Error; no partial count |
+| WAL append/publication uncertainty | Either | No | NC | No guessed repair | Fatal/uncertain result |
+| Persistent heap/index corruption | Either | No | NC | No | Corruption result |
+| Deadlock victim | Either | No | MA | No | Deadlock error only |
+| RR serialization | Either | No | MA | No | Serialization error only |
+| Cancellation before publication | False | No | FA unless stronger cause | No | Cancellation, no count |
+| Cancellation after publication | True | No | MA | No | Cancellation, no count |
+
+##### D15-M1 header matrix
+
+| Case | `xmin` | `xmax` | `cmin` | `cmax` | `prev` | Valid/classification | Byte fixture |
+|---|---:|---:|---:|---:|---|---|---|
+| INSERT command 0 | T | 0 | 0 | 0 | invalid pair | Valid | Exact 48-byte oracle |
+| INSERT command 7 | T | 0 | 7 | 0 | invalid pair | Valid | Exact 48-byte oracle |
+| UPDATE replacement command 9 | T | 0 | 9 | 0 | old RID | Valid | Exact 48-byte oracle |
+| DELETE/self-deleter command 9 | creator | T | creator C | 9 | unchanged | Valid | Actual-deleter control |
+| Invalid xmax + cmax 1 | otherwise valid | 0 | C | 1 | valid form | `CORRUPT_HEAP` | Single-field mutation |
+| Invalid xmax + cmax max | otherwise valid | 0 | C | `UINT32_MAX` | valid form | `CORRUPT_HEAP` | Single-field mutation |
+| Invalid xmax + stale cmax | otherwise valid | 0 | C | prior delete C | valid form | `CORRUPT_HEAP` | Single-field mutation |
+| Aborted-xmax normalization | creator | D -> 0 | creator C | delete C -> 0 | unchanged | Valid after WAL publication | Pre/post exact bytes |
+
+##### D15-M2 affected-row matrix
+
+| Case | Final successful attempt? | Logical rows / earlier provisional | Published count or error | Commit gate / oracle |
+|---|---:|---|---|---|
+| Single INSERT | Yes | 1 / 0 | 1 | Explicit statement envelope |
+| N-row INSERT | Yes | N / 0 | N | Logical-input oracle |
+| UPDATE N distinct finalized targets | Yes | N / 0 | N | Distinct-target oracle |
+| No-op UPDATE | Yes | N qualifying / 0 | N | Independent of physical elision |
+| Zero-target UPDATE | Yes | 0 / 0 | 0 | Successful statement |
+| DELETE N | Yes | N / 0 | N | Distinct-target oracle |
+| Zero-target DELETE | Yes | 0 / 0 | 0 | Successful statement |
+| Duplicate candidates, finalized once | Yes | 1 / duplicates | 1 | Finalized spool identity |
+| Stale target not acted upon | Yes | 0 / candidate seen | 0 contribution | Revalidation oracle |
+| RC retry 5 -> 3 | Second only | 3 / 5 | 3 | First count discarded |
+| RC retry 4 -> 0 | Second only | 0 / 4 | 0 | First count discarded |
+| Provisional 2 -> fatal | No | none / 2 | Error, no success count | Failure envelope |
+| Seven rows -> row-eight MA | No | none / 7 | Error, no partial 7 | Automatic ABORT |
+| Explicit success, later rollback | Yes | N / 0 | N remains prior response | No COMMIT claim |
+| Autocommit count 7, COMMIT fails | Statement only, request fails | 7 / 0 | Commit error, no count | Withheld through C4–C5 |
+| Autocommit success | Yes + COMMIT success | N / 0 | N | Shared RETURNING envelope |
+| Different index/MTR counts | Yes | 1 / 0 | 1 in every shape | Physical-work independence |
+
+##### UPDATE outcome matrix
+
+| State/prefix | Old visible? | New visible? | Old xmax / new creator | Index-candidate action | Cleanup owner |
+|---|---|---|---|---|---|
+| Before UPDATE | Per creator/snapshot | Absent | No updater effects | Old entries heap-rechecked | None |
+| Update IN_PROGRESS | Other readers see legal old/new MVCC outcome | Creator not dirty-visible | Nonterminal | Writers/uniqueness may wait | Transaction |
+| “Old xmax only” runtime prefix | N/A | N/A | Unreachable: §15.3 publishes replacement first | N/A | N/A |
+| Abort after replacement only | Old remains as before | New creator ABORTED/invisible | No effective old delete | New entries if any ignored by heap | Vacuum |
+| Abort after replacement + old header | Old visible; xmax ineffective | New invisible | Both updater statuses ABORTED | Old remains owner; new ignored | Vacuum/normalization |
+| Commit | Old hidden for qualifying new snapshots | New visible | Both updater effects effective | Both candidate generations heap-rechecked | Vacuum later |
+| Old RR snapshot | Chapter-10 historical result | Chapter-10 result | Snapshot/status oracle | Candidate only | Vacuum after horizons |
+| Fresh post-commit snapshot | Old not current | New current | COMMITTED | New candidate owns | Vacuum later |
+| Same transaction later command | SELF command rules | SELF command rules | Exact cmin/cmax causality | Heap recheck | Vacuum later |
+
+##### Retry and lock-retention matrix
+
+| Retry point | Legal? | Retained ownership | Snapshot / CommandId | Repeated work | Count / outcome |
+|---|---:|---|---|---|---|
+| Before any locks | Yes if clean RC conflict | None beyond transaction baseline | Fresh / same | Full attempt | Reset zero |
+| With TableWriterGate | Yes before publication | Shared gate | Fresh / same | Descriptor revalidation | Reset zero |
+| With UNIQUE_KEY | Yes before publication | Key claim terminally | Fresh / same | Complete exact-key rescan | Reset zero |
+| With old-RID TUPLE_WRITE | Yes before publication | Old claim terminally | Fresh / same | New discovery and target revalidation | Reset zero |
+| Replacement targets different RID | Yes before publication | Prior claims plus canonical new claims | Fresh / same | Lock order/revalidation for new target | Reset zero |
+| After first publication | No | Retained through automatic ABORT | No fresh attempt / consumed | None | MA; no success result |
+
+##### Error and result matrix
+
+| Error | Boundary relevance | State / retry | Count / undo | Exact owner |
+|---|---|---|---|---|
+| UniqueViolation | FA before first write; MA after | No transparent post-write retry | No success / no physical undo | §§11.10, 39.1.3 |
+| NOT NULL / supported CHECK | FA before; universal MA after | No unless clean conflict policy applies | No success / no undo | §§15.2, 39.1.3 |
+| Expression/type/encoding | FA before; MA after | No | No success / no undo | §§5.6, 39.1.3 |
+| Deadlock | Independently fatal | MA | No success / no undo | §§11.13.4, 39.1.3 |
+| RR serialization | Independently fatal | MA | No success / no undo | §§11.6, 39.1.3 |
+| No replaceable frame | Before/after | FA/MA by boundary | No success / no undo | §§7.12.3, 39.1.3 |
+| WAL position exhaustion | Before authorization or invariant failure | Exact Chapter-12/§39 result | No success / no guessed mutation | Numeric/WAL procedures |
+| WAL I/O/ENOSPC | Known versus uncertain is decisive | FA/MA or NC | No success / exact local rollback only | §§12.12, 39.1 |
+| Heap corruption | Independent of boundary | NC | No success / no repair guess | §§5.21, 39.1.3 |
+| Index corruption | Independent of boundary | NC | No success / no heap-scan substitution | §§8.27–8.29, 39.1 |
+| Status lookup failure | Before/after plus lower-layer class | FA/MA or NC as owned | No success / no guessed outcome | §§9.13, 39.1 |
+| Schema/catalog failure | Before/after | FA/MA or NC if incoherent | No success / no stale descriptor guess | §§15.1.1, 39.1 |
+| Cancellation | Before/after | FA/MA; deadlock remains MA | No success / no undo | §39.1.3 |
+| Shutdown admission | Lifecycle state decides | Reject new; drain admitted work | No fabricated success | §§3.3.6, 39.1 |
+| Database noncontinuable | Boundary does not downgrade | NC, no retry | No success / recovery owner | §§3.3.5, 12.12, 39.1 |
+
+##### Cross-chapter composition matrix
+
+| Owner | Chapter-15 obligation | Existing procedure | New composition | Status |
+|---|---|---|---|---|
+| Chapter 5 | Header/RID/slot/update-version bytes | Slotted-page and tuple-codec tests | D15-M1 headers and old/new link fixture | COMPLETE |
+| Chapter 7 | Pin/latch/guard and publication | Buffer management verification | Heap-guard release before B+ MTR | COMPLETE |
+| Chapter 8 | Candidate scans and B+ MTR | B+ Tree Verification | DML heap-before-index and retained-entry prefixes | COMPLETE |
+| Chapter 9 | CommandId/snapshot/state | Transaction identity/snapshot tests | Statement-attempt ledger | COMPLETE |
+| Chapter 10 | Creator/deleter/SELF visibility | MVCC Visibility Tests | UPDATE/DELETE abort/commit proof | COMPLETE |
+| Chapter 11 | Locks/current owner/uniqueness | Locking and UNIQUE tests | End-to-end DML waits and scans | COMPLETE |
+| Chapter 12 | Authorization/publication/failure | WAL and non-crash fault procedures | Per-operation publication prefixes | COMPLETE |
+| Chapter 13 | Physical replay/no SQL replay | Recovery Property Tests | Aborted DML and no-result replay | COMPLETE |
+| Chapter 14 | Epoch/status/RID reuse | Vacuum and Reclamation Tests | DML request handoff and cutoff blocker | COMPLETE |
+| Chapter 15 | Attempt and DML composition | This section | Direct procedural owner | COMPLETE |
+| §31 | Finalized distinct targets/result spool | Target-spool and RETURNING procedures | D15-M2 cardinality/envelope | COMPLETE |
+| §39 | FA/MA/NC and no undo | Statement Failure tests | INSERT/UPDATE/DELETE specializations | COMPLETE |
+| §41 | Required deterministic coverage | Verification requirement map | Matrices and atomic map below | COMPLETE |
+
+##### High-level DML domain/case matrix
+
+| Case | Deterministic ordering/fault | Independent oracle | Architecture | Verification owner | Status |
+|---|---|---|---|---|---|
+| Clean RC retry | Conflict before first publication | Statement ledger | §§15.7.1, 39.1 | Attempt procedure | COMPLETE |
+| Post-publication failure | Fault after first publication | Prefix/state oracle | §§15.7.2, 39.1 | Failure-prefix procedure | COMPLETE |
+| COMMITTED owner, RC/RR | Same owner fixture under both isolation modes | Current-owner oracle | §§11.5–11.6, 15.7 | Current-owner composition | COMPLETE |
+| Multi-leaf exact-key scan | Equal run spans three leaves | Uniqueness oracle | §§11.10, 15.2–15.4 | Uniqueness composition | COMPLETE |
+| Exact SELF exclusion | Old RID plus same-Txn other RID | Uniqueness oracle | §15.3 | Uniqueness composition | COMPLETE |
+| INSERT/UPDATE headers | Commands 0/7/9 | Header-byte oracle | §§5.7, 15.2–15.3 | Header fixtures | COMPLETE |
+| Malformed no-deleter cmax | Single-field byte mutations | Header validator model | §5.7.3 | Header fixtures | COMPLETE |
+| INSERT heap -> index failure | Barriers after heap/each MTR | Prefix oracle | §15.2 | INSERT prefixes | COMPLETE |
+| UPDATE replacement/old-header failures | Barriers after each live publication stage | Visibility/prefix oracles | §15.3 | UPDATE prefixes | COMPLETE |
+| DELETE failure | Before/after xmax publication | Visibility/prefix oracles | §15.4 | DELETE prefixes | COMPLETE |
+| Aborted UPDATE | Persist each legal prefix, recover | Visibility oracle | §§10, 15.3, 15.6 | UPDATE outcome matrix | COMPLETE |
+| FA / MA / NC | One isolated failure each side of boundary | Statement ledger | §39.1 | Failure matrix | COMPLETE |
+| No-op UPDATE count | Same rows, varied physical work | Affected-row oracle | §§15.1.2, 15.3 | Count fixtures | COMPLETE |
+| Retry count reset | Provisional 5 -> final 3 | Affected-row oracle | §§15.1.2, 15.7.1 | Count fixtures | COMPLETE |
+| Partial multirow abort | Rows 1–7 publish, row 8 fails | State/count oracle | §§15.1.2, 39.1.4 | Failure/count fixtures | COMPLETE |
+| Explicit/autocommit output | Pause at statement/C3/C4/C5 | Result-envelope oracle | §§15.1.2, 15.7.3 | Output fixtures | COMPLETE |
+| DML/vacuum handoff | Barriers at epoch/request/reuse | Reuse conjunction oracle | §§14.6, 14.18, 15.3–15.4 | Cross-owner procedure | COMPLETE |
+| Checkpoint concurrency | Capture during each publication stage | WAL/DPT oracle | §§7.10.5, 12, 13 | Cross-owner procedure | COMPLETE |
+| Recovery | Crash at valid prefixes | Logical committed model | §§13, 15.6 | Recovery Property Tests | COMPLETE |
+
+#### Chapter 15 atomic architecture-obligation coverage map
+
+Each row is one independently falsifiable Chapter-15 obligation. Component-only rules map
+to their already-complete procedure; cross-subsystem ordering and result rules map to the
+DML procedures and matrices above.
+
+| ID | Domain | Atomic obligation | Architecture owner | Deterministic procedure/reference | Status |
+|---:|---|---|---|---|---|
+| 1 | A | One SQL statement may own multiple internal attempts | §§15.7, 39.1.4 | Statement ledger with two attempts | COMPLETE |
+| 2 | A | Every attempt has an observable begin/end | §15.7 | Attempt barriers/event log | COMPLETE |
+| 3 | A | Abandoned attempts expose no logical result | §§15.1.2, 15.7.3 | Retry/output fixture | COMPLETE |
+| 4 | A | Final successful attempt alone owns statement success | §15.1.2 | Statement ledger/result oracle | COMPLETE |
+| 5 | A | Multirow work remains one admitted statement | §§9.6, 15.1.2 | Multirow ledger fixture | COMPLETE |
+| 6 | B | First admitted statement uses CommandId 0 | §9.6 | CommandId matrix | COMPLETE |
+| 7 | B | Clean internal retry reuses the same CommandId | §§9.6, 15.7.1 | RC retry fixture | COMPLETE |
+| 8 | B | Successful statement consumes its CommandId | §9.6 | Sequential statement fixture | COMPLETE |
+| 9 | B | Recoverable failed statement consumes its CommandId | §§9.6, 39.1.4 | FA then next-statement fixture | COMPLETE |
+| 10 | B | MUST_ABORT-producing statement consumes its CommandId | §§9.6, 39.1.4 | MA ledger fixture | COMPLETE |
+| 11 | B | One multirow statement uses one CommandId | §9.6 | Multirow header/ledger fixture | COMPLETE |
+| 12 | B | `UINT32_MAX` is final legal and exhaustion never wraps | §§9.6, 39.1 | Numeric exhaustion specialization | COMPLETE |
+| 13 | C | Each RC attempt registers a statement snapshot | §9.9 | Snapshot event log | COMPLETE |
+| 14 | C | Clean retry unregisters the abandoned snapshot | §§9.9, 15.7.1 | Two-snapshot barrier fixture | COMPLETE |
+| 15 | C | RC replacement attempt captures a fresh snapshot | §§9.9, 15.7.1 | Distinguishable committed-change fixture | COMPLETE |
+| 16 | C | Retry is legal only before first statement publication | §15.7.1 | Pre-publication conflict fixture | COMPLETE |
+| 17 | C | Retry discards target/result attempt state | §§15.7.1, 31.5 | Spool snapshot and cleanup assertions | COMPLETE |
+| 18 | C | Retry repeats discovery, revalidation, and uniqueness | §§15.7.1, 31.5 | Semantic event-count assertions | COMPLETE |
+| 19 | C | Post-publication RC restart is forbidden | §15.7.2 | Post-publication conflict fixture | COMPLETE |
+| 20 | C | Whole-request resubmission, if any, uses a new TxnId | §15.7.2 | Two-request identity fixture | COMPLETE |
+| 21 | D | RR retains its transaction snapshot | §§9.10, 15.7 | RR snapshot-registration assertion | COMPLETE |
+| 22 | D | RR conflict does not refresh/retry | §§11.6, 15.7 | Committed-owner RR fixture | COMPLETE |
+| 23 | D | RR serialization is transaction-fatal | §§11.6, 39.1.3 | RR MA/automatic-ABORT fixture | COMPLETE |
+| 24 | E | DML acquires shared TableWriterGate before first write | §15.1.1 | Gate/publication event order | COMPLETE |
+| 25 | E | Writer gate precedes tuple/key locks | §15.1.1 | Operation-order event log | COMPLETE |
+| 26 | E | Gate acquisition holds no forbidden physical protection | §15.1.1 | Ownership snapshot at wait | COMPLETE |
+| 27 | E | Gate stabilizes target schema/index set | §§15.1.1, 21.2.1 | DDL/DML barrier fixture | COMPLETE |
+| 28 | E | Gate remains through terminal publication/release | §§11.11, 15.5–15.6 | C4/C5/A2/A3 observers | COMPLETE |
+| 29 | F | UPDATE registers exact old-RID TUPLE_WRITE | §15.3 | Request-key event assertion | COMPLETE |
+| 30 | F | DELETE registers exact target-RID TUPLE_WRITE | §15.4 | Request-key event assertion | COMPLETE |
+| 31 | F | Immediate grant still requires revalidation | §§15.3–15.4 | No-wait revalidation fixture | COMPLETE |
+| 32 | F | Queued request remains a RID-retention claim | §§14.18, 15.3–15.4 | Reuse-versus-wait schedule | COMPLETE |
+| 33 | F | Granted ownership remains through C5/A3 | §§11.11, 15.5–15.6 | Terminal lifetime fixture | COMPLETE |
+| 34 | F | Deadlock/cancellation cannot leave or later grant a stale request | §§11.13.4, 14.18 | Cancellation/grant/reuse matrix | COMPLETE |
+| 35 | G | Candidate discovery occurs under a read epoch | §§14.6, 15.3–15.4 | Epoch event assertion | COMPLETE |
+| 36 | G | Epoch overlaps live TUPLE_WRITE registration | §§14.18, 15.3–15.4 | Registration barrier | COMPLETE |
+| 37 | G | Epoch releases only after request is live | §§14.18, 15.3–15.4 | Event-order assertion | COMPLETE |
+| 38 | G | Epoch releases before any blocking wait | §§14.18, 15.3–15.4 | Wait-entry ownership assertion | COMPLETE |
+| 39 | G | Registration/reuse race has only two legal linearizations | §14.18 | Paired handoff schedules | COMPLETE |
+| 40 | H | Grant causes fresh page pin/latch and tuple fetch | §§11.3, 15.3–15.4 | Post-grant event sequence | COMPLETE |
+| 41 | H | TableId/RID identity is revalidated | §§11.2, 15.3–15.4 | Rebound-RID fixture | COMPLETE |
+| 42 | H | Slot/header validity is revalidated | §§5.4, 15.3–15.4 | DEAD/UNUSED/corrupt fixtures | COMPLETE |
+| 43 | H | MVCC/current owner is recomputed after wait | §§11.4, 15.3–15.4 | Terminal-owner schedules | COMPLETE |
+| 44 | H | Required predicate qualification is rechecked | §§15.1.2, 31.5 | Changed-predicate fixture | COMPLETE |
+| 45 | H | UNIQUE wait is followed by target revalidation | §§15.3–15.4 | Unique-grant target-change fixture | COMPLETE |
+| 46 | H | Pre-wait bytes never authorize post-wait mutation | §§11.3, 15.3–15.4 | Poisoned old-copy assertion | COMPLETE |
+| 47 | I | No-xmax sentinel permits write after validation | §11.4.1 | Current-owner matrix | COMPLETE |
+| 48 | I | SELF uses exact command-aware causality | §§10.3.2, 11.4.2 | SELF boundary fixtures | COMPLETE |
+| 49 | I | IN_PROGRESS waits and rechecks | §11.4.4 | Commit/abort terminal schedules | COMPLETE |
+| 50 | I | COMMITTED owner gives clean RC retry only pre-publication | §§11.5, 15.7 | RC paired boundary fixture | COMPLETE |
+| 51 | I | COMMITTED owner gives RR serialization | §11.6 | RR owner fixture | COMPLETE |
+| 52 | I | ABORTED owner is ineffective only after revalidation | §11.4.3 | Aborted-owner fixture | COMPLETE |
+| 53 | I | Required RETIRED/INVALID/RESERVED outcome is rejected | §§9.13, 11.4 | Negative status rows | COMPLETE |
+| 54 | I | Status I/O/checksum/format failure is propagated | §§9.13, 39.1 | Injected lookup failures | COMPLETE |
+| 55 | I | Current-owner error cannot become row-not-found or guessed status | §§10.4, 39.1 | Error-precedence assertions | COMPLETE |
+| 56 | J | Fully non-NULL unique claims use stable IndexId/key identity | §§11.8–11.9 | Lock-key oracle | COMPLETE |
+| 57 | J | Multiple unique claims use canonical sorted order | §11.9 | Opposite-input-order fixture | COMPLETE |
+| 58 | J | NULL ordinary UNIQUE creates no ordinary key claim | §11.10.2 | Lock-event NULL fixture | COMPLETE |
+| 59 | J | PK NULL rejects before unique admission | §11.10.2 | Error/event-order fixture | COMPLETE |
+| 60 | J | UNIQUE_KEY remains terminal-duration | §11.11 | C4/C5/A2/A3 fixture | COMPLETE |
+| 61 | J | Nonunique indexes do not invoke uniqueness admission | §§11.8–11.10 | Nonunique lock-event fixture | COMPLETE |
+| 62 | K | Uniqueness uses current state, not caller snapshot | §11.10.1 | Old-snapshot/live-owner fixture | COMPLETE |
+| 63 | K | Exact-key scan begins at complete lower bound | §§8.11, 11.10.4 | Multi-leaf candidate model | COMPLETE |
+| 64 | K | Every equal-key candidate across leaves is enumerated | §§8.22, 11.10.4 | Candidate-count oracle | COMPLETE |
+| 65 | K | Every candidate RID is heap-rechecked | §11.10.4 | Recheck event-count oracle | COMPLETE |
+| 66 | K | Committed/frozen live creator conflicts | §§11.10.4–11.10.6 | Creator matrix | COMPLETE |
+| 67 | K | Active creator/deleter waits then rescans completely | §11.10.7 | Both terminal outcomes | COMPLETE |
+| 68 | K | Aborted creator and committed deleter do not own key | §11.10.4 | Status matrix | COMPLETE |
+| 69 | K | Aborted deleter preserves creator ownership | §11.10.4 | Status matrix | COMPLETE |
+| 70 | K | Dangling/malformed/reused candidate is corruption | §§11.10.4, 11.10.8 | Identity-negative fixture | COMPLETE |
+| 71 | L | Same-key UPDATE excludes only exact old RID | §§11.10.3, 15.3 | Two-RID SELF fixture | COMPLETE |
+| 72 | L | Same transaction's other live row conflicts | §§11.10.5–11.10.6 | Other-row fixture | COMPLETE |
+| 73 | L | Same-command other-row delete does not free key | §11.10.6 | Command-aware key fixture | COMPLETE |
+| 74 | L | Earlier-command self delete may free key | §11.10.6 | Earlier-command fixture | COMPLETE |
+| 75 | L | Current-command replacement is not transaction-wide excluded | §§11.10.3–11.10.6 | Multirow UPDATE collision | COMPLETE |
+| 76 | L | Immediate key swap follows current-state result | §11.10.6 | Two-row swap fixture | COMPLETE |
+| 77 | M | INSERT type/conversion validation precedes unsafe publication | §§15.2, 31.6 | Pre-publication error fixture | COMPLETE |
+| 78 | M | NOT NULL failure has no published row | §§15.2, 39.1.3 | Constraint event assertion | COMPLETE |
+| 79 | M | Tuple size 8135 succeeds when otherwise valid | §5.6 | Boundary encode/insert fixture | COMPLETE |
+| 80 | M | Tuple size 8136 rejects before publication | §5.6 | Boundary negative fixture | COMPLETE |
+| 81 | M | Same-statement input rows participate in immediate uniqueness | §§15.2, 31.6 | Multirow duplicate fixture | COMPLETE |
+| 82 | N | Fresh INSERT RID comes from validated heap geometry | §§5.14, 15.2 | FSM/heap oracle | COMPLETE |
+| 83 | N | FSM stale-low cannot make heap unsafe | §§6, 15.2 | Stale-low fixture | COMPLETE |
+| 84 | N | FSM stale-high cannot overrun page | §§6, 15.2 | Stale-high fixture | COMPLETE |
+| 85 | N | New page uses existing PAGE_INIT path | §§7.12.4, 12.9, 15.2 | PAGE_INIT composition | COMPLETE |
+| 86 | N | INSERT publishes byte-exact fresh header/body | §§5.7–5.12, 15.2 | Header/page oracle | COMPLETE |
+| 87 | N | Write-status dependency is held at xmin publication | §§9.4, 15.1.1 | Dependency/publication event assertion | COMPLETE |
+| 88 | N | Heap publication sets page_lsn/dirty/DPT correctly | §§7.10, 12.12, 15.2 | Prefix oracle | COMPLETE |
+| 89 | N | Heap guard releases latch-before-pin before B+ MTR | §15.2 | Direct physical-ownership barrier | COMPLETE |
+| 90 | O | Heap redo precedes every referring index MTR | §§12.11, 15.2 | WAL-order assertion | COMPLETE |
+| 91 | O | Every required index receives `(key,RID)` | §§8.23, 15.2 | Manifest/index-set comparison | COMPLETE |
+| 92 | O | Each index MTR uses its own B+ guards | §§8.19, 8.25, 15.2 | Guard-owner event log | COMPLETE |
+| 93 | O | Physical guard release does not release logical locks | §15.2 | Simultaneous ownership snapshot | COMPLETE |
+| 94 | O | Exact physical duplicate is not intentionally published | §§8.22, 15.2 | Duplicate-key model | COMPLETE |
+| 95 | O | Failure after heap/each index is MA or lower-layer NC | §§15.2, 39.1 | Per-stage fault prefix | COMPLETE |
+| 96 | O | Aborted INSERT index candidate is ignored only after heap/status proof | §§8.23, 10.2, 15.2 | Reopen/index-recheck fixture | COMPLETE |
+| 97 | P | UPDATE target set finalizes before mutation | §§31.1, 31.3 | Spool-finalize barrier | COMPLETE |
+| 98 | P | Finalized target spool contains each RID once | §31.2 | Duplicate-producing child fixture | COMPLETE |
+| 99 | P | Spool spill preserves RID and needed old bytes | §31.4 | In-memory/spill equivalence | COMPLETE |
+| 100 | P | Failed spool finalization publishes no target mutation | §§31.1, 39.1 | Finalize fault fixture | COMPLETE |
+| 101 | P | Final target survives lock/revalidation/predicate rules | §§15.1.2, 31.5 | Changed-target fixture | COMPLETE |
+| 102 | P | Halloween key/predicate changes do not rediscover target | §31.3 | Indexed key-changing UPDATE | COMPLETE |
+| 103 | Q | Old UPDATE version receives updater xmax | §15.3 | Exact header/page fixture | COMPLETE |
+| 104 | Q | Old UPDATE version receives same statement cmax | §15.3 | Exact header/page fixture | COMPLETE |
+| 105 | Q | Old header publishes only after replacement publication | §15.3 | Event-order assertion | COMPLETE |
+| 106 | Q | Direct old-xmax-only runtime prefix is unreachable | §15.3 | N/A with live-order trace | COMPLETE |
+| 107 | R | Replacement UPDATE version receives fresh physical RID | §§5.15, 15.3 | RID inequality assertion | COMPLETE |
+| 108 | R | Replacement xmin/cmin use current transaction/command | §15.3 | Header-byte oracle | COMPLETE |
+| 109 | R | Replacement no-deleter pair is `(0,0)` | §§5.7.3, 15.3 | D15-M1 fixture | COMPLETE |
+| 110 | R | Replacement prev points to exact old RID | §§5.7.4, 15.3 | Link-byte oracle | COMPLETE |
+| 111 | R | Replacement publishes before old header | §15.3 | Publication event order | COMPLETE |
+| 112 | R | Aborted replacement is invisible without physical undo | §§10.2, 15.3, 15.6 | Abort/reopen visibility fixture | COMPLETE |
+| 113 | S | UPDATE installs a new entry for every index | §§8.23, 15.3 | Index-manifest comparison | COMPLETE |
+| 114 | S | UPDATE retains every old physical entry | §§8.23, 15.3 | Before/after tree oracle | COMPLETE |
+| 115 | S | Unchanged indexed key has old/new RID candidates | §15.3 | Same-key two-RID fixture | COMPLETE |
+| 116 | S | Changed indexed key retains old and adds new candidate | §15.3 | Changed-key fixture | COMPLETE |
+| 117 | S | Partial multi-index failure yields no successful statement | §§15.3, 39.1 | Per-MTR fault fixture | COMPLETE |
+| 118 | S | Heap recheck prevents aborted/stale candidate from semantic aliasing | §§8.23, 15.3 | Abort/reuse candidate fixture | COMPLETE |
+| 119 | T | DELETE target set finalizes before mutation | §§31.1, 31.3 | Spool-finalize barrier | COMPLETE |
+| 120 | T | DELETE deduplicates one target RID | §31.2 | Join-expanded target fixture | COMPLETE |
+| 121 | T | DELETE performs epoch/TUPLE_WRITE handoff | §§14.18, 15.4 | Handoff schedule | COMPLETE |
+| 122 | T | DELETE revalidates owner/predicate after every wait | §§15.4, 31.5 | Changed-target fixture | COMPLETE |
+| 123 | T | Stale/nonqualifying target is not deleted or counted | §§15.1.2, 15.4 | Stale-target oracle | COMPLETE |
+| 124 | U | DELETE publishes current TxnId as xmax | §15.4 | Header-byte fixture | COMPLETE |
+| 125 | U | DELETE publishes current CommandId as cmax | §15.4 | Header-byte fixture | COMPLETE |
+| 126 | U | DELETE holds required old-key claims before xmax | §15.4 | Lock/publication event order | COMPLETE |
+| 127 | U | DELETE retains physical index entries | §§8.23, 15.4 | Exact tree before/after | COMPLETE |
+| 128 | U | Abort makes deleter ineffective; commit makes it effective | §§10.3, 15.4 | Paired terminal visibility fixture | COMPLETE |
+| 129 | U | DELETE/INSERT key race follows deleter terminal outcome | §§11.10, 15.4 | Two-terminal race fixture | COMPLETE |
+| 130 | V | Private WAL construction does not set published-write flag | §§12.12, 39.1.2 | Pre-append barrier | COMPLETE |
+| 131 | V | Reservation alone does not set the flag | §§12.12.1, 39.1.2 | Reservation barrier | COMPLETE |
+| 132 | V | Publication-authorizing append/page publication is exact boundary | §§12.12, 39.1.2 | Event-order/prefix oracle | COMPLETE |
+| 133 | V | Publication differs from WAL durability | §§12.12–12.13 | Pause before flush | COMPLETE |
+| 134 | V | Publication differs from page durability | §§7.10–7.11 | Pause before writeback | COMPLETE |
+| 135 | V | Publication differs from transaction COMMIT | §§9.14, 15.5 | Explicit-transaction visibility fixture | COMPLETE |
+| 136 | V | DML introduces no new WAL record family | §§12.7–12.11, 15.2–15.4 | WAL registry/payload inspection | COMPLETE |
+| 137 | W | Pre-publication recoverable statement failure is FA | §§39.1.2–39.1.4 | Boundary matrix | COMPLETE |
+| 138 | W | Clean RC retry is distinct from FA result | §§15.7.1, 39.1.4 | No-client-result assertion | COMPLETE |
+| 139 | W | Post-publication non-success is MA | §§15.7.2, 39.1.3 | Per-stage faults | COMPLETE |
+| 140 | W | Independently fatal deadlock/RR serialization is MA | §39.1.3 | Fault/status fixtures | COMPLETE |
+| 141 | W | Uncertain/incoherent storage state is NC | §§12.12.4, 39.1 | Uncertain append/publication fixture | COMPLETE |
+| 142 | W | Original diagnostic survives automatic ABORT errors | §39.1.7 | Chained-failure fixture | COMPLETE |
+| 143 | W | MA keeps resources through A2/A3 | §§15.6, 39.1.8 | Paused automatic-ABORT fixture | COMPLETE |
+| 144 | W | COMMIT is forbidden after MA | §§9.4, 39.1.1 | Admission assertion | COMPLETE |
+| 145 | W | NC closes ordinary database admission | §§3.3.5, 39.1.1 | Lifecycle gate fixture | COMPLETE |
+| 146 | X | Ordinary user ABORT performs no heap/index write-set undo | §§13.16, 15.6 | Exact page before/after ABORT | COMPLETE |
+| 147 | X | Failed INSERT physical bytes become aborted garbage | §§15.2, 15.6 | Crash/reopen visibility fixture | COMPLETE |
+| 148 | X | Failed UPDATE preserves old and aborted new semantics | §§10, 15.3, 15.6 | Update outcome matrix | COMPLETE |
+| 149 | X | Failed DELETE leaves ineffective xmax | §§10.3, 15.4, 15.6 | Abort visibility fixture | COMPLETE |
+| 150 | X | Vacuum, not statement rollback, removes retained garbage | §§14, 15.2–15.6 | Reclamation cross-reference | COMPLETE |
+| 151 | Y | INSERT command-0 header has cmax zero | §§5.7.3, 15.2 | Exact header matrix | COMPLETE |
+| 152 | Y | INSERT nonzero-command header still has cmax zero | §§5.7.3, 15.2 | Exact header matrix | COMPLETE |
+| 153 | Y | UPDATE replacement header has cmax zero | §§5.7.3, 15.3 | Exact header matrix | COMPLETE |
+| 154 | Y | Actual deleter stores actual deleting CommandId | §§5.7.3, 15.3–15.4 | Deleter control fixture | COMPLETE |
+| 155 | Y | Invalid-xmax/nonzero-cmax cases are `CORRUPT_HEAP` | §5.7.3 | Three byte-negative fixtures | COMPLETE |
+| 156 | Y | Ordinary read does not normalize malformed cmax | §5.7.3 | Before/after byte assertion | COMPLETE |
+| 157 | Y | Aborted-xmax normalization ends in exact `(0,0)` | §14.13.1 | Pre/post WAL byte fixture | COMPLETE |
+| 158 | Y | Header oracle is independent of production codec | §§5.7, 15.2–15.3 | Test-side little-endian builder | COMPLETE |
+| 159 | Z | Affected-row count is final-successful-attempt logical metadata | §15.1.2 | Affected-row oracle | COMPLETE |
+| 160 | Z | Single/N-row INSERT counts logical input rows once | §§15.1.2, 15.2 | 1 and N fixtures | COMPLETE |
+| 161 | Z | UPDATE counts distinct finalized targets once | §§15.1.2, 15.3 | N-target fixture | COMPLETE |
+| 162 | Z | No-op UPDATE counts qualifying finalized targets | §15.3 | `SET x=x` fixture | COMPLETE |
+| 163 | Z | DELETE counts distinct finalized deletes once | §§15.1.2, 15.4 | N-target fixture | COMPLETE |
+| 164 | Z | Zero-target UPDATE/DELETE succeeds with zero | §15.4 | Empty finalized spool fixture | COMPLETE |
+| 165 | Z | Stale target contributes zero unless final attempt acts | §15.1.2 | Changed-predicate fixture | COMPLETE |
+| 166 | Z | Duplicate candidate cannot double count | §§15.1.2, 31.2 | Duplicate-target fixture | COMPLETE |
+| 167 | Z | RC retry discards old provisional count | §§15.1.2, 15.7.1 | 5->3 and 4->0 fixtures | COMPLETE |
+| 168 | Z | Failed/MA multirow DML publishes no partial count | §§15.1.2, 39.1.4 | Seven-then-row-eight fault | COMPLETE |
+| 169 | Z | Count is independent of versions/indexes/WAL/pages | §15.1.2 | Physical-shape metamorphic fixture | COMPLETE |
+| 170 | AA | Failed statement publishes error, not count/RETURNING prefix | §§15.1.2, 15.7.3 | Late-row/result-spool faults | COMPLETE |
+| 171 | AA | Explicit transaction may publish at statement success | §§15.1.2, 31.9 | Pause before later COMMIT | COMPLETE |
+| 172 | AA | Later rollback does not rewrite prior statement response | §15.1.2 | Success-then-rollback fixture | COMPLETE |
+| 173 | AA | Statement success does not imply COMMIT/durability | §§15.1.2, 15.5 | Explicit transaction fixture | COMPLETE |
+| 174 | AA | Autocommit withholds count/RETURNING through C4–C5 | §§15.1.2, 31.9 | Commit-stage barriers | COMPLETE |
+| 175 | AA | Autocommit COMMIT failure exposes no success result | §§15.1.2, 39.1.5 | Pre-success commit fault | COMPLETE |
+| 176 | AA | Count/result metadata is not persisted or recovered | §15.1.2 | WAL/control/checkpoint/reopen absence assertions | COMPLETE |
+| 177 | AB | Successful multirow INSERT counts each logical row once | §§15.1.2, 15.2 | N-input fixture | COMPLETE |
+| 178 | AB | Multirow UPDATE/DELETE uses one finalized distinct target set | §§31.1–31.2 | In-memory/spill target equivalence | COMPLETE |
+| 179 | AB | No target mutation begins before spool Finalize | §§31.1, 31.3 | Finalize barrier | COMPLETE |
+| 180 | AB | Duplicate target production cannot mutate twice | §31.2 | Join-expanded fixture | COMPLETE |
+| 181 | AB | Partial physical multirow progress is not partial SQL success | §§15.1.2, 39.1.4 | Row-N fault fixture | COMPLETE |
+| 182 | AB | Separate statements may each count same logical row once | §15.1.2 | Successive-command UPDATE fixture | COMPLETE |
+| 183 | AC | FSM is advisory, heap geometry authoritative | §§6, 15.2 | Stale-high/low fixtures | COMPLETE |
+| 184 | AC | No-space search cannot reuse DEAD directly | §§5.4.3, 14.12 | DEAD candidate fixture | COMPLETE |
+| 185 | AC | Page/slot exhaustion never wraps or overwrites | §§4.3, 5.4 | Numeric/page allocation procedures | COMPLETE |
+| 186 | AC | FSM update failure cannot redefine DML correctness | §§6.12, 15.2 | Post-publication FSM fault | COMPLETE |
+| 187 | AD | No-replaceable-frame maps by first-publication boundary | §§7.12.3, 39.1 | Pre/post resource fixture | COMPLETE |
+| 188 | AD | WAL position exhaustion prevents unauthorized mutation | §§12.12, 39.1 | Terminal-boundary procedure | COMPLETE |
+| 189 | AD | WAL ENOSPC distinguishes known from uncertain outcome | §§12.12.4, 39.1 | Append fault matrix | COMPLETE |
+| 190 | AD | OOM maps FA/MA without hidden retry | §39.1.3 | Pre/post allocation fault | COMPLETE |
+| 191 | AD | Spill failure cleans temporary state and maps FA/MA | §§31.4, 39.1.3 | Spool spill fault fixture | COMPLETE |
+| 192 | AD | Lock/request registration exhaustion leaves coherent ownership | §§11.12–11.13, 39.1 | Lock resource matrix | COMPLETE |
+| 193 | AD | Resource failures never fabricate partial success | §§15.1.2, 39.1 | Result-envelope assertions | COMPLETE |
+| 194 | AE | Heap corruption is never skipped as row-not-found | §§5.21, 39.1 | Corrupt target fixture | COMPLETE |
+| 195 | AE | Index corruption is not replaced by an ad hoc heap scan | §§8.27–8.29, 39.1 | Corrupt candidate fixture | COMPLETE |
+| 196 | AE | Status corruption/failure cannot invent owner outcome | §§9.13, 10.4 | Lookup fault fixtures | COMPLETE |
+| 197 | AE | Invalid RID sentinel is never a physical target | §§4.3, 5.4 | Revalidation negative fixture | COMPLETE |
+| 198 | AE | DEAD/UNUSED target is not writable old identity | §§5.4, 14.12 | Slot-state revalidation rows | COMPLETE |
+| 199 | AE | Rebound same RID cannot satisfy old request | §§14.18, 15.3–15.4 | Reuse-first handoff schedule | COMPLETE |
+| 200 | AF | Shared writer gate stabilizes schema/index descriptors | §15.1.1 | DDL/DML concurrency fixture | COMPLETE |
+| 201 | AF | Tuple encoder uses valid schema version | §§5.13, 15.2–15.3 | Descriptor/header comparison | COMPLETE |
+| 202 | AF | Every stable index in operation set is maintained | §§15.1.1, 15.2–15.3 | Manifest/index event comparison | COMPLETE |
+| 203 | AF | Catalog lookup failure cannot use unvalidated stale descriptor | §§15.1.1, 39.1 | Lookup fault fixture | COMPLETE |
+| 204 | AF | Same-table DDL upgrade prohibition is preserved | §15.1.1 | Gate transition rejection fixture | COMPLETE |
+| 205 | AG | Read epoch/claim prevents vacuum RID rebind during DML | §§14.18, 15.3–15.4 | Cross-owner barrier schedule | COMPLETE |
+| 206 | AG | Index/predecessor cleanup remains vacuum-owned | §§14.9–14.12, 15.4 | Ownership/event absence assertion | COMPLETE |
+| 207 | AG | DML write-status dependency blocks unsafe cutoff | §§14.14, 15.1.1 | Idle writer/cutoff fixture | COMPLETE |
+| 208 | AG | DML cannot publish current TxnId after C5/A3 | §§15.1.1, 15.5–15.6 | Post-release admission assertion | COMPLETE |
+| 209 | AH | Checkpoint sees old or fully published DML page state | §§7.10.5, 12.12, 13.5 | Publication observer barriers | COMPLETE |
+| 210 | AH | DML dirty pages preserve WAL-before-data/DPT rec_lsn | §§7.11, 12.16, 15.2–15.4 | WAL/DPT oracle | COMPLETE |
+| 211 | AH | DML requires neither statement checkpoint nor data-page force | §§15.5, 15.9 | Checkpoint/writeback absence assertions | COMPLETE |
+| 212 | AI | Recovery admits no ordinary DML before READY | §§13.19, 15.8 | Lifecycle admission fixture | COMPLETE |
+| 213 | AI | Recovery replays physical WAL, not SQL statements | §§13.13, 15.8 | Redo-dispatch event assertion | COMPLETE |
+| 214 | AI | Recovery does not replay locks or uniqueness admission | §§11.10.8, 13.13 | Runtime-state reset assertion | COMPLETE |
+| 215 | AI | Recovery does not reconstruct count/RETURNING output | §§15.1.2, 31.9 | Reopen result-state absence | COMPLETE |
+| 216 | AI | Logical reopen model contains only durable commits | §§13.20, 15.5–15.6 | Recovery Property Tests | COMPLETE |
+| 217 | AJ | DML begins only in READY | §§3.3, 15.8 | Lifecycle state matrix | COMPLETE |
+| 218 | AJ | DRAINING rejects new DML | §§3.3.6, 15.8 | Admission barrier | COMPLETE |
+| 219 | AJ | In-flight DML quiesces through canonical transaction path | §§3.3.6, 15.5–15.6 | Shutdown/transaction schedule | COMPLETE |
+| 220 | AJ | NONCONTINUABLE admits no ordinary continuation | §§3.3.5, 39.1 | Lifecycle gate fixture | COMPLETE |
+| 221 | AK | Retained locks across retry do not retain semantic decisions | §§11.11, 15.7.1 | Retry/lock matrix | COMPLETE |
+| 222 | AK | Retained UNIQUE_KEY still requires fresh exact-key rescan | §§11.10, 15.7.1 | Retry with key claim fixture | COMPLETE |
+| 223 | AK | Retained old-RID TUPLE_WRITE does not bind replacement attempt target | §§11.2, 15.7.1 | Retry targeting different RID | COMPLETE |
+| 224 | AK | Retry count/boundedness remains policy-free within legal boundary | §15.7.1 | Finite barrier fixtures; no timing/count assumption | COMPLETE |
+| 225 | AK | V1 verification assumes no transparent whole-request automatic rerun | §15.7.2 | Assert no new request/TxnId appears without fixture submission | COMPLETE |
+| 226 | AK | V1 verification assumes no savepoint/subtransaction outcome | §15.7.3 | Runtime/WAL registry absence assertion | COMPLETE |
+| 227 | AK | V1 verification assumes no statement-local physical undo | §§15.6–15.7.3 | Failed-prefix bytes plus semantic ABORT oracle | COMPLETE |
+
+Coverage totals for this 227-obligation inventory are:
+
+```text
+COMPLETE:       227
+PARTIAL:          0
+MISSING:          0
+CONTRADICTORY:    0
 ```
 
 ---
