@@ -13303,9 +13303,10 @@ The complete v1 stored scalar set is exactly the seven TypeIds in §16.4:
 | `6` | `TIMESTAMP` | every signed int64 microsecond count from `1970-01-01 00:00:00` | equality and signed microsecond order | yes | none; construct by explicit cast |
 | `7` | `VARCHAR` | arbitrary finite byte string representable by the owning row/execution resource limits | exact-byte equality and unsigned lexicographic byte order | yes | single-quoted byte string |
 
-No v1 scalar TypeId exists for NULL, UNKNOWN, DECIMAL, BLOB, UUID, INTERVAL,
-JSON, arrays, or timezone-aware timestamps. Anything outside this table is not
-a v1 scalar type.
+No v1 scalar TypeId exists for NULL, SQL three-valued-logic UNKNOWN, the
+binder's unresolved type marker, DECIMAL, BLOB, UUID, INTERVAL, JSON, arrays,
+or timezone-aware timestamps. Anything outside this table is not a v1 scalar
+type.
 
 Every listed type may carry SQL NULL as a separate value/validity state. The
 ordinary tuple codec owns stored column bytes, §17.13 owns persisted metadata
@@ -13338,11 +13339,20 @@ TIMESTAMP
 VARCHAR
 ```
 
-`NULL` and `UNKNOWN` are not legal stored schema types.
+`NULL` is not a legal stored schema type. The binder's unresolved type marker
+is not a SQL scalar type, TypeId, persisted schema type, or executor vector
+element type.
 
 SQL NULL is primarily a value state attached to a concrete logical type.
 
-`UNKNOWN` is a binder-only unresolved type used for context-dependent expressions such as an untyped NULL literal and future parameters.
+An untyped NULL token may temporarily carry an unresolved type marker during
+binding. Successful binding resolves the marker to a concrete logical type
+before ordinary execution; if no legal context supplies a unique concrete type,
+binding produces `TYPE_ERROR`.
+
+The distinct terminology reflects distinct semantic layers: an unresolved type
+marker is a bind-time state, whereas SQL three-valued-logic UNKNOWN is the
+nullable BOOLEAN NULL result defined in §17.7.2.
 
 `NULL` may be used by generic non-hot semantic values to denote an explicitly null-only value before contextual coercion, but it does not become a persisted column type or executor vector element type.
 
@@ -14044,7 +14054,7 @@ The executor's vector representation is defined later.
 ## 17.12 Type/value invariants
 
 1. NULL is primarily a value state, not a storable column type.
-2. UNKNOWN is binder-only and never appears in persisted schemas.
+2. The unresolved type marker is binder-only and never appears in persisted schemas or ordinary resolved execution.
 3. Numeric implicit conversion occurs only in §17.8.5's registered contexts, widens, and never silently narrows.
 4. Non-BOOLEAN predicates are rejected.
 5. SQL Boolean semantics are three-valued.
