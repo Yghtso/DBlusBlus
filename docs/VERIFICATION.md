@@ -6614,104 +6614,1077 @@ Use workloads with:
 
 ## Catalog, SQL, and Logical-Plan Verification
 
-### SQL Grammar Testing
+### Chapter 18 Lexer, Parser, and Raw-AST Verification
 
-#### Positive parser tests
+This section is the complete procedural owner for the closed lexical, syntactic, raw-AST,
+lifetime, and front-end resource contracts in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) Chapter 18. Chapters 16, 17, 19, 20, 21, and
+29 and §§39.1–39.3 remain authoritative for the semantic handoffs identified below. A
+parser success proves membership in the Chapter-18 language only; it is not an object,
+type, function, subquery-shape, or execution-success oracle.
 
-For every supported statement and clause family in
-[`ARCHITECTURE.md`](ARCHITECTURE.md) §§18.10–18.12, parse representative minimal,
-composed, and parenthesized forms and compare the complete syntax-relevant AST shape:
+#### Deterministic front-end harness and oracle discipline
 
-```text
-node and token kinds
-clause nesting and list order
-textual identifier spelling/quoting state
-decoded literal payload
-operator tree
-half-open source spans
-```
-
-Include SELECT with and without FROM, joins, aggregation, DML, supported DDL/control
-statements, and each supported subquery spelling. Parser tests inspect syntax only: AST
-names remain textual and contain no catalog IDs or resolved types.
-
-#### Negative parser tests
-
-For each unsupported or malformed syntax family, assert the architecture-defined
-`LexerError`, `ParserError`, or later `UnsupportedFeature` boundary rather than a generic
-failure bit. Check the smallest useful half-open source-byte span, no accepted malformed
-AST, no arbitrary consumption beyond the synchronization boundary, and bounded work on
-truncated/repeated delimiters.
-
-#### Precedence and associativity tests
-
-Verify:
+Use a byte-oriented fixture driver with deterministic barriers and event capture. No
+correctness result may depend on sleeps, wall-clock deadlines, source API names, parser
+algorithm, allocator layout, or production lexer/parser code serving as its own oracle.
+The observable event vocabulary is conceptual:
 
 ```text
-1 + 2 * 3
-NOT a AND b
-a OR b AND c
-a - b - c
-a / b / c
--a * b + c
-NOT a = b OR c AND d
+lexer:
+    source offset before token; token start/end; token class; token payload;
+    lexical-mode and comment entry/exit; LexerError; EOF
+
+parser:
+    token demanded; production entered/completed; raw node created;
+    ordered child appended; optional clause present/absent; statement boundary;
+    semicolon consumed; EOF consumed; ParserError
+
+binder handoff:
+    canonical identifier/type-name bytes; literal provenance; raw tree; SourceSpan
+
+lifetime:
+    backing retained; payload borrowed/materialized; token/raw AST destroyed;
+    surviving consumer observation
+
+resource:
+    budget admitted/refused; allocation failed; private state unwound;
+    complete result or structured failure published
 ```
 
-against the exact §18.15 AST. Binary arithmetic and Boolean infix operators are
-left-associative, unary operators bind at their declared levels, parentheses override the
-table, and comparisons such as `a < b < c` are rejected rather than chained.
+The test driver records these events without requiring them to be exposed by production
+interfaces. Deterministic test adapters, fault points, ownership sentinels, or equivalent
+debug instrumentation may provide the observations. A fixture changes one relevant
+condition at a time; malformed inputs are compared with a nearest valid control.
 
-#### Identifier tests
+Independent oracles are:
 
-Tokenize and parse mixed-case unquoted identifiers, exact-case quoted identifiers,
-case-insensitive keywords, keywords used as quoted identifiers, qualified names, and
-delimiter/error boundaries. Assert unquoted names normalize to lowercase while quoted
-names preserve exact bytes/case through the AST. Exercise quoted-delimiter escaping only
-if it is registered by the grammar; §18.4 does not authorize an implementation-local
-escape convention.
+| Domain | Independent oracle |
+|---|---|
+| source bytes | explicit 256-entry state-dependent byte partition derived from §§18.2–18.7 |
+| whitespace/comments | six-byte table plus a small state machine for line/block/string/quoted modes |
+| keywords | exact registry table plus ASCII-only case folding and whole-identifier boundary checks |
+| symbols | exact trie/table of registered spellings with exhaustive prefix-overlap comparison |
+| identifiers/strings | independent byte decoders implementing only the displayed Chapter-18 grammars |
+| numeric tokens | declarative §§17.5.1–17.5.2 recognizers that return spans and exact spelling, never host numeric conversion |
+| spans | integer interval arithmetic over the original byte vector and §18.8's selection rules |
+| request/statement/expression grammar | declarative EBNF-derived acceptance tables and expected conceptual trees, separate from production parsing code |
+| raw AST | canonical structural serialization containing node roles, ordered children, multiplicity, payload, and spans but no source class names |
+| lifetime | ownership graph plus generation-tagged backing sentinels; every read must target a live generation |
+| resources | injected guard/allocation event determines category independently of source validity |
+| unsupported syntax | complement matrix of expressly absent productions, not another SQL implementation |
 
-Pass the resulting AST names to binder/catalog fixtures separately. Unquoted aliases and
-qualified names use normalized lookup; quoted names use exact binary lookup. Lexical
-normalization must not pre-resolve ambiguity or catalog identity.
+A reference database may supplement semantic differential tests where dialects overlap,
+but it is never the oracle for Chapter-18 lexical boundaries or unsupported-v1 syntax.
 
-#### String and comment termination tests
+#### Source-byte, whitespace, and comment procedures
 
-For strings, cover empty and ordinary literals, doubled single quotes, embedded zero bytes
-under §17.5.3, quote/comment marker text inside a literal, backslash as an ordinary byte
-with no escape meaning, and an unterminated literal at EOF or before a later semicolon.
-Assert decoded logical
-bytes, original span, and a bounded source-positioned `LexerError` for invalid input.
+For each of the 256 byte values, exercise every lexical state in which that byte can be
+decisive: structural, line comment, block comment, string, and quoted identifier. In
+structural state classify it as exact whitespace, ASCII identifier start/continuation,
+digit, delimiter, comment/operator candidate, registered punctuation/operator, or invalid.
+Prove that whole-source UTF-8 validity is unnecessary, high bytes outside admitted payload
+states fail deterministically, unquoted NUL fails, and embedded string NUL remains an
+ordinary byte under §17.5.3. Repeat the classification oracle under representative locales
+and both signed- and unsigned-`char` build modes or an equivalent byte-domain simulation.
 
-For comments, cover line comments ending at newline and EOF, terminated non-nested block
-comments, comment markers inside strings, quote markers inside comments, attempted nested
-block comments under the non-nested rule, and an unterminated block comment. Verify the
-next token and span after each valid comment and the exact lexical error boundary after an
-invalid one.
+The whitespace oracle contains exactly `09 0A 0B 0C 0D 20`; exhaustively assert that the
+other 250 byte values are not whitespace. Place each legal byte between identifiers,
+keywords, numeric tokens, symbols, and statements. Trivia separates tokens where needed
+and never concatenates bytes around it.
 
-#### Multi-statement synchronization tests
+The comment state-machine matrix is:
 
-Parse batches shaped as:
+| Source family | Expected lexical behavior |
+|---|---|
+| `--x`, `--x\n`, `--x\r`, `--x\r\n` | EOF or first CR/LF terminates legally; terminator remains whitespace |
+| `a--x\nb`, `--/*`, `--'` | opener wins over `-`; payload is uninterpreted until terminator |
+| `/**/`, `/*x*/` | first `*/` closes |
+| `/* /* */` | inner opener has no nesting significance |
+| `/*`, `/*x` | `LexerError`, opening delimiter through EOF |
+| `/* */ */` | comment closes, then unregistered structural suffix is diagnosed normally |
+| `a/*b*/c`, `a / * b` | comment/no-comment token boundaries follow exact bytes |
+| strings/quoted identifiers containing `--`, `/*`, or `*/` | marker bytes are payload, not comments |
+
+Comment openers are tested before their component `-` and `/` tokens. String and quoted
+identifier delimiters are tested before comment/symbol interpretation of enclosed bytes.
+No nested-comment expectation is permitted.
+
+#### Token registry, identifier, string, and numeric procedures
+
+The exact reserved-keyword oracle is:
 
 ```text
-valid statement ; malformed statement ; valid statement ;
-malformed statement ; independently malformed statement ; valid statement ;
-unterminated lexical construct at end-of-input
+ANALYZE AND AS ASC BEGIN BY CASE CAST COMMIT CREATE CROSS DEFAULT DELETE DESC
+DISTINCT DROP ELSE END EXISTS EXPLAIN FALSE FROM GROUP HAVING IN INDEX INNER
+INSERT INTO IS JOIN KEY LEFT LIMIT NOT NULL OFFSET ON OR ORDER PRIMARY RETURNING
+ROLLBACK SELECT SET TABLE THEN TRUE UNIQUE UPDATE VACUUM VALUES WHEN WHERE
 ```
 
-For batch recovery supported by §21.17, assert the malformed statement is diagnosed,
-synchronization advances to semicolon or end-of-input without merging statements, and a
-later independent statement can be parsed with accurate spans. Single-statement mode may
-stop at its first error. Do not require IDE-grade token insertion or recovery inside an
-unterminated lexical token.
+For every entry, test lowercase, uppercase, and mixed ASCII case; all map to the same
+reserved token. Test `Kx`, `_K`, and `K1` for every `K` where the identifier grammar
+admits the bytes; these are identifiers, not keyword prefixes. An unquoted keyword is not
+an identifier, a quoted keyword is one, no parser state makes a contextual keyword, and a
+representative complement of other-dialect words remains an identifier or invalid solely
+under the ordinary grammar. Maintain a keyword-to-production coverage table so every
+registered word is exercised in at least one admitted role.
 
-#### Round-trip debug tests
+| Keyword(s) | Admitted production role exercised |
+|---|---|
+| CREATE, TABLE | CREATE TABLE |
+| CREATE, INDEX, UNIQUE, ON | CREATE INDEX / CREATE UNIQUE INDEX |
+| DROP, TABLE, INDEX | DROP TABLE / DROP INDEX |
+| PRIMARY, KEY, UNIQUE, NOT, NULL, DEFAULT | CREATE TABLE elements and constraints |
+| INSERT, INTO, VALUES | INSERT sources |
+| UPDATE, SET | UPDATE assignments |
+| DELETE, FROM | DELETE target |
+| RETURNING, AS | DML RETURNING item and explicit alias |
+| SELECT, DISTINCT | SELECT header |
+| FROM, WHERE, GROUP, BY, HAVING | SELECT relational clauses |
+| ORDER, BY, ASC, DESC, LIMIT, OFFSET | SELECT tail clauses |
+| INNER, LEFT, CROSS, JOIN, ON | exact join tails |
+| BEGIN, COMMIT, ROLLBACK | transaction control |
+| VACUUM, ANALYZE | maintenance statements |
+| EXPLAIN, ANALYZE | EXPLAIN and EXPLAIN ANALYZE |
+| AND, OR, NOT | Boolean expression levels |
+| IS, NOT, NULL, IN | null and membership predicates |
+| CAST, AS | CAST expression |
+| CASE, WHEN, THEN, ELSE, END | searched CASE |
+| EXISTS | EXISTS subquery primary |
+| TRUE, FALSE, NULL | literal primaries |
 
-A debug AST formatter may produce canonical SQL-like output for inspection.
+The exact symbolic oracle is:
 
-It need not reproduce original whitespace/comments.
+```text
+( ) , . ; + - * / % = <> < <= > >=
+```
 
-Reparse the debug form and compare syntax structure, decoded literals, identifiers, and
-operator grouping. Do not treat this formatter as canonical SQL serialization.
+Enumerate each token, each proper prefix, every registered overlap, and adjacent symbol
+pairs. Longest registered spelling wins, so `<=`, `<>`, and `>=` are not split. `!=`,
+`||`, `::`, `?`, `$`, `:`, brackets, and every other unregistered symbol sequence produce
+`LexerError` rather than a generic operator token.
+
+Unquoted identifiers are checked against `[A-Za-z_][A-Za-z0-9_]*` with exhaustive ASCII
+start/continuation partitions. Boundary rows include `a`, `Z`, `_`, `_0`, `a9`, `A_B`,
+`0a`, punctuation, high-byte start/continuation, NUL, and empty input. Canonicalization is
+exhaustive over admitted bytes: `A`–`Z` map to `a`–`z`; lowercase, digits, and `_` are
+unchanged; no locale or Unicode fold participates.
+
+Quoted identifiers use an independent doubled-double-quote decoder. Verify `"Foo"`,
+`"foo"`, `"a""b"`, quoted keywords, every representative high byte, NUL rejection,
+decoded-empty rejection for `""`, and EOF before the closer. Payload bytes/case and the
+quoted-source distinction survive in the raw AST.
+
+Strings use an independent doubled-single-quote decoder. Cover empty/plain literals,
+`'It''s'`, literal backslash bytes, the two bytes backslash-plus-`n`, comment markers,
+semicolon, high bytes, embedded NUL, and EOF before the closer. Assert exact decoded bytes
+and original source span; no backslash escape or Unicode transformation is allowed.
+
+Numeric tokenization composes with the Chapter-17 type/value procedures but independently
+proves lexical boundaries. Integer tokens are `DIGIT+`; floating tokens are exactly
+`DIGIT+'.'DIGIT+([eE][+-]?DIGIT+)?` or `DIGIT+[eE][+-]?DIGIT+`. Cover leading zeros,
+INT32/INT64 boundaries, exact magnitude `2^63`, larger magnitudes, decimal/exponent forms,
+malformed exponents, adjacency to identifiers/symbols, and complete-token consumption.
+The sign is always a separate `+` or `-` token. No `strto*`-like conversion is an oracle.
+
+The numeric/dot matrix includes `1.2`, `1.`, `.5`, `1..2`, `a.b`, `a.1`, and `1.a`.
+Expected tokens/errors come from the closed number and symbol grammars: `.` never begins a
+numeric token, and a host numeric parser cannot extend or accept a token.
+
+Direct-negative composition compares these raw trees:
+
+```text
+-2147483648                 UnaryMinus(NumericLiteral("2147483648"))
+-(2147483648)               UnaryMinus(ParenthesizedExpression(NumericLiteral(...)))
+-9223372036854775808        UnaryMinus(NumericLiteral("9223372036854775808"))
+-(9223372036854775808)      UnaryMinus(ParenthesizedExpression(NumericLiteral(...)))
+```
+
+The parser test asserts only exact provenance and lossless magnitude; Chapter 17 is the
+classification oracle.
+
+#### SourceSpan and diagnostic-selection procedures
+
+For every token and raw node assert `0 <= start <= end <= source_length` and that
+`[start,end)` indexes the original request bytes. Use legal high bytes inside strings and
+quoted identifiers to prove byte rather than code-point addressing. Compute all expected
+intervals from fixture byte-vector indices, independently of production spans.
+
+Diagnostic selection follows §18.8 exactly:
+
+| Condition | Canonical selected span |
+|---|---|
+| invalid source byte | smallest byte range causing lexical rejection |
+| unrecognized symbolic candidate | smallest candidate range causing lexical rejection |
+| unterminated string/quoted identifier/block comment | opening delimiter through EOF |
+| unexpected existing token | that token's span |
+| required input missing at EOF | `[source_length,source_length)` |
+| bind/type failure | attached span of the syntactic construct whose resolution directly failed |
+| equally specific represented candidates | earliest span in source order |
+
+Exercise missing `)`, missing CASE `END`, missing expression after an operator, missing
+table name or SELECT item, and dangling comma at EOF. Handoff-only fixtures retain spans
+for unknown column, unknown type name, unresolved object, and unsupported cast without
+retesting Chapter-19/17 semantics. A synthetic oracle fixture may establish the tie rule
+when no natural single-error case presents two equally specific spans.
+
+A numeric `SourceSpan` value may remain after source release. An attempted text extraction
+then succeeds only when the source owner was retained or the text was materialized. This
+test distinguishes interval-value lifetime from source-byte lifetime and does not require
+execution to retain SQL text.
+
+#### Request framing and complete statement dispatch
+
+The request-framing table is normative for parser verification:
+
+| Source shape | Result |
+|---|---|
+| `stmt`, `stmt;` | one complete statement |
+| `stmt;stmt`, `stmt;stmt;` | two source-ordered statements |
+| surrounding whitespace/comments | same statement sequence and original spans |
+| empty, whitespace-only, comment-only | `ParserError` for zero statements |
+| `;`, `;;`, `;stmt`, `stmt;;`, `stmt; ;stmt` | `ParserError`; no empty statement |
+| valid prefix plus trailing nongrammar token | `ParserError`; no ignored suffix |
+
+Success consumes EOF and preserves exact statement order. Error recovery under §21.17 may
+collect later independent diagnostics after semicolon synchronization, but it MUST NOT
+publish the valid prefix or any recovery artifact as a successful bindable request.
+
+Run one minimal accepted source and one extension rejection for every dispatch root:
+
+```text
+CREATE TABLE                 CREATE INDEX / CREATE UNIQUE INDEX
+DROP TABLE / DROP INDEX      INSERT      UPDATE      DELETE      SELECT
+BEGIN                        COMMIT      ROLLBACK
+VACUUM table                 ANALYZE table
+EXPLAIN SELECT               EXPLAIN ANALYZE SELECT
+```
+
+An unsupported statement start never becomes a generic statement node.
+
+#### DDL, DML, and list procedures
+
+CREATE TABLE fixtures cover one/multiple columns; `NOT NULL`; `DEFAULT expr`; fixed
+`NOT NULL DEFAULT` order; table PRIMARY KEY/UNIQUE with one/composite columns; and mixed
+column/constraint order. Reject empty elements, every trailing comma, explicit column
+`NULL`, column-level PRIMARY KEY/UNIQUE, DEFAULT before NOT NULL, named constraints,
+CHECK, FOREIGN KEY, generated/identity columns, temporary/`IF NOT EXISTS` forms, and table
+options. Preserve element and constraint-column order and duplicates for DDL binding.
+
+CREATE INDEX fixtures cover ordinary/UNIQUE forms, one/multiple base columns, source order,
+and duplicate preservation. Reject empty/trailing lists, expressions, ASC/DESC, INCLUDE,
+partial predicates, and `IF NOT EXISTS`. DROP accepts exactly one TABLE or INDEX object and
+rejects `IF EXISTS`, CASCADE, RESTRICT, and multiple names.
+
+INSERT fixtures cover optional nonempty target columns, one/multiple nonempty VALUES rows,
+INSERT SELECT, and optional RETURNING. UPDATE covers a nonempty assignment list, optional
+WHERE/RETURNING, and duplicate assignments. DELETE covers exact `DELETE FROM`, optional
+WHERE/RETURNING. Reject UPDATE/DELETE aliases, UPDATE FROM, tuple assignment, DELETE USING,
+DML ORDER BY/LIMIT, all DML trailing commas, `DEFAULT VALUES`, `VALUES(DEFAULT)`, and
+`SET c=DEFAULT`. Column-definition DEFAULT remains accepted.
+
+RETURNING accepts a nonempty source-ordered list of `expression [AS alias]` only on INSERT,
+UPDATE, and DELETE. Reject unqualified/qualified star, implicit aliases, trailing comma,
+and RETURNING on SELECT, DDL, transaction, or maintenance statements.
+
+For every comma-separated family, execute the list-cardinality matrix below. Explicit
+`f()` is a separate zero-argument production, not an empty required list.
+
+#### SELECT, aliases, joins, and LIMIT/OFFSET procedures
+
+Generate SELECT cases from the exact clause sequence `SELECT [DISTINCT] projection [FROM]
+[WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT] [OFFSET]`. Exercise each optional clause
+alone where legal and in complete composition. Reject representative reorderings,
+duplicates, and trailing commas. No-FROM fixtures verify syntax—including nested SELECT—
+and delegate wildcard/binding/logical meaning to §§19.5, 20.5, 20.14, and 20.15.
+
+Projection accepts `*`, `identifier.*`, expression, and `expression AS alias`; it is
+nonempty. Base-table aliases require AS. Derived `(SELECT ...) [AS] alias` requires the
+alias while permitting AS to be absent. Reject implicit projection/base aliases,
+missing derived aliases, derived-column alias lists, and qualified star beyond one
+identifier.
+
+Join fixtures admit exactly INNER/LEFT with one ON expression and CROSS without ON. Reject
+bare/comma/RIGHT/FULL/NATURAL/USING/LATERAL joins, CROSS with ON, missing ON, and
+parenthesized join trees. For `a INNER JOIN b ON p LEFT JOIN c ON q`, compare against
+`LeftJoin(InnerJoin(a,b,p),c,q)` or an equivalent canonical serialization; no flattening or
+right association may lose the required tree.
+
+GROUP BY and ORDER BY lists are nonempty, ordered, duplicate-preserving, and reject trailing
+commas. ORDER items accept optional ASC/DESC and reject NULLS FIRST/LAST. LIMIT and OFFSET
+accept full expressions, including `LIMIT 1+1` and OFFSET without LIMIT. Structurally valid
+but nonintegral, negative, nonconstant, or subquery operands reach §§19.14/20.14.9 instead
+of parser rejection.
+
+Transaction controls accept only BEGIN, COMMIT, and ROLLBACK. VACUUM and ANALYZE require
+one table target and no options/columns. EXPLAIN and EXPLAIN ANALYZE accept SELECT only;
+nested DML, DDL, transaction, and maintenance statements are rejected structurally.
+
+#### Expression, function, star, and subquery procedures
+
+Use an independent expected-tree table for the exact low-to-high levels OR, AND, prefix
+NOT, one nonchainable predicate suffix, additive, multiplicative, unary signs, and primary.
+Repetition levels are left-associated; prefix levels nest toward their operand; parentheses
+override and remain represented in the raw AST.
+
+Mandatory precedence rows include:
+
+| Source | Canonical grouping |
+|---|---|
+| `a OR b AND c` | `OR(a,AND(b,c))` |
+| `NOT a = b` | `NOT(EQ(a,b))` |
+| `a+b*c` | `ADD(a,MUL(b,c))` |
+| `a*b+c` | `ADD(MUL(a,b),c)` |
+| `-a*b` | `MUL(NEG(a),b)` |
+| `-(a+b)` | `NEG(Paren(ADD(a,b)))` |
+| `a=b AND c=d` | `AND(EQ(a,b),EQ(c,d))` |
+| `a IN (x) OR b` | `OR(IN(a,[x]),b)` |
+| `a IS NULL AND b` | `AND(IS_NULL(a),b)` |
+
+Associativity rows include `a-b-c`, `a/b*c`, `a+b-c`, repeated AND/OR, `NOT NOT a`, and
+`- - x`. Reject `a<b<c`, `a=b=c`, and `a IS NULL IS NULL`. Assert `NOT a IN (x)` is
+`NOT(IN(a,[x]))`, `a NOT IN (x)` is one NOT-IN predicate, and `a IS NOT NULL` is one null
+predicate.
+
+IN expression lists are nonempty, no-trailing, ordered, and multiplicity-preserving;
+reject `IN ()`, `IN (1,)`, and row constructors. CAST accepts exactly
+`CAST(expression AS unquoted-type-name)`; reject `::`, quoted and parameterized types.
+Searched CASE requires at least one ordered WHEN/THEN arm and optional ELSE; reject simple
+CASE, missing WHEN/THEN/END. Column references admit one or two identifiers, never three.
+
+Generic calls parse independently of registries as `f()`, `f(expr,...)`, or `f(*)`.
+Compare `count(*)`, `sum(*)`, and `foo(*)` to the same star-argument syntax role and defer
+validity to Chapters 17/29. Exercise an ordinary quoted identifier such as `"f"(*)` and
+reject qualified `ns.f()`; no production lookup may special-case a name. Distinguish raw
+roles for `SELECT *`, `t.*`, `f(*)`, and `a*b`.
+
+Subquery syntax admits scalar `(SELECT ...)`, `EXISTS (SELECT ...)`, IN SELECT, and derived
+SELECT. Prefix NOT over EXISTS and the NOT-IN spelling compose through the ordinary
+expression grammar rather than separate subquery statement productions. A correlated but
+structurally valid SELECT, a multi-column scalar SELECT, and an IN SELECT with bad output
+shape/type all parse and reach Chapters 19/20. Parenthesized INSERT, UPDATE, DELETE, row
+constructors, and other absent wrappers fail with `ParserError` because only SELECT
+occupies a structural subquery position. Parser fixtures use no catalog, scope,
+output-schema, or type information.
+
+#### Raw-AST contract and parser/binder boundary
+
+Serialize every raw node into architecture-visible roles rather than implementation class
+names. The required category inventory is:
+
+```text
+StatementRequest; SelectStatement; CreateTableStatement; CreateIndexStatement;
+DropStatement; InsertStatement; UpdateStatement; DeleteStatement;
+TransactionStatement; VacuumStatement; AnalyzeStatement; ExplainStatement;
+AstIdentifier; AstQualifiedName; AstTypeName; AstLiteral; AstBinaryExpression;
+AstUnaryExpression; AstParenthesizedExpression; AstComparison; AstNullPredicate;
+AstInList; AstInSubquery; AstFunctionCall; AstStarArgumentCall; AstCast; AstCase;
+AstStar; AstSubqueryExpression; AstTableReference; AstJoin; AstReturningClause
+```
+
+Audit metadata to prove absence of TableId, ColumnId, IndexId, ConstraintId, BindingId,
+resolved TypeId, catalog descriptors, inserted semantic casts, and logical/physical plan
+data. Textual/canonical names, optional qualification, explicit aliases, literal
+provenance, clause presence, spans, parenthesis provenance, join kind/children/ON, and
+star roles remain recoverable.
+
+Use position-tagged duplicate fixtures for statements, binary operands, CASE arms, IN
+items, projections, VALUES rows/items, INSERT columns, UPDATE assignments, GROUP/ORDER BY,
+function arguments, table elements/constraint columns, index keys, RETURNING items,
+qualified components, and join children. Compare the complete ordered sequence; never use
+a set or sorted representation as oracle.
+
+The parser/binder boundary matrix below proves that type/object/function/subquery semantic
+validity does not affect parse results. In particular, `Potato` is a legal unquoted
+type-name syntax payload and `"INT32"` is a parser error. Exercise BOOLEAN, INT32, INT64,
+FLOAT64, DATE, TIMESTAMP, and VARCHAR in mixed ASCII case, plus unknown names, to prove that
+the parser admits the identifier shape while TypeResolver alone applies the seven-name
+registry. `name` and `main.name` parse, `a.b.c` does not; the binder alone validates
+namespace `main`. Raw type names contain canonical bytes and span, never TypeId.
+
+#### Backing, payload, and object-lifetime procedures
+
+Use generation-tagged backing owners and deterministic destruction events. A read through
+a borrowed view after its generation is dead is a test failure; the fixture must not
+perform an actual dangling dereference. Required cases are:
+
+| Case | Ownership transition | Required observation |
+|---|---|---|
+| A | token borrows source; AST materializes; token dies; source later dies | AST payload remains exact |
+| B | AST borrows source; token dies; source owner retained | AST remains exact until release |
+| C | bound object borrows source; raw AST dies; source retained | bound payload/diagnostic remains exact |
+| D | binder materializes; source and raw AST die | bound object remains exact |
+| E | SourceSpan value retained; source dies | interval remains usable; text dereference is unavailable unless materialized |
+
+Repeat across decoded string bytes, decoded quoted identifiers, canonical unquoted names,
+type/object/column/alias/function names, and numeric provenance including magnitude `2^63`.
+Destroy tokens before raw-AST consumers and destroy raw AST before eligible bound consumers
+to prove that object lifetime and payload lifetime are distinct. Exercise success, lexical
+failure, parse failure, bind failure, cancellation, and resource failure cleanup. Backing
+is runtime-only; no fixture expects WAL, catalog, tuple/index, checkpoint, or recovery state.
+
+#### Front-end resources, complete-result boundary, and transaction composition
+
+First prove with the grammar oracle that no implementation-convenience maximum is part of
+the language for request/token/string/identifier length, nesting/depth, CASE/IN/projection/
+VALUES/statement counts, or raw-AST nodes. Existing semantic/domain bounds from other
+owners remain separate.
+
+Inject deliberate admission refusal at deterministic nesting, node, parser-work, and
+front-end memory guards without causing allocation failure. The result is exactly
+`FrontEndResourceLimit`. Inject required allocation failures during token payload creation,
+string/identifier materialization, raw-node construction, numeric provenance retention,
+and binder materialization; the result is exactly `OutOfMemory`. A guard reached before a
+failed allocation dominates as `FrontEndResourceLimit`; an unsatisfied required allocation
+is `OutOfMemory`. Neither is LexerError, ParserError, BindError, TypeError, nor a generic
+resource error.
+
+Run one grammar-valid input under sufficient resources and under a deterministically tiny
+guard. The grammar oracle returns valid in both; only processing outcome differs. Deep
+valid nesting must either succeed or return one structured resource outcome before stack
+overflow, abort, memory corruption, uncaught allocation failure, or undefined behavior;
+the test does not prescribe recursion or iteration.
+
+Inject failure after private tokens/nodes exist. Assert no successful token stream, raw
+AST, bindable prefix, or executable prefix is published; all private ownership unwinds.
+Under each injection prove there is no token/string/identifier truncation, ignored suffix,
+dropped/reordered/deduplicated child, shortened list, weakened numeric provenance,
+literal approximation/type change, or prefix-only bind/execute fallback.
+
+Chapter 18 contributes the structured cause before transaction-owned write publication;
+§39.1 independently determines the command/transaction outcome. No fixture assigns a
+parser-specific rollback/retry rule or persistent mutation. Resource policy and failed
+front-end state leave no WAL, catalog, control-file, tuple/page/index, checkpoint,
+transaction-status, or recovery representation.
+
+#### Platform, technique, and closed-language procedures
+
+Replay lexical/AST fixtures under representative locales, char signedness modes, and
+Unicode-library versions or equivalent isolated classification adapters. Tokenization,
+canonical payload, spans, and accept/reject results are identical. Replay numeric fixtures
+with deliberately disagreeing host integer/FLOAT conversion adapters; token boundaries and
+Chapter-17 handoff remain oracle-defined.
+
+Where two parser implementations are available—or through one parser plus an independent
+declarative recognizer—compare token sequence, accept/reject result, and canonical raw-tree
+serialization. Generated, handwritten, and other deterministic techniques are all
+conforming possibilities; generator conflict resolution or recovery defaults cannot alter
+the language.
+
+Build the unsupported-v1 complement from explicit Chapter-18 exclusions. It includes, where
+applicable: ALTER TABLE, MERGE, UPSERT/ON CONFLICT, WITH/CTE, UNION/INTERSECT/EXCEPT,
+RIGHT/FULL/NATURAL/USING/LATERAL joins, window/FILTER/OVER syntax, CHECK, FOREIGN KEY,
+named constraints, parameters, VARCHAR(n), DECIMAL, INTERVAL, JSON, ARRAY, typed DATE/
+TIMESTAMP literals, UPDATE FROM, DELETE USING, RETURNING outside DML, `!=`, `||`, and `::`.
+Each fixture has one nearest valid control and one absent production; expected result is
+LexerError for absent symbols/bytes or ParserError for absent structural productions.
+
+#### Mandatory verification matrices
+
+The following matrices are maintained as executable table data or an equivalent generated
+fixture inventory. Each cell is asserted; blank or implementation-selected cells are not
+permitted.
+
+| Matrix | Required rows | Required columns |
+|---|---|---|
+| lexical boundary | six whitespace bytes, keyword/identifier prefixes, quotes, comments, symbol overlaps, numeric/dot, semicolon, EOF, high byte, NUL | source bytes, tokens, payload, span, result/category, oracle |
+| identifier | simple/mixed ASCII, underscore, continuation digit, digit-first, keyword, quoted keyword, empty/doubled-quote/high-byte quoted, high-byte unquoted, NUL | lexical result, canonical payload, token class, raw role, error |
+| string | empty, plain, doubled quote, backslash, comment marker, semicolon, high byte, NUL, unterminated | tokens, decoded bytes, span, error |
+| numeric | zero, INT32/INT64 boundaries, `2^63`, decimal/exponent FLOAT, malformed exponent, `.5`, `1.`, `1..2`, signs | tokens, raw payload, raw AST, Chapter-17 handoff, result owner |
+| statement | every supported root | minimal form, options, required lists, alias policy, trailing comma, root role, semantic owner, excluded extensions |
+| list cardinality | CREATE elements/PK/UNIQUE/index keys/INSERT columns/VALUES rows/items/UPDATE/SELECT/GROUP/ORDER/RETURNING/function args/IN/CASE arms | minimum, empty legality, trailing comma, order, duplicates, later validation |
+| alias | projection, base table, derived table | AS required/optional, alias required, implicit allowed, raw payload, binder owner |
+| join | INNER, LEFT, CROSS, bare, comma, RIGHT, FULL, NATURAL, USING | status, ON rule, raw kind, association, result |
+| star role | `SELECT *`, `t.*`, `f(*)`, `a*b` | tokens, context, raw role, downstream owner |
+| subquery | scalar/EXISTS/IN/derived/correlated/multi-column scalar/bad-IN-shape/INSERT/UPDATE/DELETE/row constructor | parser result, binder owner, semantic owner, error stage |
+| SourceSpan | valid token, invalid byte, three unterminated constructs, unexpected token, missing-at-EOF, unknown column/type handoff, tie | selected span, start, end, owner, rule |
+| lifetime | source, token, raw AST, bound object, SourceSpan, decoded string, identifiers, numeric provenance | borrow, own, owner, outlive source, materialize, runtime-only |
+| resource | invalid source, invalid grammar, configured guard, allocation failure, spill failure, optimizer bound | category, grammar validity, partial result, DB mutation, transaction owner, persistence |
+| parser/binder | table/column existence, namespace `main`, type registry, function existence/arity/star, operator/cast legality, alias, duplicate target, constraint/default, LIMIT, correlation/output shape | parse owner, bind/type owner, later owner, expected stage |
+
+The compact executable tables below fix the architecture-visible cells. Implementations may
+add representation-specific observation columns, but may not replace these oracles.
+
+##### Lexical, identifier, string, and numeric matrices
+
+| Lexical row | Source bytes | Tokenization/payload | Span/result | Oracle |
+|---|---|---|---|---|
+| whitespace | each of `09 0A 0B 0C 0D 20` | trivia separator | exact one-byte interval; accepted | six-byte table |
+| non-whitespace complement | each other byte in structural state | grammar-specific class or invalid, never whitespace | byte-specific | 256-entry partition |
+| keyword boundary | `SELECT`, `selectx`, `_select`, `select1` | keyword then three identifiers | whole spelling | keyword table plus identifier grammar |
+| quotes | valid/unterminated single and double quote forms | string or quoted-identifier mode | exact token or LexerError | independent decoders |
+| line comment | `--x`, CR, LF, CRLF, EOF variants | trivia through before terminator | next token begins after whitespace | comment state machine |
+| block comment | terminated, nested-looking, unterminated | first closer; no nesting | accepted or opener-through-EOF error | comment state machine |
+| comment/operator | `a--b`, `a/*b*/c`, `a / * b` | opener priority or three ordinary symbols | exact component spans | symbol/comment priority |
+| symbol overlap | `<`, `<=`, `<>`, `>`, `>=` | longest registered token | whole token | exact symbol trie |
+| numeric/dot | `1.2`, `1.`, `.5`, `1..2` | declarative numeric/punctuation result | exact consumed prefix/error | Chapter-17 recognizer |
+| qualified name | `a.b`, `a.1`, `1.a` | identifier/dot or numeric/error sequence | exact components | identifier plus numeric grammar |
+| semicolon | single/final/repeated placements | punctuation then request framing | §18.10.1 result | request EBNF |
+| EOF | after complete/incomplete construct | EOF or lexical/parser error | zero-width only for missing parser input | lexical state plus §18.8 |
+| high byte | structural, quoted, and string states | invalid, exact identifier payload, exact string payload | byte interval or containing token | state-dependent byte table |
+| NUL | structural/comment/quoted/string states | invalid except exact string payload | LexerError or string token | §§18.2, 17.5.3 |
+
+| Identifier row | Lexical result | Canonical payload | Token/raw role | Error |
+|---|---|---|---|---|
+| `a`, `Z` | unquoted identifier | `a`, `z` | textual identifier | none |
+| `_`, `_0`, `A_B9` | unquoted identifier | exact lowercase mapping | textual identifier | none |
+| `0a` | integer then identifier or grammar rejection by context | separate payloads | not one identifier | contextual ParserError where invalid |
+| reserved word | keyword | keyword token | grammar terminal | none or ParserError by position |
+| quoted reserved word | quoted identifier | exact spelling | textual quoted identifier | none |
+| `"Foo"`, `"foo"` | quoted identifier | case preserved | distinct textual payloads | none |
+| `"a""b"` | quoted identifier | `a"b` | textual quoted identifier | none |
+| `""` | rejected identifier | empty | none | LexerError/identifier-boundary error |
+| quoted high byte | quoted identifier | exact byte | textual quoted identifier | none |
+| unquoted high byte | invalid | none | none | LexerError |
+| identifier containing NUL | invalid | none | none | LexerError |
+
+| String row | Tokenization | Decoded bytes | Span | Error |
+|---|---|---|---|---|
+| `''` | one string token | empty | complete spelling | none |
+| `'a'` | one string token | `a` | complete spelling | none |
+| `'It''s'` | one string token | `It's` | complete spelling | none |
+| backslash bytes | one string token | unchanged backslash bytes | complete spelling | none |
+| comment markers | one string token | unchanged marker bytes | complete spelling | none |
+| semicolon | one string token | semicolon byte | complete spelling | none |
+| high bytes | one string token | exact high bytes | complete spelling | none |
+| embedded NUL | one string token | exact NUL byte | complete spelling | none |
+| unterminated | no token success | decoded prefix remains private | opener through EOF | LexerError |
+
+| Numeric row | Tokens/raw payload | Raw AST | Chapter-17 handoff | Result owner |
+|---|---|---|---|---|
+| `0`, leading-zero decimal | integer spelling/magnitude | literal | smallest integer classification | Chapter 17 |
+| INT32 boundaries | integer spelling/magnitude | literal or direct unary minus | exact INT32/INT64 boundary | Chapter 17 |
+| INT64 boundaries | integer spelling/magnitude | literal or direct unary minus | exact INT64 boundary | Chapter 17 |
+| `9223372036854775808` | lossless magnitude `2^63` | literal | direct-negative-only rule | Chapter 17 |
+| decimal FLOAT | complete decimal token | literal | correctly rounded conversion | Chapter 17 |
+| exponent FLOAT | complete exponent token | literal | correctly rounded conversion | Chapter 17 |
+| malformed exponent | no valid complete FLOAT token | no accepted expression | lexical/grammar result | Chapters 17/18 |
+| `.5`, `1.`, `1..2` | dot/integer boundaries per grammar | accepted only if resulting grammar admits sequence | no host extension | Chapter 18 |
+| `+1`, `-1` | sign plus unsigned numeric token | unary node plus literal | direct-sign classification | Chapters 18 then 17 |
+| direct/parenthesized INT64_MIN | same lossless magnitude | distinct parenthesis provenance | legal direct form versus ordinary operand | Chapter 17 |
+
+##### Statement, list, alias, join, star, and subquery matrices
+
+| Statement root | Minimal legal form | Principal optional surface | Required-list rule | Raw root | Semantic owner / excluded extension |
+|---|---|---|---|---|---|
+| CREATE TABLE | `CREATE TABLE t(a INT32)` | column modifiers, table PK/UNIQUE | elements/constraint columns nonempty | CreateTableStatement | Chs. 16/21; no ALTER/CHECK/FK/named constraint |
+| CREATE INDEX | `CREATE INDEX i ON t(a)` | UNIQUE spelling is separate row | keys nonempty | CreateIndexStatement | §21.8; no expression/order/include/predicate |
+| CREATE UNIQUE INDEX | `CREATE UNIQUE INDEX i ON t(a)` | none | keys nonempty | CreateIndexStatement | §21.8 |
+| DROP TABLE | `DROP TABLE t` | none | no list | DropStatement | §21.9; no IF EXISTS/multiple |
+| DROP INDEX | `DROP INDEX i` | none | no list | DropStatement | §21.9; no IF EXISTS/multiple |
+| INSERT | `INSERT INTO t VALUES(1)` | columns, rows, SELECT, RETURNING | all displayed lists nonempty | InsertStatement | §§21.11–21.12; no DML DEFAULT |
+| UPDATE | `UPDATE t SET a=1` | WHERE, RETURNING | assignments nonempty | UpdateStatement | §21.13; no alias/FROM/DEFAULT/LIMIT |
+| DELETE | `DELETE FROM t` | WHERE, RETURNING | RETURNING nonempty when present | DeleteStatement | §21.14; no alias/USING/LIMIT |
+| SELECT | `SELECT 1` | exact §18.11 clauses | projection and present lists nonempty | SelectStatement | Chs. 19/20 |
+| BEGIN | `BEGIN` | none | none | TransactionStatement | Chapter 9 |
+| COMMIT | `COMMIT` | none | none | TransactionStatement | Chapter 9 |
+| ROLLBACK | `ROLLBACK` | none | none | TransactionStatement | Chapter 9 |
+| VACUUM | `VACUUM t` | none | one target | VacuumStatement | §14.17; no targetless/options |
+| ANALYZE | `ANALYZE t` | none | one target | AnalyzeStatement | §21.17.1/Ch. 34; no targetless/options |
+| EXPLAIN SELECT | `EXPLAIN SELECT 1` | SELECT surface | SELECT lists as ordinary | ExplainStatement | Chapter 40; no non-SELECT target |
+| EXPLAIN ANALYZE SELECT | `EXPLAIN ANALYZE SELECT 1` | SELECT surface | SELECT lists as ordinary | ExplainStatement | Chapter 40; no non-SELECT target |
+
+| List family | Minimum | Empty? | Trailing comma? | Order/duplicates | Later validation |
+|---|---:|---|---|---|---|
+| CREATE TABLE elements | 1 | no | no | preserve both | DDL binder |
+| PRIMARY KEY columns | 1 | no | no | preserve both | DDL binder |
+| UNIQUE columns | 1 | no | no | preserve both | DDL binder |
+| index keys | 1 | no | no | preserve both | index binder |
+| INSERT columns | 1 when wrapper present | no | no | preserve both | DML binder |
+| VALUES rows | 1 | no | no | preserve both | DML binder |
+| VALUES row items | 1 | no | no | preserve both | DML binder |
+| UPDATE assignments | 1 | no | no | preserve both | DML binder |
+| SELECT items | 1 | no | no | preserve both | SELECT binder |
+| GROUP BY | 1 when clause present | no | no | preserve both | aggregate binder |
+| ORDER BY | 1 when clause present | no | no | preserve both | ORDER binder |
+| RETURNING | 1 when clause present | no | no | preserve both | DML binder |
+| ordinary function arguments | 1 in argument-list alternative | no | no | preserve both | function registry; `f()` separate |
+| IN expression list | 1 | no | no | preserve both | TypeResolver |
+| CASE WHEN arms | 1 | no | not comma syntax | preserve both | CASE binder |
+
+| Alias context | AS rule | Alias required? | Implicit form | Raw payload | Binder owner |
+|---|---|---|---|---|---|
+| projection | AS required when alias present | no | rejected | explicit alias and span | §19.5 |
+| base table | AS required when alias present | no | rejected | explicit alias and span | Chapter 19 |
+| derived table | AS optional | yes | alias required after child | alias and child boundary | §20.14.3 |
+
+| Join spelling | Grammar status | ON rule | Raw kind | Association/result |
+|---|---|---|---|---|
+| INNER JOIN | accepted | exactly one | inner | left-fold |
+| LEFT JOIN | accepted | exactly one | left | left-fold |
+| CROSS JOIN | accepted | absent | cross | left-fold |
+| bare JOIN | rejected | not applicable | none | ParserError |
+| comma join | rejected | not applicable | none | ParserError |
+| RIGHT / FULL | rejected | not applicable | none | ParserError |
+| NATURAL | rejected | not applicable | none | ParserError |
+| USING | rejected | not applicable | none | ParserError |
+| parenthesized join tree / LATERAL | rejected | not applicable | none | ParserError |
+
+| Star source | Token context | Raw role | Downstream owner |
+|---|---|---|---|
+| `SELECT *` | select-item | unqualified select star | binder wildcard expansion |
+| `t.*` | select-item after one identifier/dot | qualified select star | binder relation expansion |
+| `f(*)` | function-call argument | star-argument call | Chapter 17/29 registry |
+| `a*b` | multiplicative expression | binary multiplication | Chapter 17 operator registry |
+
+| Subquery row | Parser result | Binder/result owner | Semantic owner | Error stage |
+|---|---|---|---|---|
+| scalar SELECT | accept | scalar-shape binding | §20.14.4 | bind/runtime cardinality as applicable |
+| EXISTS SELECT | accept | EXISTS binding | §20.14.5 | semantic owner |
+| IN SELECT | accept | one-column/type binding | §20.14.6 | semantic owner |
+| derived SELECT | accept with required alias | derived boundary | §20.14.3 | semantic owner |
+| correlated SELECT | accept | detect outer capture | §§19.18, 20.14.2 | UnsupportedCorrelation |
+| multi-column scalar SELECT | accept | validate output arity | §20.14.1 | bind/semantic error |
+| invalid IN output shape/type | accept | validate arity/type | §20.14.1 | bind/type error |
+| INSERT/UPDATE/DELETE in subquery position | reject | none | §18.12.3 | ParserError |
+| row constructor | reject | none | §18.12 | ParserError |
+
+##### SourceSpan, lifetime, and resource matrices
+
+| SourceSpan row | Selected span | Owner/rule |
+|---|---|---|
+| valid token | complete original token bytes | lexer token |
+| invalid byte | smallest rejecting byte range | §18.8 lexical rule |
+| unterminated string | opening single quote through EOF | §18.8 lexical rule |
+| unterminated quoted identifier | opening double quote through EOF | §18.8 lexical rule |
+| unterminated block comment | opening slash-star through EOF | §18.8 lexical rule |
+| unexpected token | unexpected token span | §18.8 parser rule |
+| missing required token at EOF | `[source_length,source_length)` | §18.8 parser rule |
+| unknown column handoff | column-reference span | binder construct |
+| unknown type handoff | type-name span | TypeResolver construct |
+| equally specific tie | earliest represented span | §18.8 tie rule |
+
+| Lifetime row | May borrow? | May own/materialize? | Required owner/lifetime | May outlive source? |
+|---|---|---|---|---|
+| original source | not applicable | backing owns | while any original-byte borrower lives | owner defines source lifetime |
+| token | yes | yes | through token use and dependent transfer | only independent payload may |
+| raw AST | yes | yes | through every raw consumer | yes with retained owner/materialization |
+| bound object | yes only with retained owner | yes | through every bound consumer | yes when lifetime-safe |
+| SourceSpan value | offsets only | value | independent integer value | yes; dereference may not |
+| decoded string | yes | yes | through every consumer | yes when retained/materialized |
+| identifier payload | yes | yes | through every consumer | yes when retained/materialized |
+| numeric provenance | yes | yes | through Chapter-17 consumer | yes when retained/materialized |
+
+| Resource condition | Canonical category | Grammar valid? | Partial raw result? | DB mutation/persistence | Transaction owner |
+|---|---|---|---|---|---|
+| invalid source form | LexerError | no | no | none | §39.1 |
+| invalid grammar | ParserError | no | no | none | §39.1 |
+| configured/safety guard | FrontEndResourceLimit | may be yes | no | none | §39.1 |
+| required allocation fails | OutOfMemory | independent | no | none | §39.1 |
+| execution spill failure | SpillIOError | independent | not a front-end result | temporary only | §§39.1, 39.3 |
+| optimizer configured bound | OptimizerResourceLimit | independent | complete front-end input | none from front end | §§39.1, 39.4 |
+
+##### Raw-AST and parser/binder matrices
+
+| Raw category | Ordered children/payload | Span/provenance | Resolved IDs/TypeId? | Downstream owner |
+|---|---|---|---|---|
+| StatementRequest | statement sequence | request/statement spans | forbidden | command/binder |
+| SelectStatement | clauses and lists | exact clause presence | forbidden | Chs. 19/20 |
+| CreateTableStatement | table elements | names/types/default syntax | forbidden | Chapter 21 |
+| CreateIndexStatement | key columns | uniqueness spelling/names | forbidden | §21.8 |
+| DropStatement | object syntax | object kind/name | forbidden | §21.9 |
+| InsertStatement | columns/source/RETURNING | exact source shape | forbidden | §§21.11–21.12 |
+| UpdateStatement | assignments/WHERE/RETURNING | exact source shape | forbidden | §21.13 |
+| DeleteStatement | WHERE/RETURNING | exact source shape | forbidden | §21.14 |
+| TransactionStatement | none | keyword kind/span | forbidden | Chapter 9 |
+| VacuumStatement | target name | statement/target span | forbidden | §14.17 |
+| AnalyzeStatement | target name | statement/target span | forbidden | §21.17.1/Ch. 34 |
+| ExplainStatement | SELECT child | ANALYZE presence | forbidden | Chapter 40 |
+| AstIdentifier | canonical bytes | quoted distinction/span | forbidden | binder |
+| AstQualifiedName | one/two components | ordered components/span | forbidden | binder |
+| AstTypeName | canonical unquoted bytes | span | TypeId forbidden | TypeResolver |
+| AstLiteral | decoded/lossless payload | spelling/direct-negative data | TypeId forbidden | Chapter 17 |
+| AstBinaryExpression | left/right | operator/span | forbidden | TypeResolver |
+| AstUnaryExpression | operand | operator/directness | forbidden | TypeResolver |
+| AstParenthesizedExpression | expression | mandatory parenthesis provenance | forbidden | Chapter 17/binder |
+| AstComparison | left/right | operator/span | forbidden | TypeResolver |
+| AstNullPredicate | operand | NOT presence/span | forbidden | TypeResolver |
+| AstInList | left/items | order/multiplicity | forbidden | TypeResolver |
+| AstInSubquery | left/SELECT | IN/NOT provenance | forbidden | Chapters 19/20 |
+| AstFunctionCall | name/arguments | zero/nonzero argument form | forbidden | Chapter 17/29 |
+| AstStarArgumentCall | name | distinct star role | forbidden | Chapter 29 |
+| AstCast | expression/type syntax | span | TypeId/cast insertion forbidden | TypeResolver |
+| AstCase | WHEN arms/ELSE | order/clause presence | forbidden | Chapter 17 |
+| AstStar | qualifier when present | select-star role | forbidden | binder |
+| AstSubqueryExpression | SELECT child | scalar/EXISTS role | forbidden | Chapters 19/20 |
+| AstTableReference | object/alias or derived child | alias/AS/source form | forbidden | binder |
+| AstJoin | left/right/ON | kind and left-fold | forbidden | Chapters 19/20 |
+| AstReturningClause | expression/alias items | order/multiplicity | forbidden | Chapter 21 |
+
+| Question | Parse owner | Binder/TypeResolver/later owner | Expected stage |
+|---|---|---|---|
+| table or index exists | syntax only | catalog/binder | bind |
+| column exists or is ambiguous | syntax only | binder | bind |
+| two-part namespace equals `main` | component count only | binder/catalog | bind |
+| type-name is one of seven | unquoted identifier only | TypeResolver | bind/type |
+| function exists and arity is legal | call shape only | Chapter 17/29 | bind/type |
+| aggregate star is legal | star-call shape only | Chapter 29 | bind/type |
+| operator types compatible | operator syntax only | TypeResolver | bind/type |
+| cast pair/value legal | CAST syntax only | TypeResolver | bind/type/runtime |
+| alias resolves | explicit syntax only | binder | bind |
+| duplicate DML target legal | preserve duplicates | DML binder | bind |
+| constraint/default semantically legal | preserve syntax | Chapter 21/17 | bind |
+| LIMIT/OFFSET integral/nonnegative/constant/no-subquery | expression syntax | §§19.14, 20.14.9 | bind |
+| subquery correlated | SELECT structure only | §§19.18, 20.14.2 | bind |
+| subquery output shape/type | SELECT structure only | §20.14/TypeResolver | bind/semantic |
+
+##### Cross-chapter and high-level case matrices
+
+| Owner | Chapter-18 handoff | Existing verification reused | Chapter-18 composition | Status |
+|---|---|---|---|---|
+| Chapter 16 | canonical names, no stable IDs | catalog identity/name tests | prove IDs arise only after parse | COMPLETE |
+| Chapter 17 | literal provenance and raw expression syntax | type-system property section | direct-negative, CASE/IN/CAST/call handoff | COMPLETE |
+| Chapter 18 | closed tokens/grammar/raw AST/lifetime/resources | this section | direct owner | COMPLETE |
+| Chapter 19 | names/spans/raw trees | Binder Tests | semantic permutation leaves parsing unchanged | COMPLETE |
+| Chapter 20 | SELECT/subquery raw shape | Subquery Tests | structural acceptance versus semantic rejection | COMPLETE |
+| Chapter 21 | DDL/DML/default/RETURNING syntax | DDL/DML binder tests | syntax-to-semantic handoff | COMPLETE |
+| Chapter 29 | generic call/star syntax | aggregate tests | registry-independent parse | COMPLETE |
+| §39.1 | front-end failure cause | transaction matrix tests | no front-end mutation/retry rule | COMPLETE |
+| §39.2 | source/semantic/resource categories | front-end error tests | exact category and span | COMPLETE |
+| §39.3 | cross-layer OutOfMemory | execution resource tests | same cause before execution | COMPLETE |
+| Chapter 40 | EXPLAIN SELECT raw target | EXPLAIN tests | syntax-only target restriction | COMPLETE |
+| §41 | architecture verification obligations | subsystem suites | complete procedural realization | COMPLETE |
+
+| High-level case | Deterministic oracle | Expected result | Status |
+|---|---|---|---|
+| each of `09 0A 0B 0C 0D 20` | whitespace table | trivia | COMPLETE |
+| line-comment EOF | comment state machine | accepted trivia | COMPLETE |
+| unterminated block comment | comment state machine/span arithmetic | LexerError, opener through EOF | COMPLETE |
+| mixed-case keyword | keyword table/ASCII fold | reserved keyword | COMPLETE |
+| quoted keyword | quoted decoder | identifier | COMPLETE |
+| structural high byte / quoted high byte | state byte table | LexerError / preserved payload | COMPLETE |
+| identifier NUL / empty quoted identifier | identifier grammar | rejection | COMPLETE |
+| doubled string quote | string decoder | one quote payload byte | COMPLETE |
+| direct-negative INT64_MIN | raw-tree plus Chapter-17 oracle | direct unary provenance retained | COMPLETE |
+| `.5`, `1.`, `1..2` | numeric/dot recognizer | exact closed-grammar result | COMPLETE |
+| `<=` | symbol trie | one longest token | COMPLETE |
+| comment/operator collision | lexical priority table | comment opener wins | COMPLETE |
+| `stmt`, `stmt;`, `stmt;stmt`, `stmt;;` | request EBNF | accept first three, reject last | COMPLETE |
+| CREATE TABLE trailing comma | CREATE EBNF | ParserError | COMPLETE |
+| unknown unquoted type | type-name grammar plus TypeResolver | parse then type failure | COMPLETE |
+| `f(*)`, `COUNT(*)`, `SUM(*)` | generic-call grammar | same raw star-call shape | COMPLETE |
+| implicit projection/base alias | SELECT EBNF | ParserError | COMPLETE |
+| INNER then LEFT chain | canonical join fold | left-associated raw tree | COMPLETE |
+| comparison chain | predicate-suffix count | ParserError | COMPLETE |
+| NOT precedence | expression expected-tree table | NOT wraps predicate | COMPLETE |
+| empty IN | IN production | ParserError | COMPLETE |
+| scalar SELECT subquery | subquery production | parse success | COMPLETE |
+| correlated SELECT subquery | syntax plus binder scope oracle | parse then UnsupportedCorrelation | COMPLETE |
+| data-modifying subquery | SELECT-only production | ParserError | COMPLETE |
+| missing input at EOF | span arithmetic | zero-width EOF span | COMPLETE |
+| duplicated AST list item | canonical structural serialization | both items retained in order | COMPLETE |
+| source release with retained AST | generation-tagged owner graph | valid only after retain/materialize | COMPLETE |
+| deliberate front-end guard | injected-cause oracle | FrontEndResourceLimit | COMPLETE |
+| failed required allocation | injected-cause oracle | OutOfMemory | COMPLETE |
+| failure after private AST nodes | publication/ownership ledger | no partial success; full unwind | COMPLETE |
+
+#### Documentation-model and cross-owner consistency
+
+Maintain at least these documentation-model rows, each with `CONSISTENT`, `FINDING`, or
+`N/A`: no chronology; no implementation status; no phase narration; no development
+sequencing; no source-layout coupling; no parser-algorithm mandate; no verification
+history; no project-state leakage; precise lexical/grammar/AST/boundary/span/lifetime/
+resource/error contracts; exact owner references; implementation freedom; deterministic
+procedures; timeless methodology. Any `FINDING` prevents Chapter-18 verification closure.
+
+| Documentation-model property | Status | Deterministic audit |
+|---|---|---|
+| no project chronology | CONSISTENT | classify temporal phrases by semantic versus project-time meaning |
+| no implementation-status narration | CONSISTENT | search capability/progress assertions and require none |
+| no phase narration | CONSISTENT | search phase/milestone sequencing and require none |
+| no DEVELOPMENT sequencing | CONSISTENT | changed prose states procedures, not implementation order |
+| no source-layout coupling | CONSISTENT | search files/classes/APIs and require no mandate |
+| no parser-algorithm mandate | CONSISTENT | generated/handwritten/other techniques remain legal |
+| no verification history | CONSISTENT | no dated results, counts-as-progress, or review narrative |
+| no PROJECT_STATE leakage | CONSISTENT | no implemented/unimplemented status claim |
+| lexical semantics precise | CONSISTENT | exact byte/registry oracles exist |
+| grammar semantics precise | CONSISTENT | exact EBNF-derived acceptance and tree oracles exist |
+| raw-AST semantics precise | CONSISTENT | category and structural matrices exist |
+| parser/binder boundary precise | CONSISTENT | semantic permutation matrix exists |
+| SourceSpan precise | CONSISTENT | interval and selection matrix exists |
+| lifetime precise | CONSISTENT | ownership-transition matrix exists |
+| resources precise | CONSISTENT | guard/allocation distinction matrix exists |
+| error ownership precise | CONSISTENT | category and §39 composition procedures exist |
+| lower semantic owners referenced | CONSISTENT | cross-chapter matrix names exact owners |
+| representation freedom preserved | CONSISTENT | no AST container, owner type, or allocator required |
+| deterministic procedures and independent oracles | CONSISTENT | harness/oracle ledger and single-defect fixtures exist |
+| timeless methodology | CONSISTENT | procedures contain no mutable result snapshot |
+
+Cross-owner composition asserts, without duplicating semantic suites: Chapter 16 receives
+canonical names and creates stable IDs; Chapter 17 receives literal provenance and owns
+types/operators/casts/CASE/IN/scalar calls; Chapter 19 receives unbound names/spans and owns
+resolution, aliases, functions, LIMIT/OFFSET, and correlation diagnostics; Chapter 20 owns
+no-FROM and subquery shape/semantics; Chapter 21 owns DDL/DML/default/RETURNING semantics;
+Chapter 29 owns aggregate names/arity/star legality; §39.1 owns transaction consequences;
+§§39.2–39.3 own error categories; Chapter 40 owns EXPLAIN semantics; §41 supplies the
+architecture-level verification requirement.
+
+#### Chapter-18 verification family status
+
+| Family | Scope | Status |
+|---|---|---|
+| V18-1 | source-byte and lexical-domain determinism | CLOSED |
+| V18-2 | whitespace and comments | CLOSED |
+| V18-3 | keyword/symbol registries and longest match | CLOSED |
+| V18-4 | identifiers, strings, and numeric-token handoff | CLOSED |
+| V18-5 | SourceSpan and diagnostic selection | CLOSED |
+| V18-6 | request and batch framing | CLOSED |
+| V18-7 | top-level DDL/DML/control/maintenance grammar | CLOSED |
+| V18-8 | SELECT, aliases, joins, clauses, and LIMIT/OFFSET | CLOSED |
+| V18-9 | expression precedence, predicates, CAST, and CASE | CLOSED |
+| V18-10 | generic calls, star roles, and structural subqueries | CLOSED |
+| V18-11 | raw-AST shape, provenance, order, and multiplicity | CLOSED |
+| V18-12 | parser/binder/TypeResolver/catalog boundaries | CLOSED |
+| V18-13 | source, payload, token, AST, and bound-object lifetime | CLOSED |
+| V18-14 | front-end resource categories and complete-result failure | CLOSED |
+| V18-15 | error-taxonomy and transaction-boundary composition | CLOSED |
+| V18-16 | locale/platform/parser-technique determinism | CLOSED |
+| V18-17 | unsupported-v1 closed-language rejection | CLOSED |
+| V18-18 | harness, independent oracles, and mandatory matrices | CLOSED |
+| V18-19 | cross-chapter semantic handoffs | CLOSED |
+| V18-20 | verification-document ownership and timelessness | CLOSED |
+
+#### Atomic architecture-obligation coverage map
+
+Each row below is one independently asserted Chapter-18 obligation. `Procedure` names the
+subsection or mandatory matrix above; `Oracle` names an independently computed result.
+`COMPLETE` means both exist. The inventory is derived from the live Chapter-18 contract;
+its count is not a target selected in advance.
+
+| Atomic obligation | Architecture owner | Verification owner | Deterministic procedure/reference | Independent oracle | Status |
+|---|---|---|---|---|---|
+| V18-1.1 — Front end is Lexer, Parser, raw AST followed by separate Binder | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.2 — SQL source is one length-delimited byte sequence | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.3 — Structural syntax is ASCII-defined | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.4 — Whole-source UTF-8 validity is not required | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.5 — Invalid structural high bytes fail deterministically | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.6 — Unquoted source NUL is rejected outside strings | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.7 — Original source stays immutable while borrowed | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-1.8 — Front-end processing is independent of locale, Unicode syntax classification, and signed char | §§18.1–18.2.1 | V18-1 | Harness; source-byte procedure | 256-byte/state partition | COMPLETE |
+| V18-2.1 — Whitespace is exactly bytes 09, 0A, 0B, 0C, 0D, and 20 | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.2 — Every other byte is non-whitespace | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.3 — Trivia separates adjacent lexical sequences without concatenating surrounding bytes | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.4 — Line comment opener has priority over minus tokens | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.5 — Line comments end before CR, before LF, or legally at EOF | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.6 — CRLF comment termination leaves both bytes as whitespace | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.7 — Block comments close at the first following closer | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.8 — Block comments are nonnested | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.9 — Unterminated block comments are LexerError with deterministic span | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-2.10 — Comment markers inside strings and quoted identifiers are inert | §§18.2, 18.7 | V18-2 | Whitespace/comment procedure; lexical matrix | six-byte table and comment state machine | COMPLETE |
+| V18-3.1 — Reserved-keyword registry is enumerated exactly | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.2 — Keyword recognition is ASCII case-insensitive | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.3 — Keyword recognition requires a complete identifier boundary | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.4 — Quoted keyword spellings remain identifiers | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.5 — No contextual or nonreserved keyword class exists | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.6 — Symbolic-token registry is enumerated exactly | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.7 — Longest registered symbolic spelling wins | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.8 — Comment openers precede component symbol recognition | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-3.9 — Unregistered symbolic sequences are LexerError rather than generic operators | §18.3 | V18-3 | Registry procedure; lexical matrix | closed keyword and symbol tables | COMPLETE |
+| V18-4.1 — Unquoted identifier start bytes are exactly ASCII letters and underscore | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.2 — Unquoted identifier continuation bytes are exactly ASCII letters, digits, and underscore | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.3 — Unquoted identifiers reject non-ASCII and NUL | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.4 — Unquoted canonicalization maps only ASCII uppercase to lowercase | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.5 — Quoted identifiers use double-quote delimiters | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.6 — Doubled double quote decodes to one quote byte | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.7 — Quoted identifier bytes and case are preserved without Unicode normalization | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.8 — Quoted identifiers reject NUL and decoded empty payload | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.9 — Unterminated quoted identifiers are LexerError | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.10 — Strings use single-quote delimiters and doubled-single-quote decoding | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.11 — Backslash has no escape meaning and string high bytes plus embedded NUL are retained | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.12 — Unterminated strings are LexerError with original spelling span | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.13 — Integer tokens are ASCII DIGIT plus and signs remain separate | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.14 — FLOAT tokens use exactly the two Chapter-17 decimal forms | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-4.15 — Numeric dot boundaries and lossless magnitude through 2^63 are preserved without host conversion | §§18.4–18.6; §§17.5.1–17.5.3 | V18-4 | Identifier/string/numeric procedures; matrices | independent byte decoders and declarative numeric recognizers | COMPLETE |
+| V18-5.1 — Token and AST spans are half-open intervals | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.2 — Span offsets count bytes in the original request | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.3 — Every span satisfies zero less-than-or-equal start less-than-or-equal end less-than-or-equal source length | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.4 — Invalid-byte and unknown-symbol spans identify the rejecting range | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.5 — Unterminated lexical constructs span opening delimiter through EOF | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.6 — Unexpected-token parser errors use that token span | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.7 — Missing required input at EOF uses the zero-width EOF span | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.8 — Binder and type diagnostics retain the directly responsible syntactic span with earliest-source tie rule | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-5.9 — Span values may outlive source bytes while text dereference requires retained or materialized bytes | §18.8 | V18-5 | SourceSpan procedure; SourceSpan matrix | original-vector interval arithmetic | COMPLETE |
+| V18-6.1 — A request contains at least one statement | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.2 — A statement needs no final semicolon | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.3 — One optional final semicolon is accepted | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.4 — Semicolons are required between adjacent statements | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.5 — Leading, repeated, and interior empty statements are rejected | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.6 — Whitespace-only and comment-only requests are rejected | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.7 — Successful parsing consumes all nontrivia input through EOF | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-6.8 — Request AST preserves statement order and no failure publishes a successful prefix | §18.10.1 | V18-6 | Request-framing procedure | request EBNF table | COMPLETE |
+| V18-7.1 — Complete dispatch admits exactly the listed statement roots | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.2 — CREATE TABLE requires a nonempty ordered table-element list | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.3 — Column definition is name, unquoted type name, optional NOT NULL, then optional DEFAULT expression | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.4 — CREATE TABLE supports only table-level PRIMARY KEY and UNIQUE constraints | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.5 — CREATE TABLE excludes explicit column NULL, column-level key constraints, named constraints, CHECK, and foreign keys | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.6 — CREATE INDEX and CREATE UNIQUE INDEX require a nonempty base-column key list | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.7 — CREATE INDEX excludes expression keys, ordering, INCLUDE, predicates, and IF NOT EXISTS | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.8 — DROP admits exactly one TABLE or INDEX object | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.9 — DROP excludes IF EXISTS, CASCADE, RESTRICT, and multiple targets | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.10 — INSERT admits optional nonempty target columns and VALUES or SELECT source | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.11 — VALUES contains one or more nonempty rows | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.12 — UPDATE requires a nonempty assignment list and preserves duplicate assignments | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.13 — UPDATE excludes target aliases, FROM, tuple assignment, ORDER BY, and LIMIT | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.14 — DELETE requires DELETE FROM and excludes target aliases, USING, ORDER BY, and LIMIT | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.15 — DML DEFAULT sentinels are absent while column-definition DEFAULT remains | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.16 — RETURNING is a nonempty expression list with optional explicit AS aliases | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.17 — RETURNING is available only on INSERT, UPDATE, and DELETE and excludes stars | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.18 — Transaction syntax is exactly BEGIN, COMMIT, and ROLLBACK | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.19 — VACUUM and ANALYZE each require exactly one table target and no options | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-7.20 — EXPLAIN and EXPLAIN ANALYZE accept SELECT only | §§18.10.2–18.10.4 | V18-7 | DDL/DML/dispatch procedures; statement/list matrices | statement EBNF tables | COMPLETE |
+| V18-8.1 — SELECT clause order is fixed from DISTINCT through OFFSET | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.2 — Projection list is nonempty, ordered, multiplicity-preserving, and has no trailing comma | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.3 — SELECT DISTINCT is optional | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.4 — FROM is syntactically optional in outer and nested SELECT | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.5 — Projection aliases require explicit AS | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.6 — Base-table aliases require explicit AS | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.7 — Derived-table alias is mandatory and its AS is optional | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.8 — Qualified SELECT star has exactly one identifier qualifier | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.9 — FROM admits only one joined-table chain, not comma joins or table functions | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.10 — INNER JOIN requires exactly one ON expression | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.11 — LEFT JOIN requires exactly one ON expression | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.12 — CROSS JOIN has no ON expression | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.13 — Join tails left-fold in source order | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.14 — Bare, RIGHT, FULL, NATURAL, USING, LATERAL, and parenthesized-tree joins are rejected | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.15 — GROUP BY and ORDER BY required lists are nonempty, ordered, and no-trailing | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.16 — ORDER items allow only optional ASC or DESC | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-8.17 — LIMIT and OFFSET operands are expressions and OFFSET may appear without LIMIT | §§18.11–18.11.1 | V18-8 | SELECT/alias/join procedures; matrices | SELECT EBNF and canonical join tree | COMPLETE |
+| V18-9.1 — OR is the lowest binary expression level and left-associative | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.2 — AND binds above OR and is left-associative | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.3 — Prefix NOT binds above AND and nests toward its operand | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.4 — Predicate suffix binds above NOT and occurs at most once | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.5 — Comparison operators are exactly equals, not-equals angle, less, less-equal, greater, greater-equal | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.6 — IS NULL and IS NOT NULL are exact null-predicate forms | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.7 — IN and NOT IN are exact predicate forms | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.8 — Comparison and predicate chaining is rejected | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.9 — Additive plus and minus are left-associative | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.10 — Multiplicative star, slash, and percent are left-associative | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.11 — Unary plus and minus nest toward their operand | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.12 — Parentheses override precedence and remain represented | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.13 — IN expression lists are nonempty, no-trailing, ordered, and duplicate-preserving | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.14 — Row-valued IN and row-constructor expressions are absent | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.15 — CAST syntax is exactly CAST expression AS unquoted type name | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.16 — Searched CASE requires one or more ordered WHEN arms and optional ELSE | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.17 — Simple CASE and parameterized or double-colon cast syntax are absent | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-9.18 — Column references admit exactly one or two identifier components | §§18.12, 18.15 | V18-9 | Expression procedure; precedence matrix | expression EBNF expected-tree table | COMPLETE |
+| V18-10.1 — Ordinary zero-argument function-call syntax is registry-independent | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.2 — Ordinary nonempty expression-argument calls preserve order and multiplicity | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.3 — Star-argument calls are a distinct syntax form | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.4 — Parser does not special-case COUNT, SUM, AVG, MIN, MAX, or any function name | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.5 — Function names are unqualified identifiers and qualified calls are absent | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.6 — SELECT star, qualified star, call star, and multiplication star remain distinct | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.7 — Scalar parenthesized SELECT subquery parses structurally | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.8 — EXISTS SELECT subquery parses structurally | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.9 — IN SELECT subquery parses structurally | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.10 — Derived SELECT requires its alias and parses structurally | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.11 — Data-modifying and other non-SELECT subqueries are ParserError | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.12 — Unsupported row constructors and absent subquery wrappers are ParserError | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.13 — Correlated structurally valid SELECT reaches binding | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-10.14 — Scalar and IN output-shape or type failures reach semantic owners | §§18.12.3–18.12.4 | V18-10 | Function/star/subquery procedures; matrices | call and SELECT-only subquery productions | COMPLETE |
+| V18-11.1 — Raw AST records syntax rather than resolved semantics | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.2 — Every listed raw-AST semantic category has an observable equivalent | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.3 — Raw AST retains canonical textual identifiers and optional qualification | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.4 — Raw type-name payload retains bytes and span but no TypeId | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.5 — Raw AST excludes stable catalog IDs and BindingId | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.6 — Raw AST excludes catalog descriptors, inserted semantic casts, and plans | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.7 — Statement nodes retain every present clause | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.8 — Parenthesized-expression provenance is mandatory | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.9 — Direct-negative literal provenance distinguishes direct and parenthesized operands | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.10 — Every ordered raw child collection preserves exact source order | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.11 — Every raw child collection preserves exact multiplicity and duplicates | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.12 — Join nodes preserve kind, left, right, and required ON presence | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-11.13 — RETURNING items and explicit aliases remain ordered and syntactically distinct | §§18.13, 18.16 | V18-11 | Raw-AST procedure; raw-AST matrix | canonical structural serialization | COMPLETE |
+| V18-12.1 — Parser is independent of catalog contents and object existence | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.2 — Parser is independent of TypeResolver and the seven-type registry | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.3 — Unknown unquoted type names parse and fail only during type resolution | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.4 — Quoted identifiers are rejected in type-name position | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.5 — One- and two-part object names parse without validating namespace main | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.6 — Three-part object and column names are structurally rejected | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.7 — Function existence, arity, scalar or aggregate identity, and star legality are semantic checks | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.8 — Operator and cast type legality are semantic checks | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.9 — Alias resolution, duplicate targets, defaults, and constraint validity are semantic checks | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-12.10 — LIMIT/OFFSET legality, correlation, and subquery output shape are semantic checks | §§18.10, 18.12.5; Chapters 16–20, 29 | V18-12 | Boundary procedure; parser/binder matrix | same syntax under permuted semantic fixtures | COMPLETE |
+| V18-13.1 — One conceptual front-end backing owner covers source and referenced derived payload | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.2 — Original source bytes remain immutable while borrowed | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.3 — Tokens and raw AST may borrow source or derived payload | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.4 — Every backing owner outlives every borrower | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.5 — Required payload is retained or materialized before an earlier owner is released | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.6 — Token object lifetime is distinct from token-payload lifetime | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.7 — Tokens may die before raw AST after safe payload transfer or retained backing | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.8 — Raw AST may die after binding when no surviving object depends on it | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.9 — Bound objects may borrow only while the corresponding owner remains alive | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.10 — Decoded string and quoted-identifier payloads remain valid for every consumer | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.11 — Canonical identifiers and exact numeric provenance remain valid for every consumer | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-13.12 — Backing and SourceSpan text are runtime-only and introduce no persistent format | §§18.2.1, 18.8, 18.14 | V18-13 | Lifetime procedures; lifetime matrix | generation-tagged ownership graph | COMPLETE |
+| V18-14.1 — No implementation-convenience request, token, payload, nesting, list, statement, or AST maximum becomes grammar | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.2 — Existing semantic and persistent-domain limits remain authoritative | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.3 — Finite operational front-end budgets are permitted independently of grammar | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.4 — Deliberate checked budget refusal is FrontEndResourceLimit | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.5 — Unsatisfied required allocation is OutOfMemory at every front-end or binding stage | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.6 — FrontEndResourceLimit and OutOfMemory remain distinct | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.7 — One valid SQL source may succeed or resource-fail under different configurations without changing validity | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.8 — Uncontrolled stack overflow, abort, corruption, or undefined behavior is nonconforming | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.9 — Resource failure publishes no successful partial token stream, AST, or bindable prefix | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.10 — Resource failure never truncates source payload or ignores suffix input | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.11 — Resource failure never drops, reorders, or deduplicates AST children | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.12 — Resource failure never weakens numeric provenance or changes literal semantics | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.13 — Private lexical, parser, binder, and backing state unwinds safely | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-14.14 — Front-end budgets and failure state are runtime-only and absent from persistence and recovery | §18.17 | V18-14 | Resource procedures; resource matrix | injected guard versus failed-allocation event | COMPLETE |
+| V18-15.1 — Invalid source byte or token form is LexerError | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.2 — Structurally invalid grammar is ParserError | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.3 — Bind, type, catalog, constraint, unsupported, and cardinality categories remain semantic-owner results | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.4 — FrontEndResourceLimit is not LexerError, ParserError, BindError, or TypeError | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.5 — OutOfMemory is not relabeled by the pipeline stage | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.6 — No generic competing ResourceError or parser-specific resource category is introduced | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.7 — Canonical source processing reports the encountered resource cause without proving an unprocessed suffix | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-15.8 — Section 39.1 alone maps the failure cause to statement and transaction outcome | §§18.8, 18.12.5, 18.17; §§39.1–39.3 | V18-15 | Diagnostic/resource/transaction procedures | error-stage and injected-cause table | COMPLETE |
+| V18-16.1 — Locale cannot alter whitespace, keyword, identifier, or token classification | §§18.2–18.9, 18.16 | V18-16 | Platform and technique procedures | cross-configuration canonical token/tree comparison | COMPLETE |
+| V18-16.2 — Host char signedness cannot alter high-byte behavior | §§18.2–18.9, 18.16 | V18-16 | Platform and technique procedures | cross-configuration canonical token/tree comparison | COMPLETE |
+| V18-16.3 — Unicode library version cannot alter structural syntax or normalization | §§18.2–18.9, 18.16 | V18-16 | Platform and technique procedures | cross-configuration canonical token/tree comparison | COMPLETE |
+| V18-16.4 — Host integer conversion cannot alter numeric token boundaries or handoff | §§18.2–18.9, 18.16 | V18-16 | Platform and technique procedures | cross-configuration canonical token/tree comparison | COMPLETE |
+| V18-16.5 — Host floating conversion cannot alter numeric token boundaries or handoff | §§18.2–18.9, 18.16 | V18-16 | Platform and technique procedures | cross-configuration canonical token/tree comparison | COMPLETE |
+| V18-16.6 — Parser implementation or generator conflict resolution cannot alter accept/reject or canonical raw tree | §§18.2–18.9, 18.16 | V18-16 | Platform and technique procedures | cross-configuration canonical token/tree comparison | COMPLETE |
+| V18-17.1 — Unsupported top-level statement families are rejected | §§18.3, 18.10–18.12.5 | V18-17 | Closed-language complement procedure | expressly absent-production matrix | COMPLETE |
+| V18-17.2 — Unsupported DDL constraints, options, and type syntaxes are rejected | §§18.3, 18.10–18.12.5 | V18-17 | Closed-language complement procedure | expressly absent-production matrix | COMPLETE |
+| V18-17.3 — Unsupported join, alias, and SELECT set/window forms are rejected | §§18.3, 18.10–18.12.5 | V18-17 | Closed-language complement procedure | expressly absent-production matrix | COMPLETE |
+| V18-17.4 — Unsupported DML extensions and RETURNING placements are rejected | §§18.3, 18.10–18.12.5 | V18-17 | Closed-language complement procedure | expressly absent-production matrix | COMPLETE |
+| V18-17.5 — Unsupported expression, parameter, function modifier, and symbolic forms are rejected | §§18.3, 18.10–18.12.5 | V18-17 | Closed-language complement procedure | expressly absent-production matrix | COMPLETE |
+| V18-17.6 — No external SQL dialect compatibility alias expands the v1 language | §§18.3, 18.10–18.12.5 | V18-17 | Closed-language complement procedure | expressly absent-production matrix | COMPLETE |
+| V18-18.1 — Deterministic harness observes lexer, parser, handoff, lifetime, and resource events | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.2 — Core correctness uses deterministic barriers and no sleeps | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.3 — Production lexer and parser do not serve as their own oracle | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.4 — Lexical, identifier, string, numeric, and SourceSpan matrices are complete | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.5 — Statement, list, alias, join, star, and subquery matrices are complete | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.6 — Lifetime, resource, raw-AST, and parser/binder matrices are complete | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.7 — High-level domain/case matrix covers every named Chapter-18 boundary family | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-18.8 — Single-defect fixtures isolate one invalid condition against a valid control | Chapter 18; §41.4 | V18-18 | Harness and mandatory matrices | independent fixture inventory audit | COMPLETE |
+| V18-19.1 — Chapter 16 canonical-name and stable-ID boundary is preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-19.2 — Chapter 17 literal, type, operator, cast, CASE, IN, and scalar-call boundary is preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-19.3 — Chapters 19 and 20 binding, no-FROM, LIMIT, and subquery boundaries are preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-19.4 — Chapter 21 DDL, DML, default, RETURNING, and recovery boundaries are preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-19.5 — Chapter 29 aggregate registry and star-legality boundary is preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-19.6 — Sections 39.1–39.3 error and transaction boundaries are preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-19.7 — Chapter 40 EXPLAIN and Section 41 verification ownership are preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger | COMPLETE |
+| V18-20.1 — Verification prose contains no implementation-progress or project chronology | Architecture front matter; Chapter 18 | V18-20 | Documentation-model procedure; matrix | role and temporality classification | COMPLETE |
+| V18-20.2 — Verification prose contains no phase or development sequencing | Architecture front matter; Chapter 18 | V18-20 | Documentation-model procedure; matrix | role and temporality classification | COMPLETE |
+| V18-20.3 — Verification prose mandates no source layout, parser algorithm, AST container, or allocator | Architecture front matter; Chapter 18 | V18-20 | Documentation-model procedure; matrix | role and temporality classification | COMPLETE |
+| V18-20.4 — Architecture rules are referenced rather than redefined as competing semantic authority | Architecture front matter; Chapter 18 | V18-20 | Documentation-model procedure; matrix | role and temporality classification | COMPLETE |
+| V18-20.5 — Procedures and expected oracles are deterministic, analytical, and timeless | Architecture front matter; Chapter 18 | V18-20 | Documentation-model procedure; matrix | role and temporality classification | COMPLETE |
+| V18-20.6 — Every atomic Chapter-18 obligation has one COMPLETE coverage-map row | Architecture front matter; Chapter 18 | V18-20 | Documentation-model procedure; matrix | role and temporality classification | COMPLETE |
+
+#### Coverage totals
+
+The atomic coverage map is the closure ledger for this section:
+
+```text
+COMPLETE:       218
+PARTIAL:        0
+MISSING:        0
+CONTRADICTORY:  0
+```
+
+No debug formatter, fuzzer, production parser, or reference database substitutes for the
+independent lexical, grammar, raw-tree, span, lifetime, and resource oracles above.
 
 ---
 
@@ -6780,7 +7753,8 @@ Use an in-memory/mock catalog implementation where useful.
 
 ### Front-End Error and Source-Span Tests
 
-Drive one representative failure through each architecture-owned category in §21.16:
+Drive one representative failure through each architecture-owned category in §§21.16 and
+39.2–39.3:
 
 ```text
 LexerError
@@ -6791,14 +7765,20 @@ CatalogError
 ConstraintDefinitionError
 UnsupportedFeature / UnsupportedCorrelation
 CardinalityError
+FrontEndResourceLimit
+OutOfMemory
 ```
 
-For SQL-originating failures, assert the smallest useful retained source-byte span: bad
-token, unexpected grammar production, unknown/ambiguous identifier, invalid cast/operator,
-invalid constraint definition, unsupported subquery form, and scalar-subquery occurrence
-for a runtime cardinality error. Preserve lower-layer categories where §21.16 requires it.
-Internal logical-validator defects use internal invariant/validation errors and need no
-invented SQL span.
+For SQL-originating failures, assert the canonical retained SourceSpan selected by §18.8
+and the Chapter-18 SourceSpan matrix above: offending lexical range, unexpected-token span,
+zero-width EOF span, or directly responsible bound syntactic construct with the
+earliest-source tie rule. Cover unknown/ambiguous identifiers, invalid casts/operators,
+invalid constraint definitions, unsupported semantic subquery properties, and the scalar
+subquery occurrence used by a runtime cardinality error. Independently inject a deliberate
+front-end guard and an unsatisfied allocation to prove that resource outcomes remain
+distinct from source-language and semantic categories. Preserve lower-layer categories
+where §§21.16 and 39 require it. Internal logical-validator defects use internal
+invariant/validation errors and need no invented SQL span.
 
 ---
 
@@ -9146,9 +10126,10 @@ deep boolean expression
 multi-join query
 ```
 
-Arena allocation should keep allocation count low.
-
-Do not optimize syntax parsing before profiling, but prevent obvious per-token/per-node heap churn.
+Record total/front-end-attributed bytes, peak live bytes, allocation count, retained backing,
+and payload materialization. Compare representations only after proving the §18.14 lifetime
+contract and §18.17 resource behavior; the benchmark does not prefer an arena, per-object
+ownership, interning, source slices, or another allocation technique.
 
 ---
 
@@ -9168,8 +10149,9 @@ Requirements:
 - no crashes,
 - no out-of-bounds access,
 - no undefined behavior,
-- bounded failure behavior,
-- useful structured lexer/parser/binder/type error instead of generic failure,
+- structured `LexerError`, `ParserError`, semantic-owner, `FrontEndResourceLimit`, or
+  `OutOfMemory` classification according to the deterministic Chapter-18 procedures,
+- no successful partial token/raw-AST result and no truncation or semantic fallback,
 - no unbounded parser-recovery loop.
 
 SQL parser fuzzing is high-value because arbitrary text reaches it directly.
@@ -9178,7 +10160,7 @@ Use reproducible corpus entries and report the generated seed on failure. Includ
 bytes, deeply nested delimiters, truncated literals/comments, long identifiers/lists,
 numeric boundaries, and malformed multi-statement batches. Literal/type-conversion and
 bound-constant-evaluator fuzzing must preserve the closed Chapter-17 error categories and
-bounded allocation behavior.
+Chapter-18 complete-result/resource behavior.
 
 Parser fuzzing may naturally reach subquery syntax, but deterministic table-driven
 §20.14 tests remain authoritative for supported and rejected forms. Fuzzing does not stand
