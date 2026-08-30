@@ -14209,6 +14209,37 @@ The front end targets an explicit SQL subset rather than pretending to implement
 
 ## 18.2 Token model
 
+SQL source is one length-delimited byte sequence. Structural SQL syntax is
+defined over ASCII bytes; the complete source is not required to be valid
+UTF-8. Lexical decisions MUST NOT depend on locale-sensitive character
+classification, Unicode-library syntax classification, or host signed-char
+behavior.
+
+The complete v1 whitespace set is:
+
+```text
+0x09  horizontal tab
+0x0A  LF
+0x0B  vertical tab
+0x0C  form feed
+0x0D  CR
+0x20  space
+```
+
+No other byte is whitespace. Whitespace is discarded from the raw syntactic
+representation except that source spans continue to refer to its original
+location. Whitespace and comments separate adjacent identifier or numeric
+sequences where separation is required; removing that trivia MUST NOT
+concatenate the surrounding bytes into one token.
+
+Outside a string literal, quoted identifier, or comment, every byte not
+admitted by the closed lexical grammar is a source-positioned lexical error.
+In particular, the §17.5.3 unquoted-source-NUL rule remains authoritative: NUL
+is rejected everywhere outside a string literal, including comments and quoted
+identifiers. A source-wide UTF-8 validation or normalization pass is neither
+required nor permitted to redefine tokenization. This byte-defined grammar
+keeps structural syntax independent of locale and Unicode-library behavior.
+
 The handwritten lexer emits tokens containing at least:
 
 ```text
@@ -14234,25 +14265,93 @@ quoted identifier
 integer literal
 floating literal
 string literal
-keyword
-operator
-punctuation
+reserved keyword
+symbolic operator / punctuation
 end-of-input
 ```
 
-Keywords are case-insensitive.
+The v1 keyword registry is closed. Every keyword is reserved when unquoted;
+v1 has no contextual or nonreserved keyword class. A reserved spelling may be
+used as an identifier only through quoted-identifier syntax. Recognition uses
+only the ASCII mapping `A`..`Z` to `a`..`z`, independently of locale.
 
-They may be recognized directly or through identifier-to-keyword lookup.
+The complete v1 reserved-keyword registry is:
+
+```text
+ANALYZE     AND         AS          ASC         BEGIN
+BY          CASE        CAST        COMMIT      CREATE
+CROSS       DEFAULT     DELETE      DESC        DISTINCT
+DROP        ELSE        END         EXISTS      EXPLAIN
+FALSE       FROM        GROUP       HAVING      IN
+INDEX       INNER       INSERT      INTO        IS
+JOIN        KEY         LEFT        LIMIT       NOT
+NULL        OFFSET      ON          OR          ORDER
+PRIMARY     RETURNING   ROLLBACK    SELECT      SET
+TABLE       THEN        TRUE        UNIQUE      UPDATE
+VACUUM      VALUES      WHEN        WHERE
+```
+
+This registry reserves the word terminals already required by the v1 language
+surface. Reservation does not authorize a word in a grammar position where the
+closed statement or expression grammar does not admit it, and the registry does
+not import compatibility words from another SQL dialect.
+
+The complete v1 symbolic-token registry is:
+
+| Class | Exact spellings |
+|---|---|
+| punctuation | `(`, `)`, `,`, `.`, `;` |
+| arithmetic | `+`, `-`, `*`, `/`, `%` |
+| comparison | `=`, `<>`, `<`, `<=`, `>`, `>=` |
+
+`!=` and every unlisted symbolic operator or punctuation spelling are absent
+from v1. The lexer MUST NOT manufacture a generic operator token from an
+arbitrary symbol sequence.
+
+When registered symbolic tokens share a prefix, tokenization chooses the
+longest registered spelling. Comment openers `--` and `/*` are recognized
+before their component `-` or `/` tokens. A string or quoted-identifier
+delimiter enters its corresponding lexical construct before bytes within that
+construct can be interpreted as comments or symbolic tokens. A symbol-like
+byte not admitted by another lexical construct or by the table above is a
+source-positioned lexical error. These rules make byte-to-token mapping unique
+without prescribing a lexer algorithm.
+
+Keywords may be recognized directly or through identifier-to-keyword lookup.
 
 ## 18.4 Identifier rules
 
-Unquoted identifiers are normalized to lowercase.
+An unquoted identifier has exactly this ASCII grammar:
+
+```text
+[A-Za-z_][A-Za-z0-9_]*
+```
+
+No non-ASCII byte or NUL is admitted in an unquoted identifier. Canonicalization
+maps each ASCII `A`..`Z` byte to the corresponding `a`..`z` byte and leaves all
+other admitted bytes unchanged. Locale-sensitive or Unicode case folding MUST
+NOT participate.
 
 Thus `Users`, `USERS`, and `users` all resolve textually as `users`.
 
-Quoted identifiers preserve exact spelling/case.
+Quoted identifiers use double-quote delimiters. Within a quoted identifier,
+`""` decodes to one literal `"` byte; any lone `"` closes the identifier.
+The decoded payload may contain arbitrary non-NUL bytes, including bytes with
+the high bit set, and preserves exact byte values and case without Unicode
+normalization. NUL is forbidden. End-of-input before a closing delimiter is a
+source-positioned lexical error.
+
+The decoded canonical identifier payload MUST be nonempty, so `""` is rejected
+at the Chapter-18 identifier boundary rather than becoming an empty catalog
+name. The raw AST preserves the canonical identifier bytes, the quoted-source
+distinction where syntax or diagnostics requires it, and the original source
+span.
 
 AST identifiers remain textual until binding.
+
+Binding performs namespace/catalog lookup and assigns object identities. The
+lexer, parser, and raw AST do not decide object existence or assign TableId,
+ColumnId, or IndexId.
 
 ## 18.5 String literals
 
@@ -14287,10 +14386,26 @@ The lexer recognizes exactly the integer and FLOAT64 token grammars in
 Leading `+`/`-` is tokenized as a unary operator rather than embedded in the
 numeric token.
 
+When the current source byte is an ASCII digit, the lexer consumes exactly one
+unsigned integer or FLOAT64 token under §§17.5.1–17.5.2. It does not extend the
+token according to a host numeric parser. A current `.` byte is the registered
+punctuation token because §17.5.2 does not permit a numeric token to begin with
+`.`. The same grammar excludes `.5` and excludes `1.` as a FLOAT64 token; this
+chapter does not broaden those forms.
+
 Thus `-2147483648` is parsed as unary minus applied to a positive numeric
 literal representation and has the exact INT32 result described by §17.5.1.
 
-Literal overflow/type selection is a semantic/type-resolution concern rather than unchecked host-language overflow in the lexer.
+The token/raw AST retains a lossless spelling, checked mathematical magnitude,
+exact decimal token object, or equivalent representation sufficient for
+Chapter 17's canonical classification. In particular, the unsigned decimal
+magnitude `9223372036854775808` remains representable through binding so that
+§17.5.1 can distinguish its legal direct-negative use. No specific source
+container or numeric representation is required.
+
+Literal overflow/type selection and FLOAT64 conversion are semantic/type-
+resolution concerns rather than unchecked host-language integer/FLOAT
+conversion in the lexer or parser.
 
 ## 18.7 Comments
 
@@ -14303,7 +14418,22 @@ Version 1 recognizes line comments and non-nested block comments:
 
 Nested block comments are deferred.
 
-An unterminated block comment is a source-positioned lexical error.
+A line comment begins with `--` outside a string literal or quoted identifier.
+It consumes bytes after the opener up to but not including the first CR or LF,
+or through end-of-input when neither occurs. End-of-input is therefore a valid
+line-comment terminator. The terminating CR/LF remains ordinary whitespace; in
+CRLF input the comment ends before CR and both CR and LF are then whitespace.
+No newline normalization is required.
+
+A block comment begins with `/*` outside a string literal or quoted identifier
+and ends at the first following `*/`. It is non-nested: an inner `/*` has no
+nesting significance. End-of-input before the closer is a source-positioned
+lexical error.
+
+Comment payload may otherwise contain arbitrary non-NUL bytes. Comment delimiters
+inside string literals or quoted identifiers are ordinary payload bytes and do
+not begin or end comments. A complete comment acts as lexical trivia and as a
+token separator where required.
 
 ## 18.8 Source locations
 
@@ -14354,14 +14484,48 @@ EXPLAIN ANALYZE
 The v1 ANALYZE statement grammar is:
 
 ```sql
-ANALYZE table_name;
+ANALYZE table_name
 ```
+
+Request framing below owns whether a following semicolon separates another
+statement or optionally terminates the final statement.
 
 `ANALYZE;` without a table target is reserved for the future all-table form and is not required by the initial parser.
 
 `ALTER TABLE` is deferred initially.
 
 The schema-version/catalog architecture remains compatible with adding it later.
+
+### 18.10.1 SQL request and statement-batch framing
+
+A parsed SQL request contains one or more statements in source order. The `;`
+token is required between adjacent statements and optional after the final
+statement:
+
+```text
+statement
+statement ;
+statement ; statement
+statement ; statement ;
+```
+
+Empty statements are forbidden. A leading semicolon, repeated semicolons, or
+an extra semicolon after the optional final terminator is a `ParserError` under
+§21.16. A request containing only whitespace and/or comments likewise contains
+zero statements and is rejected as an empty SQL request.
+
+Successful request parsing MUST consume all non-whitespace/non-comment input
+through end-of-input. After the final statement, only end-of-input or one
+optional final semicolon followed by whitespace/comments and end-of-input is
+valid. No trailing token suffix is ignored. A token that is neither a valid
+continuation of the current statement nor, after the required separator, the
+start of another admitted statement produces `ParserError`.
+
+The request/batch AST preserves exact statement source order. This section owns
+only request framing; parser recovery remains §21.17's responsibility, and
+transaction/execution behavior for multiple statements remains with its later
+owners. Explicit framing prevents empty entries or ignored suffixes from
+becoming implementation-dependent batch behavior.
 
 ## 18.11 SELECT grammar surface
 
@@ -14508,6 +14672,7 @@ AstQualifiedName
 AstLiteral
 AstBinaryExpression
 AstUnaryExpression
+AstParenthesizedExpression
 AstFunctionCall
 AstCast
 AstStar
@@ -14519,6 +14684,57 @@ AstSubqueryExpression
 Textual names remain names in the AST.
 
 They are not replaced with TableId/ColumnId until binding.
+
+Parentheses form a mandatory syntax-preserving raw-AST boundary, represented by
+`AstParenthesizedExpression` conceptually or by an exactly equivalent raw-AST
+property. This preserves the distinction required by §17.5.1:
+
+```text
+-9223372036854775808
+    UnaryMinus
+        NumericLiteral("9223372036854775808")
+
+-(9223372036854775808)
+    UnaryMinus
+        ParenthesizedExpression
+            NumericLiteral("9223372036854775808")
+```
+
+Only the first numeric literal is the direct syntactic operand of unary minus.
+Parentheses break the direct-negative special form; `-x` remains ordinary
+unary minus. Chapter 18 preserves this syntax provenance while Chapter 17 alone
+classifies and evaluates the literal.
+
+Every raw-AST child collection whose source syntax is ordered MUST preserve
+exact source order and exact multiplicity. Parser-side sorting, canonical
+reordering, and deduplication are forbidden. This includes, where the syntax is
+present:
+
+```text
+binary-expression left/right operands
+unary operand provenance
+CASE WHEN arms
+IN expression-list items
+SELECT projection items
+VALUES rows and each row's items
+INSERT column lists
+UPDATE assignments
+GROUP BY items
+ORDER BY items
+function and aggregate arguments
+table/column declaration lists
+index key-column lists
+qualified-name components
+statement request/batch entries
+```
+
+Both occurrences of a duplicated syntactic item remain present in their
+written order even when binding or another later semantic owner rejects the
+duplicate. Chapter 17 makes source order observable for short-circuit AND/OR,
+searched CASE, and IN/NOT IN demand/error behavior; later owners also require
+the actual written sequence when validating duplicate names or assignments.
+The required abstraction is an ordered sequence with exact multiplicity, not
+any particular C++ container or allocation layout.
 
 ## 18.14 AST ownership
 
@@ -14545,6 +14761,10 @@ primary
 
 Parentheses override precedence.
 
+The syntax-preserving parenthesized-expression boundary in §18.13 may survive
+in the raw AST even when the enclosed expression tree already captures the
+same precedence grouping.
+
 Binary arithmetic and Boolean infix operators use conventional left associativity.
 
 Comparisons are non-chainable in v1.
@@ -14554,19 +14774,23 @@ Thus `a < b < c` is rejected rather than assigned accidental host-language seman
 ## 18.16 Front-end invariants
 
 1. Lexer/parser are handwritten in-project components.
-2. Token and AST source spans use source-byte positions suitable for diagnostics.
-3. SQL keywords are case-insensitive.
-4. Unquoted identifiers normalize to lowercase; quoted identifiers preserve spelling/case.
-5. String quote escaping uses doubled single quotes in v1.
-6. Unary minus remains syntactically distinct from the numeric literal token where practical.
-7. Nested block comments are not part of v1.
-8. Parser output contains textual syntax names, not resolved catalog IDs.
-9. AST nodes retain source spans through semantic binding.
-10. Pratt/precedence parsing uses the defined precedence hierarchy.
-11. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
-12. Unsupported syntax fails explicitly rather than being half-interpreted.
-13. Constructing a generic AST operator/function node does not imply semantic support; binding accepts only the closed Chapter-17 registry.
-14. FROM is optional in a SELECT query specification and omission has the exact §18.11.1 one-row semantics.
+2. SQL source is length-delimited bytes; ASCII structural classification and the exact whitespace set are locale/Unicode-library independent.
+3. Token and AST source spans use source-byte positions suitable for diagnostics.
+4. The reserved-keyword and symbolic-token registries are closed; keywords use ASCII-insensitive recognition and symbolic prefixes use longest registered match.
+5. Unquoted identifiers use the exact ASCII grammar and fold only `A`..`Z`; quoted identifiers preserve decoded non-NUL bytes/case and use doubled double quotes.
+6. String quote escaping uses doubled single quotes in v1.
+7. Leading numeric signs remain symbolic tokens, numeric syntax is the closed Chapter-17 grammar, and numeric handoff is lossless through magnitude `2^63`.
+8. Parenthesized-expression provenance is mandatory, so direct unary-minus literal syntax remains distinguishable from a parenthesized operand.
+9. Line-comment CR/LF/EOF termination and first-closer non-nested block comments use the exact §18.7 rules.
+10. Parser output contains textual syntax names, not resolved catalog IDs.
+11. Raw-AST ordered children/lists preserve exact source order and multiplicity; parser-side sorting and deduplication are forbidden.
+12. AST nodes retain source spans through semantic binding.
+13. Pratt/precedence parsing uses the defined precedence hierarchy.
+14. One request contains one or more source-ordered statements, requires semicolons between them, permits one optional final semicolon, rejects empty statements, and consumes all nontrivia input.
+15. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
+16. Unsupported syntax fails explicitly rather than being half-interpreted.
+17. Constructing a generic AST operator/function node does not imply semantic support; binding accepts only the closed Chapter-17 registry.
+18. FROM is optional in a SELECT query specification and omission has the exact §18.11.1 one-row semantics.
 
 ---
 
