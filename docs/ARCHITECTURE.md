@@ -14458,43 +14458,77 @@ This keeps precedence, associativity, AST construction, and syntax diagnostics e
 
 No external parser generator defines the language semantics.
 
-## 18.10 Initial statement set
+## 18.10 Closed v1 statement grammar
 
-The initial parser/binder surface includes:
+The grammar in this chapter uses these EBNF conventions:
 
-```sql
-CREATE TABLE
-CREATE INDEX
-CREATE UNIQUE INDEX
-DROP TABLE
-DROP INDEX
-INSERT
-UPDATE
-DELETE
-SELECT
-BEGIN
-COMMIT
-ROLLBACK
-VACUUM
-ANALYZE
-EXPLAIN
-EXPLAIN ANALYZE
+```text
+"TOKEN"        exact reserved keyword or symbolic token
+<name>         nonterminal
+[ item ]       optional item
+{ item }       zero or more repetitions
+a | b          alternatives
 ```
 
-The v1 ANALYZE statement grammar is:
+Every syntactically required comma-separated list is nonempty and no
+comma-separated list accepts a trailing comma. An explicitly optional wrapper
+does not make the list inside it empty-capable. A zero-argument function call
+is the separate production in §18.12.4 rather than an exception to this list
+rule. This closed policy prevents list boundaries from depending on a generic
+parser-helper implementation.
 
-```sql
-ANALYZE table_name
+The name grammar is:
+
+```ebnf
+<identifier> ::= <unquoted-identifier> | <quoted-identifier>
+
+<object-name> ::=
+      <identifier>
+    | <identifier> "." <identifier>
+
+<table-name>  ::= <object-name>
+<index-name>  ::= <object-name>
+<column-name> ::= <identifier>
+<alias>       ::= <identifier>
+
+<type-name> ::= <unquoted-identifier>
 ```
 
-Request framing below owns whether a following semicolon separates another
-statement or optionally terminates the final statement.
+Tables and indexes therefore admit either an unqualified name or exactly
+`namespace.object`. Binding requires the canonical first component of a
+two-part object name to equal `main`; it performs the namespace/object lookup
+and reports the existing binding error otherwise. Three-part and arbitrary
+repeated-dot object names are not v1 syntax. Parsing this shape requires no
+catalog access.
 
-`ANALYZE;` without a table target is reserved for the future all-table form and is not required by the initial parser.
+A type-name position accepts any unquoted identifier syntactically. Binding and
+the Chapter-17 TypeResolver accept exactly the canonical names `BOOLEAN`,
+`INT32`, `INT64`, `FLOAT64`, `DATE`, `TIMESTAMP`, and `VARCHAR` after §18.4
+canonicalization. Any other unquoted identifier parses and then fails through
+the existing type-resolution error; a quoted identifier is not type-name
+syntax. The raw AST retains the type-name bytes and source span, never a
+resolved TypeId. There are no type aliases or parameterized `VARCHAR(n)` syntax.
 
-`ALTER TABLE` is deferred initially.
+The complete top-level dispatch is:
 
-The schema-version/catalog architecture remains compatible with adding it later.
+```ebnf
+<statement> ::=
+      <create-table-statement>
+    | <create-index-statement>
+    | <drop-statement>
+    | <insert-statement>
+    | <update-statement>
+    | <delete-statement>
+    | <select-statement>
+    | "BEGIN"
+    | "COMMIT"
+    | "ROLLBACK"
+    | <vacuum-statement>
+    | <analyze-statement>
+    | <explain-statement>
+```
+
+No generic statement node admits an unlisted statement start.
 
 ### 18.10.1 SQL request and statement-batch framing
 
@@ -14527,45 +14561,219 @@ transaction/execution behavior for multiple statements remains with its later
 owners. Explicit framing prevents empty entries or ignored suffixes from
 becoming implementation-dependent batch behavior.
 
+The equivalent request production is:
+
+```ebnf
+<sql-request> ::=
+    <statement> { ";" <statement> } [ ";" ] <end-of-input>
+```
+
+### 18.10.2 DDL statements
+
+The complete CREATE TABLE grammar is:
+
+```ebnf
+<create-table-statement> ::=
+    "CREATE" "TABLE" <table-name>
+    "(" <table-element> { "," <table-element> } ")"
+
+<table-element> ::=
+      <column-definition>
+    | <table-constraint>
+
+<column-definition> ::=
+    <column-name> <type-name>
+    [ "NOT" "NULL" ]
+    [ "DEFAULT" <expression> ]
+
+<table-constraint> ::=
+      "PRIMARY" "KEY"
+        "(" <column-name> { "," <column-name> } ")"
+    | "UNIQUE"
+        "(" <column-name> { "," <column-name> } ")"
+```
+
+Column modifiers have exactly the displayed order. A column is nullable when
+neither this syntax nor a table PRIMARY KEY causes the Chapter-16/21 semantic
+owner to make it non-nullable. Explicit column `NULL`, column-level PRIMARY KEY
+or UNIQUE, DEFAULT before NOT NULL, named constraints, CHECK, FOREIGN KEY,
+generated/identity columns, temporary tables, `IF NOT EXISTS`, and table
+options are absent. Table-element and constraint-column order and multiplicity
+are preserved; DDL binding validates duplicate names, duplicate/referenced
+constraint columns, type support, and default legality.
+
+The standalone index and DROP grammars are:
+
+```ebnf
+<create-index-statement> ::=
+    "CREATE" [ "UNIQUE" ] "INDEX" <index-name>
+    "ON" <table-name>
+    "(" <column-name> { "," <column-name> } ")"
+
+<drop-statement> ::=
+      "DROP" "TABLE" <table-name>
+    | "DROP" "INDEX" <index-name>
+```
+
+Index keys are source-ordered base-column names. The raw list retains
+duplicates for binder rejection. Expression keys, per-key ASC/DESC, INCLUDE,
+partial predicates, `IF NOT EXISTS`, `IF EXISTS`, CASCADE, RESTRICT, and
+multiple DROP targets are absent.
+
+### 18.10.3 DML statements and RETURNING
+
+The complete INSERT grammar is:
+
+```ebnf
+<insert-statement> ::=
+    "INSERT" "INTO" <table-name>
+    [ "(" <column-name> { "," <column-name> } ")" ]
+    <insert-source>
+    [ <returning-clause> ]
+
+<insert-source> ::=
+      "VALUES" <values-row> { "," <values-row> }
+    | <select-statement>
+
+<values-row> ::=
+    "(" <expression> { "," <expression> } ")"
+```
+
+When present, the target-column list is nonempty; VALUES contains at least one
+nonempty row. Row/target order and multiplicity are exact. Binding owns target
+column uniqueness, row/target arity, assignment coercion, omitted-column
+defaults, NULLability, and INSERT SELECT compatibility.
+
+The complete UPDATE and DELETE grammars are:
+
+```ebnf
+<update-statement> ::=
+    "UPDATE" <table-name>
+    "SET" <assignment> { "," <assignment> }
+    [ "WHERE" <expression> ]
+    [ <returning-clause> ]
+
+<assignment> ::=
+    <column-name> "=" <expression>
+
+<delete-statement> ::=
+    "DELETE" "FROM" <table-name>
+    [ "WHERE" <expression> ]
+    [ <returning-clause> ]
+```
+
+The SET list is nonempty and retains duplicate assignments for binder
+rejection. UPDATE/DELETE target aliases, implicit or explicit, are not syntax.
+UPDATE FROM, tuple assignment, DELETE USING, and DML ORDER BY/LIMIT are absent.
+
+Explicit DML DEFAULT sentinels do not exist: `DEFAULT VALUES`, a DEFAULT item
+inside VALUES, and `SET column = DEFAULT` are syntax errors. INSERT obtains a
+stored default only for an omitted target column under §21.11. Column-definition
+`DEFAULT <expression>` remains the distinct DDL form governed by §21.12.
+
+RETURNING is available only on INSERT, UPDATE, and DELETE:
+
+```ebnf
+<returning-clause> ::=
+    "RETURNING" <returning-item> { "," <returning-item> }
+
+<returning-item> ::=
+    <expression> [ "AS" <alias> ]
+```
+
+Its list is nonempty, source ordered, and multiplicity preserving. Aliases
+require AS. `RETURNING *`, qualified-star RETURNING, implicit aliases, and
+RETURNING on SELECT, DDL, transaction, or maintenance statements are absent.
+Chapter 15 and §§21.13–21.15 own DML row-image and result semantics.
+
+### 18.10.4 Transaction, maintenance, and EXPLAIN statements
+
+Transaction-control syntax is exactly the three keyword-only alternatives in
+`<statement>`: `BEGIN`, `COMMIT`, and `ROLLBACK`. V1 has no START TRANSACTION,
+BEGIN/COMMIT TRANSACTION, isolation clause, READ ONLY, SAVEPOINT, RELEASE, or
+ROLLBACK TO syntax; Chapter 9 owns transaction semantics.
+
+The maintenance and observability grammar is:
+
+```ebnf
+<vacuum-statement>  ::= "VACUUM" <table-name>
+<analyze-statement> ::= "ANALYZE" <table-name>
+
+<explain-statement> ::=
+      "EXPLAIN" <select-statement>
+    | "EXPLAIN" "ANALYZE" <select-statement>
+```
+
+VACUUM and ANALYZE each require exactly one table target and accept no option or
+column list. EXPLAIN and EXPLAIN ANALYZE accept only SELECT; DML, DDL,
+transaction, and maintenance statements are not explainable v1 syntax. The
+semantic owners are §14.17, §21.17.1/Chapter 34, and Chapter 40 respectively.
+
 ## 18.11 SELECT grammar surface
 
-The baseline SELECT surface is:
+The complete SELECT grammar is:
 
-```sql
-SELECT [DISTINCT] select_list
-[FROM table_reference [joins...]]
-[WHERE predicate]
-[GROUP BY expressions]
-[HAVING predicate]
-[ORDER BY expressions [ASC|DESC] ...]
-[LIMIT integer]
-[OFFSET integer]
+```ebnf
+<select-statement> ::=
+    "SELECT" [ "DISTINCT" ]
+    <select-item> { "," <select-item> }
+    [ <from-clause> ]
+    [ "WHERE" <expression> ]
+    [ "GROUP" "BY" <expression> { "," <expression> } ]
+    [ "HAVING" <expression> ]
+    [ "ORDER" "BY" <order-item> { "," <order-item> } ]
+    [ "LIMIT" <expression> ]
+    [ "OFFSET" <expression> ]
+
+<select-item> ::=
+      "*"
+    | <identifier> "." "*"
+    | <expression> [ "AS" <alias> ]
+
+<from-clause> ::=
+    "FROM" <joined-table>
+
+<joined-table> ::=
+    <table-primary> { <join-tail> }
+
+<table-primary> ::=
+      <table-name> [ "AS" <alias> ]
+    | "(" <select-statement> ")" [ "AS" ] <alias>
+
+<join-tail> ::=
+      "INNER" "JOIN" <table-primary> "ON" <expression>
+    | "LEFT" "JOIN" <table-primary> "ON" <expression>
+    | "CROSS" "JOIN" <table-primary>
+
+<order-item> ::=
+    <expression> [ "ASC" | "DESC" ]
 ```
+
+Projection, GROUP BY, and ORDER BY lists are nonempty. Projection and base-table
+aliases require explicit AS. A derived-table alias is mandatory while its AS
+is optional, as required by §20.14.3. Qualified star has exactly one identifier
+component; `main.table.*` and arbitrary repeated qualification are not syntax.
+Wildcard expansion, output aliases/ordinals, and ORDER BY semantic resolution
+remain Chapter-19 responsibilities.
+
+INNER and LEFT JOIN require exactly one ON expression; CROSS JOIN has none.
+Each repeated join tail left-folds over the preceding joined table, preserving
+source order. Thus `a INNER JOIN b ON p LEFT JOIN c ON q` has the raw structure
+`LeftJoin(InnerJoin(a,b,p),c,q)`. Bare JOIN, comma joins, RIGHT/FULL/NATURAL/
+USING/LATERAL joins, and parenthesized join-tree grouping are absent. Parentheses
+in FROM are used only by the displayed derived-SELECT production.
+
+Clause order is exactly projection, FROM, WHERE, GROUP BY, HAVING, ORDER BY,
+LIMIT, OFFSET; no clause repeats. ORDER BY has no NULLS FIRST/LAST syntax.
+OFFSET may appear without LIMIT. LIMIT/OFFSET operands are syntactic
+expressions, matching §§19.14 and 20.14.9: binding requires an integral,
+nonnegative value constant at execution start, and subqueries are prohibited.
+The parser does not enforce those semantic properties or narrow the operand to
+one integer token.
 
 `FROM` is optional in every v1 SELECT query specification, including a
 supported nested SELECT. Omitting it does not remove or add any other clause in
 this grammar.
-
-Initial FROM supports:
-
-```text
-base tables
-aliases
-INNER JOIN
-LEFT JOIN
-CROSS JOIN
-```
-
-Deferred from the initial surface:
-
-```text
-RIGHT JOIN
-FULL OUTER JOIN
-LATERAL
-recursive CTEs
-window functions
-set operations
-```
 
 ### 18.11.1 SELECT without FROM
 
@@ -14633,57 +14841,286 @@ V1 forbids:
 9. changing §20.14 scalar/EXISTS/IN/derived-table behavior; or
 10. consulting estimates/statistics to decide whether the conceptual row exists.
 
-## 18.12 Subquery syntax
+## 18.12 Closed v1 expression grammar
 
-Parser/AST structures support exactly these v1 subquery syntax classes:
+The complete expression grammar is:
 
-```text
-(SELECT ...)
-EXISTS (SELECT ...)
-NOT EXISTS (SELECT ...)
-scalar_expr [NOT] IN (SELECT ...)
-FROM (SELECT ...) [AS] required_alias
+```ebnf
+<expression> ::=
+    <or-expression>
+
+<or-expression> ::=
+    <and-expression> { "OR" <and-expression> }
+
+<and-expression> ::=
+    <not-expression> { "AND" <not-expression> }
+
+<not-expression> ::=
+      "NOT" <not-expression>
+    | <predicate-expression>
+
+<predicate-expression> ::=
+    <additive-expression>
+    [
+          <comparison-operator> <additive-expression>
+        | "IS" [ "NOT" ] "NULL"
+        | [ "NOT" ] "IN" "(" <in-right-hand-side> ")"
+    ]
+
+<comparison-operator> ::=
+      "=" | "<>" | "<" | "<=" | ">" | ">="
+
+<in-right-hand-side> ::=
+      <expression> { "," <expression> }
+    | <select-statement>
+
+<additive-expression> ::=
+    <multiplicative-expression>
+    { ( "+" | "-" ) <multiplicative-expression> }
+
+<multiplicative-expression> ::=
+    <unary-expression>
+    { ( "*" | "/" | "%" ) <unary-expression> }
+
+<unary-expression> ::=
+      "+" <unary-expression>
+    | "-" <unary-expression>
+    | <primary-expression>
 ```
 
-Their closed semantic/execution matrix is §20.14. Parser recognition does not
-make row-valued subqueries, multi-column scalar/IN forms, ANY/SOME/ALL,
-LATERAL, CTEs, set operations, data-modifying subqueries, or correlation v1
-features. Those forms are rejected as syntax or during binding according to
-where recognition occurs.
+OR, AND, additive, and multiplicative repetitions construct left-associated
+trees. Prefix NOT and unary signs nest from the prefix toward their operand.
+The optional predicate suffix occurs at most once, so comparisons and
+predicates do not chain: `a < b < c`, `a = b = c`, and
+`a IS NULL IS NULL` are syntax errors. Consequently `NOT a = b` means
+`NOT (a = b)`, `NOT a IN (x)` means `NOT (a IN (x))`, `a NOT IN (x)` is one
+NOT-IN predicate spelling, and `a IS NOT NULL` is one null-predicate spelling.
+These results follow the grammar rather than parser conflict resolution.
 
-The optional `AS` keyword does not make the derived-table alias optional. V1
-does not support a derived-column alias list after that relation alias.
+An expression-list IN right-hand side is nonempty, has no trailing comma, and
+retains source order and multiplicity for §17.7.3. Its subquery alternative is
+exactly one SELECT statement. Row-valued IN and `(a,b)` row-constructor syntax
+do not exist.
+
+### 18.12.1 Primary expressions and names
+
+The primary-expression grammar is:
+
+```ebnf
+<primary-expression> ::=
+      <literal>
+    | <column-reference>
+    | <parenthesized-expression>
+    | <cast-expression>
+    | <case-expression>
+    | <exists-expression>
+    | <scalar-subquery-expression>
+    | <function-call>
+
+<column-reference> ::=
+      <identifier>
+    | <identifier> "." <identifier>
+
+<parenthesized-expression> ::=
+    "(" <expression> ")"
+
+<literal> ::=
+      <integer-literal-token>
+    | <floating-literal-token>
+    | <string-literal-token>
+    | "TRUE"
+    | "FALSE"
+    | "NULL"
+```
+
+A two-part column reference is syntactically `relation-or-alias.column`;
+binding chooses the relation binding and column. Three-part
+`namespace.table.column` references are absent even though table/index object
+names separately permit two parts. Column lookup is never performed by the
+parser.
+
+The literal token classes and their lossless/decoded payloads are §§17.3 and
+17.5–18.6. NULL remains syntactically untyped. Parentheses remain a mandatory
+raw-AST boundary under §§18.6 and 18.13, including for Chapter-17 direct-negative
+classification.
+
+### 18.12.2 CAST and searched CASE
+
+The exact forms are:
+
+```ebnf
+<cast-expression> ::=
+    "CAST" "(" <expression> "AS" <type-name> ")"
+
+<case-expression> ::=
+    "CASE"
+    <when-clause> { <when-clause> }
+    [ "ELSE" <expression> ]
+    "END"
+
+<when-clause> ::=
+    "WHEN" <expression> "THEN" <expression>
+```
+
+CASE therefore has at least one WHEN arm, preserves arm source order, and has
+an optional ELSE with the exact §17.9.1 missing-ELSE semantics. Simple CASE,
+`::`, CONVERT, and parameterized type syntax are absent. The parser records
+type-name syntax; TypeResolver owns cast/type legality.
+
+### 18.12.3 Subquery syntax and rejection boundary
+
+The expression and FROM grammars admit exactly these structural SELECT-subquery
+positions:
+
+```ebnf
+<exists-expression> ::=
+    "EXISTS" "(" <select-statement> ")"
+
+<scalar-subquery-expression> ::=
+    "(" <select-statement> ")"
+```
+
+Together with the productions above, the complete structural classes are
+scalar `(SELECT ...)`, `[NOT] EXISTS (SELECT ...)`, scalar expression
+`[NOT] IN (SELECT ...)`, and derived table
+`(SELECT ...) [AS] required_alias`. SELECT is reserved, so a parenthesized
+SELECT is distinct from a parenthesized ordinary expression without catalog or
+type information. The optional AS on a derived table never makes its alias
+optional, and no derived-column alias list exists.
+
+Only SELECT can occupy a subquery position. A parenthesized INSERT, UPDATE,
+DELETE, DDL, or other statement is therefore a `ParserError`, as is an
+unsupported row constructor or wrapper/operator for which this grammar has no
+production. The parser does not create a generic arbitrary-statement subquery.
+
+A structurally valid SELECT subquery is parsed without resolving names,
+detecting correlation, inspecting output arity/types, or consulting a schema.
+Binding and §20.14 then reject unsupported semantic properties with the
+existing `UnsupportedCorrelation`, `UnsupportedFeature`, type, or cardinality
+owner as applicable. In particular:
+
+- a correlated SELECT reaches binding, which detects the attempted outer
+  reference;
+- a scalar SELECT with the wrong output arity reaches binding/subquery-shape
+  validation;
+- an IN SELECT with an incompatible output arity or type reaches binding and
+  TypeResolver;
+- an independently well-formed nested SELECT is not rejected merely because
+  the parser cannot establish its semantic support.
+
+This split makes structurally nonexistent forms parser errors while preserving
+Chapter-19/20 ownership of every unsupported property that requires semantic
+knowledge. It uses the existing §21.16/§39.2 categories and creates no new
+error enum.
+
+### 18.12.4 Generic function and star-argument calls
+
+Function-call syntax is registry-independent:
+
+```ebnf
+<function-call> ::=
+      <identifier> "(" ")"
+    | <identifier> "(" <expression> { "," <expression> } ")"
+    | <identifier> "(" "*" ")"
+```
+
+Function names are unqualified identifiers; because `<identifier>` includes
+both §18.4 forms, quoted call names are structurally legal without receiving
+special semantic treatment. Normal calls preserve an ordered zero-or-more
+argument sequence. Star-argument calls retain a distinct syntactic star role.
+
+The parser MUST NOT recognize `count`, `sum`, `avg`, `min`, `max`, or any other
+name through a scalar/aggregate registry. Thus `count(*)`, `sum(*)`, and
+`foo(*)` all parse as the same star-call shape, while `f()`, `f(a)`, and
+`f(a,b)` parse as ordinary calls. Chapter 17 and Chapter 29 decide function
+existence, scalar versus aggregate identity, arity/types, and whether star is
+legal. Aggregate DISTINCT, FILTER, OVER, and qualified function names are not
+syntax.
+
+### 18.12.5 Parse and bind boundary
+
+Parse success means only that the source belongs to this closed syntactic
+language. It does not establish that an object/column/type/function exists;
+that an alias resolves; that a call's arity or star form is registered; that an
+operator or cast accepts its operand types; that a duplicate target is legal;
+that a default expression is permitted; that a SELECT subquery has supported
+semantic shape; or that a LIMIT/OFFSET expression satisfies §§19.14 and
+20.14.9. Those checks belong to binding and the cited semantic registries.
+
+Conversely, unsupported statement starts, missing/reordered/repeated clauses,
+empty required lists, trailing commas, implicit aliases, excluded JOIN forms,
+comparison chaining, malformed CAST/CASE/call syntax, DML DEFAULT sentinels,
+RETURNING wildcards, DML target aliases, data-modifying subqueries, and
+unsupported row constructors fail structurally with the existing ParserError.
+The parser remains catalog-independent and TypeResolver-independent.
 
 ## 18.13 AST contract
 
 The AST records syntax, not resolved semantics.
 
-Representative AST kinds include:
+Raw-AST semantic categories include:
 
 ```text
+StatementRequest
 SelectStatement
 CreateTableStatement
+CreateIndexStatement
+DropStatement
 InsertStatement
 UpdateStatement
 DeleteStatement
+TransactionStatement
+VacuumStatement
 AnalyzeStatement
+ExplainStatement
 AstIdentifier
 AstQualifiedName
+AstTypeName
 AstLiteral
 AstBinaryExpression
 AstUnaryExpression
 AstParenthesizedExpression
+AstComparison
+AstNullPredicate
+AstInList
+AstInSubquery
 AstFunctionCall
+AstStarArgumentCall
 AstCast
+AstCase
 AstStar
 AstSubqueryExpression
+AstTableReference
+AstJoin
+AstReturningClause
 ```
 
-`AnalyzeStatement` contains the unresolved target table name and source span; it does not contain a TableId before binding.
+These names describe required syntactic distinctions rather than mandatory C++
+class names. Statement nodes retain every present clause and its ordered raw
+children. `AnalyzeStatement` and `VacuumStatement`, for example, contain an
+unresolved target table name and source span, not a TableId.
 
-Textual names remain names in the AST.
+Textual object/column/function names and type-name syntax remain names in the
+AST. An optional second object-name component, explicit AS aliases, literal
+syntax provenance, and each syntactic star role remain recoverable.
 
-They are not replaced with TableId/ColumnId until binding.
+Raw AST MUST NOT contain TableId, ColumnId, IndexId, ConstraintId, BindingId,
+resolved TypeId, catalog descriptors, parser-inserted semantic casts, or a
+logical/physical plan. Binding creates those resolved identities and casts.
+
+The four star contexts remain distinct:
+
+```text
+SELECT *
+identifier.*
+binary multiplication
+function-call star argument
+```
+
+No star is encoded as a fake identifier, fake NULL/expression argument, or a
+different star role. Function-call argument/star distinction, type-name syntax,
+RETURNING expressions/aliases, and JOIN kind/left/right/ON presence likewise
+remain explicit.
 
 Parentheses form a mandatory syntax-preserving raw-AST boundary, represented by
 `AstParenthesizedExpression` conceptually or by an exactly equivalent raw-AST
@@ -14726,6 +15163,8 @@ table/column declaration lists
 index key-column lists
 qualified-name components
 statement request/batch entries
+RETURNING items
+JOIN left/right source structure
 ```
 
 Both occurrences of a duplicated syntactic item remain present in their
@@ -14746,7 +15185,7 @@ The concrete arena implementation is not part of the persistent or SQL-semantic 
 
 ## 18.15 Expression precedence
 
-Initial precedence from low to high is:
+V1 precedence from low to high is:
 
 ```text
 OR
@@ -14765,11 +15204,15 @@ The syntax-preserving parenthesized-expression boundary in §18.13 may survive
 in the raw AST even when the enclosed expression tree already captures the
 same precedence grouping.
 
-Binary arithmetic and Boolean infix operators use conventional left associativity.
+Binary arithmetic and Boolean infix operators use the left associativity fixed
+by §18.12's repetition productions. Prefix NOT and unary signs nest toward
+their operand.
 
-Comparisons are non-chainable in v1.
+Comparison/IS NULL/IN predicate suffixes are non-chainable in v1.
 
-Thus `a < b < c` is rejected rather than assigned accidental host-language semantics.
+Thus `a < b < c` is rejected rather than assigned accidental host-language
+semantics; `NOT a = b`, `a NOT IN (b)`, and `a IS NOT NULL` have the exact
+structures stated in §18.12.
 
 ## 18.16 Front-end invariants
 
@@ -14791,6 +15234,19 @@ Thus `a < b < c` is rejected rather than assigned accidental host-language seman
 16. Unsupported syntax fails explicitly rather than being half-interpreted.
 17. Constructing a generic AST operator/function node does not imply semantic support; binding accepts only the closed Chapter-17 registry.
 18. FROM is optional in a SELECT query specification and omission has the exact §18.11.1 one-row semantics.
+19. The §18.10 top-level dispatch is complete; no generic statement production admits an unlisted v1 statement.
+20. Table/index object names have one or two identifier components; binding alone validates the optional namespace as `main`, and three-part names are not syntax.
+21. A type-name is an unquoted identifier retained as syntax; parser output never contains a resolved TypeId, and the binder/TypeResolver owns the seven-name registry.
+22. Every required comma-separated list is nonempty, no list accepts a trailing comma, and every raw list preserves source order and multiplicity.
+23. Projection/base-table/RETURNING aliases require AS; derived-table aliases are mandatory with optional AS; UPDATE/DELETE targets have no aliases.
+24. JOIN syntax is exactly left-associated INNER/LEFT with ON and CROSS without ON; bare, comma, parenthesized-tree, and every other join form are absent.
+25. DML has no DEFAULT sentinel; RETURNING is a nonempty expression/explicit-alias list on INSERT, UPDATE, and DELETE only.
+26. LIMIT/OFFSET operands parse as expressions while §§19.14 and 20.14.9 own integral, nonnegative, execution-start-constant, and no-subquery validation.
+27. Generic zero/multiple/star-argument calls parse without function-name lookup; Chapter 17/29 owns every scalar/aggregate identity, arity, type, and star decision.
+28. Only SELECT occupies a structural subquery position; parser errors own nonexistent structures, while binding owns correlation, output shape/type, and other semantic rejection.
+29. Raw AST contains no stable catalog ID, BindingId, resolved TypeId, inserted semantic cast, catalog descriptor, or plan.
+30. SELECT star, qualified SELECT star, multiplication, and function-call star argument remain distinct syntax roles.
+31. Every accepted request has one canonical raw syntactic structure determined without catalog contents or TypeResolver results.
 
 ---
 
