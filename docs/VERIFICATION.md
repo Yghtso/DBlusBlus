@@ -6804,31 +6804,1183 @@ invented SQL span.
 
 ### Type-System Property Tests
 
-Test consistency between:
+This section is the detailed procedural owner for the SQL type/value contract in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) Chapter 17. Chapter 17 remains authoritative for
+semantic results; Chapters 5, 8, and 16 remain authoritative for ordinary tuple bytes,
+index-key bytes, and persistent TypeIds/catalog descriptors. The procedures below compare
+those owners without creating a second scalar registry.
+
+#### Deterministic type/value harness and fixture discipline
+
+Use table-driven semantic fixtures and deterministic event barriers rather than timing or
+sleeps. The harness records architecture-visible events without requiring any source API or
+container layout:
 
 ```text
-binder type resolution
-constant evaluation
-vectorized executor semantics
-index-key comparator where relevant
+binding:
+    token handoff -> literal classification -> unresolved marker creation
+    -> contextual candidate/common type -> inserted cast -> overload selection
+    -> resolved expression or bind error
+
+evaluation:
+    child demanded/skipped -> child value/error -> operator/cast begins
+    -> checked boundary/result -> typed value, SQL UNKNOWN, or controlled error
+
+folding:
+    bound tree -> demanded fold subtree -> folded value/error
+    -> runtime evaluation of the same bound tree
+
+persistence:
+    semantic value -> ordinary tuple / PersistedScalarV1 / index-key encoding
+    -> structural validation -> schema/type resolution -> semantic decode
 ```
 
-Especially:
+Every fixture is canonical except for the one condition under test. Corruption fixtures
+mutate one field, bit, byte, length, TypeId, or padding region at a time after constructing
+a valid encoding and recomputing only enclosing checksums that are not the tested defect.
+Semantic-input errors use valid storage and malformed SQL values; persisted corruption uses
+validly framed SQL-independent bytes with one malformed persisted field. Fixed-seed
+property generators partition all scalar domains into boundary and semantic classes, but
+fixed seeds are replay aids rather than the oracle.
 
-- signed numeric ordering,
-- FLOAT64 NaN/zero semantics,
-- NULL comparisons,
-- three-valued logic,
-- implicit numeric promotion.
+Binding observations assert concrete logical type, nullability, inserted casts, selected
+registry identity, and exact error category. Evaluation observations assert type, NULL
+state, semantic value or exact error, and which children were demanded. Persistence
+observations assert exact bytes where the owning format is canonical and semantic/order
+equivalence where different codecs intentionally use different bytes.
 
-A query must not have one semantic meaning in the binder and another in the index comparator/executor.
+#### Independent scalar oracles
 
-Generate shared values/types at signed boundaries, FLOAT64 NaN/signed-zero/infinity cases,
-NULL/UNKNOWN combinations, VARCHAR byte-order cases, and legal/illegal promotions. For
-each capability that exists, compare binder overload/type/nullability with bound constant
-evaluation, the §41.5 vector-expression oracle, and index-key canonical comparison/hash
-semantics. An absent downstream capability postpones execution of that comparison; it does
-not remove the durable property requirement.
+Production parsing, comparison, encoding, formatting, and dispatch code must not verify
+itself. Use these independent test-side models:
+
+| Oracle | Independent construction |
+|---|---|
+| TypeId and closed registry | Literal map `1..7` plus a separately authored finite set of types, operators, predicates, casts, and functions |
+| Contextual NULL | Constraint solver over the Chapter-17 context table; its state is called an **unresolved type marker**, never SQL UNKNOWN |
+| SQL 3VL | Literal TRUE/FALSE/UNKNOWN tables, with UNKNOWN represented as typed BOOLEAN NULL |
+| Integer arithmetic | Arbitrary-precision mathematical integers followed by explicit target-domain checks |
+| Integer quotient/remainder | Mathematical truncation toward zero plus `a=q*b+r`, remainder bound, and dividend-sign rule |
+| FLOAT64 classes/order | Bit-level sign/exponent/significand classifier and Chapter-17 normalization, without host unordered predicates |
+| FLOAT64 arithmetic | Exact significand/exponent or arbitrary-precision rational operation followed by one binary64 nearest/ties-even rounding per bound operator |
+| VARCHAR | Length-delimited byte arrays and unsigned-byte lexicographic comparison |
+| DATE/TIMESTAMP | Independent proleptic-Gregorian civil-day conversion and checked integer microsecond arithmetic |
+| Cast/coercion | Literal 7-by-7 cast table plus separate context/assignment tables; direct edges are evaluated directly, not by production cast chaining |
+| Literal classification | Checked mathematical token magnitude and separately authored ASCII grammars |
+| PersistedScalarV1 | Test-side byte builder/reader using the exact §17.13 offsets, little-endian helpers, checked length arithmetic, and canonical padding |
+| Ordinary tuple handoff | Chapter-5 test-side layout/null-bitmap/scalar codec already used by Tuple codec tests |
+| Index order | Test-side semantic comparator sorted independently from Chapter-8 encoded-byte sorting |
+| Historical schema | Immutable `(TableId,SchemaVer)` descriptor map independent of the current descriptor/cache |
+| Folding/runtime | Small interpreted bound-expression tree using the independent scalar and demand models, compared with folded and runtime paths |
+| Equality modes | Separate predicate, grouping, hash, UNIQUE, and physical-order relations; no generic host equality |
+| Error classification | Literal decision table separating bind/user semantic, runtime resource, required corruption, and advisory-statistics invalidation |
+
+For FLOAT64 text, use an independently implemented shortest-round-trip model or a vetted
+externally generated corpus whose expected bytes and bit patterns are embedded as fixtures;
+the production parser/formatter is never the expected-value generator. For platform
+determinism, replay the same corpus under distinct locale/timezone settings and available
+floating environments, and include software-oracle cases that expose extended precision,
+reassociation, and contraction even when one host cannot manifest all variants.
+
+#### TypeId, closed-registry, and runtime-tag verification
+
+The exact persistent registry fixture is:
+
+| TypeId | SQL type |
+|---:|---|
+| `1` | BOOLEAN |
+| `2` | INT32 |
+| `3` | INT64 |
+| `4` | FLOAT64 |
+| `5` | DATE |
+| `6` | TIMESTAMP |
+| `7` | VARCHAR |
+
+Round-trip every legal TypeId through catalog descriptors and metadata scalars. Reject
+`0`, `8`, and `UINT32_MAX` as non-storable/unknown in recognized-v1 data with the owning
+required-metadata corruption or advisory-statistics invalidation outcome. Run the semantic
+registry through a test adapter whose runtime tags are deliberately permuted relative to
+`1..7`; all binding/evaluation results and persistent bytes must remain unchanged.
+
+Enumerate the closed type set and assert that NULL, SQL UNKNOWN, the unresolved type marker,
+DECIMAL, BLOB, UUID, INTERVAL, JSON, arrays, timezone-aware timestamps, and parameterized
+`VARCHAR(n)` do not become scalar TypeIds or registry entries. Syntax may fail at its
+Chapter-18 owner; any accepted syntax reaching type resolution must fail with the exact
+Chapter-17 unsupported/type result. Parser acceptance and runtime-library capability never
+create a registry entry.
+
+#### Contextual NULL, typed NULL, and SQL UNKNOWN
+
+At the binding event boundary, expose an abstract unresolved type marker and prove that it
+is neither a SQL scalar type nor a TypeId, cannot be encoded, and is eliminated before an
+ordinary resolved expression or executor input is published. Cover every §17.3 context:
+
+| Context | Required observation |
+|---|---|
+| `CAST(NULL AS T)` for each concrete type | typed NULL of `T` |
+| comparison/arithmetic with one compatible concrete operand | selected registered/common numeric type, NULL result at evaluation |
+| uniquely determining operator signature | signature type; `NOT NULL` and `NULL AND NULL` become BOOLEAN |
+| INSERT/UPDATE/default destination | destination-typed NULL, followed by ordinary constraint checking |
+| searched CASE, IN list, or VALUES column with a concrete compatible value | exact common type |
+| `NULL IS NULL` / `NULL IS NOT NULL` | non-NULL BOOLEAN TRUE/FALSE without persisted pseudo-type |
+| standalone SELECT/VALUES NULL, `NULL=NULL`, `NULL+NULL`, all-NULL CASE, or any nonunique context | bind-time `TYPE_ERROR` |
+
+For each of the seven concrete types, construct typed NULL directly and through every legal
+cast edge. Assert retained target type, NULL validity, no source payload inspection or
+parse/range error, `IS NULL=TRUE`, `IS NOT NULL=FALSE`, and UNKNOWN for every supported
+ordinary comparison. Persisted typed NULL retains its concrete TypeId; no unresolved marker
+or separate UNKNOWN encoding exists.
+
+SQL UNKNOWN fixtures always use nullable BOOLEAN NULL. Reject any fourth truth state, third
+non-NULL BOOLEAN payload, UNKNOWN TypeId, or unresolved executor value. Keep this vocabulary
+in fixture names and diagnostics so bind-time unresolved typing cannot be mistaken for 3VL.
+
+#### BOOLEAN, three-valued logic, predicates, and demand
+
+Evaluate the complete literal tables:
+
+| NOT | Result |
+|---|---|
+| TRUE | FALSE |
+| FALSE | TRUE |
+| UNKNOWN | UNKNOWN |
+
+| AND | TRUE | FALSE | UNKNOWN |
+|---|---|---|---|
+| TRUE | TRUE | FALSE | UNKNOWN |
+| FALSE | FALSE | FALSE | FALSE |
+| UNKNOWN | UNKNOWN | FALSE | UNKNOWN |
+
+| OR | TRUE | FALSE | UNKNOWN |
+|---|---|---|---|
+| TRUE | TRUE | TRUE | TRUE |
+| FALSE | TRUE | FALSE | UNKNOWN |
+| UNKNOWN | TRUE | UNKNOWN | UNKNOWN |
+
+Independently record demand: FALSE skips an AND RHS, TRUE skips an OR RHS, and every
+other left value demands the RHS before applying the table. Put deterministic errors and
+evaluation counters in each RHS. Ordinary comparisons are strict: after demanded children
+evaluate, any NULL operand yields UNKNOWN. `IS NULL` and `IS NOT NULL` still demand their
+child and never suppress its error; when the child succeeds they return non-NULL BOOLEAN.
+Where relational clauses consume predicates, reuse the binder/executor fixtures to prove
+that only TRUE qualifies and FALSE/UNKNOWN do not, without host truthiness.
+
+For expression-list IN, evaluate the left expression exactly once and list items
+left-to-right. Stop at the first TRUE; with no TRUE return UNKNOWN iff any demanded
+comparison was UNKNOWN, otherwise FALSE. NOT IN applies exact 3VL NOT. Cover incompatible
+common types, nonempty-list enforcement, early-TRUE suppression of a later error, demanded
+errors, duplicate values, typed NULLs, signed zeros, and canonical-equivalent NaNs.
+
+#### Literals, integer arithmetic, and operator registry
+
+Build checked token-magnitude fixtures around `2^31` and `2^63`, including leading zeros,
+underscores/radix/suffix rejection, and parentheses:
+
+| Form | Required classification |
+|---|---|
+| `0`, `2147483647` | INT32 |
+| `2147483648`, `9223372036854775807` | INT64 |
+| direct `-2147483648` | INT32 minimum literal construction |
+| direct `-9223372036854775808` | INT64 minimum literal construction |
+| positive or parenthesized `9223372036854775808` | `INVALID_LITERAL` before unary evaluation |
+| `-(2147483648)` | valid INT64 unary negation |
+| unary minus applied to an already formed INT32/INT64 minimum | `NUMERIC_OVERFLOW` |
+| magnitude above `2^63`, or direct unary plus at `2^63` | `INVALID_LITERAL` |
+
+Exhaust unary `+`, unary `-`, and NOT over all seven types and NULL states. Exhaust each
+binary arithmetic symbol over all 49 type pairs at binding, then evaluate every legal row
+of §17.6.2. Integer cases use neighborhoods around minimum, maximum, `-1`, `0`, and `1`,
+generated overflow pairs, multiplication square-root boundaries, both mixed INT32/INT64
+directions, and NULLs. Assert result type, checked exact value, and no wrap.
+
+Division/remainder fixtures cover all sign combinations, zero numerator, zero divisor,
+and `MIN/-1`. Assert truncation toward zero, `a=q*b+r`, `abs(r)<abs(b)`, dividend-sign
+remainder, `DIVISION_BY_ZERO` for integer zero divisors, and `NUMERIC_OVERFLOW` for both
+`MIN/-1` quotient and remainder. Arithmetic/comparison operators evaluate children
+left-to-right and do not use NULL as general child-demand short-circuit: a demanded child
+error survives. Once children succeed, strict NULL suppresses only the non-NULL operation.
+
+#### Cast, coercion, and comparison verification
+
+Drive every cell of the cast, assignment, arithmetic, and comparison matrices below through
+the central TypeResolver. Assert selected common type/edge and inserted casts before
+evaluation. Unsupported cells fail at bind time with `TYPE_ERROR`; a registered edge whose
+particular value fails uses its value-specific error. Direct casts use their registered
+semantics and are not synthesized through an intermediate type.
+
+Numeric conversion uses the independent rounding/range oracle. Include all INT32/INT64
+limits, `2^24` and `2^53` neighborhoods, `INT64_MIN/MAX`, finite FLOAT64 values just inside
+and outside each integer target after truncation, subnormals, signed zeros, infinities, and
+NaNs. INT32→INT64 is exact; integer→FLOAT64 rounds nearest/ties-even even when inexact;
+FLOAT64→integer truncates toward zero before range checking; NaN/infinity is
+`INVALID_CAST`; finite target-range failure is `NUMERIC_OVERFLOW`.
+
+Mixed numeric comparison first converts both operands to the registered smallest common
+type. Include `2^53` neighborhoods where mathematical integer/real comparison differs from
+comparison after INT64→FLOAT64 rounding. BOOLEAN equality works but BOOLEAN SQL ordering
+does not. VARCHAR, DATE, and TIMESTAMP compare only with their own type. SQL NULL comparison
+remains UNKNOWN even though Chapter 8 supplies a total physical NULL order.
+
+Assignment/default coercion is tested separately from explicit cast legality. Only identity,
+INT32→INT64, INT32→FLOAT64, INT64→FLOAT64, and contextual typed NULL are automatic for
+their permitted destinations. Parsing, stringification, narrowing, temporal conversion,
+and BOOLEAN conversion remain explicit-only; destination constraints run after coercion.
+
+#### FLOAT64 semantic, arithmetic, text, and cross-engine verification
+
+Partition bit-pattern fixtures into negative/positive finite normals, subnormals, both
+zeros, infinities, quiet/signaling NaNs, payload/sign variants, and randomized raw bits.
+Every bit pattern is a legal semantic FLOAT64. The semantic comparator normalizes both
+zeros together and all NaNs together, orders NaN after positive infinity, and otherwise
+orders numerically. Assert this relation in constant evaluation, vector evaluation,
+hash/grouping, UNIQUE, and Chapter-8 key encoding. Ordinary tuple round-trip preserves all
+64 input bits; PersistedScalarV1 emits only canonical quiet NaN bits; index keys normalize
+zeros and NaNs. These are three intentionally different representation contracts.
+
+For `+`, `-`, `*`, `/`, and unary minus, compare exact output bits or canonical NaN class
+with the independent one-round-per-operator oracle. Include halfway cases, overflow,
+underflow, subnormal transitions, signed-zero signs, `finite/±0`, `±0/±0`, and
+`infinity/infinity`. FLOAT64 zero division produces IEEE infinity/NaN and never integer
+`DIVISION_BY_ZERO`; FLOAT64 remainder is a bind-time `TYPE_ERROR`. Use expression pairs that
+distinguish per-node binary64 rounding from extended intermediates, reassociation, and FMA.
+
+Literal tests accept only §17.5.2's two unsigned token shapes plus syntactic unary sign;
+reject `.5`, `1.`, hexadecimal, underscores, suffixes, and NaN/infinity literal keywords.
+Finite literal overflow is `INVALID_LITERAL`; underflow rounds, retaining a negative zero
+when applicable. Explicit VARCHAR parsing separately accepts its §17.8.2 full-string forms
+and canonical special spellings, with `NUMERIC_OVERFLOW` for syntactically valid finite
+out-of-range text.
+
+For canonical FLOAT64→VARCHAR, verify signed-zero spellings, NaN/infinity spellings, and
+the shortest round-trippable finite rule, candidate-distance tie break, fixed/scientific
+length choice, lowercase exponent, and zero suppression. Parse the output with the
+independent parser and require exact finite bits, preserved zero sign, or canonical NaN
+class. Replay under alternate locale, timezone, and host rounding settings.
+
+#### VARCHAR byte semantics and size-boundary composition
+
+Use empty strings, ASCII, embedded and repeated `0x00`, bytes `0x80..0xff`, equal byte
+strings, strict prefixes, and fixed-seed arbitrary byte arrays. Assert byte length, exact
+equality, unsigned lexicographic order, no UTF-8/normalization/case-folding, and no C-string
+termination. Explicitly distinguish empty non-NULL VARCHAR from typed NULL.
+
+String-literal handoff fixtures assert doubled quotes, ordinary backslash, embedded quoted
+NUL, and the Chapter-18 lexical rejection of an unquoted source NUL. VARCHAR casts consume
+the complete ASCII byte string, accept no surrounding whitespace or trailing bytes, and
+use the exact BOOLEAN, integer, FLOAT64, DATE, and TIMESTAMP grammars. Include empty,
+Unicode digit/sign, embedded-NUL, valid boundary, malformed, and range-overflow cases with
+their exact error categories. Scalar-to-VARCHAR fixtures assert canonical BOOLEAN,
+integer, FLOAT64, DATE, and TIMESTAMP output.
+
+Compose semantic VARCHAR validity with storage limits: a valid value may make an ordinary
+tuple cross the Chapter-5 complete encoded-length boundary (`8135` accepted, `8136`
+rejected) or an encoded user key cross Chapter 8's 1024-byte boundary. Assert the owning
+row/key-size result without globally narrowing the VARCHAR domain, truncating bytes, or
+changing the semantic Value.
+
+#### DATE, TIMESTAMP, calendar, and timezone verification
+
+The semantic-domain generator covers every int32 DATE and int64 TIMESTAMP carrier class,
+including minima/maxima and fixed-seed values. Independently verify day zero and microsecond
+zero at `1970-01-01 00:00:00`, exact microsecond units, pre-epoch values, and signed order.
+All carrier bit patterns remain valid semantic values even when their civil year is outside
+the textual range.
+
+Text fixtures cover years `0001..9999`, Gregorian leap rules, month/day limits, fixed-width
+fields, mandatory timestamp seconds, optional 1–6 fractional digits and right-padding,
+microsecond boundaries, and exact ASCII/full consumption. Reject year 0000/10000, invalid
+calendar/time fields, second 60, `T`, timezone suffixes/offsets, whitespace, trailing data,
+and more than six fractional digits. DATE/TIMESTAMP→VARCHAR outside the textual civil range
+is `INVALID_CAST`; malformed input uses `INVALID_DATE` or `INVALID_TIMESTAMP` as owned.
+
+DATE→TIMESTAMP multiplies by exact microseconds/day and range-checks int64. TIMESTAMP→DATE
+uses floor toward the prior midnight and checked int32 range. Mandatory vectors include
+`0`, `1us`, `day_us-1`, `day_us`, `-1us`, `-day_us`, and `-day_us-1`, plus both cast overflow
+boundaries. Replaying with distinct process timezones must not change any result. Temporal
+arithmetic, implicit DATE/TIMESTAMP cross-comparison, timezone-aware types, and typed
+DATE/TIMESTAMP literals are rejected where their syntax reaches binding.
+
+#### CASE, IN, branch demand, and fold/runtime equivalence
+
+Searched CASE fixtures cover BOOLEAN conditions, unresolved NULL conditions becoming
+BOOLEAN UNKNOWN, same-type and promoted-numeric result arms, contextual NULL arms, all-NULL
+failure, missing ELSE typed NULL, incompatible arms, and simple-CASE rejection. Record each
+condition/result demand in source order: stop at the first TRUE and never evaluate an
+unselected result or unnecessary ELSE.
+
+For every registered scalar operator/cast, compare folded and runtime type, NULL state,
+semantic value, FLOAT64 bits/class, or error. Constant errors surface during binding only
+when the subtree dominates every scalar-control-flow completion path. Include root error,
+FALSE-AND error, TRUE-OR error, selected/unselected CASE errors, IN early match/later error,
+EXISTS projection/ORDER BY errors, empty relational subquery, and demanded subquery cases.
+No estimate, `required_rows`, or possible row production proves demand.
+
+Use checked-integer expression trees where reassociation changes overflow and FLOAT64 trees
+where reassociation/contraction changes rounded bits. Folded and runtime evaluation preserve
+the bound tree. Aggregate constant evaluation delegates to the Chapter-29 n-ary state and
+does not replace it with repeated scalar addition.
+
+#### Equality modes, generic Value, and lifetime
+
+Maintain separate expected relations:
+
+| Mode | NULL rule | Non-NULL rule |
+|---|---|---|
+| ordinary predicate/join | any NULL is nonmatching/UNKNOWN | Chapter-17 equality after bound common type |
+| GROUP BY/DISTINCT | all NULLs one class | same normalized equality |
+| hash | mode-specific NULL handling | equal values must hash equal; exact bits are not prescribed |
+| UNIQUE | NULL-containing key bypasses ordinary admission equality | normalized non-NULL component equality |
+| B+ physical order | total NULLS FIRST and BOOLEAN order | Chapter-8 order; SQL-orderable non-NULL values agree |
+
+Exercise every type, composite values, mixed numeric predicate comparisons, both zeros,
+multiple NaNs, and exact VARCHAR bytes. Assert the negative cross-mode cases: `NULL=NULL`
+is UNKNOWN while grouping NULLs coalesce; BOOLEAN has a physical order but no SQL ordering
+overload; mixed numeric comparison does not create a mixed-TypeId persisted key.
+
+A generic Value fixture asserts one resolved logical type for resolved values, or the
+explicitly null-only pre-context state permitted by §17.3, plus the corresponding NULL state,
+scalar payload, and owned VARCHAR lifetime in non-hot semantic use. Permute its test
+implementation and prove no persistent bytes or runtime tag ordinal are inferred from object
+layout. Materialize an escaping VARCHAR Value from tuple/page bytes, release the page guard
+and recycle source memory, then verify the Value remains valid. The hot vector representation
+remains owned by the execution architecture and is not required to use generic Value.
+
+#### Ordinary tuple, index, catalog, default, and historical-schema handoff
+
+For each type and representative boundary/NULL value, execute three distinct paths:
+
+```text
+semantic value -> Chapter-5 ordinary tuple bytes -> semantic value
+semantic value -> §17.13 PersistedScalarV1 bytes -> semantic value
+semantic value -> Chapter-8 key bytes -> semantic equality/order property
+```
+
+Do not compare bytes across codecs. Tuple NULL uses the Chapter-5 bitmap and canonical
+VARCHAR NULL descriptor. BOOLEAN byte defects and malformed VARCHAR descriptors are
+`CORRUPT_HEAP`; FLOAT64 tuple NaN/infinity payloads are legal and preserve bits; every
+signed DATE/TIMESTAMP carrier is legal. Index properties reuse `IndexKeyCodec and
+physical-order properties`, adding SQL-vs-physical NULL and BOOLEAN-order distinctions.
+
+Catalog fixtures map each ColumnDescriptor TypeId through the fixed Chapter-16 registry.
+DefaultValueBlob stores exactly one final destination-typed PersistedScalarV1; typed DEFAULT
+NULL differs from no default. Decode an old tuple only after resolving its exact
+`(TableId,SchemaVer)` descriptor, including a later schema with changed column arrangement.
+No current descriptor, runtime tag, or changed type parameter may reinterpret the old
+TypeId; v1 admits no hidden scalar type parameters.
+
+#### PersistedScalarV1 exact-byte and validation procedures
+
+Use an independent byte builder. The codec has **no embedded version field**; the enclosing
+supported catalog/default/statistics grammar selects v1. Verify exact total size
+`Align8(16+payload_length)` and this header:
+
+| Offset | Width | Field | Canonical rule |
+|---:|---:|---|---|
+| `0` | 4 | TypeId | one of `1..7`, little-endian |
+| `4` | 4 | flags | bit 0 is `IS_NULL`; all other bits zero |
+| `8` | 4 | payload_length | exact type/NULL length, little-endian |
+| `12` | 4 | reserved32 | zero |
+
+Typed NULL for every TypeId uses flags `1`, payload length `0`, no payload, and total size
+16. Non-NULL payloads are BOOLEAN 1 byte, INT32/DATE 4 bytes, INT64/FLOAT64/TIMESTAMP
+8 bytes, and VARCHAR exact byte length. All alignment padding is zero. Test minima, maxima,
+zero, `-1`, both FLOAT64 zeros/infinities, canonical NaN, empty/embedded-NUL/high-byte
+VARCHAR, and checked length boundaries. Persisted NaN is exactly
+`0x7ff8000000000000`; a noncanonical NaN is invalid metadata even though it is legal in an
+ordinary tuple.
+
+From each valid scalar, inject one defect: TypeId 0/8/large, unknown flag bit, nonzero
+reserved byte, NULL with payload, wrong fixed width, BOOLEAN byte outside 0/1, noncanonical
+NaN, nonzero padding, overflowed/truncated length, truncated VARCHAR, or extra bytes outside
+the enclosing scalar extent. Bounds/structure are validated before type-specific decode,
+and successful decode returns owned bytes rather than an alias into unvalidated storage.
+
+Apply the same malformed scalar under two owners. Required catalog/default metadata follows
+the required corruption policy; a malformed scalar inside an otherwise safely framed
+advisory statistics generation invalidates only that generation and selects the prior valid
+or missing-statistics fallback. Malformed outer/core catalog framing never receives the
+advisory exception.
+
+#### Error taxonomy, resource failure, and DML composition
+
+Use the mandatory error matrix below. In particular, unsupported structure is
+`TYPE_ERROR`; malformed/out-of-domain source literal is `INVALID_LITERAL`; a registered
+cast with no target value is `INVALID_CAST`; checked range failure is
+`NUMERIC_OVERFLOW`; integer zero division/remainder is `DIVISION_BY_ZERO`; textual calendar
+errors are `INVALID_DATE`/`INVALID_TIMESTAMP`. None silently becomes NULL. Persisted defects
+are corruption or advisory invalidation, never user cast errors.
+
+Inject allocation failure while acquiring owned VARCHAR bytes and while parse/format
+scratch state is live. Expect the §39 query resource category, complete cleanup, and no
+NULL substitution or semantic-error relabeling. Feed the same row-dependent scalar error
+through DML before and after the first published mutation; Chapter 17 supplies the scalar
+error while Chapter 15/§39.1 supplies ACTIVE versus MUST_ABORT/abort consequences. No type
+test invents transaction policy.
+
+#### Unsupported registry and platform-determinism sweeps
+
+Enumerate every absent type, cast cell, arithmetic/comparison cell, unary overload,
+predicate, and scalar function. Representative parser-accepted absent forms must reach the
+closed registry and fail deterministically; parser-rejected syntax remains a Chapter-18
+case. Include BOOLEAN ordering, FLOAT64 remainder, VARCHAR arithmetic/implicit coercion,
+DATE/TIMESTAMP arithmetic and implicit cross-comparison, unsupported predicates, and named
+scalar functions. Aggregate names remain Chapter-29 entries, not scalar functions.
+
+Replay semantic and byte corpora with changed process locale/timezone, high-bit VARCHAR
+bytes, opposite-endian oracle construction, altered host rounding mode where safely
+isolated, and builds/configurations capable of exposing excess precision or contraction.
+Results must remain identical. The methodology constrains observable results, demand,
+errors, bytes, and lifetimes—not a C++ enum, Value layout, parser data structure,
+TypeResolver dispatch table, vector representation, or floating-point implementation
+strategy.
+
+#### Mandatory scalar matrices
+
+These matrices are test inventories. Each cell is exercised at binding and, when legal,
+with positive, NULL, boundary, and value-error evaluation fixtures.
+
+##### Type matrix
+
+| Type | TypeId | Non-NULL domain | NULL | SQL equality/order | Cast/operator highlights | Tuple / index / metadata owner |
+|---|---:|---|---|---|---|---|
+| BOOLEAN | 1 | FALSE, TRUE | yes | `=`/`<>`; no SQL order | NOT/AND/OR; explicit VARCHAR only | Ch. 5 / Ch. 8 / §17.13 |
+| INT32 | 2 | signed 32-bit | yes | signed; mixed numeric promotion | checked arithmetic; implicit INT64/FLOAT64 | Ch. 5 / Ch. 8 / §17.13 |
+| INT64 | 3 | signed 64-bit | yes | signed; mixed numeric promotion | checked arithmetic; implicit FLOAT64; explicit INT32 | Ch. 5 / Ch. 8 / §17.13 |
+| FLOAT64 | 4 | every binary64 pattern | yes | normalized total equality/order | IEEE scalar arithmetic; explicit integer casts | Ch. 5 / Ch. 8 / §17.13 |
+| DATE | 5 | signed int32 day count | yes | same-type signed order | explicit VARCHAR/TIMESTAMP; no arithmetic | Ch. 5 / Ch. 8 / §17.13 |
+| TIMESTAMP | 6 | signed int64 microseconds | yes | same-type signed order | explicit VARCHAR/DATE; no arithmetic | Ch. 5 / Ch. 8 / §17.13 |
+| VARCHAR | 7 | arbitrary finite bytes within owner resources | yes | exact bytes/unsigned lexicographic | explicit parse casts; no arithmetic | Ch. 5 / Ch. 8 / §17.13 |
+
+##### Cast matrix
+
+`ID` is identity, `IM` registered widening usable only in registered automatic contexts,
+`EX` explicit-only, and `NO` forbidden.
+
+| Source \ Target | BOOL | I32 | I64 | F64 | VARCHAR | DATE | TS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BOOL | ID | NO | NO | NO | EX | NO | NO |
+| I32 | NO | ID | IM | IM | EX | NO | NO |
+| I64 | NO | EX | ID | IM | EX | NO | NO |
+| F64 | NO | EX | EX | ID | EX | NO | NO |
+| VARCHAR | EX | EX | EX | EX | ID | EX | EX |
+| DATE | NO | NO | NO | NO | EX | ID | EX |
+| TS | NO | NO | NO | NO | EX | EX | ID |
+
+Every legal edge propagates NULL to target-typed NULL. Numeric edges use exact/range/rounding
+rules; VARCHAR source edges use full-string ASCII grammars; scalar→VARCHAR uses canonical
+formatting; temporal cross-casts use checked epoch arithmetic. NO is bind-time `TYPE_ERROR`.
+
+##### Assignment/default coercion matrix
+
+| Source | Legal automatic destinations |
+|---|---|
+| BOOLEAN | BOOLEAN |
+| INT32 | INT32, INT64, FLOAT64 |
+| INT64 | INT64, FLOAT64 |
+| FLOAT64 | FLOAT64 |
+| VARCHAR | VARCHAR |
+| DATE | DATE |
+| TIMESTAMP | TIMESTAMP |
+| untyped NULL | any concrete destination, then constraints |
+
+##### Comparison matrix
+
+| Left \ Right | BOOL | I32 | I64 | F64 | VARCHAR | DATE | TS |
+|---|---|---|---|---|---|---|---|
+| BOOL | EQ | NO | NO | NO | NO | NO | NO |
+| I32 | NO | EO:I32 | EO:I64 | EO:F64 | NO | NO | NO |
+| I64 | NO | EO:I64 | EO:I64 | EO:F64 | NO | NO | NO |
+| F64 | NO | EO:F64 | EO:F64 | EO:F64 | NO | NO | NO |
+| VARCHAR | NO | NO | NO | NO | EO:bytes | NO | NO |
+| DATE | NO | NO | NO | NO | NO | EO:day | NO |
+| TS | NO | NO | NO | NO | NO | NO | EO:microsecond |
+
+`EQ` means `=`/`<>` only; `EO` means equality and ordering after the named common type.
+Every legal ordinary comparison with either operand NULL returns UNKNOWN; `NO` is bind-time
+`TYPE_ERROR`.
+
+##### Arithmetic matrix
+
+| Operator | Legal inputs | Result | NULL | Error/special rule |
+|---|---|---|---|---|
+| unary `+` | I32, I64, F64 | same type | strict | identity; signed zero preserved |
+| unary `-` | I32, I64 | same type | strict | MIN overflow except direct literal construction |
+| unary `-` | F64 | F64 | strict | sign flip; canonical NaN result |
+| `+ - * / %` | I32/I32 | I32 | strict | checked; zero divisor and MIN/-1 rules |
+| `+ - * / %` | I32/I64 either order, I64/I64 | I64 | strict | checked; zero divisor and MIN/-1 rules |
+| `+ - * /` | any numeric pair containing F64 | F64 | strict | one binary64 rounding/operator; IEEE division |
+| `%` | any pair containing F64 | unsupported | N/A | bind-time `TYPE_ERROR` |
+| arithmetic | BOOLEAN/VARCHAR/DATE/TS involvement | unsupported | N/A | bind-time `TYPE_ERROR` |
+
+##### NULL and three-valued matrix
+
+| Construct | Required result/demand |
+|---|---|
+| NOT TRUE/FALSE/UNKNOWN | FALSE/TRUE/UNKNOWN |
+| AND 3×3 | exact table above; FALSE skips RHS only |
+| OR 3×3 | exact table above; TRUE skips RHS only |
+| legal ordinary comparison with NULL | UNKNOWN after demanded children |
+| `IS NULL` / `IS NOT NULL` | non-NULL BOOLEAN; child still demanded |
+| WHERE/HAVING/ON | only TRUE qualifies |
+| IN | first TRUE wins; else UNKNOWN if observed; else FALSE |
+| NOT IN | 3VL NOT of IN |
+
+##### FLOAT64 matrix
+
+| Class | Legal | Equality/order class | Tuple | Index | PersistedScalarV1 | Integer cast / text |
+|---|---|---|---|---|---|---|
+| negative/positive finite | yes | numeric | preserve bits | total-order encoding | preserve bits | truncate/range; shortest round-trip |
+| negative/positive subnormal | yes | numeric | preserve bits | total-order encoding | preserve bits | usually zero after truncation; shortest round-trip |
+| `-0` / `+0` | yes | one equality/order class | preserve sign | one normalized class | preserve sign | integer 0; `-0` / `0` |
+| `-Inf` / `+Inf` | yes | numeric endpoints below NaN | preserve bits | ordered | preserve bits | `INVALID_CAST`; canonical spelling |
+| quiet/signaling/payload NaNs | yes | one class above +Inf | preserve all bits | canonical class | canonical quiet NaN only | `INVALID_CAST`; `NaN` |
+
+##### VARCHAR matrix
+
+| Fixture | Semantic validity/length | Equality/order | Tuple/index | Result boundary |
+|---|---|---|---|
+| empty non-NULL | valid, 0 bytes | distinct from NULL; prefix minimum | present empty descriptor / terminator | success |
+| ASCII/equal bytes | valid, byte length | exact equality | exact payload / escaped key | success |
+| embedded `00` | valid, includes byte | unsigned-byte comparison | length-delimited / `00 FF` | no truncation |
+| bytes `80..ff` | valid | unsigned order | exact / memcomparable | signed-char independent |
+| strict prefix pair | valid | shorter first | distinct encodings | success |
+| tuple exceeds inline limit | semantic value valid | unchanged | tuple operation rejects | owning row-size error |
+| key encoding >1024 | semantic value valid | unchanged | index operation rejects | oversized-key result |
+| `VARCHAR(n)` | not a v1 type | N/A | no encoding | syntax/type rejection |
+
+##### Temporal matrix
+
+| Fixture | Semantic value | Text validity | Cast/result | Storage/order |
+|---|---|---|---|---|
+| carrier zero | epoch DATE/TIMESTAMP | valid epoch text | exact | signed carrier |
+| negative/pre-epoch | valid carrier | valid only if civil year in range | TIMESTAMP→DATE floors | signed carrier |
+| int32/int64 extrema | valid semantic carrier | generally outside text range | formatting `INVALID_CAST`; cross-cast may overflow | valid persisted/order |
+| years 0001/9999 | valid | accepted exact width | exact round-trip | signed carrier |
+| leap day / century cases | calendar-dependent | Gregorian oracle | accepted/rejected exactly | N/A |
+| invalid date/time/second 60 | no text value | rejected | `INVALID_DATE`/`INVALID_TIMESTAMP` | N/A |
+| fractions absent/1..6/>6 | right-pad accepted forms | >6 rejected | exact microseconds/error | N/A |
+| timezone suffix/offset | timezone-aware text outside v1 | rejected | `INVALID_TIMESTAMP` | no conversion |
+| DATE→TS / TS→DATE | valid when target range fits | N/A | checked multiply / prior-midnight floor | target signed carrier |
+
+##### Literal matrix
+
+| Literal family | Handoff/classification | Boundary/error |
+|---|---|---|
+| integer token | checked magnitude; smallest signed type | direct-negative minima special; >`2^63` invalid |
+| FLOAT64 token | exact §17.5.2 ASCII forms | finite overflow `INVALID_LITERAL`; rounded underflow |
+| BOOLEAN | TRUE/FALSE keywords | numeric/string forms do not become BOOLEAN literals |
+| VARCHAR | decoded length-delimited bytes | doubled quote; backslash ordinary; source-NUL boundary owned by lexer |
+| DATE/TIMESTAMP | no typed literal syntax | construct by explicit VARCHAR cast |
+| NULL | unresolved type marker during binding | contextual typed NULL or `TYPE_ERROR` |
+
+##### Type/storage-handoff matrix
+
+| Type | Semantic owner | TypeId owner | Tuple/null owner | Metadata owner | Index owner | Historical/validation owner |
+|---|---|---|---|---|---|---|
+| BOOLEAN | Ch. 17 | §16.4 | §§5.10–5.11 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+| INT32 | Ch. 17 | §16.4 | §§5.10–5.11 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+| INT64 | Ch. 17 | §16.4 | §§5.10–5.11 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+| FLOAT64 | Ch. 17 | §16.4 | §§5.10–5.11 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+| DATE | Ch. 17 | §16.4 | §§5.10–5.11 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+| TIMESTAMP | Ch. 17 | §16.4 | §§5.10–5.11 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+| VARCHAR | Ch. 17 | §16.4 | §§5.10, 5.12 | §17.13 | §8.5 | §§5.13, 16.7 / Ch. 5 |
+
+##### PersistedScalarV1 byte matrix
+
+| Region/type | Offset/width or extent | Positive fixture | Single defect | Required / advisory outcome |
+|---|---|---|---|---|
+| codec selection | enclosing grammar; no embedded field | supported enclosing v1 | unsupported/malformed envelope | owner dispatch; never guess scalar version |
+| TypeId | 0/4 | each 1..7 | 0, 8, large | corruption / generation invalid |
+| flags | 4/4 | 0 or `IS_NULL` | unknown bit | corruption / generation invalid |
+| length | 8/4 | exact payload | wrong/overflow/truncated | corruption / generation invalid |
+| reserved32 | 12/4 | zero | one nonzero bit/byte | corruption / generation invalid |
+| typed NULL | total 16 | each concrete TypeId, flags 1, len 0 | payload/nonzero length | corruption / generation invalid |
+| BOOLEAN | len 1, total 24 | 00/01 plus zero pad | other byte/nonzero pad | corruption / generation invalid |
+| INT32/DATE | len 4, total 24 | boundary LE bits | wrong length/nonzero pad | corruption / generation invalid |
+| INT64/TS | len 8, total 24 | boundary LE bits | wrong length | corruption / generation invalid |
+| FLOAT64 | len 8, total 24 | finite, zeros, infinities, canonical NaN | noncanonical NaN/wrong length | corruption / generation invalid |
+| VARCHAR | len N, total `Align8(16+N)` | empty/NUL/high bytes | truncation/extra extent/nonzero pad | corruption / generation invalid |
+
+##### Error matrix
+
+| Condition | Class | NULL? | State/fallback owner | Oracle |
+|---|---|---|---|---|
+| unsupported type/operator/cast/function; underconstrained NULL | `TYPE_ERROR` | no | binder / §39.1 if in statement | closed registry |
+| malformed/out-of-domain source literal | `INVALID_LITERAL` | no | binder/folder | literal grammar |
+| registered cast value has no target | `INVALID_CAST` | no | expression / §39.1 | direct cast model |
+| checked arithmetic/narrowing/range failure | `NUMERIC_OVERFLOW` | no | expression / §39.1 | widened/range model |
+| integer `/` or `%` zero divisor | `DIVISION_BY_ZERO` | no | expression / §39.1 | quotient model |
+| invalid DATE/TIMESTAMP text | `INVALID_DATE` / `INVALID_TIMESTAMP` | no | expression / §39.1 | calendar model |
+| malformed ordinary tuple scalar | `CORRUPT_HEAP` | no | Ch. 5/§39 | byte/layout oracle |
+| malformed required PersistedScalarV1 | required corruption | no | §§4.14.6, 16, 39 | byte oracle |
+| malformed advisory statistics scalar | generation invalid/fallback | no | §34.14 | byte + envelope oracle |
+| owned-byte/scratch allocation failure | resource/OutOfMemory | no | §39.3 then §39.1 | injected resource boundary |
+
+##### Demand and error-dominance matrix
+
+| Expression | Demanded | Skipped | Result/error | Fold/runtime |
+|---|---|---|---|---|
+| `FALSE AND error` | left | RHS | FALSE | equal |
+| `TRUE AND error` | both | none | RHS error | equal |
+| `TRUE OR error` | left | RHS | TRUE | equal |
+| `FALSE OR error` | both | none | RHS error | equal |
+| `UNKNOWN AND FALSE` | both | none | FALSE | equal |
+| `UNKNOWN OR TRUE` | both | none | TRUE | equal |
+| selected CASE safe, later error arm | conditions through first TRUE and selected arm | later arms/ELSE | selected value | equal |
+| selected CASE error | selected path | later paths | selected error | equal |
+| IN early TRUE, later error | left/items through TRUE | later items | TRUE | equal |
+| IN no TRUE, observed UNKNOWN | left/all items | none | UNKNOWN unless demanded error | equal |
+| NOT IN | same IN demand | same | NOT of IN | equal |
+| `NULL + erroring child` | both children | none | child error | equal |
+| `NULL / 0` with both child values successful | both children | non-NULL division operation | typed NULL | equal |
+| `IS NULL(error)` | child | none | child error | equal |
+
+##### Cross-chapter composition matrix
+
+| Owner | Chapter-17 composition | Verification procedure | Status |
+|---|---|---|---|
+| Ch. 4 | checked domains, format/corruption policy | widened arithmetic and required/advisory classification | COMPLETE |
+| Ch. 5 | tuple NULL/scalar/VARCHAR/schema bytes | ordinary tuple handoff and one-defect codec fixtures | COMPLETE |
+| Ch. 8 | scalar key bytes and total order | independent semantic sort versus encoded-byte sort | COMPLETE |
+| Ch. 15 | expression failure before/after publication | same semantic error at both DML boundaries | COMPLETE |
+| Ch. 16 | TypeIds, descriptors, defaults, history | registry/default/historical-schema fixtures | COMPLETE |
+| Ch. 17 | scalar semantics and PersistedScalarV1 | this complete section | COMPLETE |
+| Ch. 18 | token/string/numeric handoff | parser tests plus literal semantic fixtures | COMPLETE |
+| Ch. 20 | subquery demand/IN | demand matrix plus Subquery Tests | COMPLETE |
+| Ch. 21 | folded-default envelope and assignment handoff | exact DefaultValueBlob plus nested PersistedScalarV1 fixture | COMPLETE |
+| Ch. 29 | aggregate registry/n-ary FLOAT semantics | Aggregate Tests; no scalar-function conflation | COMPLETE |
+| Chs. 34/35 | scalar equality/proof and advisory fallback | statistics scalar and semantic-proof fixtures | COMPLETE |
+| §39 | scalar/resource errors and transaction consequence | error matrix plus DML boundary composition | COMPLETE |
+| §41 | durable verification obligations | this section plus referenced lower-layer owners | COMPLETE |
+
+##### High-level domain/case matrix
+
+| Case | Deterministic fixture | Independent oracle | Owner | Status |
+|---|---|---|---|---|
+| TypeIds 1..7 / unknown | literal and descriptor carriers | fixed map | §§16.4, 17.2 | COMPLETE |
+| resolvable / underconstrained NULL | every §17.3 context | NULL constraint model | §17.3 | COMPLETE |
+| SQL UNKNOWN / complete 3VL | literal matrices | truth tables | §17.7 | COMPLETE |
+| integer minima and MIN/-1 | boundary expressions | widened integer model | §§17.5–17.6 | COMPLETE |
+| integer→FLOAT precision | `2^53` neighborhoods | exact rounding model | §17.8.1 | COMPLETE |
+| FLOAT NaN/zeros/order | raw-bit class corpus | normalized total-order model | §§17.4.3, 8.5.5 | COMPLETE |
+| VARCHAR arbitrary bytes | NUL/high-byte/prefix corpus | unsigned byte model | §17.4.6 | COMPLETE |
+| pre-epoch timestamp→date | `-1us` and day edges | floor/calendar model | §17.8.4 | COMPLETE |
+| legal/forbidden/NULL casts | full 7×7 matrix | direct cast table | §17.8 | COMPLETE |
+| PersistedScalar typed NULL/NaN | exact byte fixtures | independent codec | §17.13 | COMPLETE |
+| required/advisory malformed scalar | same one-byte defect in two envelopes | ownership classifier | §§17.13, 34.14 | COMPLETE |
+| skipped fold error | AND/OR/CASE/IN/subquery cases | demand interpreter | §§17.7.3, 17.10.2 | COMPLETE |
+| reassociation/contraction | overflow and halfway trees | bound-tree evaluator | §17.10.2 | COMPLETE |
+| tuple/index round-trip/order | all types/boundaries | Ch. 5/8 independent models | §§17.1, 17.10.3 | COMPLETE |
+| historical decode | old tuple plus changed descriptor | `(TableId,SchemaVer)` map | §§16.7, 17.10.3 | COMPLETE |
+
+#### Chapter 17 atomic architecture-obligation coverage map
+
+`Type-System Property Tests` means the procedures and matrices in this section. Referenced
+lower-layer sections provide reusable byte, lifecycle, execution, or catalog mechanisms;
+the listed procedure supplies the Chapter-17 semantic composition. Matrix cells are all
+executed, but the map counts the owning architectural rule rather than multiplying one rule
+by fixture count. Every row is required.
+
+Domain codes are:
+
+```text
+A scope/ownership                 B TypeId mapping             C closed registry
+D unresolved marker              E typed NULL                 F SQL UNKNOWN
+G BOOLEAN                         H three-valued logic          I INT32
+J INT64                           K FLOAT64                     L DATE
+M TIMESTAMP                       N VARCHAR                     O general literal classification
+P integer literal                 Q FLOAT literal               R VARCHAR/BOOLEAN literal
+S temporal text                   T unary/strict evaluation     U binary arithmetic
+V comparison                      W NULL predicates             X evaluation order
+Y short-circuit/demand            Z explicit casts              AA implicit casts
+AB assignment coercion            AC numeric casts              AD VARCHAR parsing
+AE VARCHAR formatting             AF temporal casts             AG CASE
+AH IN/NOT IN                      AI scalar functions           AJ TypeResolver
+AK constant folding               AL equality modes             AM hash/group/UNIQUE/index
+AN forbidden implementations     AO generic Value              AP Value lifetime
+AQ scalar header                  AR scalar NULL                AS scalar payloads
+AT scalar validation              AU tuple handoff              AV index handoff
+AW catalog/default handoff        AX historical schema          AY error taxonomy
+AZ resource failure               BA platform determinism       BB unsupported scope
+BC cross-owner invariants
+```
+
+| ID | Domain | Atomic obligation | Architecture owner | Verification procedure | Status |
+|---:|---|---|---|---|---|
+| 1 | A | Chapter 17 owns logical scalar meaning | §17.1 | ownership/handoff matrix | COMPLETE |
+| 2 | A | Chapter 5 remains tuple-byte owner | §17.1 | ordinary tuple handoff | COMPLETE |
+| 3 | A | Chapter 8 remains index-byte/order owner | §17.1 | index-order differential | COMPLETE |
+| 4 | A | SQL semantics compose with both physical owners | §17.1 | cross-chapter matrix | COMPLETE |
+| 5 | B | TypeId 1 means BOOLEAN | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 6 | B | TypeId 2 means INT32 | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 7 | B | TypeId 3 means INT64 | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 8 | B | TypeId 4 means FLOAT64 | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 9 | B | TypeId 5 means DATE | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 10 | B | TypeId 6 means TIMESTAMP | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 11 | B | TypeId 7 means VARCHAR | §§16.4, 17.2 | fixed TypeId oracle | COMPLETE |
+| 12 | B | TypeId zero is invalid/not stored | §§16.4, 17.2 | zero descriptor/scalar fixtures | COMPLETE |
+| 13 | B | Unknown persistent TypeIds are not runtime opaque values | §§17.2, 17.13.4 | unknown-TypeId byte fixtures | COMPLETE |
+| 14 | B | Runtime tag ordinal need not equal TypeId | §§16.4, 17.2 | permuted runtime-tag adapter | COMPLETE |
+| 15 | C | V1 scalar registry contains exactly seven types | §§17.2, 17.4 | literal closed-set oracle | COMPLETE |
+| 16 | C | NULL is not a scalar TypeId | §§17.2–17.3 | registry/descriptor negatives | COMPLETE |
+| 17 | C | SQL UNKNOWN is not a scalar TypeId | §§17.2–17.3 | registry/descriptor negatives | COMPLETE |
+| 18 | C | Unresolved type marker is not a scalar TypeId | §§17.2–17.3 | binder/persistence negatives | COMPLETE |
+| 19 | C | DECIMAL/BLOB/UUID/INTERVAL are unregistered | §17.2 | unsupported-type sweep | COMPLETE |
+| 20 | C | JSON/arrays/timezone-aware timestamp are unregistered | §17.2 | unsupported-type sweep | COMPLETE |
+| 21 | C | V1 has no hidden type parameters or VARCHAR(n) | §§17.2, 17.4.6 | parameter/type negatives | COMPLETE |
+| 22 | C | Parser capacity cannot open scalar registry | §17.4 | parser-to-resolver negative | COMPLETE |
+| 23 | D | Untyped NULL may carry unresolved type marker during binding | §17.3 | binding event trace | COMPLETE |
+| 24 | D | Marker is binder-only | §§17.3, 17.12 | phase-boundary assertion | COMPLETE |
+| 25 | D | Marker is not a SQL scalar type | §17.3 | semantic registry negative | COMPLETE |
+| 26 | D | Marker is not persisted | §17.3 | all-codec rejection | COMPLETE |
+| 27 | D | Marker is not an executor vector element | §17.3 | resolved-plan validation | COMPLETE |
+| 28 | D | Successful binding eliminates marker | §17.3 | bind-to-execution trace | COMPLETE |
+| 29 | D | `CAST(NULL AS T)` resolves to T | §17.3 | seven-target context fixtures | COMPLETE |
+| 30 | D | Compatible comparison/arithmetic context resolves NULL | §17.3 | context matrix | COMPLETE |
+| 31 | D | Unique operator signature resolves untyped positions | §17.3 | NOT/AND context fixtures | COMPLETE |
+| 32 | D | Assignment/default context resolves destination type | §17.3 | assignment context fixtures | COMPLETE |
+| 33 | D | CASE/IN/VALUES concrete context resolves common type | §17.3 | common-type fixtures | COMPLETE |
+| 34 | D | NULL predicates need no persisted pseudo-type | §17.3 | folded predicate fixtures | COMPLETE |
+| 35 | D | Every underconstrained listed context is TYPE_ERROR | §17.3 | underconstrained table sweep | COMPLETE |
+| 36 | D | No fallback VARCHAR/INT32 type is guessed | §17.3 | fallback-negative assertion | COMPLETE |
+| 37 | E | Every concrete type admits typed NULL value state | §§17.2–17.3 | seven-type NULL matrix | COMPLETE |
+| 38 | E | Typed NULL retains concrete logical type | §§17.3, 17.13.2 | semantic/byte assertions | COMPLETE |
+| 39 | E | Legal cast of NULL yields target-typed NULL | §17.8 | every legal cast edge | COMPLETE |
+| 40 | E | NULL cast performs no parse/range operation | §17.8 | poisoned-payload fixtures | COMPLETE |
+| 41 | E | Typed NULL is distinct from absent default | §§16.5.3, 17.3 | default handoff fixture | COMPLETE |
+| 42 | F | SQL UNKNOWN is nullable BOOLEAN NULL | §§17.3, 17.7.2 | truth-state representation fixture | COMPLETE |
+| 43 | F | UNKNOWN has no independent payload/state | §17.7.2 | fourth-state negative | COMPLETE |
+| 44 | F | Binder marker terminology remains distinct from UNKNOWN | §§17.3, 17.7.2 | diagnostics/event vocabulary assertion | COMPLETE |
+| 45 | G | BOOLEAN non-NULL domain is exactly FALSE/TRUE | §§17.2, 17.4.1 | domain and persisted-byte fixtures | COMPLETE |
+| 46 | G | BOOLEAN supports nullable NULL state | §17.4.1 | typed-NULL fixture | COMPLETE |
+| 47 | G | BOOLEAN has no integer truthiness | §17.4.1 | binder negatives | COMPLETE |
+| 48 | G | BOOLEAN has no numeric cast | §§17.4.1, 17.8 | cast-matrix negatives | COMPLETE |
+| 49 | G | BOOLEAN SQL comparison is equality-only | §§17.4.1, 17.7.1 | comparison matrix | COMPLETE |
+| 50 | G | Physical BOOLEAN order does not authorize SQL order | §§17.4.1, 17.10.3 | SQL/index contrast fixture | COMPLETE |
+| 51 | H | NOT TRUE is FALSE | §17.7.2 | literal 3VL oracle | COMPLETE |
+| 52 | H | NOT FALSE is TRUE | §17.7.2 | literal 3VL oracle | COMPLETE |
+| 53 | H | NOT UNKNOWN is UNKNOWN | §17.7.2 | literal 3VL oracle | COMPLETE |
+| 54 | H | Complete AND 3x3 table is exact | §17.7.2 | exhaustive 3VL matrix | COMPLETE |
+| 55 | H | Complete OR 3x3 table is exact | §17.7.2 | exhaustive 3VL matrix | COMPLETE |
+| 56 | H | Non-BOOLEAN predicates are rejected | §§17.7.2, 17.12 | binder predicate sweep | COMPLETE |
+| 57 | H | WHERE consumes only TRUE | §17.7.2 | relational predicate fixture | COMPLETE |
+| 58 | H | HAVING consumes only TRUE | §17.7.2 | aggregate predicate fixture | COMPLETE |
+| 59 | H | JOIN ON consumes only TRUE | §17.7.2 | join predicate fixture | COMPLETE |
+| 60 | H | XOR is unsupported | §17.7.2 | operator negative | COMPLETE |
+| 61 | P | Unsuffixed integer token is ASCII DIGIT+ | §17.5.1 | independent token grammar | COMPLETE |
+| 62 | P | Leading zeros do not imply octal | §17.5.1 | leading-zero vectors | COMPLETE |
+| 63 | P | Radix prefixes/underscores/suffixes are unsupported | §17.5.1 | literal negatives | COMPLETE |
+| 64 | P | Magnitudes through INT32_MAX bind INT32 | §17.5.1 | boundary classification | COMPLETE |
+| 65 | P | INT32_MAX+1 through INT64_MAX bind INT64 | §17.5.1 | boundary classification | COMPLETE |
+| 66 | P | Positive magnitude 2^63 is direct-minus-only | §17.5.1 | syntax-shape fixtures | COMPLETE |
+| 67 | P | Magnitude above 2^63 is INVALID_LITERAL | §17.5.1 | checked magnitude oracle | COMPLETE |
+| 68 | P | Direct negative through 2^31 chooses INT32 | §17.5.1 | direct-negative vectors | COMPLETE |
+| 69 | P | Larger direct negative through 2^63 chooses INT64 | §17.5.1 | direct-negative vectors | COMPLETE |
+| 70 | P | Direct `-2^63` constructs INT64_MIN | §17.5.1 | special-edge fixture | COMPLETE |
+| 71 | P | Parentheses break direct-negative special form | §17.5.1 | AST-shape/literal fixture | COMPLETE |
+| 72 | P | Direct unary plus receives no special range | §17.5.1 | positive-edge negative | COMPLETE |
+| 73 | I | INT32 domain is exact signed 32-bit | §§17.2, 17.4.2 | widened-domain fixtures | COMPLETE |
+| 74 | I | INT32 arithmetic is checked mathematical arithmetic | §17.4.2 | widened integer oracle | COMPLETE |
+| 75 | I | INT32 unary minimum negation overflows | §17.6.1 | minimum fixture | COMPLETE |
+| 76 | I | INT32 operations never use host wrap | §§17.4.2, 17.10.4 | boundary/property sweep | COMPLETE |
+| 77 | I | INT32+INT32 result is INT32 | §17.6.2 | arithmetic matrix | COMPLETE |
+| 78 | I | INT32 integer division truncates toward zero | §17.6.2 | quotient oracle | COMPLETE |
+| 79 | I | INT32 remainder follows dividend sign | §17.6.2 | remainder oracle | COMPLETE |
+| 80 | J | INT64 domain is exact signed 64-bit | §§17.2, 17.4.2 | widened-domain fixtures | COMPLETE |
+| 81 | J | INT64 arithmetic is checked mathematical arithmetic | §17.4.2 | widened integer oracle | COMPLETE |
+| 82 | J | INT64 unary minimum negation overflows | §17.6.1 | minimum fixture | COMPLETE |
+| 83 | J | INT64 operations never use host wrap | §§17.4.2, 17.10.4 | boundary/property sweep | COMPLETE |
+| 84 | J | Mixed INT32/INT64 arithmetic result is INT64 | §17.6.2 | both-order matrix fixtures | COMPLETE |
+| 85 | J | INT64 division truncates toward zero | §17.6.2 | quotient oracle | COMPLETE |
+| 86 | J | INT64 remainder follows dividend sign | §17.6.2 | remainder oracle | COMPLETE |
+| 87 | U | Integer addition checks overflow | §17.6.2 | min/max pair sweep | COMPLETE |
+| 88 | U | Integer subtraction checks overflow | §17.6.2 | min/max pair sweep | COMPLETE |
+| 89 | U | Integer multiplication checks overflow | §17.6.2 | widened product sweep | COMPLETE |
+| 90 | U | Integer zero divisor is DIVISION_BY_ZERO | §17.6.2 | zero-divisor matrix | COMPLETE |
+| 91 | U | Integer MIN/-1 division is NUMERIC_OVERFLOW | §17.6.2 | minimum fixture | COMPLETE |
+| 92 | U | Integer MIN%-1 is NUMERIC_OVERFLOW | §17.6.2 | minimum fixture | COMPLETE |
+| 93 | U | Remainder satisfies `a=q*b+r` | §17.6.2 | arithmetic identity oracle | COMPLETE |
+| 94 | U | Remainder magnitude is below divisor magnitude | §17.6.2 | arithmetic identity oracle | COMPLETE |
+| 95 | U | Strict integer NULL returns resolved typed NULL | §§17.6, 17.12 | NULL/type fixtures | COMPLETE |
+| 96 | K | Every binary64 bit pattern is a legal FLOAT64 value | §§17.2, 17.4.3 | raw-bit class/property corpus | COMPLETE |
+| 97 | K | FLOAT64 arithmetic uses binary64 | §17.4.3 | software rounding oracle | COMPLETE |
+| 98 | K | Each scalar operator rounds nearest/ties-even | §17.4.3 | halfway vectors | COMPLETE |
+| 99 | K | Extended-precision result differences are forbidden | §17.4.3 | excess-precision discriminators | COMPLETE |
+| 100 | K | Altered process rounding cannot change SQL result | §17.4.3 | environment replay/software oracle | COMPLETE |
+| 101 | K | Observable FMA/contraction differences are forbidden | §17.4.3 | contraction discriminators | COMPLETE |
+| 102 | K | Arithmetic NaN results normalize canonically | §17.4.3 | NaN-producing operation corpus | COMPLETE |
+| 103 | K | FLOAT64 arithmetic preserves signed zero | §17.4.3 | zero-sign vectors | COMPLETE |
+| 104 | K | FLOAT overflow produces signed infinity | §17.4.3 | maximum finite vectors | COMPLETE |
+| 105 | K | FLOAT underflow produces rounded subnormal/signed zero | §17.4.3 | underflow boundary vectors | COMPLETE |
+| 106 | K | FLOAT arithmetic raises no floating trap semantics | §17.4.3 | controlled environment fixture | COMPLETE |
+| 107 | K | `-0` and `+0` compare equal | §§17.4.3, 17.7.1 | comparator matrix | COMPLETE |
+| 108 | K | All NaNs compare equal | §§17.4.3, 17.7.1 | payload/sign corpus | COMPLETE |
+| 109 | K | NaN sorts after +infinity | §§17.4.3, 17.7.1 | total-order corpus | COMPLETE |
+| 110 | K | Non-NaN FLOAT order is numeric | §§17.4.3, 17.7.1 | semantic comparator oracle | COMPLETE |
+| 111 | K | Raw IEEE unordered predicates are not SQL comparator | §§17.7.1, 17.10.4 | host-comparator negative | COMPLETE |
+| 112 | K | FLOAT scalar arithmetic differs from aggregate n-ary semantics | §§17.4.3, 29.3 | scalar/aggregate contrast | COMPLETE |
+| 113 | K | FLOAT zero division follows IEEE outcomes | §§17.6.2, 39.3.2 | division class matrix | COMPLETE |
+| 114 | K | FLOAT remainder is unsupported | §17.6.2 | binder negative | COMPLETE |
+| 115 | K | FLOAT unary plus preserves semantic value and signed zero | §17.6.1 | unary fixtures | COMPLETE |
+| 116 | K | FLOAT unary minus flips sign and canonicalizes NaN result | §17.6.1 | unary bit fixtures | COMPLETE |
+| 117 | K | INT/FLOAT mixed arithmetic result is FLOAT64 | §17.6.2 | pair matrix | COMPLETE |
+| 118 | K | FLOAT folding equals runtime bits/classes | §17.10.2 | fold/runtime differential | COMPLETE |
+| 119 | L | DATE semantic domain is every signed int32 day count | §§17.2, 17.4.4 | carrier-domain generator | COMPLETE |
+| 120 | L | DATE epoch day zero is 1970-01-01 | §17.4.4 | civil-day oracle | COMPLETE |
+| 121 | L | DATE uses proleptic Gregorian calendar | §17.4.4 | independent calendar model | COMPLETE |
+| 122 | L | DATE signed order follows day count | §§17.2, 17.7.1 | comparison/order fixture | COMPLETE |
+| 123 | L | DATE text range is narrower than semantic domain | §17.4.4 | carrier/text contrast | COMPLETE |
+| 124 | L | Out-of-text-range DATE formatting is INVALID_CAST | §§17.4.4, 17.8.3 | boundary formatting fixture | COMPLETE |
+| 125 | M | TIMESTAMP semantic domain is every signed int64 microsecond count | §§17.2, 17.4.5 | carrier-domain generator | COMPLETE |
+| 126 | M | TIMESTAMP epoch zero is exact | §17.4.5 | epoch oracle | COMPLETE |
+| 127 | M | TIMESTAMP unit is microseconds | §17.4.5 | adjacent-unit fixtures | COMPLETE |
+| 128 | M | TIMESTAMP is timezone-naive | §17.4.5 | timezone replay | COMPLETE |
+| 129 | M | Leap seconds are outside v1 | §17.4.5 | second-60 rejection | COMPLETE |
+| 130 | M | TIMESTAMP signed order follows microsecond count | §§17.2, 17.7.1 | comparison/order fixture | COMPLETE |
+| 131 | M | TIMESTAMP text range is narrower than semantic domain | §17.4.5 | carrier/text contrast | COMPLETE |
+| 132 | M | Out-of-text-range TIMESTAMP formatting is INVALID_CAST | §§17.4.5, 17.8.3 | boundary formatting fixture | COMPLETE |
+| 133 | N | VARCHAR semantic values are arbitrary finite byte strings | §§17.2, 17.4.6 | byte-array generator | COMPLETE |
+| 134 | N | VARCHAR length is byte length | §17.4.6 | NUL/high-byte length fixtures | COMPLETE |
+| 135 | N | VARCHAR equality is exact bytes | §§17.2, 17.7.1 | byte comparator oracle | COMPLETE |
+| 136 | N | VARCHAR order is unsigned lexicographic | §§17.2, 17.7.1 | unsigned-byte oracle | COMPLETE |
+| 137 | N | Equal-prefix shorter VARCHAR sorts first | §17.7.1 | prefix corpus | COMPLETE |
+| 138 | N | VARCHAR requires no UTF-8 | §17.4.6 | invalid-UTF8 byte corpus | COMPLETE |
+| 139 | N | VARCHAR requires no normalization/collation locale | §17.4.6 | locale/canonical-byte replay | COMPLETE |
+| 140 | N | Embedded NUL is ordinary data | §§17.4.6, 17.5.3 | NUL round-trip/order fixture | COMPLETE |
+| 141 | N | Empty VARCHAR is non-NULL length zero | §§5.12.3, 17.4.6 | NULL/empty contrast | COMPLETE |
+| 142 | N | Semantic VARCHAR domain is distinct from tuple limit | §§17.2, 17.4.6 | oversized-row composition | COMPLETE |
+| 143 | N | Semantic VARCHAR domain is distinct from key limit | §§17.2, 8.6 | oversized-key composition | COMPLETE |
+| 144 | Q | FLOAT literal grammar has exactly two unsigned token forms | §17.5.2 | independent grammar sweep | COMPLETE |
+| 145 | Q | FLOAT literal leading sign is unary syntax | §17.5.2 | AST/token handoff fixture | COMPLETE |
+| 146 | Q | `.5`, `1.`, hex, underscore, suffix are invalid | §17.5.2 | negative grammar corpus | COMPLETE |
+| 147 | Q | NaN/infinity keywords are not FLOAT literals | §17.5.2 | literal negative | COMPLETE |
+| 148 | Q | FLOAT literal parse is full, ASCII, locale-independent | §17.5.2 | parser oracle/environment replay | COMPLETE |
+| 149 | Q | Finite FLOAT literal overflow is INVALID_LITERAL | §17.5.2 | decimal boundary fixture | COMPLETE |
+| 150 | Q | FLOAT literal underflow rounds without error | §17.5.2 | subnormal/zero vectors | COMPLETE |
+| 151 | R | VARCHAR literal uses doubled quote | §17.5.3 | token handoff fixture | COMPLETE |
+| 152 | R | Backslash has no escape meaning | §17.5.3 | literal byte assertion | COMPLETE |
+| 153 | R | Quoted embedded NUL is retained | §17.5.3 | length-delimited fixture | COMPLETE |
+| 154 | R | Unquoted source NUL is lexical error | §§17.5.3, 18 | parser/lexer composition | COMPLETE |
+| 155 | R | BOOLEAN literals are TRUE/FALSE keywords only | §17.5.3 | keyword/literal sweep | COMPLETE |
+| 156 | R | Numeric/string literals never become BOOLEAN implicitly | §17.5.3 | binder negatives | COMPLETE |
+| 157 | S | DATE has no typed-literal syntax | §17.5.4 | syntax/resolver negative | COMPLETE |
+| 158 | S | TIMESTAMP has no typed-literal syntax | §17.5.4 | syntax/resolver negative | COMPLETE |
+| 159 | S | Temporal construction uses explicit VARCHAR cast | §17.5.4 | cast-path fixture | COMPLETE |
+| 160 | S | DATE grammar is exact YYYY-MM-DD | §17.5.4 | grammar/calendar corpus | COMPLETE |
+| 161 | S | TIMESTAMP grammar uses space and mandatory seconds | §17.5.4 | grammar corpus | COMPLETE |
+| 162 | S | Timestamp fraction is absent or 1..6 digits | §17.5.4 | fraction boundary sweep | COMPLETE |
+| 163 | S | Fraction digits right-pad to microseconds | §17.5.4 | exact scalar fixture | COMPLETE |
+| 164 | S | More than six fraction digits reject, not round | §17.5.4 | negative boundary | COMPLETE |
+| 165 | S | Year range is exactly 0001..9999 | §17.5.4 | year boundary fixtures | COMPLETE |
+| 166 | S | Gregorian leap rule is exact | §17.5.4 | century/leap corpus | COMPLETE |
+| 167 | S | Time is 00:00:00 through 23:59:59 | §17.5.4 | field boundary corpus | COMPLETE |
+| 168 | S | Timezone/whitespace/trailing bytes reject | §17.5.4 | full-consumption negatives | COMPLETE |
+| 169 | T | Scalar children evaluate left-to-right by default | §17.6 | event trace | COMPLETE |
+| 170 | T | Strict NULL suppresses non-NULL operation after child evaluation | §17.6 | NULL/error precedence matrix | COMPLETE |
+| 171 | T | Strictness never suppresses an error raised by a demanded child | §17.6 | child-error event trace | COMPLETE |
+| 172 | T | Strict result nullability follows nullable inputs | §17.6 | bound nullability assertions | COMPLETE |
+| 173 | T | Unary plus exists only for INT32/INT64/FLOAT64 | §17.6.1 | unary 7-type matrix | COMPLETE |
+| 174 | T | Unary plus is same-type identity | §17.6.1 | boundary/NULL fixtures | COMPLETE |
+| 175 | T | Integer unary minus is checked | §17.6.1 | min/non-min sweep | COMPLETE |
+| 176 | T | Direct-minimum literal exception is not runtime negation | §§17.5.1, 17.6.1 | literal/runtime contrast | COMPLETE |
+| 177 | T | FLOAT unary minus uses IEEE sign negation | §17.6.1 | bit fixtures | COMPLETE |
+| 178 | T | NOT has only BOOLEAN overload | §17.6.1 | unary registry sweep | COMPLETE |
+| 179 | T | No unary overload exists for VARCHAR/DATE/TIMESTAMP | §17.6.1 | binder negatives | COMPLETE |
+| 180 | U | Binary arithmetic registry is exactly §17.6.2 table | §17.6.2 | exhaustive 7x7x5 binding matrix | COMPLETE |
+| 181 | U | INT32/INT32 arithmetic retains INT32 | §17.6.2 | result-type assertions | COMPLETE |
+| 182 | U | Any INT64 integer pair promotes to INT64 | §17.6.2 | both-order result fixtures | COMPLETE |
+| 183 | U | Any legal FLOAT64 numeric pair promotes to FLOAT64 | §17.6.2 | all mixed pair fixtures | COMPLETE |
+| 184 | U | Minimum promotions, not arbitrary explicit casts, resolve arithmetic | §17.6.2 | inserted-cast inspection | COMPLETE |
+| 185 | U | VARCHAR concatenation is unsupported | §17.6.2 | binder negative | COMPLETE |
+| 186 | U | DATE/TIMESTAMP arithmetic is unsupported | §17.6.2 | binder negative | COMPLETE |
+| 187 | U | FLOAT64 division by zero is not SQL integer error | §§17.6.2, 39.3.2 | division contrast | COMPLETE |
+| 188 | V | Every ordinary comparison returns BOOLEAN | §17.7.1 | bound result-type matrix | COMPLETE |
+| 189 | V | Comparison nullability follows nullable operands | §17.7.1 | nullability matrix | COMPLETE |
+| 190 | V | BOOLEAN supports equality/inequality only | §17.7.1 | comparison matrix | COMPLETE |
+| 191 | V | Every numeric pair supports equality and order | §17.7.1 | 3x3 numeric pair matrix | COMPLETE |
+| 192 | V | Numeric comparison uses smallest common type | §17.7.1 | inserted-cast/common-type oracle | COMPLETE |
+| 193 | V | Inexact INT64→FLOAT64 promotion governs comparison | §§17.7.1, 17.8.1 | `2^53` boundary fixtures | COMPLETE |
+| 194 | V | VARCHAR same-type equality/order uses exact bytes | §17.7.1 | byte comparator differential | COMPLETE |
+| 195 | V | DATE same-type equality/order uses signed days | §17.7.1 | signed carrier fixtures | COMPLETE |
+| 196 | V | TIMESTAMP same-type equality/order uses signed microseconds | §17.7.1 | signed carrier fixtures | COMPLETE |
+| 197 | V | Every other comparison pair is unsupported | §17.7.1 | full 7x7 matrix | COMPLETE |
+| 198 | V | VARCHAR/numeric/temporal implicit comparison is absent | §17.7.1 | cross-family negatives | COMPLETE |
+| 199 | V | DATE/TIMESTAMP cross-comparison is absent | §17.7.1 | temporal negative | COMPLETE |
+| 200 | V | FLOAT SQL comparator uses canonical total semantics | §17.7.1 | float class matrix | COMPLETE |
+| 201 | V | FLOAT SQL and B+ non-NULL order agree | §§17.7.1, 8.5.5 | semantic/encoded sort differential | COMPLETE |
+| 202 | W | Any NULL operand makes legal ordinary comparison UNKNOWN | §17.7.2 | operator/type/side NULL sweep | COMPLETE |
+| 203 | W | `x=NULL` is not rewritten to IS NULL | §§17.7.2, 17.12 | bound-tree/result fixture | COMPLETE |
+| 204 | W | IS NULL accepts every valid scalar type | §17.7.2 | seven-type matrix | COMPLETE |
+| 205 | W | IS NOT NULL accepts every valid scalar type | §17.7.2 | seven-type matrix | COMPLETE |
+| 206 | W | NULL predicates return non-NULL BOOLEAN | §17.7.2 | result validity assertions | COMPLETE |
+| 207 | W | NULL predicates evaluate/error their child | §17.7.2 | erroring-child fixture | COMPLETE |
+| 208 | W | IS TRUE/FALSE/UNKNOWN are unsupported | §§17.7.2, 17.9.2 | predicate negatives | COMPLETE |
+| 209 | X | Scalar evaluation follows source child order | §§17.6, 17.7.3 | numbered event trace | COMPLETE |
+| 210 | Y | FALSE AND skips RHS | §17.7.3 | controlled-error/counter fixture | COMPLETE |
+| 211 | Y | TRUE OR skips RHS | §17.7.3 | controlled-error/counter fixture | COMPLETE |
+| 212 | Y | Other AND/OR left states demand RHS | §17.7.3 | TRUE/FALSE/UNKNOWN demand matrix | COMPLETE |
+| 213 | Y | Searched CASE conditions run in source order | §17.7.3 | branch event trace | COMPLETE |
+| 214 | Y | CASE stops at first TRUE and demands only selected result | §17.7.3 | selected/unselected errors | COMPLETE |
+| 215 | Y | CASE ELSE runs only with no TRUE | §17.7.3 | ELSE demand fixture | COMPLETE |
+| 216 | Y | IN evaluates left exactly once | §17.7.3 | evaluation counter | COMPLETE |
+| 217 | Y | IN items run left-to-right and stop at first TRUE | §17.7.3 | item event trace | COMPLETE |
+| 218 | Y | IN without TRUE continues to determine UNKNOWN | §17.7.3 | UNKNOWN/later-item fixture | COMPLETE |
+| 219 | Y | Optimizer cannot force skipped error/volatile expression | §§17.7.3, 17.10.2 | fold/rewrite demand differential | COMPLETE |
+| 220 | Z | Explicit cast syntax resolves only closed 7x7 matrix | §17.8 | complete cast matrix | COMPLETE |
+| 221 | Z | Identity cast is legal implicitly and explicitly | §17.8 | seven identity edges | COMPLETE |
+| 222 | Z | Registered widening cast is also explicit | §17.8 | I-edge binding fixtures | COMPLETE |
+| 223 | Z | EX cells require explicit CAST | §17.8 | implicit-negative/explicit-positive pairs | COMPLETE |
+| 224 | Z | NO cells are bind-time TYPE_ERROR | §§17.8, 17.10.1 | matrix negative sweep | COMPLETE |
+| 225 | Z | Direct cast never inherits an unregistered chained path | §§17.8, 17.10.4 | direct-versus-chain discriminators | COMPLETE |
+| 226 | AC | INT32→INT64 is exact | §17.8.1 | full boundary conversion | COMPLETE |
+| 227 | AC | INT32→FLOAT64 rounds nearest/ties-even | §17.8.1 | precision-boundary oracle | COMPLETE |
+| 228 | AC | INT64→FLOAT64 rounds nearest/ties-even | §17.8.1 | `2^53`/limits corpus | COMPLETE |
+| 229 | AC | Inexact integer→FLOAT64 remains legal | §17.8.1 | exactness contrast | COMPLETE |
+| 230 | AC | INT64→INT32 is explicit and range-checked | §§17.8, 17.8.1 | four boundary values | COMPLETE |
+| 231 | AC | FLOAT→integer is explicit | §§17.8, 17.8.1 | implicit negative/explicit positive | COMPLETE |
+| 232 | AC | Finite FLOAT→integer truncates toward zero | §17.8.1 | signed fractional corpus | COMPLETE |
+| 233 | AC | FLOAT→integer checks range after truncation | §17.8.1 | adjacent target limits | COMPLETE |
+| 234 | AC | FLOAT NaN/infinity→integer is INVALID_CAST | §17.8.1 | special-class matrix | COMPLETE |
+| 235 | AC | FLOAT signed zero→integer is zero | §17.8.1 | both-zero fixtures | COMPLETE |
+| 236 | AC | No numeric cast wraps or modulo-truncates | §§17.8.1, 17.10.4 | out-of-range negative | COMPLETE |
+| 237 | AD | VARCHAR casts parse complete byte string | §17.8.2 | full-consumption corpus | COMPLETE |
+| 238 | AD | VARCHAR parse permits no surrounding whitespace | §17.8.2 | whitespace variants | COMPLETE |
+| 239 | AD | VARCHAR parse recognizes ASCII only | §17.8.2 | Unicode digit/sign negatives | COMPLETE |
+| 240 | AD | VARCHAR→BOOLEAN accepts case-insensitive TRUE/FALSE only | §17.8.2 | accepted/near-match corpus | COMPLETE |
+| 241 | AD | VARCHAR→INT32/INT64 grammar is exact | §17.8.2 | sign/zero/range corpus | COMPLETE |
+| 242 | AD | VARCHAR→FLOAT64 grammar and special spellings are exact | §17.8.2 | grammar/special corpus | COMPLETE |
+| 243 | AD | VARCHAR→DATE delegates exact temporal grammar | §§17.8.2, 17.5.4 | calendar parse corpus | COMPLETE |
+| 244 | AD | VARCHAR→TIMESTAMP delegates exact temporal grammar | §§17.8.2, 17.5.4 | timestamp parse corpus | COMPLETE |
+| 245 | AD | Empty/malformed/trailing/embedded-NUL BOOLEAN/numeric parse is INVALID_CAST | §17.8.2 | negative corpus | COMPLETE |
+| 246 | AD | Valid integer/finite-FLOAT text range failure is NUMERIC_OVERFLOW | §17.8.2 | range boundary corpus | COMPLETE |
+| 247 | AD | FLOAT text underflow rounds and preserves negative zero | §17.8.2 | signed underflow vectors | COMPLETE |
+| 248 | AD | Invalid temporal text uses INVALID_DATE/INVALID_TIMESTAMP | §17.8.2 | error taxonomy fixture | COMPLETE |
+| 249 | AD | NaN text constructs canonical semantic NaN | §17.8.2 | special parse fixture | COMPLETE |
+| 250 | AE | BOOLEAN→VARCHAR emits TRUE/FALSE | §17.8.3 | canonical byte fixtures | COMPLETE |
+| 251 | AE | Integer→VARCHAR is shortest canonical decimal | §17.8.3 | signed boundary corpus | COMPLETE |
+| 252 | AE | DATE→VARCHAR uses exact date text or INVALID_CAST | §17.8.3 | range/calendar corpus | COMPLETE |
+| 253 | AE | TIMESTAMP→VARCHAR always emits six fractional digits or error | §17.8.3 | exact format corpus | COMPLETE |
+| 254 | AE | FLOAT special/zero spellings are canonical | §17.8.3 | NaN/Inf/zero corpus | COMPLETE |
+| 255 | AE | Finite FLOAT text is shortest bit-round-trippable | §17.8.3 | independent formatter corpus | COMPLETE |
+| 256 | AE | FLOAT candidate-distance tie uses even final digit | §17.8.3 | tie corpus | COMPLETE |
+| 257 | AE | Fixed/scientific shortest-form tie chooses fixed | §17.8.3 | representation tie corpus | COMPLETE |
+| 258 | AE | Scientific syntax has canonical lowercase/no-plus/no-leading-zero form | §17.8.3 | exact byte assertions | COMPLETE |
+| 259 | AE | Formatting is independent of libc/iostream/locale | §§17.8.3, 17.10.4 | environment differential | COMPLETE |
+| 260 | AF | DATE→TIMESTAMP sets midnight and checks multiplication | §17.8.4 | widened microsecond oracle | COMPLETE |
+| 261 | AF | Unrepresentable DATE→TIMESTAMP is NUMERIC_OVERFLOW | §17.8.4 | exact overflow boundary | COMPLETE |
+| 262 | AF | TIMESTAMP→DATE floors toward prior midnight | §17.8.4 | negative-boundary matrix | COMPLETE |
+| 263 | AF | TIMESTAMP→DATE checks int32 day range | §17.8.4 | target-boundary fixture | COMPLETE |
+| 264 | AF | Temporal casts perform no timezone conversion | §17.8.4 | timezone replay | COMPLETE |
+| 265 | AA | Automatic coercion is contextual, not arbitrary path search | §17.8.5 | context-specific resolver trace | COMPLETE |
+| 266 | AA | Operator coercion is exact/minimum numeric promotion only | §17.8.5 | operator matrix inspection | COMPLETE |
+| 267 | AA | CASE/IN/VALUES common type is same or smallest numeric type | §17.8.5 | common-type matrix | COMPLETE |
+| 268 | AA | Scalar functions add no coercion because registry is empty | §§17.8.5, 17.9.3 | function negatives | COMPLETE |
+| 269 | AA | Aggregate coercion uses only Chapter-29 signatures | §§17.8.5, 29.3 | aggregate binding matrix | COMPLETE |
+| 270 | AA | Arbitrary unlike expressions receive no implicit conversion | §17.8.5 | unlike-expression negatives | COMPLETE |
+| 271 | AB | BOOLEAN assignment is identity only | §17.8.5 | assignment matrix | COMPLETE |
+| 272 | AB | INT32 assignment admits INT32/INT64/FLOAT64 | §17.8.5 | assignment matrix | COMPLETE |
+| 273 | AB | INT64 assignment admits INT64/FLOAT64 | §17.8.5 | assignment matrix | COMPLETE |
+| 274 | AB | FLOAT64/VARCHAR/DATE/TIMESTAMP assignment is same type only | §17.8.5 | assignment matrix | COMPLETE |
+| 275 | AB | Untyped NULL adopts any concrete destination before constraints | §17.8.5 | nullable/not-null fixtures | COMPLETE |
+| 276 | AB | Narrowing/parsing/stringifying/temporal conversion is explicit-only | §17.8.5 | assignment negatives | COMPLETE |
+| 277 | AB | Destination constraints run after coercion | §17.8.5 | coercion/constraint event order | COMPLETE |
+| 278 | AB | DDL default stores final destination-typed scalar | §17.8.5 | default encode fixture | COMPLETE |
+| 279 | AB | Runtime default application performs no deferred cast | §17.8.5 | bound-default inspection | COMPLETE |
+| 280 | AG | Only searched CASE is supported | §17.9.1 | searched/simple syntax-binding contrast | COMPLETE |
+| 281 | AG | Every CASE WHEN must be BOOLEAN | §17.9.1 | condition-type matrix | COMPLETE |
+| 282 | AG | Untyped NULL CASE condition becomes BOOLEAN UNKNOWN | §17.9.1 | contextual/demand fixture | COMPLETE |
+| 283 | AG | CASE result common type is same/smallest numeric | §17.9.1 | arm matrix | COMPLETE |
+| 284 | AG | NULL CASE arms adopt resolved result type | §17.9.1 | typed-NULL arm fixtures | COMPLETE |
+| 285 | AG | All-NULL CASE results fail binding | §17.9.1 | underconstrained case | COMPLETE |
+| 286 | AG | Missing ELSE is typed NULL of resolved result | §17.9.1 | result metadata/value fixture | COMPLETE |
+| 287 | AG | Simple CASE is unsupported | §17.9.1 | binder negative | COMPLETE |
+| 288 | AH | Expression-list IN/NOT IN are supported | §17.9.2 | binding/result matrix | COMPLETE |
+| 289 | AH | IN list must be nonempty | §17.9.2 | empty-list negative | COMPLETE |
+| 290 | AH | IN uses one comparison type | §§17.9.2, 17.8.5 | common-type inspection | COMPLETE |
+| 291 | AH | Any TRUE comparison makes IN TRUE | §17.9.2 | ordered item fixtures | COMPLETE |
+| 292 | AH | No TRUE plus any UNKNOWN makes IN UNKNOWN | §17.9.2 | NULL item/probe matrix | COMPLETE |
+| 293 | AH | No TRUE/UNKNOWN makes IN FALSE | §17.9.2 | nonmatch fixture | COMPLETE |
+| 294 | AH | NOT IN is exact 3VL NOT | §17.9.2 | paired IN/NOT IN matrix | COMPLETE |
+| 295 | AH | Scalar and subquery IN registries remain distinct | §§17.9.2, 20.14 | cross-owner binding fixtures | COMPLETE |
+| 296 | AH | Unlisted predicates/convenience expressions are unsupported | §17.9.2 | predicate sweep | COMPLETE |
+| 297 | AI | Named scalar-function registry is empty | §17.9.3 | representative/all-token function negatives | COMPLETE |
+| 298 | AI | AST function-call capacity does not authorize a function | §17.9.3 | parser/resolver negative | COMPLETE |
+| 299 | AI | Aggregate calls remain separate Chapter-29 registry | §§17.9.3, 29.3 | scalar/aggregate binding contrast | COMPLETE |
+| 300 | AI | Defaults may not invoke an unregistered named scalar function | §17.9.3 | default binding negative | COMPLETE |
+| 301 | AJ | One TypeResolver owns literal classification | §17.10.1 | cross-consumer registry identity | COMPLETE |
+| 302 | AJ | TypeResolver owns common numeric type | §17.10.1 | all-consumer common-type differential | COMPLETE |
+| 303 | AJ | TypeResolver owns operator/comparison/cast tables | §17.10.1 | binder/folder/executor signature comparison | COMPLETE |
+| 304 | AJ | TypeResolver owns assignment and CASE/IN resolution | §17.10.1 | resolved-plan inspection | COMPLETE |
+| 305 | AJ | No consumer adds overloads | §17.10.1 | unsupported cross-engine sweep | COMPLETE |
+| 306 | AY | Unsupported registry/type/underconstrained NULL is TYPE_ERROR | §17.10.1 | error matrix | COMPLETE |
+| 307 | AY | Malformed/out-of-domain source literal is INVALID_LITERAL | §17.10.1 | literal error fixtures | COMPLETE |
+| 308 | AY | Registered value-invalid cast is INVALID_CAST | §17.10.1 | cast error fixtures | COMPLETE |
+| 309 | AY | Checked arithmetic/narrowing/range is NUMERIC_OVERFLOW | §17.10.1 | range/operation fixtures | COMPLETE |
+| 310 | AY | Integer zero divisor is DIVISION_BY_ZERO | §17.10.1 | division/remainder fixtures | COMPLETE |
+| 311 | AY | Invalid DATE text is INVALID_DATE | §17.10.1 | date parse fixture | COMPLETE |
+| 312 | AY | Invalid TIMESTAMP text is INVALID_TIMESTAMP | §17.10.1 | timestamp parse fixture | COMPLETE |
+| 313 | AY | Unsupported static cast pair differs from value-invalid cast | §17.10.1 | TYPE_ERROR/INVALID_CAST contrast | COMPLETE |
+| 314 | AY | Constant versus row-dependent error timing follows demand | §§17.10.1–17.10.2 | fold/runtime timing matrix | COMPLETE |
+| 315 | AY | Arithmetic conceptual subcategory need not invent source enum | §17.10.1 | surfaced-category/lower-cause assertion | COMPLETE |
+| 316 | AY | Transaction consequence remains §39.1 owner | §§17.10.1, 39.1 | DML boundary composition | COMPLETE |
+| 317 | AK | Every scalar operator/cast is deterministic/IMMUTABLE | §17.10.2 | repeated/environment differential | COMPLETE |
+| 318 | AK | Folded value matches runtime concrete type | §17.10.2 | fold/runtime matrix | COMPLETE |
+| 319 | AK | Folded NULL/value matches runtime | §17.10.2 | fold/runtime matrix | COMPLETE |
+| 320 | AK | Folded integer checks/errors match runtime | §17.10.2 | overflow differential | COMPLETE |
+| 321 | AK | Folded FLOAT rounding/NaN/zero matches runtime | §17.10.2 | hard-float differential | COMPLETE |
+| 322 | AK | Folded parse/format/comparison/3VL matches runtime | §17.10.2 | registry-wide differential | COMPLETE |
+| 323 | AK | Dominating constant error reports at bind/plan time | §17.10.2 | root/dominance fixture | COMPLETE |
+| 324 | AK | Nondominating constant error remains demand-lazy | §17.10.2 | branch demand matrix | COMPLETE |
+| 325 | AK | Folding ignores estimated/actual row count for dominance | §17.10.2 | estimate/empty contrast | COMPLETE |
+| 326 | AK | Persisted defaults are mandatorily folded | §§17.10.2, 17.8.5 | default fixture | COMPLETE |
+| 327 | AK | EXISTS projection/order value is not demanded | §§17.10.2, 20.14.5 | subquery demand fixture | COMPLETE |
+| 328 | AK | Relational-subquery constant error needs proven outer+inner demand | §§17.10.2, 20.14, 20.17.10 | proof/demand matrix | COMPLETE |
+| 329 | AK | Possible/estimated subquery rows do not prove demand | §17.10.2 | estimate-only negative | COMPLETE |
+| 330 | AK | FLOAT folding is environment/architecture independent | §17.10.2 | environment replay | COMPLETE |
+| 331 | AK | Constant aggregate evaluation uses Chapter-29 state | §§17.10.2, 29.3 | scalar-fold/aggregate contrast | COMPLETE |
+| 332 | AL | Equal non-NULL hashable values hash equal | §17.10.3 | equality-class property | COMPLETE |
+| 333 | AL | Mixed numeric hash/equality applies bound common type | §17.10.3 | `2^53` mixed fixtures | COMPLETE |
+| 334 | AL | FLOAT hash/key normalize both zeros | §17.10.3 | zero class fixture | COMPLETE |
+| 335 | AL | FLOAT hash/key normalize all NaNs | §17.10.3 | NaN payload corpus | COMPLETE |
+| 336 | AL | VARCHAR hashes exact bytes | §17.10.3 | byte equality property | COMPLETE |
+| 337 | AL | Hash bits remain process-local implementation freedom | §17.10.3 | property-only assertion | COMPLETE |
+| 338 | AL | Ordinary predicate/join NULL is nonmatching | §17.10.3 | join/predicate fixtures | COMPLETE |
+| 339 | AL | Non-NULL NaNs match in joins | §17.10.3 | join equality fixture | COMPLETE |
+| 340 | AL | GROUP BY/DISTINCT coalesce NULLs | §17.10.3 | grouping fixture | COMPLETE |
+| 341 | AL | Grouping NULL rule does not leak into ordinary equality | §17.10.3 | negative cross-mode fixture | COMPLETE |
+| 342 | AM | B+ physical order includes NULL and BOOLEAN | §17.10.3 | key-order fixture | COMPLETE |
+| 343 | AM | SQL-orderable non-NULL order matches B+ | §17.10.3 | encoded-sort differential | COMPLETE |
+| 344 | AM | Index bounds preserve NULL/BOOLEAN predicate distinctions | §17.10.3 | bound/residual fixtures | COMPLETE |
+| 345 | AM | Broader physical bound retains residual recheck | §17.10.3 | access-path result differential | COMPLETE |
+| 346 | AM | UNIQUE bypasses NULL-containing key | §§11.10, 17.10.3 | unique composition fixture | COMPLETE |
+| 347 | AM | UNIQUE uses normalized non-NULL component equality | §§11.10, 17.10.3 | FLOAT/VARCHAR key fixtures | COMPLETE |
+| 348 | AM | Semantic proof uses only closed exact error-safe facts | §§17.10.3, 34.1, 35.2 | proof acceptance/rejection corpus | COMPLETE |
+| 349 | AM | Statistics/required_rows are not scalar semantic proof | §17.10.3 | estimate-versus-proof negative | COMPLETE |
+| 350 | AN | Host signed overflow/unchecked negation is rejected | §17.10.4 | widened-oracle differential | COMPLETE |
+| 351 | AN | Host quotient/remainder corner behavior is rejected | §17.10.4 | sign/MIN boundary corpus | COMPLETE |
+| 352 | AN | Implicit VARCHAR/numeric/temporal/BOOLEAN conversion is rejected | §17.10.4 | closed-matrix sweep | COMPLETE |
+| 353 | AN | Locale-sensitive parsing/formatting/collation is rejected | §17.10.4 | environment differential | COMPLETE |
+| 354 | AN | Host optional/pointer NULL equality is rejected | §17.10.4 | SQL/host contrast | COMPLETE |
+| 355 | AN | Raw IEEE NaN comparison/hash differences are rejected | §17.10.4 | special-class differential | COMPLETE |
+| 356 | AN | Library-default FLOAT text is not canonical oracle | §17.10.4 | exact text corpus | COMPLETE |
+| 357 | AN | Narrowing/wrapping cast shortcuts are rejected | §17.10.4 | target-boundary negatives | COMPLETE |
+| 358 | AN | Estimates/data/runtime libraries cannot add semantic facts/entries | §17.10.4 | unsupported/proof sweep | COMPLETE |
+| 359 | AN | Grouping NULL equality cannot replace predicate equality | §17.10.4 | cross-mode negative | COMPLETE |
+| 360 | AN | Scalar results cannot vary by locale/timezone/FENV/machine | §17.10.4 | platform corpus | COMPLETE |
+| 361 | AN | Host object/struct serialization is rejected | §17.10.4 | byte-oracle differential | COMPLETE |
+| 362 | AO | Generic Value is permitted only as semantic representation | §17.11 | semantic-field assertions | COMPLETE |
+| 363 | AO | Resolved generic Value has one logical type; pre-context null-only state remains nonpersisted | §§17.3, 17.11 | representation-permutation differential | COMPLETE |
+| 364 | AO | Generic Value owns escaping VARCHAR bytes | §17.11 | source-lifetime poison fixture | COMPLETE |
+| 365 | AO | Generic Value is not required hot executor cell layout | §17.11 | ownership/nonrequirement assertion | COMPLETE |
+| 366 | AP | Value escaping page/chunk lifetime remains valid | §17.11 | unpin/recycle lifetime fixture | COMPLETE |
+| 367 | AP | No persisted bytes derive from Value object layout | §§17.11, 17.13 | two-representation byte differential | COMPLETE |
+| 368 | AQ | PersistedScalarV1 is shared by listed metadata scalar uses | §17.13 | default/statistics codec comparison | COMPLETE |
+| 369 | AQ | PersistedScalarV1 differs from ordinary tuple codec | §§17.1, 17.13 | separate-codec assertions | COMPLETE |
+| 370 | AQ | Codec has no embedded version field | §17.13 | byte-layout/absence fixture | COMPLETE |
+| 371 | AQ | Enclosing supported grammar selects exact v1 codec | §17.13 | envelope dispatch fixture | COMPLETE |
+| 372 | AQ | Header is exactly 16 bytes little-endian | §17.13.1 | independent byte fixture | COMPLETE |
+| 373 | AQ | TypeId is uint32 at offset 0 | §17.13.1 | offset/endian fixture | COMPLETE |
+| 374 | AQ | Flags are uint32 at offset 4 | §17.13.1 | offset/endian fixture | COMPLETE |
+| 375 | AQ | Payload length is uint32 at offset 8 | §17.13.1 | offset/endian fixture | COMPLETE |
+| 376 | AQ | reserved32 is zero at offset 12 | §17.13.1 | single-bit mutation | COMPLETE |
+| 377 | AQ | Flags bit 0 alone means IS_NULL | §17.13.1 | flag matrix | COMPLETE |
+| 378 | AQ | Total extent is Align8(16+length) | §17.13.1 | checked geometry oracle | COMPLETE |
+| 379 | AQ | Alignment padding is zero | §17.13.1 | every pad-byte mutation | COMPLETE |
+| 380 | AR | Typed NULL has IS_NULL=1 and length zero | §17.13.2 | seven-TypeId exact fixtures | COMPLETE |
+| 381 | AR | Typed NULL has no payload | §17.13.2 | payload/length defect fixtures | COMPLETE |
+| 382 | AR | Typed NULL retains concrete TypeId | §17.13.2 | decode assertions | COMPLETE |
+| 383 | AR | No unresolved/UNKNOWN encoding exists | §§17.3, 17.13.2 | codec negatives | COMPLETE |
+| 384 | AS | BOOLEAN payload is one byte 0/1 | §17.13.3 | exact/invalid-byte fixtures | COMPLETE |
+| 385 | AS | INT32 payload is 4-byte little-endian two's complement | §17.13.3 | min/max/0/-1 bytes | COMPLETE |
+| 386 | AS | INT64 payload is 8-byte little-endian two's complement | §17.13.3 | min/max/0/-1 bytes | COMPLETE |
+| 387 | AS | DATE payload is signed int32 little-endian | §17.13.3 | carrier boundary bytes | COMPLETE |
+| 388 | AS | TIMESTAMP payload is signed int64 little-endian | §17.13.3 | carrier boundary bytes | COMPLETE |
+| 389 | AS | FLOAT64 payload is exact uint64 little-endian | §17.13.3 | finite/zero/infinity bytes | COMPLETE |
+| 390 | AS | Persisted FLOAT signed zero is preserved | §17.13.3 | both-zero byte fixtures | COMPLETE |
+| 391 | AS | Persisted metadata NaN is canonical quiet pattern | §17.13.3 | canonical/noncanonical fixtures | COMPLETE |
+| 392 | AS | VARCHAR payload is exact bytes with no terminator | §17.13.3 | empty/NUL/high-byte fixtures | COMPLETE |
+| 393 | AT | Decoder rejects unknown/non-storable TypeId | §17.13.4 | 0/8/large fixtures | COMPLETE |
+| 394 | AT | Decoder rejects unknown flags | §17.13.4 | one-bit sweep | COMPLETE |
+| 395 | AT | Decoder rejects nonzero reserved32 | §17.13.4 | one-byte sweep | COMPLETE |
+| 396 | AT | Decoder rejects NULL with nonzero length | §17.13.4 | length/payload defect | COMPLETE |
+| 397 | AT | Decoder rejects wrong fixed-width length | §17.13.4 | per-type length matrix | COMPLETE |
+| 398 | AT | Decoder rejects BOOLEAN payload outside 0/1 | §17.13.4 | byte sweep | COMPLETE |
+| 399 | AT | Decoder rejects nonzero padding | §17.13.4 | every padding position | COMPLETE |
+| 400 | AT | Decoder rejects noncanonical persisted NaN | §17.13.4 | payload/sign corpus | COMPLETE |
+| 401 | AT | Decoder checks length arithmetic/truncation before access | §17.13.4 | terminal-length/truncation cases | COMPLETE |
+| 402 | AT | Successful decoder returns owned typed value | §17.13.4 | source-buffer poison fixture | COMPLETE |
+| 403 | AU | Every semantic type round-trips through ordinary tuple codec | §§5.9–5.12, 17.1 | tuple type/boundary matrix | COMPLETE |
+| 404 | AU | Tuple NULL meaning comes from bitmap/schema | §§5.10, 17.3 | bitmap/value differential | COMPLETE |
+| 405 | AU | Tuple NULL inactive bytes gain no semantic Value meaning | §§5.10.6, 17.3 | inactive-byte contrast | COMPLETE |
+| 406 | AU | Invalid tuple BOOLEAN is CORRUPT_HEAP | §§5.11.1, 17.10.1 | persisted/user-error contrast | COMPLETE |
+| 407 | AU | Malformed tuple VARCHAR framing is CORRUPT_HEAP | §§5.12, 17.10.1 | descriptor defect matrix | COMPLETE |
+| 408 | AU | Ordinary tuple FLOAT preserves all NaN payload bits | §§5.11.3, 17.4.3 | raw-bit round-trip | COMPLETE |
+| 409 | AU | All DATE/TIMESTAMP carrier bits are legal tuple values | §§5.11.2, 17.4.4–17.4.5 | extrema decode fixtures | COMPLETE |
+| 410 | AV | Integer/date/timestamp semantic order matches index bytes | §§8.5, 17.10.3 | semantic/encoded sort property | COMPLETE |
+| 411 | AV | VARCHAR semantic order matches memcomparable bytes | §§8.5.6, 17.4.6 | NUL/high-byte/prefix property | COMPLETE |
+| 412 | AV | FLOAT semantic classes/order match index bytes | §§8.5.5, 17.4.3 | full class property | COMPLETE |
+| 413 | AV | Physical NULLS FIRST remains distinct from SQL NULL comparison | §§8.5.1, 17.7.2 | direct contrast | COMPLETE |
+| 414 | AV | Physical BOOLEAN order remains distinct from SQL overloads | §§8.5.2, 17.4.1 | direct contrast | COMPLETE |
+| 415 | AV | Oversized encoded key does not invalidate semantic Value | §§8.6, 17.2 | key-limit composition | COMPLETE |
+| 416 | AW | Catalog ColumnDescriptor TypeId selects Chapter-17 semantics | §§16.4, 17.2 | descriptor/value round-trip | COMPLETE |
+| 417 | AW | DefaultValueBlob uses final typed PersistedScalarV1 | §§16.5.3, 17.8.5, 17.13, 21.12.1 | default handoff fixture | COMPLETE |
+| 418 | AW | Required metadata scalar defect is corruption | §§4.14.6, 17.13 | required envelope fixture | COMPLETE |
+| 419 | AW | Advisory statistics scalar defect invalidates generation only | §§17.13, 34.14 | same-defect advisory fixture | COMPLETE |
+| 420 | AW | Advisory fallback never weakens malformed core framing | §§16.5.7, 34.14 | core/advisory contrast | COMPLETE |
+| 421 | AX | Tuple SchemaVer resolves exact historical descriptor | §§5.13, 16.7 | old-tuple/new-schema fixture | COMPLETE |
+| 422 | AX | Current descriptor never substitutes for old SchemaVer | §16.7 | wrong-current negative | COMPLETE |
+| 423 | AX | TypeId meaning is stable, nonreused, and never rebound across SchemaVer | §§16.4, 16.7, 17.2 | multi-version descriptor fixture | COMPLETE |
+| 424 | AX | Historical decode uses historical column arrangement | §§16.7–16.8 | reordered-column fixture | COMPLETE |
+| 425 | AX | V1 has no hidden historical type parameter | §§17.2, 17.4.6 | descriptor/type negative | COMPLETE |
+| 426 | AZ | Owned VARCHAR allocation failure is resource error | §§17.11, 39.3 | injected allocation failure | COMPLETE |
+| 427 | AZ | Parse/format allocation failure is not INVALID_CAST/NULL | §§17.8, 39.3 | resource/error contrast | COMPLETE |
+| 428 | AZ | Resource failure cleans query-owned state | §39.3 | lifetime assertions | COMPLETE |
+| 429 | AY | No semantic error silently returns NULL | §§17.6, 17.10.1 | error-versus-NULL matrix | COMPLETE |
+| 430 | AY | User semantic invalidity differs from persisted corruption | §§17.10.1, 17.13.4 | paired semantic/byte fixtures | COMPLETE |
+| 431 | AY | Same scalar error before first DML write follows FA owner | §§15, 39.1 | prepublication DML fixture | COMPLETE |
+| 432 | AY | Same scalar error after first DML write follows MA owner | §§15, 39.1 | postpublication DML fixture | COMPLETE |
+| 433 | AY | Chapter 17 never independently chooses transaction state | §§17.10.1, 39.1 | ownership assertion | COMPLETE |
+| 434 | BA | Scalar semantics are locale-independent | §§17.5–17.10 | locale replay | COMPLETE |
+| 435 | BA | Scalar semantics are timezone-environment-independent | §§17.4.5, 17.10.2 | timezone replay | COMPLETE |
+| 436 | BA | VARCHAR order is char-signedness-independent | §§17.4.6, 17.10.4 | high-byte corpus | COMPLETE |
+| 437 | BA | Semantic values are native-endian-independent | §§17.1, 17.10.4 | opposite-endian oracle | COMPLETE |
+| 438 | BA | FLOAT results are host-rounding/precision/contraction-independent | §§17.4.3, 17.10.2 | software-oracle discriminators | COMPLETE |
+| 439 | BA | Persistent bytes never use native object layout | §§5, 8, 17.10.4, 17.13 | byte-exact differential | COMPLETE |
+| 440 | BB | Unsupported type names do not resolve | §§17.2, 17.4 | type sweep | COMPLETE |
+| 441 | BB | Unsupported casts do not resolve | §17.8 | 7x7 NO-cell sweep | COMPLETE |
+| 442 | BB | Unsupported unary/binary operators do not resolve | §17.6 | registry complement sweep | COMPLETE |
+| 443 | BB | Unsupported predicates do not resolve | §17.9.2 | predicate complement sweep | COMPLETE |
+| 444 | BB | Unsupported named scalar functions do not resolve | §17.9.3 | function sweep | COMPLETE |
+| 445 | BB | Unsupported string/temporal arithmetic is not invented | §§17.6.2, 17.10.4 | targeted negatives | COMPLETE |
+| 446 | BB | Unsupported BOOL/numeric and VARCHAR implicit coercion is not invented | §§17.8, 17.10.4 | coercion negatives | COMPLETE |
+| 447 | BB | Unsupported DATE/TIMESTAMP implicit comparison is not invented | §§17.7.1, 17.10.4 | comparison negative | COMPLETE |
+| 448 | BC | Closed registry is used consistently by binder/folder/executor | §§17.4, 17.10.1 | three-engine differential | COMPLETE |
+| 449 | BC | Closed registry is consistent with tuple/index/catalog handoffs | §§17.1, 17.10.3 | cross-codec matrix | COMPLETE |
+| 450 | BC | Every Chapter-17 invariant maps to a direct procedure | §17.12 | invariant-to-map audit | COMPLETE |
+
+Coverage totals for this 450-obligation Chapter-17 inventory are:
+
+```text
+COMPLETE:       450
+PARTIAL:          0
+MISSING:          0
+CONTRADICTORY:    0
+```
+
+| Required family | Direct ownership in this section | Status |
+|---|---|---|
+| V17-1 closed TypeResolver/type registry | fixed registry, permuted runtime tags, and complete complement sweeps | CLOSED |
+| V17-2 literals/direct-negative integers | independent token grammars and exact `2^31`/`2^63` boundaries | CLOSED |
+| V17-3 contextual NULL/unresolved marker | every resolving/underconstrained context and no-persistence boundary | CLOSED |
+| V17-4 casts/coercions | complete cast, assignment, operator, and comparison matrices | CLOSED |
+| V17-5 VARCHAR parse/format | arbitrary-byte, full-consumption, canonical-format, and size-owner fixtures | CLOSED |
+| V17-6 DATE/TIMESTAMP | full carrier domains, calendar/text boundaries, checked casts, and timezone replay | CLOSED |
+| V17-7 PersistedScalarV1 | exact header/payload/padding and one-defect required/advisory fixtures | CLOSED |
+| V17-8 FLOAT64 equivalence | bit classes, arithmetic rounding, text, tuple, index, hash, grouping, and UNIQUE | CLOSED |
+| V17-9 error taxonomy | semantic/corruption/advisory/resource and DML-boundary matrix | CLOSED |
+| V17-10 storage handoff | ordinary tuple, metadata, TypeId, index, default, and historical-schema compositions | CLOSED |
+| V17-11 folding/demand | fold/runtime values/errors, scalar/subquery demand, reassociation, and contraction | CLOSED |
+| V17-12 unsupported registry | exhaustive absent type/cast/operator/predicate/function sweeps | CLOSED |
 
 ---
 
