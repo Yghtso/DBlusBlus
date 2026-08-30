@@ -14255,6 +14255,39 @@ Line/column information may be cached or derived from byte offsets.
 
 The parser does not repeatedly rescan source text merely to rediscover token boundaries.
 
+### 18.2.1 Front-end source and payload backing
+
+Each front-end processing attempt for an admitted SQL request has one
+conceptual **front-end backing owner**. It keeps alive the immutable original
+SQL source bytes and every derived payload store on which a surviving token,
+raw-AST object, bound object, or diagnostic depends. Derived payload includes,
+where applicable:
+
+```text
+decoded string-literal bytes
+decoded quoted-identifier bytes
+canonicalized unquoted-identifier bytes
+lossless numeric-literal provenance
+other referenced lexical payload
+```
+
+This owner is a semantic lifetime concept, not a required C++ class or
+allocation structure. The original request bytes MUST remain immutable while
+any surviving object refers to them. An implementation MAY retain the request
+buffer, copy it, retain another immutable owner, or use stable offsets into an
+equivalent immutable copy.
+
+Tokens and later front-end objects MAY borrow views of original or derived
+payload storage. Every backing owner MUST outlive every borrower. Before an
+object survives release of the owner from which it borrows, the implementation
+MUST either retain that owner or materialize/transfer every required payload
+into storage that covers the object's remaining lifetime. It MUST NOT mutate,
+recycle, or release referenced bytes and leave a dangling view.
+
+Front-end backing is process-local runtime state. It is not WAL-logged,
+checkpointed, cataloged, stored in user data or indexes, or recovered after a
+crash. Source spans and raw SQL text are not persistent database format.
+
 ## 18.3 Token classes
 
 Initial token classes include:
@@ -14437,16 +14470,32 @@ token separator where required.
 
 ## 18.8 Source locations
 
-Every AST node retains a source span:
+Every token and AST source span is the half-open interval:
 
 ```text
-start byte offset
-end byte offset
+SourceSpan = [start_byte_offset, end_byte_offset)
 ```
+
+over the original SQL request byte sequence, with:
+
+```text
+0 <= start_byte_offset <= end_byte_offset <= source_byte_length
+```
+
+Offsets count bytes, not Unicode code points, characters, graphemes, or
+line/column identities. Line/column information may be derived separately but
+does not redefine a SourceSpan.
 
 Binder/type errors refer to the smallest useful available source span.
 
-Source positions are retained beyond parsing long enough to support semantic diagnostics.
+The numeric interval value MAY outlive the original source storage. Extracting
+or rendering the original text identified by that interval requires either the
+original immutable source backing or a materialized copy of the needed text.
+A diagnostic that outlives the source owner and needs rendered source text MUST
+materialize that text before source release; retaining offsets alone does not
+require execution to retain the original SQL request. Source positions and any
+required backing remain available through parsing and semantic diagnostics for
+as long as their consumers require them.
 
 ## 18.9 Parser architecture
 
@@ -15175,13 +15224,59 @@ the actual written sequence when validating duplicate names or assignments.
 The required abstraction is an ordered sequence with exact multiplicity, not
 any particular C++ container or allocation layout.
 
-## 18.14 AST ownership
+## 18.14 Front-end object ownership and lifetime
 
-AST nodes use statement/query-batch arena ownership.
+AST nodes have statement/query-batch-scoped lifetime ownership. Arena ownership
+is permitted but not required; the concrete allocation, container, and
+reference representation is not part of the SQL-semantic contract.
 
-The architectural properties are stable node addresses for the AST lifetime, cheap bulk destruction, and no need for one general-purpose allocation/free pair per tiny node.
+Token lifetime and token-payload lifetime are distinct. Token objects MAY be
+destroyed after parsing once no surviving raw-AST object depends on token-owned
+storage, or after every required payload has been transferred/materialized into
+another valid owner. The token sequence itself need not remain resident for the
+raw-AST lifetime.
 
-The concrete arena implementation is not part of the persistent or SQL-semantic contract.
+A raw AST MUST remain valid through every stage that is permitted to reference
+it. It MAY be released after successful binding when the bound representation
+no longer refers to it and no surviving diagnostic or result depends on
+raw-AST-owned payload. Bound expressions, statements, trees, and plans MAY
+borrow source/raw-AST-backed information only while the corresponding backing
+owner remains alive. Otherwise binding MUST materialize the required names,
+literal bytes, source excerpts, source-derived labels, or other payload before
+releasing the earlier owner. Neither borrowing nor copying is mandatory;
+lifetime correctness is.
+
+The following information MUST remain valid for as long as any surviving
+consumer references it:
+
+```text
+decoded string-literal logical bytes
+decoded quoted-identifier canonical bytes
+canonicalized unquoted-identifier bytes
+lossless numeric-literal information required by Chapter 17
+type-name identifier bytes
+object, column, alias, and function identifier bytes
+every other lexical payload represented by reference
+```
+
+The ownership boundary is:
+
+| Object/state | May borrow source or derived payload? | May own/materialize payload? | Required lifetime |
+|---|---|---|---|
+| original source | not applicable | owned by front-end backing | while any borrower needs original bytes |
+| token | yes | yes | through token use and transfer of every dependent payload |
+| raw AST | yes | yes | through every raw-AST consumer |
+| bound object | only while the backing owner is retained | yes | through every bound-object consumer |
+| `SourceSpan` value | stores offsets, not a byte view | value may be retained independently | interval may outlive source; source dereference may not |
+
+Front-end backing is released only after the last dependent object has been
+destroyed or has transferred/materialized every required payload elsewhere.
+This rule applies on parse or bind success, parse or bind failure,
+cancellation, and resource failure. Cleanup MUST NOT leave a surviving dangling
+object. The architecture permits immutable request allocations, arenas, copied
+or interned strings, reference-counted backing, offset-based slices,
+individually owned payloads, and equivalent combinations without selecting any
+one representation.
 
 ## 18.15 Expression precedence
 
@@ -15247,6 +15342,116 @@ structures stated in §18.12.
 29. Raw AST contains no stable catalog ID, BindingId, resolved TypeId, inserted semantic cast, catalog descriptor, or plan.
 30. SELECT star, qualified SELECT star, multiplication, and function-call star argument remain distinct syntax roles.
 31. Every accepted request has one canonical raw syntactic structure determined without catalog contents or TypeResolver results.
+32. Original source and derived lexical payload backing outlive every borrower, or required payload is materialized before the earlier owner is released.
+33. `SourceSpan` is a half-open byte interval over the original request; an interval value may outlive source storage, but dereferencing it may not.
+34. Token, raw-AST, and bound-object lifetimes are independent provided every surviving payload reference remains valid.
+35. A front-end resource failure returns `FrontEndResourceLimit` or `OutOfMemory` rather than changing grammar or exposing a successful partial syntax object.
+36. Operational resource policy never permits truncation, AST reordering/deduplication, weakened literal provenance, or uncontrolled process failure.
+
+## 18.17 Front-end resource and failure boundary
+
+Chapter 18 defines no fixed SQL-language maximum merely for implementation
+convenience on request, token, string-literal, or identifier byte length;
+parenthesis or expression depth; CASE-arm, IN-list, projection, VALUES-row,
+VALUES-item, or statement count; or raw-AST node count/depth. A correctness or
+domain limit defined by another architecture owner remains authoritative,
+including persisted-field widths, object-ID domains, tuple/page or index-key
+limits, and scalar value domains. This rule prevents a parser implementation
+limit from masquerading as grammar; it does not erase canonical semantic
+limits.
+
+A conforming implementation MAY enforce finite operational budgets for memory,
+call-stack safety, parser work, AST construction, nesting, node count, or other
+request-processing resources. Such budgets are runtime resource policy, not
+SQL grammar, and their numerical values and decomposition are
+implementation/configuration choices. The same syntactically valid request may
+therefore complete under one resource configuration and fail under another
+without changing whether it belongs to the v1 language.
+
+### 18.17.1 Structured front-end resource outcomes
+
+The relevant failure classification is:
+
+| Condition | Canonical category |
+|---|---|
+| invalid source byte or token form | `LexerError` |
+| structurally invalid grammar | `ParserError` |
+| unknown or incompatible name/type/semantic property | existing bind/type owner |
+| deliberate configured or safety front-end budget reached | `FrontEndResourceLimit` |
+| required memory allocation cannot be satisfied | `OutOfMemory` |
+| execution spill I/O failure | existing `SpillIOError` under §39.3 |
+| optimizer configured budget reached | existing `OptimizerResourceLimit` under §39.4 |
+
+The two resource categories available to front-end work are exactly
+`FrontEndResourceLimit` and `OutOfMemory`.
+
+`FrontEndResourceLimit` means that the front end deliberately refused further
+work because a configured or safety budget was reached before uncontrolled
+resource failure. A nesting-safety guard, bounded parser-work or AST-node
+budget, or checked front-end memory budget may produce this result. The
+architecture does not prescribe which guards exist or their numerical values.
+The result means **resource guard reached**, not invalid SQL syntax.
+
+`OutOfMemory` is the cross-layer operational cause for inability to satisfy a
+required memory allocation. An allocation failure during lexing, parsing,
+payload decoding, raw-AST construction, or binding remains `OutOfMemory`; it
+MUST NOT be relabeled `LexerError`, `ParserError`, `BindError`, or `TypeError`
+because of the pipeline stage in which it occurred. `FrontEndResourceLimit`
+and `OutOfMemory` therefore distinguish deliberate refusal at a checked budget
+from failure to satisfy a required allocation.
+
+Resource failure MUST NOT be reported as proof that a request is
+syntactically invalid. The front end returns the failure encountered in its
+canonical source-processing order; if a resource failure prevents continuation,
+it need not prove whether unprocessed suffix bytes would have produced another
+error. This operational rule does not change grammar closedness or any
+otherwise-defined demanded-error order.
+
+### 18.17.2 Safe failure and complete-result boundary
+
+Uncontrolled stack overflow, memory corruption, uncaught allocation failure,
+undefined behavior, or process abort caused solely by parser depth is not a
+conforming result for valid but resource-intensive syntax. The implementation
+MUST use a resource-safe technique or detect/refuse work before uncontrolled
+failure and return the corresponding structured resource cause. No particular
+recursion, iteration, or stack representation is required.
+
+On `FrontEndResourceLimit` or `OutOfMemory`, the front-end operation fails as a
+whole. It MUST expose either a complete canonical raw syntax object or a
+structured failure, never a partially constructed token stream/raw AST as a
+successful bindable or executable request. Private lexical, parser, binder,
+and front-end backing state MUST unwind without dangling payload references, an
+active partial AST, a bindable prefix, or leaked ownership that changes later
+semantics.
+
+Resource exhaustion never authorizes semantic fallback. It MUST NOT truncate a
+token, identifier, or string; ignore trailing source or statements; drop,
+deduplicate, or reorder AST children; truncate CASE/IN/VALUES lists; weaken
+lossless numeric provenance; approximate or change literal types; bind or
+execute only a prefix; or reinterpret a resource-heavy construct. If sufficient
+resources cannot preserve exact bytes, source order, multiplicity, provenance,
+and AST completeness, the operation returns a resource failure.
+
+### 18.17.3 Transaction, batch, and persistence ownership
+
+Lexing, parsing, raw-AST construction, and binding publish no
+transaction-owned persistent database mutation, so their resource cleanup
+requires no Chapter-18 physical undo protocol. `FrontEndResourceLimit` and
+`OutOfMemory` identify the operational cause; §39.1 alone determines the
+statement/transaction outcome under its existing publication boundary and any
+independent stronger condition. Chapter 18 creates no transaction state or
+retry rule.
+
+For a multi-statement request, front-end resource failure MUST NOT fabricate a
+successful parse/bind result for the completed prefix. The existing batch and
+transaction owners determine the status of any earlier statement whose
+execution had independently completed; §18.10.1 framing and §21.17 behavior
+are unchanged.
+
+Front-end budgets, backing storage, and failed parser state are runtime-only.
+They do not alter catalogs, WAL, checkpoints, `database.control`, tuple/page
+formats, transaction status, or recovery, and recovery does not reconstruct a
+failed front-end operation.
 
 ---
 
@@ -25203,11 +25408,23 @@ CatalogError
 ConstraintDefinitionError
 UnsupportedFeature
 CardinalityError
+FrontEndResourceLimit
 ```
 
 Where a failure originates from SQL source, it carries the smallest useful source span.
 
 User input errors do not become internal invariant failures merely because they are discovered after binding.
+
+`LexerError` and `ParserError` classify source-language failures.
+`FrontEndResourceLimit` instead means that a deliberate front-end safety or
+configured operational budget was reached. `OutOfMemory` is the existing
+cross-layer operational cause and retains that classification when a required
+allocation fails during lexing, parsing, payload decoding, raw-AST
+construction, or binding. Neither resource outcome becomes a source-language,
+bind, or type error merely because it occurs in that stage. Both are controlled
+operational outcomes, not internal invariant failures merely because they
+occur during front-end or binding work. The exact front-end distinction and
+complete-result rule are §18.17.
 
 Logical-plan validator failures, by contrast, indicate internal architecture/implementation defects.
 
@@ -25226,6 +25443,11 @@ ArithmeticError
 ConstraintViolation
 TransactionConflict
 ```
+
+`OutOfMemory` is a query operational resource cause, not an
+execution-exclusive category. This section owns its execution-layer reporting
+and cleanup when execution has begun; a front-end or binding occurrence uses
+the same cause under §§18.17 and 39.2.
 
 Lower-layer structured causes are preserved rather than erased. Examples include:
 
