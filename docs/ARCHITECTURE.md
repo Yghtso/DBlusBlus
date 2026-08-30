@@ -14189,7 +14189,7 @@ The decoder returns one owned typed semantic value; it never exposes a pointer i
 
 ## 18.1 Front-end boundary
 
-The SQL front end is implemented in-project.
+The SQL front end is an in-project subsystem.
 
 It consists of:
 
@@ -14240,7 +14240,7 @@ identifiers. A source-wide UTF-8 validation or normalization pass is neither
 required nor permitted to redefine tokenization. This byte-defined grammar
 keeps structural syntax independent of locale and Unicode-library behavior.
 
-The handwritten lexer emits tokens containing at least:
+Lexical analysis produces tokens containing at least:
 
 ```text
 TokenKind
@@ -14252,8 +14252,6 @@ source offset / diagnostic location
 Token spans use half-open source-byte ranges `[start, end)`.
 
 Line/column information may be cached or derived from byte offsets.
-
-The parser does not repeatedly rescan source text merely to rediscover token boundaries.
 
 ### 18.2.1 Front-end source and payload backing
 
@@ -14290,7 +14288,7 @@ crash. Source spans and raw SQL text are not persistent database format.
 
 ## 18.3 Token classes
 
-Initial token classes include:
+The v1 token classes are:
 
 ```text
 identifier
@@ -14349,8 +14347,6 @@ construct can be interpreted as comments or symbolic tokens. A symbol-like
 byte not admitted by another lexical construct or by the table above is a
 source-positioned lexical error. These rules make byte-to-token mapping unique
 without prescribing a lexer algorithm.
-
-Keywords may be recognized directly or through identifier-to-keyword lookup.
 
 ## 18.4 Identifier rules
 
@@ -14442,14 +14438,14 @@ conversion in the lexer or parser.
 
 ## 18.7 Comments
 
-Version 1 recognizes line comments and non-nested block comments:
+V1 recognizes line comments and non-nested block comments:
 
 ```sql
 -- line comment
 /* block comment */
 ```
 
-Nested block comments are deferred.
+Nested block comments are outside the v1 lexical grammar.
 
 A line comment begins with `--` outside a string literal or quoted identifier.
 It consumes bytes after the opener up to but not including the first CR or LF,
@@ -14486,7 +14482,25 @@ Offsets count bytes, not Unicode code points, characters, graphemes, or
 line/column identities. Line/column information may be derived separately but
 does not redefine a SourceSpan.
 
-Binder/type errors refer to the smallest useful available source span.
+A source-originating diagnostic carries the `SourceSpan` of the token or
+syntactic construct whose violation directly determines that diagnostic, using
+the most specific such span already represented by the responsible front-end
+stage. If two represented spans are equally specific, the earliest span in
+source order is selected.
+
+Lexical diagnostics use these spans:
+
+- an invalid source byte or unrecognized symbolic-token candidate uses the
+  smallest offending byte or candidate range that causes lexical rejection;
+- an unterminated string literal, quoted identifier, or block comment uses the
+  range from its opening delimiter byte through end-of-input.
+
+A parser diagnostic for an unexpected existing token uses that token's span.
+When required input is missing at end-of-input, it uses the zero-width span
+`[source_byte_length, source_byte_length)`. A binding or type diagnostic uses
+the span already attached to the raw or bound syntactic construct whose
+resolution directly produced the error. The selection rule does not prescribe
+diagnostic message text, recovery behavior, or presentation formatting.
 
 The numeric interval value MAY outlive the original source storage. Extracting
 or rendering the original text identified by that interval requires either the
@@ -14497,15 +14511,16 @@ require execution to retain the original SQL request. Source positions and any
 required backing remain available through parsing and semantic diagnostics for
 as long as their consumers require them.
 
-## 18.9 Parser architecture
+## 18.9 Parser semantic contract
 
-Statements/clauses use handwritten recursive descent.
+Parsing MUST implement the closed statement and expression grammars in this
+chapter. Precedence, associativity, grouping, and syntax-preserving boundaries
+MUST produce the canonical raw-AST structure defined by §§18.10–18.15.
 
-Expressions use Pratt parsing / precedence climbing.
-
-This keeps precedence, associativity, AST construction, and syntax diagnostics explicit.
-
-No external parser generator defines the language semantics.
+This chapter is authoritative for the accepted language and raw-AST semantic
+contract. Parser-library or generator defaults, conflict resolution, traversal
+strategy, lookahead strategy, and recovery heuristics MUST NOT redefine them.
+Parser construction technique is otherwise implementation-defined.
 
 ## 18.10 Closed v1 statement grammar
 
@@ -14606,9 +14621,9 @@ start of another admitted statement produces `ParserError`.
 
 The request/batch AST preserves exact statement source order. This section owns
 only request framing; parser recovery remains §21.17's responsibility, and
-transaction/execution behavior for multiple statements remains with its later
-owners. Explicit framing prevents empty entries or ignored suffixes from
-becoming implementation-dependent batch behavior.
+transaction/execution behavior for multiple statements remains with its
+respective downstream owners. Explicit framing prevents empty entries or
+ignored suffixes from becoming implementation-dependent batch behavior.
 
 The equivalent request production is:
 
@@ -14650,6 +14665,8 @@ generated/identity columns, temporary tables, `IF NOT EXISTS`, and table
 options are absent. Table-element and constraint-column order and multiplicity
 are preserved; DDL binding validates duplicate names, duplicate/referenced
 constraint columns, type support, and default legality.
+
+`ALTER TABLE` is outside the v1 grammar.
 
 The standalone index and DROP grammars are:
 
@@ -14754,7 +14771,8 @@ The maintenance and observability grammar is:
 ```
 
 VACUUM and ANALYZE each require exactly one table target and accept no option or
-column list. EXPLAIN and EXPLAIN ANALYZE accept only SELECT; DML, DDL,
+column list. Targetless `ANALYZE` is outside the v1 grammar. EXPLAIN and
+EXPLAIN ANALYZE accept only SELECT; DML, DDL,
 transaction, and maintenance statements are not explainable v1 syntax. The
 semantic owners are §14.17, §21.17.1/Chapter 34, and Chapter 40 respectively.
 
@@ -14826,69 +14844,13 @@ this grammar.
 
 ### 18.11.1 SELECT without FROM
 
-A query block with no FROM has exactly one conceptual input row containing zero
-relation columns. Its local relation namespace is empty. Binding/planning uses
-the existing §20.5 source:
-
-```text
-LogicalValues(rows = { one zero-column row })
-```
-
-and then applies every present WHERE, aggregate/GROUP BY, HAVING, projection,
-DISTINCT, ORDER BY, LIMIT, and OFFSET operation in the ordinary §20.15 order.
-This is an exact semantic fact, not a statistics estimate or an implicit
-catalog relation.
-
-Required examples are:
-
-```text
-SELECT 1;                    -> one row containing INT32 1
-SELECT TRUE;                 -> one row containing TRUE
-SELECT NULL;                 -> bind-time TYPE_ERROR because standalone NULL
-                               still lacks a concrete Chapter 17 type context
-SELECT 1 WHERE TRUE;         -> one row
-SELECT 1 WHERE FALSE;        -> zero rows
-SELECT 1 WHERE NULL;         -> zero rows because WHERE retains only TRUE
-SELECT COUNT(*);             -> one row containing INT64 1
-SELECT 1 LIMIT 0;            -> zero rows
-SELECT 1 LIMIT 1;            -> one row
-```
-
-OFFSET, ORDER BY, DISTINCT, GROUP BY, HAVING, scalar typing, aggregate
-legality, and error/short-circuit behavior are unchanged. A constant GROUP BY
-sees the one input row; a no-group global aggregate sees one row after WHERE,
-so a false/UNKNOWN WHERE produces an empty aggregate input while the global
-aggregate itself still emits its ordinary one result row. Ordinary scalar
-expressions such as arithmetic, CAST, and CASE use Chapter 17 without a
-no-FROM-specific registry.
-
-Because the namespace is empty, an unqualified or qualified column reference
-is an ordinary unknown-column/unknown-qualifier bind error. Unqualified `*`
-also requires at least one visible FROM relation and is a bind error here; v1
-does not expose a zero-column `SELECT *` result. Qualified `t.*` fails because
-`t` is not bound.
-
-Each supported uncorrelated subquery applies this rule independently. Thus
-`SELECT (SELECT 1)` is valid; `EXISTS(SELECT 1)` is TRUE;
-`EXISTS(SELECT 1/0)` remains TRUE without evaluating its projection under
-§20.14.5; `x IN (SELECT 1)` uses the ordinary one-row IN build; and
-`FROM (SELECT 1 AS x) AS q` uses the existing derived-table rules. No enclosing
-column becomes visible, and no correlated, LATERAL, CTE, set-operation,
-table-function, VALUES-in-FROM, DUAL, pseudo-column, or data-modifying-subquery
-feature is added.
-
-V1 forbids:
-
-1. rejecting `SELECT 1` merely because FROM is absent;
-2. inventing a catalog/system `DUAL` relation or implicit pseudo-table;
-3. treating omitted FROM as zero input rows;
-4. returning `0` for `SELECT COUNT(*)` without an intervening filter;
-5. resolving column references or wildcards without a visible relation binding;
-6. using no-FROM syntax to capture an outer subquery column;
-7. assigning no-FROM expressions different Chapter 17 scalar semantics;
-8. enabling another clause or SQL feature while accepting optional FROM;
-9. changing §20.14 scalar/EXISTS/IN/derived-table behavior; or
-10. consulting estimates/statistics to decide whether the conceptual row exists.
+`FROM` is optional in every v1 SELECT query specification, including a
+supported nested SELECT. Section 19.5 owns wildcard and output-name binding for
+an empty relation namespace; §§20.5 and 20.15 own the logical source and
+relational-operator semantics when FROM is omitted; §20.14 owns composition
+with supported subqueries. Chapter 18 adds no no-FROM-specific binding,
+planning, execution, aggregate, or scalar semantics; this subsection is the
+syntax and ownership index for omitted FROM.
 
 ## 18.12 Closed v1 expression grammar
 
@@ -15217,18 +15179,19 @@ JOIN left/right source structure
 ```
 
 Both occurrences of a duplicated syntactic item remain present in their
-written order even when binding or another later semantic owner rejects the
-duplicate. Chapter 17 makes source order observable for short-circuit AND/OR,
-searched CASE, and IN/NOT IN demand/error behavior; later owners also require
-the actual written sequence when validating duplicate names or assignments.
+written order even when binding or another downstream semantic owner rejects
+the duplicate. Chapter 17 makes source order observable for short-circuit
+AND/OR, searched CASE, and IN/NOT IN demand/error behavior; downstream owners
+also require the actual written sequence when validating duplicate names or
+assignments.
 The required abstraction is an ordered sequence with exact multiplicity, not
 any particular C++ container or allocation layout.
 
 ## 18.14 Front-end object ownership and lifetime
 
-AST nodes have statement/query-batch-scoped lifetime ownership. Arena ownership
-is permitted but not required; the concrete allocation, container, and
-reference representation is not part of the SQL-semantic contract.
+AST nodes have statement/query-batch-scoped lifetime ownership. The concrete
+allocation, container, and reference representation is not part of the
+SQL-semantic contract.
 
 Token lifetime and token-payload lifetime are distinct. Token objects MAY be
 destroyed after parsing once no surviving raw-AST object depends on token-owned
@@ -15273,10 +15236,8 @@ Front-end backing is released only after the last dependent object has been
 destroyed or has transferred/materialized every required payload elsewhere.
 This rule applies on parse or bind success, parse or bind failure,
 cancellation, and resource failure. Cleanup MUST NOT leave a surviving dangling
-object. The architecture permits immutable request allocations, arenas, copied
-or interned strings, reference-counted backing, offset-based slices,
-individually owned payloads, and equivalent combinations without selecting any
-one representation.
+object. Allocation and storage representation remain implementation-defined
+subject to this lifetime contract.
 
 ## 18.15 Expression precedence
 
@@ -15311,9 +15272,9 @@ structures stated in §18.12.
 
 ## 18.16 Front-end invariants
 
-1. Lexer/parser are handwritten in-project components.
+1. Lexing and parsing conform to this chapter's closed lexical and syntactic grammars; implementation technique does not define the accepted language.
 2. SQL source is length-delimited bytes; ASCII structural classification and the exact whitespace set are locale/Unicode-library independent.
-3. Token and AST source spans use source-byte positions suitable for diagnostics.
+3. Token and AST source spans are half-open original-request byte intervals, and source-originating diagnostics select them under §18.8.
 4. The reserved-keyword and symbolic-token registries are closed; keywords use ASCII-insensitive recognition and symbolic prefixes use longest registered match.
 5. Unquoted identifiers use the exact ASCII grammar and fold only `A`..`Z`; quoted identifiers preserve decoded non-NUL bytes/case and use doubled double quotes.
 6. String quote escaping uses doubled single quotes in v1.
@@ -15323,12 +15284,12 @@ structures stated in §18.12.
 10. Parser output contains textual syntax names, not resolved catalog IDs.
 11. Raw-AST ordered children/lists preserve exact source order and multiplicity; parser-side sorting and deduplication are forbidden.
 12. AST nodes retain source spans through semantic binding.
-13. Pratt/precedence parsing uses the defined precedence hierarchy.
+13. Expression ASTs use the precedence and associativity defined by §§18.12 and 18.15, independently of parser construction technique.
 14. One request contains one or more source-ordered statements, requires semicolons between them, permits one optional final semicolon, rejects empty statements, and consumes all nontrivia input.
 15. `ANALYZE table_name` is a first-class statement AST, not parsed as VACUUM/EXPLAIN syntax.
 16. Unsupported syntax fails explicitly rather than being half-interpreted.
 17. Constructing a generic AST operator/function node does not imply semantic support; binding accepts only the closed Chapter-17 registry.
-18. FROM is optional in a SELECT query specification and omission has the exact §18.11.1 one-row semantics.
+18. FROM is optional in every SELECT query specification; §§19.5, 20.5, 20.14, and 20.15 own the resulting binding and relational semantics.
 19. The §18.10 top-level dispatch is complete; no generic statement production admits an unlisted v1 statement.
 20. Table/index object names have one or two identifier components; binding alone validates the optional namespace as `main`, and three-part names are not syntax.
 21. A type-name is an unquoted identifier retained as syntax; parser output never contains a resolved TypeId, and the binder/TypeResolver owns the seven-name registry.
@@ -25411,7 +25372,8 @@ CardinalityError
 FrontEndResourceLimit
 ```
 
-Where a failure originates from SQL source, it carries the smallest useful source span.
+Where a failure originates from SQL source, it carries the canonical
+`SourceSpan` selected under §18.8.
 
 User input errors do not become internal invariant failures merely because they are discovered after binding.
 
