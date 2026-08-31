@@ -10515,6 +10515,1221 @@ All V20 families are closed. The inventory, procedures, independent oracles, and
 
 ---
 
+### Chapter 21 DDL/DML Semantic-Planning Verification
+
+This section is the complete procedural owner for the operation, publication, and SQL-v1
+contract in [`ARCHITECTURE.md`](ARCHITECTURE.md) Chapter 21. It consumes the complete
+Chapter-15 DML, Chapter-16 catalog, Chapter-17 scalar/default, Chapter-18 parser,
+Chapter-19 binder, and Chapter-20 logical-semantics verification families. Chapters 5,
+7–14, and 31 and §§39.1–39.3 remain authoritative for tuple bytes, files, indexes,
+transactions, visibility, locks, WAL, recovery, reclamation, physical execution, and
+transaction consequences. A reference to one of those complete families is a reuse of its
+deterministic procedure, not a duplication of its architecture.
+
+Every fixture starts from fully bound input. Production parsing, binding, planning,
+execution, catalog caching, and recovery never serve as their own expected-result oracle.
+No correctness case uses sleeps; controlled barriers, exact event release, explicit
+persisted prefixes, and independent finite models determine every outcome.
+`COMPLETE` in this section classifies procedural coverage; it is not an implementation or
+test-run result.
+
+#### Deterministic Chapter-21 harness
+
+The conceptual harness controls and records:
+
+```text
+catalog:
+    canonical table/index name classes and same-transaction DROP reservations
+    TableId, ColumnId, IndexId, ConstraintId, FileId, SchemaVer
+    immutable table/index/constraint descriptors and their ownership links
+    transaction-local and globally committed catalog versions
+
+transaction:
+    TxnId, isolation level, CommandId, admitted statement, attempt identity
+    attempt snapshot, first-published-write flag, locks/gates, runtime state
+    C0-C6/A0-A4 boundaries and explicit/autocommit result envelope
+
+MVCC:
+    current logical owners, historical/superseded versions, deleted versions
+    own earlier-command and current-command versions, other-transaction versions
+
+DML:
+    bound target mappings, source occurrence bag/order, default actions/coercions
+    finalized target RIDs, duplicate discoveries, stale transitions
+    old/candidate/final row images, constraint claims, affected rows, RETURNING bag
+
+DDL:
+    bound object identities, SchemaLock/TableWriterGate/MANIFEST_CHANGE ownership
+    private/final/catalog-committed/retired file state, current-owner build set
+    catalog rows, descriptor/cache publication, namespace reservation
+
+diagnostic:
+    attempt membership, finalized occurrence, category, responsible SourceSpan
+    SourceSpan specificity, row-semantic phase, ordinary-versus-dynamic class
+
+observable:
+    statement/transaction result, public error and origin, catalog visibility
+    committed row/index state, affected-row count, RETURNING occurrence bag
+    SchemaVer/cache state, file lifecycle, durable/recovered state
+
+perturbation:
+    RID/page/source/spool/index visitation, vector and batch shape, hash seed
+    worker schedule, allocator/pointer identity, and legal physical build algorithm
+```
+
+The harness exposes barriers immediately before and after statement admission, attempt
+start, snapshot registration, target finalization, every logical-lock/gate wait, every
+ordinary-error candidate becoming established, every transaction-owned publication,
+catalog/file namespace transition, terminal publication, cache coherence action, and
+recovery READY. Perturbations may change an unordered RETURNING sequence, but never its
+bag, committed state, selected ordinary error, or transaction consequence.
+
+#### Independent oracle registry
+
+- The **statement oracle** assigns one CommandId to each admitted statement, nests attempts
+  beneath it, and derives retry eligibility, attempt reset, lock lifetime, and terminal
+  state from §§9.6, 15.7, and 39.1.
+- The **publication oracle** marks the first transaction-owned WAL-backed database
+  mutation and independently classifies prepublication failure, mandatory abort, and
+  noncontinuable outcomes using the existing Chapter-12/15/39 event model.
+- The **result-envelope oracle** separates attempt output, statement success, explicit
+  transaction response, implicit COMMIT, and client publication.
+- The **row-construction oracle** applies resolved INSERT mappings or simultaneous UPDATE
+  assignments to immutable input images using test-side scalar/coercion models.
+- The **target oracle** forms a set keyed by exact target RID, applies finalized-attempt
+  qualification and stale-owner rules, and never consults production spool order.
+- The **constraint oracle** checks descriptor NOT NULL predicates, canonical key encoding,
+  NULL participation, current-owner uniqueness, and exact UPDATE old-RID self-exclusion.
+- The **RETURNING oracle** builds operation-specific row occurrences and compares
+  unordered multisets by exact typed value and multiplicity.
+- The **ordinary-error oracle** constructs candidates only from finalized attempt
+  occurrences and sorts semantic keys `(start, span_length, phase, category, origin)`;
+  complete ties compare as one observational class.
+- The **current-owner build oracle** derives the CREATE INDEX row set from transaction-
+  local version histories at the command boundary rather than a SQL snapshot or heap scan.
+- The **index-completeness oracle** compares the required `(encoded_key,RID)` multiset of
+  the build oracle with the published index-entry multiset.
+- The **catalog oracle** evaluates catalog MVCC, immutable descriptors, stable IDs,
+  SchemaVer, constraint/index links, name classes, and DROP reservations independently.
+- The **file-lifecycle oracle** is a finite state model over private, final durable
+  uncommitted, catalog committed, retiring, and retired-linked resources.
+- The **durability oracle** constructs valid WAL/file/directory prefixes and derives
+  commit eligibility and reopen state without invoking production recovery as oracle.
+- The **recovery oracle** applies the architecture-owned redo/loser/file-classification
+  transition to the selected durable prefix and repeats it for second-crash cases.
+- The **surface oracle** compares the admitted Chapter-21 statement/subquery/default
+  registry with literal closed sets and verifies that excluded forms fail explicitly.
+- The **documentation oracle** checks ownership references, timeless procedural prose,
+  absence of implementation mandates, and one ledger row per atomic obligation.
+
+#### V21-1 — Front-end and bound-statement handoff
+
+Use one valid and one failing request at each Chapter-18/19 boundary. A parse failure must
+produce no Chapter-21 operation; a bind failure must produce no durable allocation, file,
+gate, or operation. For valid DDL/DML/ANALYZE, compare the consumed IDs, types, coercions,
+SourceSpans, descriptors, defaults, and logical child against the immutable bound fixture.
+Mutate source names after binding and prove Chapter 21 neither re-resolves nor rebinds them.
+
+#### V21-2 — Statement attempts, CommandId, and retry
+
+Reuse the Chapter-15 statement ledger while adding Chapter-21 row construction, target
+sets, error candidates, counts, and RETURNING buffers to attempt-local state. Force RC
+pre-write retry and prove a fresh attempt/snapshot with the same CommandId and no inherited
+provisional semantics. Force the same conflict after publication and RR conflict at either
+point; verify no forbidden retry and the exact §39.1 outcome.
+
+#### V21-3 — Atomicity, locks, and result envelopes
+
+Inject each ordinary, dynamic, DML, and DDL failure immediately before and after the first
+published write. Compare explicit and autocommit outcomes with the publication and result-
+envelope oracles. Locks and gates remain transaction-owned through their terminal release
+stage. No failed multirow statement yields partial committed state, count, or RETURNING.
+
+#### V21-4 — INSERT row construction and defaults
+
+Construct candidate rows from bound target order. Cover explicit reorder, omitted nullable
+without default, omitted persisted default, omitted nonnullable without default, selected
+assignment coercions, multiple rows, VALUES, and SELECT. Decode DefaultValueBlob through
+V21-27, but use its independently decoded typed scalar as the INSERT input; never bind or
+reevaluate an expression per row.
+
+#### V21-5 — INSERT uniqueness and physical handoff
+
+Combine the candidate-row oracle with complete Chapter-11 uniqueness and Chapter-15 INSERT
+procedures. Cover committed, own earlier-command, own current-command prior-row, active
+other-owner, aborted, NULL, NaN, signed-zero, and composite keys. Then compare the fresh
+tuple version and required index-entry set with the reusable header/WAL/index oracles.
+
+#### V21-6 — INSERT self-reference and result
+
+Fix the source relation under the statement snapshot/CommandId and vary physical
+materialization. Newly inserted current-command rows cannot recursively extend that source.
+Count one per successful logical input occurrence and build one final-new RETURNING
+occurrence per input in the final successful attempt; compare as an unordered bag.
+
+#### V21-7 — UPDATE targets, deduplication, stale handling, and Halloween safety
+
+Produce duplicate discoveries and predicate/index changes for exact old RIDs. The target
+oracle must finalize each RID once before mutation. Exercise immediate grant, wait/grant,
+stale owner, changed predicate, RC clean retry, post-write conflict, and RR conflict. A
+replacement version or changed access key must never be rediscovered as another target.
+
+#### V21-8 — UPDATE simultaneous row construction
+
+Evaluate every RHS against one immutable old row, apply bound coercions, copy unmentioned
+columns, and compare the complete candidate row. Mandatory fixtures include `SET a=b,b=a`,
+overlapping expressions, NULL, subquery errors, and `SET x=x`. Permute assignment storage
+and physical evaluation while preserving Chapter-17/20 within-expression demand order.
+
+#### V21-9 — D21-S1 descriptor-wide UPDATE NOT NULL
+
+For each finalized target, place barriers after RHS evaluation, coercion, complete-row
+construction, NOT NULL validation, uniqueness admission, and publication. Cover nullable
+NULL, non-PK and PK nonnullable NULL, valid copied nonnullable columns, simultaneous swap,
+and no-op UPDATE. A violation is `ConstraintViolation`, uses the responsible RHS origin
+when applicable, and publishes no target tuple/delete/index effect before validation.
+
+#### V21-10 — UPDATE uniqueness, swaps, cycles, and index maintenance
+
+Apply immediate uniqueness after complete-row NOT NULL validation. Cover unchanged and
+changed keys, exact old-RID exclusion, another own row, same-command collision, two-row
+swap, three-row cycle, NULL, NaN, signed zero, and multiple indexes. Swaps/cycles fail; old
+physical entries remain and every successful replacement receives required new entries.
+
+#### V21-11 — UPDATE affected rows and RETURNING
+
+Count each distinct finalized target acted upon once, including `SET x=x`; exclude removed
+duplicates, stale/nonqualifying targets, and abandoned attempts. Build one final-new row
+occurrence per counted target. Permute target and write order and compare count plus
+unordered RETURNING bag; no failed prefix escapes.
+
+#### V21-12 — DELETE operation semantics
+
+Exercise exact RID targeting, deduplication, post-wait revalidation, RC/RR stale behavior,
+one-target-once and index/predicate Halloween fixtures. Compare `xmax/cmax`, absence of a
+new version, retained index entries, one affected row per finalized delete, and one
+retained-old RETURNING occurrence in an unordered bag.
+
+#### V21-13 — D21-S4 deterministic ordinary DML error precedence
+
+Build the candidate set independently from the final attempt. Include expression/subquery,
+descriptor NOT NULL, and immediate UNIQUE candidates, plus deduplicated-away, stale,
+nonqualifying, and abandoned-attempt noncandidates. Select smallest SourceSpan start, then
+shorter span, then expression/subquery before NOT NULL before UNIQUE. Complete semantic
+ties must produce the same public diagnostic without a row-identity tie-breaker.
+
+#### V21-14 — D21-S5 RETURNING bags and failure suppression
+
+For INSERT, UPDATE, and DELETE generate two or more legal physical sequences. Exact
+operation image and multiplicity must match; sequence may differ. Verify ordered source
+does not transfer order, duplicate targets do not multiply output, reclamation does not
+alter DELETE images, retries discard buffers, failures expose no prefix, and autocommit
+withholds the bag through the required COMMIT envelope.
+
+#### V21-15 — CREATE TABLE lifecycle
+
+Drive SchemaLock, name revalidation, ID reservation, private heap/FSM/backing-index
+creation, durable final-name publication, catalog insertion, transaction-local visibility,
+terminal cache publication, and abort/orphan transitions with explicit barriers. Compare
+catalog and file state independently at every failure prefix; gaps remain consumed and no
+catalog row may name a not-final-durable file.
+
+#### V21-16 — CREATE INDEX gates and offline build
+
+Exercise SchemaLock, exclusive target writer gate, writer drain, current object/name
+revalidation, private B+ construction, MANIFEST_CHANGE, catalog publication, and terminal
+release. Include legal retained exclusive ownership for a transaction-local table and
+proactive rejection of same-table shared-to-exclusive upgrade. No page latch may span a
+gate wait, and no scan order or build algorithm is an oracle.
+
+#### V21-17 — D21-S3 CREATE INDEX current-owner build view
+
+Construct version histories containing committed owners, own earlier INSERTs, own earlier
+UPDATE replacements, own earlier deletes, aborted versions, superseded versions, active
+other owners, and reclamation history. At the command boundary after writer drain compare
+the exact included RID set with the current-owner build oracle. Repeat under an older RR
+query snapshot and prove query visibility differs without underfilling the index build.
+
+#### V21-18 — CREATE UNIQUE INDEX and publication completeness
+
+Validate canonical uniqueness over exactly the V21-17 build set, including own earlier
+rows, NULL-containing keys, NaN, signed zero, composite keys, and duplicates spanning
+arbitrary physical partitions. Before catalog visibility compare the required and actual
+entry multisets for exact equality; a half-built or underfilled index never publishes.
+
+#### V21-19 — DROP TABLE, DROP INDEX, and physical retirement
+
+Model catalog deletion separately from resource retirement. DROP TABLE covers its table,
+constraints, and indexes as one operation; ordinary standalone index DROP covers its
+index. Verify transaction-local/global MVCC visibility, abort restoration, old descriptor
+survival, no-new-fetch and drain barriers, RETIRED_LINKED, durable directory sync,
+retryable cleanup failure, crash, and delayed unlink.
+
+#### V21-20 — D21-S2 constraint-owned backing-index protection
+
+Resolve one ordinary index and live PRIMARY KEY/UNIQUE backing links. A standalone DROP of
+either backing index must return `CatalogError` at the target-name origin before catalog
+deletion, descriptor retirement, LIVE-to-RETIRING, or file retirement. State is byte- and
+identity-equal afterward. DROP TABLE remains legal as the owning dependency operation.
+
+#### V21-21 — D21-S6 dropped-name reservation and recreation
+
+Track catalog visibility and namespace reservation as separate booleans in the catalog
+oracle. Same-transaction DROP then same-name CREATE TABLE/INDEX rejects even when the
+predecessor is self-invisible. Abort leaves the predecessor and no replacement; committed
+DROP releases the name to a later transaction, whose object receives fresh IDs/files and
+may coexist with old descriptors and pending predecessor retirement.
+
+#### V21-22 — Catalog MVCC, SchemaVer, descriptors, and cache
+
+Run RC and RR binding around uncommitted CREATE, committed CREATE, DROP, rollback, and
+same-name recreation. Compare authoritative catalog MVCC with immutable descriptor and
+SchemaVer identities. Cache hits may neither expose invisible metadata nor hide visible
+transaction-local metadata; postcommit install failure must yield coherent bypass/
+invalidation or the frozen noncontinuable result without changing COMMITTED.
+
+#### V21-23 — WAL, durability, recovery, and second crash
+
+Reuse Chapter-12/13 prefix construction for DML heap/index, catalog mutation, private-file
+initialization, final-name publication, index build, DROP retirement, COMMIT, and ABORT.
+Assert no new WAL grammar. Reopen private/final orphans, uncommitted/committed CREATE and
+DROP, and pending retirement; then persist the recovered state, crash again, and require
+the same committed logical result and reconstructible cleanup ownership.
+
+#### V21-24 — Constraint and uniqueness closure
+
+Use table-driven matrices for INSERT/UPDATE NOT NULL, PRIMARY KEY implication, ordinary
+and composite UNIQUE, NULL, NaN, signed zero, same-statement INSERT, UPDATE collision,
+swap/cycle, concurrent nonterminal owners, aborted creators/deleters, own earlier/current
+commands, and exact old-RID exclusion. The independent key/status model determines
+conflict, wait/recheck, category, and statement outcome.
+
+#### V21-25 — Determinism and implementation freedom
+
+Replay every applicable DML/DDL fixture while perturbing RID/page/source/spool/index order,
+batch/vector shape, hash seed, worker schedule, allocation addresses, and legal build
+algorithm. Committed/catalog state, affected rows, public errors, transaction state, and
+RETURNING bags remain equal. Only sequence presentation of an unordered bag may vary.
+
+#### V21-26 — ANALYZE operation boundary
+
+Consume the bound TableId, descriptor, SchemaVer, columns, and visible IndexIds without
+rebinding. Verify normal RC/RR value visibility, final object/manifest revalidation,
+STATS_PUBLISH/MANIFEST_CHANGE composition, transaction-local descriptor visibility,
+terminal global publication, conflict with same-manifest DDL, cancellation/failure before
+and after statistics-row publication, and cache fallback through existing statistics tests.
+
+#### V21-27 — DefaultValueBlob v1
+
+Construct bytes independently: `DBLUSDEF`, version 1, zero flags/reserved, exact total
+length, CRC32C with checksum bytes zeroed, and one PersistedScalarV1 of the target TypeId.
+Cover every scalar kind, NULL, 4096-byte boundary, oversize rejection, malformed and
+trailing bytes, wrong type, zero/malformed version, greater positive version, and reopen.
+Original SQL text and expression trees must not become execution authority.
+
+#### V21-28 — SQL-v1 surface and exclusions
+
+Compare parser/binder/logical handoffs against the literal Chapter-21 statement and
+subquery registries. Every admitted form reaches its canonical owner; every listed
+outside-v1 form fails explicitly and cannot be partially reinterpreted through generic AST
+or IR capacity. The fixture makes no claim about when excluded features might exist.
+
+#### V21-29 — Operation-plan and upper-invariant validation
+
+Inspect semantic plans and operation manifests before physical effects: hidden target RID
+survives to DML, required old/new row values are present, bound IDs/types/nullability and
+uncorrelated side-plan ownership are preserved, index manifests are complete, and no
+physical algorithm or SQL name resolution appears. Inject one broken invariant at a time
+and require validation failure before data-changing publication.
+
+#### V21-30 — Cross-chapter, documentation-model, and atomic closure
+
+Audit every explicit owner edge against the cross-chapter matrix, every procedure against
+the documentation-model matrix, and every atomic obligation against the ledger. Require
+one deterministic procedure or complete reusable mapping, one independent oracle, and
+`COMPLETE` status per row. Aggregate statuses mechanically; any nonzero PARTIAL, MISSING,
+or CONTRADICTORY count keeps this family open.
+
+#### Mandatory Chapter-21 matrices
+
+##### Statement-attempt matrix
+
+| Case | CommandId/attempt | Retry | Published write | Result/locks | Transaction oracle |
+|---|---|---|---|---|---|
+| INSERT success | one ID/final attempt | no | operation dependent | final count/bag; locks retained | ACTIVE or implicit COMMIT |
+| INSERT row error | one ID/current attempt | no | before/after matrix | no count/bag | FA before; MA after |
+| UPDATE success | one ID/final attempt | no | yes | distinct-target result | ACTIVE or implicit COMMIT |
+| RC stale before write | same ID/new attempt | yes | no | old provisional state discarded | ACTIVE |
+| RC stale after write | same ID/no new attempt | no | yes | no success; locks through abort | MA/ABORTED |
+| RR stale conflict | one ID/no replacement | no | either | no success | frozen serialization outcome |
+| UPDATE NOT NULL | one ID | no | target check precedes target write | no target result | §39.1 boundary |
+| UPDATE UNIQUE | one ID | no | boundary dependent across rows | no successful prefix | §39.1 boundary |
+| DELETE success | one ID/final attempt | no | yes | distinct-target old-image bag | ACTIVE or implicit COMMIT |
+| pre-catalog DDL failure | one ID | no | no catalog write | orphans owned; gates released as allowed | FA/ACTIVE or autocommit ABORT |
+| post-catalog DDL failure | one ID | no | yes | no DDL success | MA/automatic ABORT |
+| autocommit success | one ID | no | yes if persistent | output withheld through C4-C5 | COMMITTED before success |
+
+##### DML row-image matrix
+
+| Operation | Input image | Construction | Constraint point | Physical handoff | RETURNING |
+|---|---|---|---|---|---|
+| INSERT | bound source occurrence | target map, persisted default/NULL, coercion | NOT NULL then immediate UNIQUE | fresh §15.2 version and indexes | final new row |
+| UPDATE | revalidated old target | all RHS from old; coercion; copy unmentioned | descriptor NOT NULL then immediate UNIQUE | §15.3 replacement/old xmax/indexes | complete final new row |
+| DELETE | revalidated retained old target | no replacement row | old-key/current-owner admission | §15.4 xmax/cmax; retain indexes | retained old row |
+
+##### DML multiplicity matrix
+
+| Case | Logical actions | Physical effects | Affected rows | RETURNING occurrences |
+|---|---:|---|---:|---:|
+| INSERT repeated equal nonunique values | one per input occurrence | one version/index set each | input count | input count |
+| INSERT same unique key | statement fails | possible aborted prefix | no successful count | none |
+| UPDATE duplicate target discovery | one per distinct finalized RID | one replacement protocol | one | one |
+| UPDATE stale/nonqualifying target | zero unless final attempt acts | none for skipped target | zero | zero |
+| UPDATE `SET x=x` | one | baseline UPDATE protocol | one | one |
+| DELETE duplicate target | one per distinct finalized RID | one xmax/cmax | one | one |
+| DELETE stale target | zero unless final attempt acts | none for skipped target | zero | zero |
+
+##### DML error-precedence matrix
+
+| Case | Candidate? | Semantic key/result | Physical order | Consequence owner |
+|---|---|---|---|---|
+| two expression errors | yes if both finalized | smallest start, then span, expression phase | irrelevant | §39.1 after selection |
+| expression vs NOT NULL, identical span | yes | expression wins | irrelevant | §39.1 |
+| NOT NULL vs UNIQUE, identical span | yes | NOT NULL wins | irrelevant | §39.1 |
+| two UNIQUE errors | yes | span then equivalence rules | irrelevant | §39.1 |
+| equal start/different length | yes | shorter span wins | irrelevant | §39.1 |
+| complete semantic tie | yes | observationally equivalent diagnostic | no row tie-break | §39.1 |
+| deduplicated target occurrence | no | absent | irrelevant | none |
+| stale/nonfinal occurrence | no | absent | irrelevant | concurrency owner |
+| abandoned retry attempt | no | discarded | irrelevant | retry owner |
+| deadlock/cancellation/resource/I/O | no ordinary candidate | independent dynamic failure | occurrence-time behavior | Chapters 11/15/39 |
+
+##### RETURNING matrix
+
+| Case | Image | Multiplicity | Order | Publication |
+|---|---|---|---|---|
+| INSERT ordered source | final new | one/input | none inherited | successful envelope only |
+| INSERT unordered source | final new | one/input | unordered | successful envelope only |
+| UPDATE | final new | one/distinct acted target | unordered | successful envelope only |
+| UPDATE duplicate discovery | final new | one, not duplicate | unordered | successful envelope only |
+| DELETE | retained old | one/distinct deleted target | unordered | successful envelope only |
+| stale/skipped target | none | zero | N/A | none |
+| abandoned retry | discarded | zero exposed | N/A | replacement attempt only |
+| failed statement | discarded | zero exposed | N/A | error only |
+| autocommit commit failure | buffered then discarded/not-success | zero successful response | N/A | no success |
+
+##### CREATE INDEX build-set matrix
+
+| Version/owner class | Included? | Index entry required? | Reason |
+|---|---:|---:|---|
+| committed live current owner | yes | yes | belongs to current target state |
+| own earlier INSERT | yes | yes | can commit with DDL transaction |
+| own earlier UPDATE replacement | yes | yes | current replacement owner |
+| own earlier UPDATE predecessor | no | no | superseded historical version |
+| own earlier DELETE target | no | no | not live in transaction-local state |
+| aborted creator | no | no | cannot belong to commit state |
+| superseded committed history | no | no | not current logical owner |
+| nonterminal other transaction | no | no | cannot be admitted as committing owner |
+| RR-visible historical predecessor | no unless current owner | no | SQL visibility is not build authority |
+| current owner omitted by old RR query snapshot | yes | yes | special current-owner build view |
+| reclamation-only retained version | no | no | physical history is nonsemantic |
+
+##### DDL object-lifecycle matrix
+
+| Case | Catalog | Namespace/file | Cache/descriptor | WAL/recovery result |
+|---|---|---|---|---|
+| CREATE TABLE success | transaction-local then committed | private -> final -> catalog committed | publish at terminal commit | committed object recoverable |
+| CREATE TABLE pre-catalog failure | absent | private/final orphan; IDs consumed | none | classify/retire orphan |
+| CREATE TABLE post-catalog failure | aborted/invisible | final orphan candidate | no global entry | MA/loser recovery |
+| CREATE INDEX success | complete index row after build | private -> final | immutable entry at commit | complete index recoverable |
+| UNIQUE build failure | no visible index | orphan candidate | none | no half index |
+| DROP TABLE | deleted as one dependency scope | delayed retirement | old descriptors survive | committed deletion recoverable |
+| ordinary DROP INDEX | deleted | delayed retirement | old descriptors survive | committed deletion recoverable |
+| backing-index DROP rejection | unchanged | unchanged | unchanged | CatalogError; no retirement |
+| rollback | creator/deleter ineffective | orphan or retained predecessor | no false global publish | loser/ABORT semantics |
+| crash after durable commit | committed result | required namespace durable | cache rebuilt/bypassed | same logical result |
+| second crash after recovery | same committed result | cleanup ownership persistent | rebuildable | no recovery-only authority |
+
+##### CREATE TABLE failure matrix
+
+| Failure boundary | Catalog result | Physical result | ID result | Transaction/recovery result |
+|---|---|---|---|---|
+| name revalidation | unchanged | none | none | prepublication failure |
+| object/FileId reservation | unchanged | none or no published file | consumed gaps permitted | pre-catalog failure |
+| private heap/FSM initialization | unchanged | deterministic private orphan ownership | consumed | pre-catalog failure or lower fatal cause |
+| backing-index construction | unchanged | complete survivor set becomes orphan-owned | consumed | no partial object |
+| final-name publication/sync | unchanged | private/final prefix classified exactly | consumed | no catalog reference to incomplete namespace |
+| before first catalog row | unchanged | final durable uncommitted orphan | consumed | may remain ACTIVE only after ownership transfer |
+| after first catalog row | transaction-owned rows later aborted | final files become orphan candidates | consumed | mandatory abort; loser recovery |
+| constraint/index catalog publication | all-or-aborted | no visible partial dependency set | consumed | §39.1 boundary result |
+| COMMIT prerequisite | no acknowledged commit | required files retained/classified | consumed | canonical COMMIT failure path |
+| after durable COMMIT | committed complete object | required files durable | retained | outcome remains COMMITTED |
+
+##### DDL visibility and name matrix
+
+| Observer/state | Object visible? | Name reserved? | CREATE same name? | Identity |
+|---|---:|---:|---:|---|
+| creator own later command | yes | occupied | no | created identity |
+| other transaction before CREATE commit | no | not its usable object | governed by current-owner/name lock | no exposure |
+| eligible transaction after CREATE commit | yes | occupied | no | created identity |
+| dropper own later command | no | yes by own DROP | no | predecessor retained |
+| same transaction after DROP | no | yes | rejected | no replacement |
+| DROP rollback | predecessor visible | occupied | no replacement | predecessor identity |
+| later transaction after committed DROP | no predecessor | no DROP reservation | yes if otherwise free | fresh IDs/FileIds |
+| old RR snapshot after recreation | predecessor by snapshot | new name owner may exist for newer view | snapshot-specific | identities distinct |
+
+##### DROP dependency matrix
+
+| Target | Allowed? | Constraint/catalog state | File retirement | Error |
+|---|---:|---|---|---|
+| ordinary named standalone index | yes | index deletion under DROP protocol | delayed | none on success |
+| PRIMARY KEY backing index | no | unchanged | not begun | CatalogError at target |
+| UNIQUE backing index | no | unchanged | not begun | CatalogError at target |
+| DROP TABLE owning dependencies | yes | table/constraints/indexes one operation | delayed collectively | none on success |
+
+##### Constraint matrix
+
+| Constraint | Binding owner | Runtime check | Publication boundary | Error/consequence |
+|---|---|---|---|---|
+| INSERT NOT NULL | Chapter 19 descriptor/action | final candidate value | before row publication | ConstraintViolation; §39.1 |
+| UPDATE NOT NULL | Chapter 19 descriptor/RHS | complete replacement, all nonnullable columns | before target tuple/xmax/index publication | ConstraintViolation; §39.1 |
+| PRIMARY KEY | Chapters 16/19 | NOT NULL then UNIQUE | before conflicting publication | constraint/unique cause; §39.1 |
+| UNIQUE | Chapters 11/16/19 | immediate current-owner check | before conflicting publication | UniqueViolation; §39.1 |
+| CHECK | unsupported v1 | none | N/A | explicit unsupported |
+| foreign key | unsupported v1 | none | N/A | explicit unsupported |
+
+##### UNIQUE matrix
+
+| Case | Conflict? | Wait/recheck | Result |
+|---|---:|---|---|
+| non-NULL duplicate current owner | yes | exact-key complete scan | UniqueViolation |
+| NULL-containing ordinary UNIQUE | no | no ordinary key claim | allowed unless another constraint |
+| composite partial NULL | no | no ordinary conflict | allowed unless another constraint |
+| NaN canonical-equal duplicate | key-owner rule | canonical encoding | model result |
+| +0/-0 | key-owner rule | canonical encoding | model result |
+| same-statement INSERT duplicate | yes | current-command owner participates | statement failure |
+| UPDATE another-row collision | yes | all owners except exact old RID | statement failure |
+| two-row swap / cycle | yes | immediate per-target semantics | statement failure |
+| other uncommitted owner | terminal-dependent | wait then recheck | conflict/free by outcome |
+| aborted creator/deleter | status-dependent | heap/status recheck | model result |
+| own earlier/current command | current-owner rules | exact command-aware recheck | model result |
+| exact old UPDATE RID | self-excluded only when allowed | still scan every other RID | no self-conflict alone |
+
+##### WAL and durability matrix
+
+| Action | Prerequisite | Visibility/publication | Recovery owner | Second crash |
+|---|---|---|---|---|
+| heap INSERT/UPDATE/delete marker | Chapter-12 authorized WAL | transaction-owned page publication | Chapters 12–15 | logical terminal result retained |
+| DML index mutation | heap authority precedes referring entry | B+ MTR publication | Chapters 8/12/13 | replay idempotent |
+| catalog tuple mutation | ordinary catalog WAL | crosses first-write boundary | Chapters 12/13/16 | MVCC result retained |
+| private file initialization | private-file durability rules | no catalog visibility | §§4.7, 13 | orphan ownership retained |
+| final-name publication | rename plus directory sync | still uncommitted without catalog | §§4.7, 13 | namespace state classified |
+| CREATE INDEX build | ordinary B+ WAL/MTR plus file rules | private until catalog | Chapters 8/12/13 | complete/orphan classified |
+| DROP retirement | catalog commit before delayed unlink | logical DROP independent of cleanup | §§4.7, 7.12.5, 14.17.1 | retirement resumes |
+| COMMIT | required files final-durable; commit WAL durable | terminal catalog visibility | Chapters 9/12/13/15 | COMMITTED retained |
+| ABORT | canonical terminal protocol | no committed DDL/DML result | Chapters 9/12/13/15 | loser remains ABORTED |
+
+##### Error-category matrix
+
+| Failure | Category/origin | D21-S4 candidate? | Statement result | Transaction owner |
+|---|---|---:|---|---|
+| parse/bind/type/default definition | Chapter 18/19/17 category/span | no | no operation or prewrite failure | §39.1/39.2 |
+| INSERT/UPDATE NOT NULL | ConstraintViolation; responsible value origin | yes when finalized row-semantic | no success | §39.1 |
+| immediate UNIQUE | UniqueViolation nested cause | yes when finalized row-semantic | no success | §39.1 |
+| DROP backing dependency | CatalogError; DROP target name | no multirow candidate | unchanged catalog/file | §39.1 |
+| stale RC | TransactionConflict owner | no | retry or failure by boundary | §§15.7, 39.1 |
+| stale RR | serialization owner | no | failure | §§11/15/39 |
+| deadlock | DeadlockVictim | no | mandatory abort | Chapters 11/39 |
+| scalar/subquery DML | scalar/category origin | yes when ordinary/finalized | selected by D21-S4 | §39.1 |
+| DDL namespace collision/reservation | CatalogError at object name | no | prepublication rejection | §39.1 |
+| postcommit cache failure | lower cause plus coherent fallback/NC | no | COMMITTED unchanged | §39.1.5/39.1.8 |
+| cancellation/resource/storage | preserved lower cause | no | boundary/dynamic result | §§15/39 |
+
+##### Determinism matrix
+
+| Perturbation | Committed/catalog state | Public ordinary error | RETURNING | Allowed effect |
+|---|---|---|---|---|
+| RID/page order | equal | equal | equal bag | sequence only if unordered |
+| source occurrence order | equal under statement semantics | D21-S4, not visit order | equal bag | no hidden order |
+| spool/index traversal | equal | equal | equal bag | none beyond sequence |
+| vector/batch shape | equal | equal | equal bag | none beyond sequence |
+| hash seed | equal | equal | equal bag | none beyond sequence |
+| worker schedule | equal | dynamic failures retain owner | equal bag on success | legal timing only |
+| allocator/pointer identity | equal | equal | equal bag | none |
+| file pathname-generation detail | equal identity contract | equal | N/A | representation only |
+| CREATE INDEX scan/build algorithm | complete equal index | equal duplicate result | N/A | implementation freedom |
+
+##### Cross-chapter composition matrix
+
+| Owner | Upstream input | Chapter-21 role | Reused verification | Duplicated? |
+|---|---|---|---|---:|
+| Chapter 5 | tuple/RID/version bytes | operation image/version handoff | Tuple codec + V15 | no |
+| Chapter 7 | guards/files/drain | retirement boundary | Buffer/File retirement tests | no |
+| Chapter 8 | key codec/B+ MTR | required index-entry set | B+ Tree Verification | no |
+| Chapter 9 | TxnId/CommandId/snapshot | admission and attempt composition | Transaction identity tests | no |
+| Chapter 10 | MVCC/current owner | row/catalog/build visibility | MVCC Visibility Tests | no |
+| Chapter 11 | locks/gates/uniqueness | operation claims and exclusion | Locking/UNIQUE tests | no |
+| Chapters 12–13 | WAL/recovery | DML/DDL durability composition | WAL/Recovery tests | no |
+| Chapter 14 | retention/retirement | old entries/descriptors/files | Vacuum/Reclamation tests | no |
+| Chapter 15 | physical DML/attempt/envelope | upper operation semantics | DML Execution Tests | no |
+| Chapter 16 | catalog/IDs/descriptors/cache | DDL object publication | Catalog Tests | no |
+| Chapter 17 | scalar/coercion/default scalar | row construction/default handoff | Type-System tests | no |
+| Chapter 18 | parse/framing | successful raw-statement boundary | Chapter-18 tests | no |
+| Chapter 19 | binding/SourceSpan | fully bound input | Chapter-19 tests | no |
+| Chapter 20 | bags/order/subqueries/provenance | relational child composition | V20 families | no |
+| Chapter 21 | operation/publication/SQL scope | direct V21 oracle | V21-1–30 | canonical |
+| Chapter 31 | physical targets/results/DDL | downstream conformance | DML/Execution tests | no |
+| §39 | categories/transaction consequence | selected error handed off | Statement Failure tests | no |
+| §41 | verification architecture | coverage closure | ledger/matrices | no |
+
+##### Documentation-model matrix
+
+| Requirement | Procedure | Expected | Status |
+|---|---|---|---|
+| no project chronology or implementation status | prose audit | none | COMPLETE |
+| no phase/development sequencing or historical results | prose audit | none | COMPLETE |
+| no source/class/layout or physical algorithm mandate | technique audit | none | COMPLETE |
+| parser and binder ownership remain Chapters 18/19 | owner matrix | exact handoff | COMPLETE |
+| statement/CommandId/retry semantics precise | V21-2/3 | deterministic | COMPLETE |
+| INSERT/UPDATE/DELETE precise | V21-4–12 | deterministic | COMPLETE |
+| D21-S1 through D21-S6 precise | V21-9/13/14/17/20/21 | all covered | COMPLETE |
+| DDL visibility/file lifetime/WAL/recovery precise | V21-15–23 | all covered | COMPLETE |
+| deterministic procedures and independent oracles | harness/registry | one per obligation | COMPLETE |
+| implementation freedom and no sleeps | V21-25/30 | preserved | COMPLETE |
+| exact cross-owner references | owner audit | valid canonical targets | COMPLETE |
+| timeless procedural verification | documentation oracle | yes | COMPLETE |
+
+##### High-level case matrix
+
+| Fixture | Architecture owner | Independent oracle | Expected result | Family | Status |
+|---|---|---|---|---|---|
+| RC pre-write retry | §§15.7, 21.16.1 | statement/publication | same CommandId, fresh attempt, discarded provisional state | V21-2 | COMPLETE |
+| post-write UPDATE failure | §§21.13, 39.1 | publication/transaction | no retry; automatic abort | V21-3/9 | COMPLETE |
+| INSERT duplicate unique | §§21.7, 11.10 | constraint | UniqueViolation; no success | V21-5 | COMPLETE |
+| INSERT self-reference | §§21.11, 20.14 | source relation | no recursive current-command feed | V21-6 | COMPLETE |
+| UPDATE duplicate target / stale target | §§21.13, 31.2/31.5 | target | once or skipped/retried per owner | V21-7 | COMPLETE |
+| `SET a=b,b=a` / `SET nn=NULL` / `SET x=x` | §21.13 | row/constraint | simultaneous; reject NN; no-op acts | V21-8/9 | COMPLETE |
+| key swap / cycle | §§21.7, 15.3 | constraint | immediate conflict | V21-10 | COMPLETE |
+| DELETE duplicate / stale target | §§21.14, 31.2/31.5 | target | one action or owner-defined stale result | V21-12 | COMPLETE |
+| INSERT/UPDATE/DELETE RETURNING reorder | §21.15 | multiset | equal bags; sequence unspecified | V21-14 | COMPLETE |
+| expression vs NOT NULL vs UNIQUE | §21.16.1 | ordinary-error | span then phase precedence | V21-13 | COMPLETE |
+| complete error tie / deadlock exclusion | §21.16.1 | error equivalence/dynamic owner | same diagnostic / deadlock owner | V21-13 | COMPLETE |
+| CREATE TABLE success / abort | §§21.5–21.6 | catalog/file | visible complete object / invisible orphan | V21-15 | COMPLETE |
+| CREATE TABLE -> INSERT -> CREATE INDEX | §21.8.2 | build/completeness | committed index contains inserted rows | V21-17/18 | COMPLETE |
+| own UPDATE/DELETE -> CREATE INDEX | §21.8.2 | build | replacement included; deleted row excluded | V21-17 | COMPLETE |
+| CREATE UNIQUE INDEX own duplicate | §21.8.2 | constraint/build | duplicate detected before publication | V21-18 | COMPLETE |
+| DROP ordinary / PK / UNIQUE index | §21.9 | dependency | allow / reject / reject | V21-19/20 | COMPLETE |
+| DROP TABLE dependencies | §21.9 | catalog lifecycle | one semantic operation | V21-19 | COMPLETE |
+| same-txn DROP -> same-name CREATE | §§21.3, 21.9 | reservation | reject | V21-21 | COMPLETE |
+| DROP rollback / commit then later recreate | §21.9 | catalog/identity | predecessor / fresh replacement IDs | V21-21 | COMPLETE |
+| old RR descriptor and pending old file plus recreation | §§21.9–21.10 | descriptor/file | identities coexist; no early unlink | V21-19/21/22 | COMPLETE |
+| crash before/after DDL commit and second crash | §§21.5–21.10 | durability/recovery | orphan or committed result remains reconstructible | V21-23 | COMPLETE |
+
+#### Complete Chapter-21 architecture-obligation coverage map
+
+The following ledger is the authoritative atomic inventory derived from the final Chapter-21
+text. Each row has one deterministic V21 procedure (or an explicitly reused complete lower-
+layer family) and one independent expected-result oracle.
+
+| Atomic obligation | Architecture owner | Verification owner | Deterministic procedure/reference | Independent oracle | Status |
+|---|---|---|---|---|---|
+| V21-1.1 — Chapter 18 remains sole parser/request-recovery owner | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.2 — A parse failure creates no Chapter-21 operation | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.3 — Chapter 19 remains sole SQL binding and type-resolution owner | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.4 — A bind failure allocates no durable ID or physical resource | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.5 — Chapter 21 consumes one fully bound statement | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.6 — Chapter 21 performs no SQL-name rebinding | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.7 — Resolved TableId/ColumnId/IndexId identities are preserved | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.8 — Bound types, nullability, casts, and coercions are preserved | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.9 — Bound SourceSpan and diagnostic origins are preserved | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.10 — Bound logical child and subquery occurrence ownership are preserved | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.11 — DDL binding allocates no persistent object or FileId | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-1.12 — Statement admission and CommandId allocation remain §§9.6/39.1-owned | §§21.1, 21.6.1, 21.8.1, 21.11, 21.13–21.14, 21.17; Chapters 18–20 | V21-1 | V21-1 procedure and applicable mandatory-matrix row | bound-input identity map and surface oracle | COMPLETE |
+| V21-2.1 — One CommandId is assigned per admitted statement | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.2 — One multirow statement uses one CommandId | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.3 — An internal retry creates a new statement attempt | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.4 — An RC pre-write retry reuses the statement CommandId | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.5 — An RC retry captures a fresh statement snapshot | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.6 — An RC retry discards the old target/source occurrence state | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.7 — An RC retry discards provisional row images | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.8 — An RC retry discards provisional constraint decisions | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.9 — An RC retry discards provisional ordinary-error candidates | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.10 — An RC retry discards affected-row and RETURNING state | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.11 — Retained transaction locks carry no prior semantic decision | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.12 — Retry is allowed only before the first published write | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.13 — No retry occurs after a transaction-owned write publishes | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.14 — RR does not refresh its transaction snapshot for stale-target retry | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.15 — An abandoned attempt exposes no error or result | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.16 — A terminal statement success or failure consumes its CommandId | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.17 — CommandId exhaustion follows the existing checked boundary | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-2.18 — Whole-request/autocommit transparent rerun is not introduced | §§21.15–21.16.1; §§9.6, 9.9–9.10, 15.7, 39.1 | V21-2 | V21-2 procedure and applicable mandatory-matrix row | statement ledger and publication oracle | COMPLETE |
+| V21-3.1 — Prepublication recoverable statement failure may leave explicit transaction ACTIVE | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.2 — Postpublication statement failure enters mandatory abort | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.3 — A failed multirow DML cannot partially commit | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.4 — A failed DDL cannot expose a partially committed catalog operation | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.5 — Physical DML bytes need not be undone on abort | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.6 — Private/final DDL artifacts use orphan ownership rather than logical success | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.7 — Earlier statements in a transaction abort when a later mandatory-abort failure occurs | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.8 — Transaction-owned tuple/key locks survive statement failure until terminal release | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.9 — SchemaLock and writer/publication gates follow terminal lifetime | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.10 — No gate wait occurs while a page/B+ latch is held | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.11 — Explicit successful statement result may publish while transaction remains ACTIVE | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.12 — Explicit result never claims durability | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.13 — Later explicit rollback does not rewrite an already returned successful statement result | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.14 — Autocommit withholds affected rows and RETURNING through required commit completion | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.15 — Autocommit commit failure exposes no successful statement result | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.16 — Transport failure cannot rewrite a terminal committed outcome | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.17 — Failed or retried statements expose no partial result prefix | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-3.18 — Statement result metadata is neither persisted nor recovered | §§21.2, 21.5–21.10, 21.15–21.16; §§15.1.2, 15.5–15.7, 39.1 | V21-3 | V21-3 procedure and applicable mandatory-matrix row | publication, transaction-state, lock-lifetime, and result-envelope oracles | COMPLETE |
+| V21-4.1 — INSERT consumes the resolved target table identity | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.2 — INSERT consumes canonical full target-column order | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.3 — Explicit target columns map source positions exactly | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.4 — INSERT VALUES and INSERT SELECT share one target-column contract | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.5 — Duplicate target rejection remains Chapter-19-owned | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.6 — Source expression type/coercion choices remain Chapter-19/17-owned | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.7 — Each omitted column follows its bound persisted-default or typed-NULL action | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.8 — A nullable omitted column without default receives typed NULL | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.9 — A nonnullable omitted column without a value fails | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.10 — A persisted default is already destination-typed | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.11 — INSERT does not reopen or resolve a persisted default expression | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.12 — Persisted default value is applied independently to each constructed row | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.13 — Permitted default syntax is closed and immutable | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.14 — Default expressions contain no column reference, subquery, aggregate, function, or parameter | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.15 — Default folding occurs once during DDL binding | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.16 — Default assignment coercion occurs before persistence | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.17 — Default fold/cast/constraint failure stores no partial expression | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-4.18 — INSERT subquery occurrences retain lazy once-per-attempt ownership rather than per-row reevaluation | §§21.11–21.12; §§17.8.5, 19.4.3, 19.20, 20.14 | V21-4 | V21-4 procedure and applicable mandatory-matrix row | independent row-construction and persisted-default oracles | COMPLETE |
+| V21-5.1 — INSERT validates NOT NULL on the final candidate row | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.2 — PRIMARY KEY NULL fails before uniqueness admission | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.3 — PRIMARY KEY means NOT NULL for every component plus UNIQUE | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.4 — Every fully non-NULL unique key acquires the canonical claim | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.5 — INSERT uniqueness uses current-owner rather than caller snapshot alone | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.6 — Committed live conflicting owner conflicts | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.7 — Own earlier-command live owner conflicts | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.8 — Own current-command prior input row conflicts | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.9 — Other nonterminal owner is waited/rechecked | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.10 — Aborted creator is not a live owner | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.11 — Aborted deleter leaves its creator owning as specified | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.12 — Any-NULL ordinary UNIQUE key does not conflict | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.13 — NaN uniqueness follows canonical key equality | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.14 — Signed zero uniqueness follows canonical key equality | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.15 — Composite keys use canonical component encoding and NULL rule | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.16 — A same-statement duplicate INSERT fails immediately | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.17 — A successful INSERT creates the exact fresh §15.2 tuple version | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-5.18 — Every applicable index receives the required `(key,RID)` entry | §§21.7, 21.11; §§11.9–11.10, 15.2, 16.5.4–16.5.6 | V21-5 | V21-5 procedure and applicable mandatory-matrix row | constraint/current-owner oracle plus V15 header/index oracle | COMPLETE |
+| V21-6.1 — INSERT SELECT source uses the containing statement snapshot | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.2 — INSERT self-reference does not recursively consume current-command inserts | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.3 — Source isolation is semantic and does not require a particular materialization | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.4 — Each successful logical input occurrence contributes one affected row | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.5 — Physical tuple/index/WAL multiplicity does not alter affected rows | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.6 — Only the final successful attempt contributes affected rows | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.7 — A failed INSERT has no successful affected-row count | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.8 — INSERT RETURNING uses the final new row image | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.9 — INSERT RETURNING emits one occurrence per successful logical input occurrence | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.10 — INSERT RETURNING is an unordered bag | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.11 — Ordered source does not establish RETURNING order | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.12 — Abandoned-attempt RETURNING rows are discarded | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.13 — A failed INSERT exposes no RETURNING prefix | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-6.14 — Autocommit INSERT output remains buffered through commit | §§21.11, 21.15; §§15.1.2, 15.2, 15.7.3, 20.14, 31.6, 31.9 | V21-6 | V21-6 procedure and applicable mandatory-matrix row | fixed-source, affected-row, RETURNING-bag, and result-envelope oracles | COMPLETE |
+| V21-7.1 — UPDATE logical child supplies exact target RID | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.2 — UPDATE logical child supplies every required old value | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.3 — Target materialization completes before target mutation | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.4 — Duplicate discovery of one RID finalizes one target | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.5 — Finalized targets are keyed by logical target RID identity | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.6 — A target is acted upon at most once | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.7 — Access-key changes cannot rediscover a replacement as a target | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.8 — Predicate changes cannot rediscover a replacement as a target | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.9 — Target-spool spill preserves the semantic target set | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.10 — Spool finalization failure publishes no target write | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.11 — Every target is re-fetched after TUPLE_WRITE wait/grant | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.12 — Every target is revalidated after unique-lock wait/grant | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.13 — Changed qualification can remove a stale target | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.14 — RC stale conflict before publication may restart the attempt | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.15 — RC stale conflict after publication cannot restart | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.16 — RR stale conflict follows the serialization owner | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.17 — Removed stale/nonqualifying target contributes no count/result | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-7.18 — Replacement attempt rediscovers targets independently | §21.13; §§15.1.2, 15.3, 15.7, 31.1–31.5 | V21-7 | V21-7 procedure and applicable mandatory-matrix row | exact-RID target-set and stale-owner oracles | COMPLETE |
+| V21-8.1 — UPDATE consumes fully bound SET/WHERE/RETURNING input | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.2 — Each assignment maps one resolved ColumnId to one typed expression | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.3 — Every SET RHS reads the complete old target row | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.4 — All SET assignments are simultaneous | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.5 — `SET a=b,b=a` swaps old values rather than evaluating sequentially | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.6 — Bound assignment coercion is applied after RHS evaluation | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.7 — Unmentioned columns copy their old values | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.8 — The complete candidate row contains every target descriptor column | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.9 — WHERE remains part of target materialization | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.10 — Supported UPDATE subqueries are uncorrelated Chapter-20 occurrences | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.11 — Assignment/RETURNING subquery errors use the ordinary write boundary | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.12 — Within-expression demand/evaluation order remains Chapters 17/20-owned | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.13 — Assignment storage order cannot change the final row | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.14 — `SET x=x` produces a complete value-preserving candidate | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-8.15 — Logical planning requests every old/new value required by physical tuple and RETURNING construction | §21.13; §§17.8.5, 19.4.3, 20.14 | V21-8 | V21-8 procedure and applicable mandatory-matrix row | immutable-old-row expression and candidate-row oracle | COMPLETE |
+| V21-9.1 — UPDATE revalidates/finalizes the old target before row construction | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.2 — Every RHS is evaluated before descriptor-wide NOT NULL validation | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.3 — Every assignment coercion completes before NOT NULL validation | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.4 — The complete replacement row exists before NOT NULL validation | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.5 — Every descriptor-declared nonnullable column is checked | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.6 — Non-PK nonnullable columns are checked | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.7 — PRIMARY KEY nonnullable columns are checked | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.8 — Unmentioned copied nonnullable columns are checked | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.9 — Nullable columns may remain NULL | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.10 — NOT NULL validation precedes immediate uniqueness | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.11 — Violation publishes no new tuple version for that target | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.12 — Violation publishes no old-version xmax/cmax for that target | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.13 — Violation publishes no new referring index entry for that target | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.14 — Violation uses canonical ConstraintViolation | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.15 — Explicit NULL-producing RHS retains its responsible SourceSpan | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.16 — No synthetic SQL offset is invented for structural corruption | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-9.17 — Simultaneous assignment and no-op acted-target semantics remain unchanged | §21.13; §§15.3, 17.8.5, 39.1, 39.3 | V21-9 | V21-9 procedure and applicable mandatory-matrix row | descriptor-wide NOT NULL and publication-prefix oracle | COMPLETE |
+| V21-10.1 — UPDATE uniqueness is immediate per finalized target | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.2 — NOT NULL validation precedes UPDATE uniqueness | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.3 — Unchanged unique key checks current owners | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.4 — Changed unique key checks current owners | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.5 — Only the exact old RID may be self-excluded | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.6 — Another row owned by the same transaction is not self-excluded | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.7 — Current-command replacement remains a conflicting owner as specified | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.8 — Same-statement two-target collision fails | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.9 — Two-row unique-key swap fails | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.10 — Three-row unique-key cycle fails | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.11 — No deferred final-state permutation rule is introduced | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.12 — NULL-containing ordinary UNIQUE key follows the no-conflict rule | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.13 — NaN and signed-zero follow canonical key encoding | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.14 — A successful UPDATE creates a fresh replacement RID/version | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.15 — Old physical index entries are retained | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.16 — Every index receives a new replacement entry | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-10.17 — Unchanged indexed key may retain old/new RID candidates under one key | §§21.7, 21.13; §§11.9–11.10, 15.3 | V21-10 | V21-10 procedure and applicable mandatory-matrix row | immediate uniqueness and index-entry multiset oracle | COMPLETE |
+| V21-11.1 — UPDATE counts each distinct finalized acted target once | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.2 — `SET x=x` counts once per qualifying target | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.3 — Duplicate target discovery cannot double count | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.4 — Stale/nonqualifying target contributes zero | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.5 — Abandoned attempt count is discarded | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.6 — Failed UPDATE publishes no successful count | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.7 — UPDATE RETURNING uses the complete final new row | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.8 — UPDATE RETURNING emits one occurrence per distinct acted target | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.9 — Duplicate target discovery emits no duplicate RETURNING row | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.10 — UPDATE RETURNING is unordered | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.11 — RID/source/spool/mutation order is nonsemantic | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-11.12 — Failed or autocommit-uncommitted UPDATE exposes no RETURNING prefix | §§21.13, 21.15; §§15.1.2, 15.3, 31.9 | V21-11 | V21-11 procedure and applicable mandatory-matrix row | distinct-target affected-row and RETURNING-bag oracle | COMPLETE |
+| V21-12.1 — DELETE consumes a fully bound one-table target | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.2 — DELETE logical child supplies exact target RID | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.3 — DELETE logical child supplies old values required by semantics/RETURNING | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.4 — DELETE target materialization completes before mutation | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.5 — Duplicate discovery finalizes one RID once | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.6 — DELETE target is revalidated after waits | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.7 — RC stale behavior follows the pre/post-write boundary | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.8 — RR stale behavior follows the serialization owner | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.9 — Stale/nonqualifying target is not deleted | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.10 — Physical rediscovery cannot delete a target twice | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.11 — DELETE publishes current TxnId as xmax | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.12 — DELETE publishes current CommandId as cmax | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.13 — DELETE creates no new tuple version | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.14 — DELETE retains physical index entries | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.15 — Vacuum remains index-garbage owner | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.16 — DELETE affected rows count distinct finalized deletes once | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.17 — DELETE RETURNING uses the retained old row once per deleted target | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-12.18 — DELETE RETURNING is unordered and reclamation-independent | §§21.14–21.15; §§15.4, 31.1–31.5, 31.8–31.9 | V21-12 | V21-12 procedure and applicable mandatory-matrix row | exact-RID delete, retention, affected-row, and RETURNING-bag oracles | COMPLETE |
+| V21-13.1 — Ordinary candidate must arise from one DML row occurrence | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.2 — Candidate occurrence belongs to the final statement attempt | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.3 — Binding/logical prerequisites must be satisfied | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.4 — Target revalidation prerequisites must be satisfied | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.5 — Demanded scalar/subquery errors may be candidates | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.6 — Descriptor-wide final-row NOT NULL violations may be candidates | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.7 — Immediate UNIQUE violations may be candidates | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.8 — Only already-supported other row constraints may be candidates | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.9 — Abandoned retry-attempt errors are excluded | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.10 — Deduplicated-away target occurrences are excluded | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.11 — Stale nonfinal targets are excluded | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.12 — Skipped/nonqualifying occurrences are excluded | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.13 — Smallest responsible SourceSpan start is primary precedence | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.14 — Equal starts use shorter/more-specific represented SourceSpan | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.15 — Identical span uses scalar/subquery/final-row-expression phase first | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.16 — Identical span uses descriptor-wide NOT NULL phase second | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.17 — Identical span uses immediate UNIQUE phase third | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.18 — Existing within-phase precedence remains authoritative | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.19 — Complete semantic ties are observationally equivalent | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.20 — RID/page/source-row index cannot break a tie | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.21 — Spool/vector/batch/hash/index/operator/scheduler order cannot break a tie | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.22 — Ordered logical input does not imply first-row error precedence | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.23 — Unordered logical input remains unordered | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-13.24 — Scalar child demand/evaluation order is not changed | §21.16.1; Chapters 11, 15, 17, 20; §39.1 | V21-13 | V21-13 procedure and applicable mandatory-matrix row | ordinary-error candidate set and semantic-precedence oracle | COMPLETE |
+| V21-14.1 — All v1 INSERT RETURNING results are unordered bags | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.2 — All v1 UPDATE RETURNING results are unordered bags | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.3 — All v1 DELETE RETURNING results are unordered bags | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.4 — Bag equality uses exact typed values and occurrence multiplicity | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.5 — Different equal-bag sequences are semantically equivalent | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.6 — INSERT image/multiplicity remain final-new per input | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.7 — UPDATE image/multiplicity remain final-new per distinct acted target | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.8 — DELETE image/multiplicity remain retained-old per distinct deleted target | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.9 — RETURNING order freedom does not alter affected rows | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.10 — RETURNING order freedom does not alter error selection | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.11 — Cancellation remains outside ordinary error arbitration | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.12 — Deadlock/resource/storage/concurrency failures retain independent owners | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.13 — Dynamic future failures need not be predicted | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.14 — Lower-precedence visitation cannot hide an established higher-precedence ordinary error | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.15 — Physical publication order cannot change that error's §39.1 consequence | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.16 — No prevalidation/staging/spool/sort algorithm is mandated | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-14.17 — No partial failed or abandoned RETURNING buffer is exposed | §§21.15–21.16.1; §§15.1.2, 15.7.3, 31.9, 39.1 | V21-14 | V21-14 procedure and applicable mandatory-matrix row | RETURNING multiset, dynamic-failure, and publication-consequence oracles | COMPLETE |
+| V21-15.1 — CREATE TABLE acquires SchemaLock under §11.13 rules | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.2 — Name availability is revalidated at execution | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.3 — Own earlier-DROP reservations participate in name revalidation | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.4 — TableId is allocated only during execution | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.5 — Heap and FSM FileIds are allocated only during execution | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.6 — Durable catalog-object high-water advances before persistent use | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.7 — Aborted/crashed allocations may leave gaps | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.8 — TableId/IndexId/ConstraintId/FileId reuse is forbidden | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.9 — Fresh table receives exclusive TableWriterGate ownership | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.10 — Private heap/FSM files are initialized before catalog publication | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.11 — ColumnIds are assigned 1 through N for schema version 1 | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.12 — Required PK/UNIQUE backing indexes are built as private objects | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.13 — All required files reach durable final names before catalog rows | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.14 — Catalog rows use the exact Chapter-16 schema | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.15 — Created descriptors remain transaction-local before commit | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.16 — Creating transaction may use its retained exclusive gate for DML | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.17 — Creating transaction may reuse that gate for later CREATE INDEX | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.18 — Autocommit success enters commit after statement completion | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.19 — Explicit CREATE remains transaction-local until user commit | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.20 — SchemaLock/gates remain held through terminal publication | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.21 — Committed CREATE publishes globally coherent descriptor/name state | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.22 — Abort keeps catalog rows invisible | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.23 — Abort transfers physical survivors to orphan retirement | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.24 — Pre-catalog failure may remain ACTIVE only after deterministic orphan transfer | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.25 — Post-catalog failure mandates abort | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-15.26 — Committed table has tuple SchemaVer 1 | §§21.2, 21.4–21.7; §§4.7, 13.2.6, 16.5, 39.1 | V21-15 | V21-15 procedure and applicable mandatory-matrix row | DDL catalog/file lifecycle, allocator, and result-envelope oracles | COMPLETE |
+| V21-16.1 — Schema-changing CREATE INDEX uses database-wide SchemaLock | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.2 — CREATE INDEX uses target TableWriterGate exclusive | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.3 — Existing target writers drain to terminal outcome | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.4 — New target writers remain blocked through index terminal outcome | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.5 — Reads may continue because private index is catalog-invisible | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.6 — Same-table shared-to-exclusive upgrade is proactively rejected | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.7 — Different-table gate acquisition remains legal through unified graph | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.8 — Retained exclusive gate for own new table is reusable | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.9 — No transaction wait occurs under heap/B+ latch | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.10 — DDL lock order follows SchemaLock then target gate then manifest/publication | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.11 — Bound target TableId is revalidated | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.12 — Bound ordered key ColumnIds are consumed unchanged | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.13 — Index-name availability is revalidated | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.14 — Own earlier-DROP reservation participates in revalidation | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.15 — IndexId and FileId allocate only during execution | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.16 — Private B+ tree starts empty | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.17 — MANIFEST_CHANGE is acquired before catalog manifest publication | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.18 — Complete current table/index manifest is revalidated | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.19 — Final B+ name is durable before catalog rows | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.20 — Catalog index/key rows use Chapter-16 ordering | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.21 — Gate/manifest/SchemaLock ownership survives through terminal outcome | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-16.22 — No physical scan/build order is semantic | §§21.2–21.2.1, 21.8; §§11.13, 14.17.1, 15.5–15.6 | V21-16 | V21-16 procedure and applicable mandatory-matrix row | gate-event graph and DDL lifecycle oracle | COMPLETE |
+| V21-17.1 — Build view is fixed at CREATE INDEX command boundary | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.2 — Writer drain precedes build-set observation | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.3 — Build view is not ordinary SQL snapshot visibility | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.4 — Build view is not committed-only visibility | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.5 — Build view is not raw physical version enumeration | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.6 — Every committed live current owner is included | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.7 — Own earlier-command INSERT row is included | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.8 — Own earlier-command UPDATE replacement is included | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.9 — Own earlier UPDATE predecessor is excluded | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.10 — Own earlier-command deleted row is excluded | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.11 — Aborted creator/version is excluded | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.12 — Superseded historical version is excluded | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.13 — Other nonterminal version unable to join commit state is excluded | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.14 — Reclamation-only retained history is excluded | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.15 — Older RR SQL snapshot cannot underfill the build | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.16 — Ordinary RR SELECT visibility remains unchanged | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.17 — CREATE INDEX performs no recursive row mutation inclusion | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-17.18 — Later-command mutations are not invented | §21.8.2; Chapters 9–10; §§11.13, 20.4 | V21-17 | V21-17 procedure and applicable mandatory-matrix row | transaction-local current-owner build-set oracle | COMPLETE |
+| V21-18.1 — UNIQUE build uses exactly the V21-17 build set | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.2 — Every fully non-NULL duplicate group is detected | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.3 — Any-NULL unique keys do not conflict | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.4 — Composite key comparison is canonical | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.5 — NaN follows canonical key equality | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.6 — Signed zero follows canonical key equality | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.7 — Own earlier-command rows participate in duplicate detection | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.8 — Duplicate detection is complete across physical partitions/order | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.9 — Build-row order cannot change validation result | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.10 — Successful build inserts every required `(key,RID)` | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.11 — Published index entry multiset equals required current-owner multiset | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.12 — No missing current owner is permitted at catalog commit | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.13 — Same-transaction CREATE TABLE/INSERT/CREATE INDEX commits complete | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.14 — Half-built index is never visible to planning | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-18.15 — Failed unique build becomes an orphan candidate without catalog visibility | §21.8.2; §§8.23, 11.10.2, 11.10.9, 16.5.4–16.5.5 | V21-18 | V21-18 procedure and applicable mandatory-matrix row | canonical unique-build and index-completeness oracles | COMPLETE |
+| V21-19.1 — DROP TABLE and DROP INDEX are transactional at catalog visibility | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.2 — DROP acquires SchemaLock | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.3 — DROP acquires owning table's exclusive writer gate | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.4 — DROP acquires MANIFEST_CHANGE for its scope | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.5 — Current object identity/manifest/LIVE state is revalidated | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.6 — LIVE-to-RETIRING precedes catalog deletion only after admission checks | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.7 — DROP TABLE uses table plus dependent indexes as one manifest scope | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.8 — DROP TABLE retires dependent constraints and indexes as one operation | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.9 — Ordinary DROP INDEX affects its owning table/index scope | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.10 — No new object/statistics claim is admitted after RETIRING | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.11 — Abort restores LIVE through the object-publication protocol | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.12 — Abort makes catalog deletion xmax ineffective | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.13 — Commit makes object invisible to new catalog snapshots | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.14 — Older catalog snapshots may still resolve predecessor | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.15 — Immutable old descriptors remain usable while retained | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.16 — DROP does not unlink files immediately | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.17 — Retirement waits for catalog-global death | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.18 — Retirement waits for descriptor/query-handle release | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.19 — Retirement waits for BufferPool/file-owner drain | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.20 — No-new-fetch/pin and frame drain follow §7.12.5 | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.21 — Unlink uses managed-file §4.7.7 protocol | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.22 — Directory fsync is required for durable retirement | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.23 — Unlink/sync failure leaves semantic DROP committed and cleanup pending | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-19.24 — Crash recovery resumes/defer retirement without resurrecting dropped object | §§21.2.1, 21.9; §§4.7.7, 7.12.5, 14.17.1, 16.10 | V21-19 | V21-19 procedure and applicable mandatory-matrix row | DROP catalog-MVCC and file-retirement state oracle | COMPLETE |
+| V21-20.1 — Constraint-owned index is defined by a live PK/UNIQUE catalog reference | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.2 — Constraint-owned ownership is semantic even when canonical index name is NULL | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.3 — Standalone DROP INDEX rejects a PRIMARY KEY backing IndexId | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.4 — Standalone DROP INDEX rejects a UNIQUE backing IndexId | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.5 — Rejection occurs before catalog deletion | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.6 — Rejection occurs before descriptor retirement | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.7 — Rejection occurs before LIVE-to-RETIRING | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.8 — Rejection occurs before file-retirement eligibility | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.9 — Rejection does not mutate the owning constraint | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.10 — Rejection does not delete the index row | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.11 — Rejection leaves physical file lifecycle unchanged | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.12 — Rejection reports CatalogError | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.13 — DROP target-name construct supplies diagnostic origin | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-20.14 — DROP TABLE dependency operation remains legal | §21.9; §§16.5.4, 16.5.6, 39.1 | V21-20 | V21-20 procedure and applicable mandatory-matrix row | constraint/index dependency graph and unchanged-state oracle | COMPLETE |
+| V21-21.1 — Catalog visibility and namespace reservation are distinct | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.2 — Own successful DROP may hide predecessor from later commands | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.3 — Own successful DROP reserves the canonical name | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.4 — Reservation lasts through terminal transaction outcome | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.5 — Reservation follows the existing table/index name classes | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.6 — Same-transaction DROP TABLE then same-name CREATE TABLE rejects | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.7 — Same-transaction DROP INDEX then same-name CREATE INDEX rejects | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.8 — CREATE name revalidation checks current owner conflicts | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.9 — CREATE name revalidation checks own earlier-DROP reservations | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.10 — Abort makes predecessor deletion ineffective | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.11 — Abort creates no replacement identity | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.12 — Committed DROP removes the live transaction reservation | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.13 — Later transaction may reuse name if otherwise available | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.14 — Later recreation receives fresh object IDs | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.15 — Later recreation receives fresh FileIds | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.16 — Old snapshot/descriptor may coexist with replacement | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.17 — Old/new objects remain distinguished by persistent identity | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-21.18 — Pending RETIRED_LINKED predecessor file does not block logical name reuse | §§21.3, 21.6.2, 21.8.2, 21.9; §§16.2–16.3, 16.10 | V21-21 | V21-21 procedure and applicable mandatory-matrix row | catalog visibility/name-reservation/identity oracle | COMPLETE |
+| V21-22.1 — READ COMMITTED binding uses statement catalog snapshot | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.2 — REPEATABLE READ binding uses transaction catalog snapshot | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.3 — Uncommitted DDL from another transaction is invisible | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.4 — Own completed earlier DDL is visible through self/CommandId rules | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.5 — Long-running RR does not suddenly resolve new committed object | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.6 — Cache cannot override catalog MVCC visibility | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.7 — Cached descriptor requires visibility to binding snapshot | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.8 — Uncommitted CREATE metadata is transaction-local | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.9 — Committed CREATE publishes current cache/name entry | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.10 — Committed DROP removes current-name lookup | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.11 — Old immutable descriptors are never mutated | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.12 — Active plans retain their descriptor identity | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.13 — CREATE TABLE establishes tuple SchemaVer 1 | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.14 — CREATE INDEX updates applicable manifest under frozen SchemaVer rules | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.15 — Failed DDL does not falsely publish a schema/cache state | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.16 — Postcommit cache install may use safe invalidate/bypass | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.17 — Postcommit cache incoherence yields NC without changing COMMITTED | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-22.18 — Same-name replacement cannot rebind predecessor descriptor | §§21.3, 21.6.2, 21.8.2, 21.9–21.10; Chapter 16 | V21-22 | V21-22 procedure and applicable mandatory-matrix row | catalog MVCC, descriptor identity, SchemaVer, and cache oracle | COMPLETE |
+| V21-23.1 — DML heap mutation uses existing WAL grammar | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.2 — DML index mutation uses existing B+ MTR grammar | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.3 — Catalog tuple mutation is WAL-governed | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.4 — Chapter 21 introduces no new WAL record family | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.5 — Private file creation follows §4.7 namespace/durability rules | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.6 — Final-name publication requires no-replace rename | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.7 — Final-name publication requires parent-directory durability | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.8 — Catalog CREATE cannot commit before every required file is final-durable | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.9 — CREATE INDEX contents are durable/recoverable at committed publication | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.10 — DROP catalog outcome is independent of delayed physical unlink | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.11 — DROP unlink durability requires directory synchronization | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.12 — Private CREATE crash prefix is classified as orphan/incomplete | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.13 — Final-name/no-catalog crash prefix is classified without live object | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.14 — Uncommitted catalog CREATE recovers as loser/invisible | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.15 — Committed CREATE recovers as visible complete object | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.16 — Uncommitted DROP recovers predecessor as live | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.17 — Committed DROP recovers predecessor as dropped | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.18 — Pending file retirement resumes or remains owned | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.19 — Recovery replays physical WAL rather than SQL statements | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.20 — Recovery reconstructs no statement attempts/counts/RETURNING | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.21 — Committed DDL survives a crash before cache installation | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.22 — Recovered committed CREATE survives a second crash | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.23 — Recovered committed DROP survives a second crash | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-23.24 — No transient recovery-only hidden state is correctness authority | §§21.5–21.10; Chapters 4, 7, 12–15 | V21-23 | V21-23 procedure and applicable mandatory-matrix row | durable-prefix, file-lifecycle, recovery, and second-crash oracles | COMPLETE |
+| V21-24.1 — v1 enforced constraint set is NOT NULL, PRIMARY KEY, and UNIQUE | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.2 — CHECK constraint execution is outside v1 | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.3 — Foreign-key execution is outside v1 | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.4 — INSERT NOT NULL checks final candidate value | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.5 — UPDATE NOT NULL checks complete candidate row | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.6 — PRIMARY KEY implies descriptor NOT NULL for all components | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.7 — PRIMARY KEY fully non-NULL value uses UNIQUE current-owner semantics | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.8 — Ordinary UNIQUE permits any-NULL key | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.9 — Composite partial-NULL key follows any-NULL rule | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.10 — Canonical string/value equality feeds key encoding | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.11 — NaN key semantics match Chapter 8/11 owner | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.12 — Signed-zero key semantics match Chapter 8/11 owner | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.13 — Same-statement INSERT duplicate conflicts | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.14 — Same-statement UPDATE collision conflicts | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.15 — Key swap conflicts | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.16 — Key cycle conflicts | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.17 — Concurrent nonterminal owner is waited/rechecked | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.18 — Aborted creator/deleter statuses are rechecked exactly | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.19 — Own earlier/current-command owners follow §11.10.6 | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-24.20 — Only exact old UPDATE RID receives self-exclusion | §§21.6–21.8, 21.13; §§11.10, 16.5.6, 39.3 | V21-24 | V21-24 procedure and applicable mandatory-matrix row | closed constraint and uniqueness matrix oracle | COMPLETE |
+| V21-25.1 — RID visitation order cannot change committed state | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.2 — Page placement/order cannot change committed state | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.3 — Source occurrence visitation cannot select ordinary error | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.4 — Target spool order cannot change operation result | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.5 — Index traversal order cannot change uniqueness/build result | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.6 — Vector width and batch boundaries cannot change semantics | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.7 — Hash seed/bucket order cannot change semantics | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.8 — Worker schedule cannot choose ordinary row error | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.9 — Allocator result cannot change semantics | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.10 — Pointer identity cannot change semantics | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.11 — Physical CREATE INDEX scan algorithm cannot change build set | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.12 — Physical CREATE INDEX build algorithm cannot change completeness | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.13 — Physical DML algorithm cannot change affected rows | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.14 — Physical DML algorithm cannot change RETURNING bag | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.15 — Different unordered RETURNING sequences may be equivalent | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.16 — Equal RETURNING bag is required for such equivalence | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.17 — Dynamic failures retain occurrence-time owners | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-25.18 — All successful perturbations yield equal final logical state | §§21.8.2, 21.15–21.16.1, 21.20; Chapters 20, 31 | V21-25 | V21-25 procedure and applicable mandatory-matrix row | metamorphic environment and observable-state oracle | COMPLETE |
+| V21-26.1 — ANALYZE consumes one fully bound base-table target | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.2 — Bound ANALYZE captures TableId | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.3 — Bound ANALYZE captures immutable TableDescriptor | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.4 — Bound ANALYZE captures current SchemaVer | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.5 — Bound ANALYZE captures analyzed ColumnIds | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.6 — Bound ANALYZE captures currently visible IndexIds | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.7 — Captured identities are scan inputs rather than final publication authority | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.8 — Final current-object/schema/index-manifest revalidation is mandatory | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.9 — ANALYZE acquires no SchemaLock merely for stable row set | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.10 — ANALYZE acquires no exclusive writer gate merely for stable row set | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.11 — ANALYZE values use normal RC statement snapshot | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.12 — ANALYZE values use normal RR transaction snapshot/current command boundary | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.13 — Concurrent DML may make statistics approximate without invalidating correctness | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.14 — Statistics rows use ordinary transaction/catalog MVCC | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.15 — StatsDescriptor is transaction-local before commit | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.16 — Own later statements may use transaction-local descriptor | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.17 — Global cache changes only at terminal COMMITTED | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.18 — Failed/cancelled prepublication ANALYZE publishes no partial descriptor | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.19 — Failure after statistics-row publication mandates abort | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-26.20 — Same-manifest DDL/ANALYZE races follow §14.17.1 claims/revalidation | §21.17.1; §§14.17.1, 19.1, 34.14, 39.1 | V21-26 | V21-26 procedure and applicable mandatory-matrix row | bound ANALYZE identity, snapshot, generation, and publication oracle | COMPLETE |
+| V21-27.1 — Default blob magic is exactly ASCII DBLUSDEF | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.2 — Default blob format_version is exactly 1 | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.3 — Default blob flags are zero | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.4 — Default blob reserved32 is zero | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.5 — Default blob header is 24 bytes | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.6 — All multibyte fields are little-endian | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.7 — Payload is exactly one PersistedScalarV1 | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.8 — total_length equals 24 plus scalar length | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.9 — No trailing bytes are accepted | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.10 — CRC32C covers total_length with checksum bytes logically zero | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.11 — MAX_DEFAULT_VALUE_BLOB is 4096 bytes | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.12 — Exactly-4096-byte valid blob is accepted | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.13 — Oversize default is rejected as unsupported | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.14 — Decoder validates magic/version/flags/reserved | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.15 — Decoder validates length and checksum | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.16 — Decoder validates PersistedScalarV1 structure | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.17 — Decoded scalar TypeId must equal target column TypeId | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.18 — Version zero/malformed v1 is required-metadata corruption | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.19 — Positive version greater than one is UNSUPPORTED_DEFAULT_FORMAT | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.20 — Malformed greater/recognized dispatch is not guessed | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.21 — Expression-bearing blob is not parsed as scalar | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.22 — Original SQL text is not execution authority | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.23 — No function/operator identity tree is persisted | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-27.24 — Reopen reconstructs the same typed constant default | §§21.12–21.12.1; §§4.14.2, 17.10.2, 17.13 | V21-27 | V21-27 procedure and applicable mandatory-matrix row | literal byte builder, CRC32C, and independent PersistedScalarV1 decoder | COMPLETE |
+| V21-28.1 — Every listed v1 statement kind has one canonical upstream/downstream owner | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.2 — CREATE TABLE is admitted only through its bound handoff | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.3 — CREATE/UNIQUE INDEX is admitted only through its bound handoff | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.4 — DROP TABLE/INDEX is admitted only through its bound handoff | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.5 — INSERT/UPDATE/DELETE/SELECT use the stated bound/logical handoffs | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.6 — BEGIN/COMMIT/ROLLBACK use transaction owners | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.7 — VACUUM/ANALYZE use maintenance owners | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.8 — EXPLAIN/EXPLAIN ANALYZE use presentation/execution owners | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.9 — Supported subquery surface equals §20.14 exactly | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.10 — Generic parser or IR capacity does not expand v1 semantics | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.11 — Every listed outside-v1 feature fails explicitly | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.12 — Unsupported CHECK/foreign key do not receive partial runtime semantics | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.13 — Expression/partial index syntax is not silently approximated | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.14 — Correlated/data-modifying subqueries are not silently decorrelated/executed | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.15 — Excluded types/features do not alter persisted formats | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-28.16 — Verification prose states closed v1 scope without roadmap chronology | §§21.6.1, 21.8.1, 21.17–21.19; Chapters 18–20 | V21-28 | V21-28 procedure and applicable mandatory-matrix row | literal closed statement/subquery/feature registry | COMPLETE |
+| V21-29.1 — Parser output names and binder resolved IDs remain distinct | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.2 — Executor performs no SQL name resolution | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.3 — Logical operations encode no physical algorithms | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.4 — BindingId/ColumnId/LogicalSlotId/heap SlotId/vector position remain distinct | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.5 — All operation expressions have resolved type/nullability | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.6 — Hidden DML target RID survives until DML consumption | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.7 — INSERT operation carries complete canonical target mapping | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.8 — UPDATE operation carries all old values needed for RHS and tuple construction | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.9 — UPDATE operation carries complete candidate-row descriptor | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.10 — DELETE operation carries retained old values needed by RETURNING | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.11 — DML subqueries are only supported uncorrelated forms | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.12 — Required index manifest is stable for the operation | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.13 — Catalog cache cannot bypass snapshot visibility | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.14 — Uncommitted DDL is not globally published | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.15 — Unsupported SQL is not partially reinterpreted | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.16 — Validation failure occurs before data-changing effects | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.17 — Plan validation introduces no persistent format | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-29.18 — Operation manifest does not prescribe executor data structures | §§21.11, 21.13–21.14, 21.20; Chapters 19–20, 31 | V21-29 | V21-29 procedure and applicable mandatory-matrix row | operation-manifest validator and invariant mutation table | COMPLETE |
+| V21-30.1 — Every Chapter-21 heading has verification coverage | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.2 — Every Chapter-21 atomic obligation has one ledger row | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.3 — Every ledger row names an architecture owner | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.4 — Every ledger row names a deterministic procedure or complete reusable family | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.5 — Every ledger row names an independent oracle | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.6 — Every ledger row has COMPLETE status | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.7 — PARTIAL total is zero | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.8 — MISSING total is zero | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.9 — CONTRADICTORY total is zero | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.10 — No frozen Chapter-21 semantic question remains | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.11 — No new architecture rule is invented by verification | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.12 — Verification prose contains no project chronology/current implementation status | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.13 — Verification prose contains no phase/development sequence/history | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.14 — Verification mandates no source layout or physical algorithm | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.15 — Chapter 22 is not reviewed by these procedures | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+| V21-30.16 — Separation of Architecture/Verification/Development/Project State/devlog is preserved | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, documentation matrix, and mechanical status aggregation | COMPLETE |
+
+The actual inventory derived from the final Chapter-21 text contains **547 atomic obligations**:
+
+```text
+COMPLETE:       547
+PARTIAL:          0
+MISSING:          0
+CONTRADICTORY:    0
+```
+
+| Verification family | Atomic obligations | Status |
+|---|---:|---|
+| V21-1 | 12 | COMPLETE |
+| V21-2 | 18 | COMPLETE |
+| V21-3 | 18 | COMPLETE |
+| V21-4 | 18 | COMPLETE |
+| V21-5 | 18 | COMPLETE |
+| V21-6 | 14 | COMPLETE |
+| V21-7 | 18 | COMPLETE |
+| V21-8 | 15 | COMPLETE |
+| V21-9 | 17 | COMPLETE |
+| V21-10 | 17 | COMPLETE |
+| V21-11 | 12 | COMPLETE |
+| V21-12 | 18 | COMPLETE |
+| V21-13 | 24 | COMPLETE |
+| V21-14 | 17 | COMPLETE |
+| V21-15 | 26 | COMPLETE |
+| V21-16 | 22 | COMPLETE |
+| V21-17 | 18 | COMPLETE |
+| V21-18 | 15 | COMPLETE |
+| V21-19 | 24 | COMPLETE |
+| V21-20 | 14 | COMPLETE |
+| V21-21 | 18 | COMPLETE |
+| V21-22 | 18 | COMPLETE |
+| V21-23 | 24 | COMPLETE |
+| V21-24 | 20 | COMPLETE |
+| V21-25 | 18 | COMPLETE |
+| V21-26 | 20 | COMPLETE |
+| V21-27 | 24 | COMPLETE |
+| V21-28 | 16 | COMPLETE |
+| V21-29 | 18 | COMPLETE |
+| V21-30 | 16 | COMPLETE |
+
+All V21 families are closed. Every final Chapter-21 obligation has a deterministic
+procedure or precise reusable complete method, an independent oracle, and COMPLETE status.
+No frozen semantic question or cross-owner contradiction remains. Chapter 21 is fully
+reviewed and closed; this section begins no Chapter-22 review.
+
+---
+
 ### Front-End Error and Source-Span Tests
 
 Drive one representative failure through each architecture-owned category in §§21.16 and
