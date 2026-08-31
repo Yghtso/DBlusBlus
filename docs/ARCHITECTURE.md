@@ -16405,6 +16405,12 @@ BOOLEAN predicate
 
 Its output schema is identical to its child's schema.
 
+For every child row whose retention decision the filter must determine, the
+predicate evaluation is **demanded**. TRUE retains the row; FALSE and UNKNOWN
+reject it under Chapter 17. A logically equivalent form may not demand the
+predicate for additional rows or suppress it for such a row when that change
+could introduce or hide an observable error.
+
 It does not specify whether the predicate will later be vectorized into a selection mask, used to form an index bound, fused with a scan, or evaluated by another physical strategy.
 
 ## 20.7 `LogicalProject`
@@ -16418,6 +16424,13 @@ expr_1 -> output LogicalSlotId
 ```
 
 Projection may reorder values, duplicate a source value, calculate expressions, rename outputs, or drop unused input values.
+
+For an ordinary `LogicalProject`, every declared projected expression is
+required to form that Project output and is demanded for every input row that
+produces an output row. An explicitly specialized semantic rule may establish
+that a value is not demanded; in particular, §20.14's scalar-subquery rules and
+EXISTS projection-value irrelevance remain authoritative. Such an exception
+does not make arbitrary ordinary Project expressions optional.
 
 It is the semantic boundary between an internal relation shape and a SELECT output shape.
 
@@ -16443,6 +16456,12 @@ CROSS
 ```
 
 CROSS has no join condition.
+
+For a join with a condition, predicate evaluation is demanded only for
+candidate row pairs that the logical join semantics require to test. Logical
+semantics do not prescribe a physical pair-generation order. Moving a
+potentially erroring predicate to rows or pairs outside that demand domain
+requires the exact rewrite-safety proof defined by §20.17.
 
 The node never selects HashJoin/NestedLoop/MergeJoin.
 
@@ -16497,6 +16516,11 @@ Its outputs consist only of group-key outputs and aggregate outputs.
 
 Expressions above the aggregate refer to those outputs, not arbitrary pre-aggregate columns.
 
+Grouping keys and aggregate arguments are demanded only for the logical input
+rows to which the aggregate applies. A HAVING predicate is demanded for the
+groups whose retention its `LogicalFilter` must determine. Chapter 29 and
+§20.14 retain their more specific aggregate and subquery demand rules.
+
 Grouping and DISTINCT use SQL grouping-equivalence semantics:
 
 ```text
@@ -16540,6 +16564,10 @@ This matches the existing ascending NULL-first B+ key order and its natural reve
 If an explicit `NULLS FIRST/LAST` SQL surface is added later, the resolved choice is still stored directly in the logical sort key.
 
 Physical sorting/index-order matching never guesses NULL ordering.
+
+Each sort-key expression is demanded only for the logical rows to which the
+sort applies. This demand rule does not establish a result-row order beyond the
+resolved logical ordering contract.
 
 ## 20.12 `LogicalLimit`
 
@@ -17146,6 +17174,55 @@ Logical properties do not substitute for the later physical-property system.
 
 Logical rewrites occur after binding and before cost-based physical selection.
 
+A scalar-expression evaluation is **demanded** when the unrevised logical
+relational semantics require evaluating that expression for a particular
+logical input row, candidate row pair, group, or other relational occurrence
+to determine a required value, predicate result, grouping key, aggregate
+argument, ordering key, or output. Demand is a semantic property, not an
+optimizer schedule, physical visitation order, CPU evaluation count,
+vector-lane detail, or page/tuple iteration rule.
+
+Changing whether, where, or how an evaluation is demanded is
+correctness-observable when it could change a produced value, SQL NULL/UNKNOWN
+behavior, error versus success, error category, responsible `SourceSpan`,
+Chapter-17 child order or short-circuit behavior, an already-frozen error
+precedence, or another explicitly frozen semantic result. Relational result-row
+order and physical resource usage remain separate contracts: allocation count,
+CPU work, spill volume, addresses, and similar operational differences are not
+logical demand effects. V1 scalar expressions have no ordinary user-visible
+side effects beyond these frozen value, NULL, error, and demand semantics.
+
+Every logical rewrite MUST satisfy one of these branches:
+
+1. it preserves every semantically demanded evaluation that could have a
+   correctness-observable effect, including its logical value context,
+   Chapter-17 child order and short-circuit behavior, error category,
+   responsible source-derived `SourceSpan`, and any frozen error precedence;
+   or
+2. an exact semantic proof establishes that adding, removing, duplicating, or
+   moving the affected evaluation cannot alter any such result.
+
+One sufficient proof for the second branch establishes over the complete newly
+affected logical demand domain that the expression is total, error-free,
+deterministic for the same bound values, and semantically insensitive to the
+changed evaluation count/order. Total and error-free means every value
+combination admitted by the proof completes normally with a scalar value or SQL
+NULL and cannot raise a user-visible scalar/runtime semantic error. Exact
+constants, frozen TypeResolver semantics, exact nullability, trusted enforced
+constraints, and exact facts authorized by §§34.1 and 35.2 may participate.
+Statistics, samples, selectivity/cardinality estimates, costs, heuristics, and
+likely value ranges are never sufficient.
+
+Absent such an exact proof, an expression is conservatively treated as
+potentially erroring and correctness-observable, and its semantic demand MUST
+be preserved. Existing specialized rules, including all §20.14 subquery demand
+rules, remain authoritative within their domains. A rewrite does not create a
+new physical row, RID, page, hash-bucket, or thread-order error precedence; it
+preserves every precedence already defined by the owning semantic layer.
+Consequently, a legal rewrite preserves relational values, NULL behavior,
+multiplicity and result-order guarantees where defined, demanded scalar
+evaluations, Chapter-17 evaluation ordering, and observable errors.
+
 ### 20.17.1 Constant folding
 
 Fold a subtree only when it is composed entirely of constants and uses entries
@@ -17172,17 +17249,35 @@ The baseline optimizer is conservative around expressions whose evaluation may r
 
 ### 20.17.3 Predicate pushdown
 
-Predicates may be pushed toward base relations when the referenced slots and join semantics permit.
+Predicates may be pushed toward base relations only when the referenced slots
+and join semantics permit and the transformation is demand-safe under §20.17.
 
-For INNER/CROSS joins, a predicate referencing only one side may be pushed to that side.
+For INNER/CROSS joins, referencing only one side is necessary but not
+sufficient for pushdown. If movement would demand the predicate for rows that
+the unrevised plan would not test, the predicate may move only when an exact
+proof establishes that the additional evaluations cannot change a value,
+NULL/UNKNOWN behavior, error, or other correctness-observable result. A
+potentially erroring left-local predicate above an INNER JOIN therefore cannot
+move to the left input merely because it references only left slots when some
+left rows would never produce a joined row.
 
-LEFT JOIN uses stricter null-preservation rules.
+LEFT JOIN uses its existing stricter null-preservation rules in addition to
+this demand-safety requirement.
 
 V1 does not apply an inner-join pushdown rule across a LEFT JOIN unless an explicit outer-join transformation proves equivalence.
 
 ### 20.17.4 Projection pruning
 
 Projection pruning computes values required by ancestors and removes unused outputs.
+
+Ancestor slot nonuse alone does not authorize removal of an ordinary projected
+expression whose evaluation is demanded under §20.7 and may be
+correctness-observable. Such an expression may be removed only when an explicit
+specialized semantic rule establishes that the value is not demanded, as for
+EXISTS under §20.14.5, or an exact §20.17 proof establishes that suppressing
+the evaluation cannot change any observable result. A projected expression
+proven total and error-free over its complete demand domain may qualify when
+all other semantics are unchanged.
 
 It MUST retain every value still required by:
 
@@ -17199,17 +17294,32 @@ hidden target RID/system slots
 
 ### 20.17.5 Expression canonicalization
 
-Safe canonicalization may include:
+Executable source-derived scalar expressions preserve Chapter 17's semantic
+child order. For a binary expression, its semantic left child remains left and
+its semantic right child remains right. Chapter-20 canonicalization MUST NOT
+swap commutative operands, reverse an executable comparison such as `a < b` to
+`b > a`, sort executable children, or use associative/commutative algebra to
+reassociate them. This includes executable arithmetic, comparison, AND, and OR
+trees. Chapter-17 AND/OR short-circuiting and CASE branch order remain exact.
 
-```text
-flattening AND chains
-canonical operand ordering for truly commutative operators
-placing constants on one side of comparisons where operator reversal is exact
-```
+Value commutativity is not evaluation commutativity: even when successful
+values satisfy `value(a OP b) == value(b OP a)`, the executable trees can
+differ in child demand, error occurrence/category, responsible `SourceSpan`,
+and short-circuit behavior. Mathematical equality alone therefore cannot
+justify executable operand reordering.
 
-Canonicalization does not change NULL semantics, FLOAT64 semantics, or volatility/evaluation-count semantics.
+Commutativity, associativity, or exact comparison reversal MAY normalize
+non-executable equivalence facts, lookup/search keys, proof facts, or comparison
+descriptors. Such metadata MUST NOT replace the executable expression, change
+its child order or evaluation semantics, redefine an error or `SourceSpan`, or
+become a user-visible expression tree. No particular metadata representation is
+required.
 
-Source/display metadata may be retained separately for readable EXPLAIN output.
+Chapter-17-authorized constant folding under §17.10.2 remains permitted because
+that owner defines its exact value, error, skipped-branch, and timing
+equivalence. Existing source-child provenance remains attached to its original
+semantic occurrence; this rule does not define provenance for newly synthesized
+expressions.
 
 ### 20.17.6 Join graph extraction
 
@@ -17279,6 +17389,12 @@ NOT NULL column IS NULL
 ```
 
 and marks the corresponding logical relation as provably empty before physical search.
+
+Proof of empty output is not by itself permission to suppress another
+correctness-observable evaluation demanded by the unrevised logical semantics.
+Contradiction propagation or an empty replacement must also preserve that
+demand, or carry an exact §20.17 proof that every changed evaluation is
+insensitive.
 
 These are semantic proofs only when they use exact typed constants, Chapter-17 type semantics, and trusted currently enforced catalog constraints. Statistics-derived min/max, NDV, MCV, histogram, HLL, NULL fraction, row count, or estimated join domains are not constraints and cannot participate in this contradiction proof.
 
@@ -17360,6 +17476,11 @@ For `WHERE`, `HAVING`, and INNER JOIN match selection, only TRUE admits a row or
 
 An empty-result helper or equivalent plan replacement may be introduced only for a node whose semantic proof is established by these rules. The replacement must preserve the node's output schema and all statement/operator semantics. A numerical zero estimate is never such authorization.
 
+Exact emptiness alone does not authorize erasing an otherwise demanded
+potentially erroring expression. The replacement is legal only when the
+unrevised semantics demand no suppressed correctness-observable evaluation or
+an exact §20.17 proof establishes that every demand difference is insensitive.
+
 ## 20.18 Logical-plan validation
 
 Validation runs after initial logical planning and after major rewrite phases.
@@ -17382,6 +17503,8 @@ every expression subquery is one supported §20.14 mode with exactly one
 independent child and no OuterRef/correlated slot
 scalar/IN child arity, subquery result TypeId/nullability, derived-table output
 names/slot maps, and NOT wrappers agree with §20.14
+every accepted rewrite is justifiable as demand-preserving or by an exact
+demand-insensitivity proof under §20.17
 ```
 
 Malformed logical plans are architecture errors detected before execution, not conditions left for executor crashes.
@@ -17427,6 +17550,8 @@ The logical EXPLAIN representation does not depend on reparsing or pretty-printi
 17. Literal/operator/cast/predicate/scalar-function binding uses only the closed §§17.2–17.10 registry.
 18. Every accepted subquery is one closed §20.14 uncorrelated form with its required logical child, cardinality/3VL contract, and physical fallback.
 19. Subquery rewrites preserve lazy demand, error precedence, snapshot/CommandId, and exact proof provenance defined by §§34.1 and 35.2.
+20. Every logical rewrite preserves correctness-observable demanded evaluations and existing error category, source-derived SourceSpan, and frozen precedence unless exact semantic proof establishes the demand difference is insensitive.
+21. Executable scalar expressions preserve Chapter-17 child order; commutative, associative, or comparison-reversal normalization is confined to non-executable metadata and never replaces executable order.
 
 ---
 
