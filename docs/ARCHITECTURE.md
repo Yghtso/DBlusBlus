@@ -16286,7 +16286,7 @@ LogicalJoin   != HashJoin
 LogicalSort   != one particular sorting algorithm
 ```
 
-Physical choices belong to later planning.
+Physical choices belong to downstream physical planning.
 
 The canonical relational model is a **bag of row occurrences** unless a named
 logical operator explicitly changes multiplicity or forms equivalence classes.
@@ -16391,9 +16391,9 @@ self-join, alias, duplicate-column, computed-expression, rewrite, and hidden
 system-value distinctions without prescribing an allocator or node
 representation.
 
-## 20.3 Initial logical operator family
+## 20.3 V1 logical operator family
 
-The initial logical family is:
+The canonical v1 logical operator family is:
 
 ```text
 LogicalGet
@@ -16450,7 +16450,8 @@ neither eliminates duplicates nor establishes a physical scan order.
 
 It does not decide sequential versus index access.
 
-A later optimizer may attach/push logical predicates to the Get while preserving the original query semantics.
+Logical predicate attachment or pushdown may place predicates on the Get only
+while preserving the original query semantics.
 
 ## 20.5 `LogicalValues`
 
@@ -16475,7 +16476,8 @@ Every SELECT query block without FROM uses exactly one zero-column logical
 input row. Ordinary filtering, aggregation, projection, ordering, and limiting
 then apply; `SELECT 1` is the simplest
 `LogicalValues(single zero-column row) -> LogicalProject` instance. §18.11.1
-owns the complete observable semantics.
+owns the optional-FROM syntax; this section owns the resulting logical source
+and row-occurrence semantics.
 
 ## 20.6 `LogicalFilter`
 
@@ -16496,7 +16498,7 @@ The filter never performs duplicate elimination. A logically equivalent form
 may not demand the predicate for additional rows or suppress it for such a row
 when that change could introduce or hide an observable error.
 
-It does not specify whether the predicate will later be vectorized into a selection mask, used to form an index bound, fused with a scan, or evaluated by another physical strategy.
+It does not prescribe a physical predicate-evaluation strategy.
 
 ## 20.7 `LogicalProject`
 
@@ -16595,19 +16597,13 @@ requires the exact rewrite-safety proof defined by §20.17.
 
 The node never selects HashJoin/NestedLoop/MergeJoin.
 
-### 20.8.2 Binding scope
+### 20.8.2 Bound-predicate handoff
 
-For INNER/LEFT JOIN:
-
-```text
-1. bind left relation
-2. create/bind right relation
-3. create a combined ON-expression scope
-4. bind ON as BOOLEAN
-5. produce joined output bindings
-```
-
-The ON expression may reference both sides.
+Join predicates arrive fully bound under §§19.2.1 and 19.3. Every bound column
+reference already identifies its relation occurrence, and logical-plan
+construction maps that identity to the corresponding `LogicalSlotId` under
+§20.2. `LogicalJoin` consumes the resolved BOOLEAN expression without
+rebinding names, qualifiers, or correlation.
 
 ON and WHERE remain semantically distinct.
 
@@ -16701,7 +16697,8 @@ VARCHAR uses binary byte equality
 
 This grouping equivalence is intentionally different from ordinary SQL `=` with NULL, which returns NULL.
 
-Hashing and comparison implementations used later for aggregate/DISTINCT must agree with this contract.
+Every hashing or comparison implementation for aggregate/DISTINCT must agree
+with this contract.
 
 ## 20.10 `LogicalDistinct`
 
@@ -16738,9 +16735,13 @@ DESC -> NULLS LAST
 
 This matches the existing ascending NULL-first B+ key order and its natural reverse.
 
-If an explicit `NULLS FIRST/LAST` SQL surface is added later, the resolved choice is still stored directly in the logical sort key.
+The resolved NULL-order choice is stored directly in each logical sort key;
+physical sorting and index-order matching never infer it.
 
-Physical sorting/index-order matching never guesses NULL ordering.
+`LogicalSort` establishes the resolved key-sequence order. Rows equal on every
+ORDER BY key have no stable relative-order guarantee under §30.1. Section 30.3
+owns the canonical physical comparator, including SQL type and FLOAT64 ordering,
+that realizes this logical requirement.
 
 Each sort-key expression is demanded only for the logical rows to which the
 sort applies. This demand rule does not establish a result-row order beyond the
@@ -16755,10 +16756,10 @@ optional limit
 offset
 ```
 
-Chapter 19 exclusively owns LIMIT/OFFSET admissibility, execution-start
+Section 19.14 exclusively owns LIMIT/OFFSET admissibility, execution-start
 constancy, type resolution, INT32-to-INT64 normalization, mandatory folding,
 and NULL/negative count validation. The logical-plan representation carries
-Chapter 19's folded/residual count expressions until their one execution-start
+§19.14's folded/residual count expressions until their one execution-start
 acquisition. The relational selection contract below receives only the
 resulting validated nonnegative INT64 offset and optional validated nonnegative
 INT64 limit. It introduces no count-expression error or reevaluation.
@@ -16792,7 +16793,10 @@ semantic.
 display metadata, types, nullability, and lineage unchanged. It only removes
 row occurrences and never deduplicates them.
 
-The optimizer may later use safe LIMIT pushdown or Top-N alternatives without changing the logical limit semantics.
+Section 27.9 owns `PhysicalLimit` conformance to this logical contract, and
+§35.20 owns its optimizer cardinality derivation. Any LIMIT pushdown or
+alternative physical operator remains conforming only when it preserves the
+semantics defined here.
 
 ## 20.13 DML logical nodes and hidden system slots
 
@@ -16922,17 +16926,20 @@ does not inherit enclosing relation bindings. Inner aliases shadow nothing in
 the parent because parent lookup is not attempted; inner names also never leak
 out except through a derived table's named output columns.
 
-Parent links may remain in parser/binder data structures for diagnostics and a
-future architecture, but v1 binding uses them only to distinguish an attempted
-outer capture from an ordinary unknown name. It MUST NOT emit an executable
+Parent links may exist for diagnostics, but v1 binding uses them only to
+distinguish an attempted outer capture from an ordinary unknown name. It MUST
+NOT emit an executable
 `BoundCorrelatedColumnRef`, infer correlation from a matching name at runtime,
 or accept syntax on the assumption that the optimizer will decorrelate it.
 Nested subqueries are legal only when each nested block is independently
 uncorrelated from every lexical ancestor.
 
-A nested SELECT may omit FROM. It then receives its own §18.11.1 one-row,
-zero-column source and empty local relation namespace; no enclosing relation
-binding becomes visible.
+Correlation is outside the v1 SQL architecture; supporting executable
+correlated references requires an architecture revision.
+
+A nested SELECT may omit FROM under §18.11.1 syntax. It then receives its own
+§20.5 one-row, zero-column source and empty local relation namespace; no
+enclosing relation binding becomes visible.
 
 ### 20.14.3 Derived tables
 
@@ -17095,11 +17102,11 @@ dormant build does not start. If at least one active row reaches the IN
 operation, the complete build initializes once before any of those rows is
 probed. Later selections reuse it.
 
-### 20.14.7 Canonical logical and physical fallback
+### 20.14.7 Logical fallback and physical-planning handoff
 
 Each bound expression-subquery occurrence has one stable query-local identity
-and an independent logical child. The initial logical representation preserves
-one of three semantic modes:
+and an independent logical child. Its logical representation preserves one of
+three semantic modes:
 
 ```text
 SCALAR_ONE_VALUE
@@ -17111,49 +17118,29 @@ NOT wrappers remain ordinary bound Boolean nodes. The representation does not
 pretend the child is an ordinary local column expression, merge it with a
 different textual occurrence, or require a semi/anti join rewrite.
 
-Every executable v1 physical plan has a fallback side-plan role for each mode:
+Every supported expression-subquery mode has a mandatory executable fallback
+that does not depend on a successful semi/anti/marker rewrite:
 
 ```text
-PhysicalScalarSubquery
-    lazily execute child
-    observe at most two final rows
-    own/copy the one result scalar, including VARCHAR bytes
+SCALAR_ONE_VALUE
+    preserve lazy demand and the zero/one/more-than-one contract of §20.14.4
 
-PhysicalExistsSubquery
-    lazily execute only existence-demanded child work
-    stop after first final row
-    store one BOOLEAN
+EXISTS_BOOLEAN
+    preserve lazy existence demand and projection irrelevance under §20.14.5
 
-PhysicalInSubqueryBuild
-    lazily consume complete final child result
-    build/deduplicate non-NULL values
-    record empty + has-NULL markers
-    expose vectorized probes
+IN_VALUE_SET
+    preserve complete final-child consumption and the match/NULL/empty state
+    required by §20.14.6
 ```
 
-These names are conceptual algorithm roles, not required C++ class names. Their
-children are ordinary vectorized physical subplans. Runtime state is held in
-the existing `QueryExecutionContext`/pipeline dependency graph and uses the
-ordinary query arena, memory manager, spill manager, cancellation, snapshot,
-and error channels. No row-at-a-time production executor or parameterized Apply
-subsystem is introduced.
-
-The IN build is query-memory accounted and spill-capable. It may reuse exact
-hash/DISTINCT equality plus partition spill or external sort/dedup machinery;
-either implementation must produce the same values/markers. Spill failure is
-`SpillIOError`; inability to obtain non-spillable control memory is
-`OutOfMemory`. Scalar/EXISTS retain only bounded own state, although their child
-operators may use ordinary blocking memory/spill.
-
-Every retained IN value/key owns its variable-length bytes in build/spill
-storage; no cached key may point into a recycled child DataChunk or unpinned
-page.
-
-After build/evaluation, scalar and EXISTS results are constant-like side inputs;
-IN is an immutable build side plus vectorized probe. A CONSTANT vector or
-equivalent side-input view may repeat scalar/BOOLEAN results over the currently
-demanded outer selection. Result VARCHAR bytes remain owned for the statement
-attempt. Derived tables remain ordinary DataChunk-producing relational plans.
+The fallback remains keyed by the bound occurrence and preserves the
+statement-attempt identity, Chapter-17 evaluation order, cardinality, 3VL,
+error, snapshot, and CommandId contracts in §§20.14.4–20.14.8. Section 22.4
+owns the physical operator vocabulary, while §37.17 owns physical subquery
+planning and selection among conforming fallback or exactly proven rewrite
+alternatives. Chapters 24–26 own physical memory, expression-state, and
+pipeline mechanics. Chapter 20 prescribes none of those implementation
+representations or algorithms.
 
 ### 20.14.8 Lazy statement-attempt ownership, snapshot, and CommandId
 
@@ -17353,9 +17340,10 @@ Limit/Offset
 
 The optimizer may transform this only when it proves semantic equivalence.
 
-The no-FROM source and its edge cases are canonical in §18.11.1. EXPLAIN
-exposes that Values source and ordinary operators, or an optimizer-equivalent
-shape with identical semantics; no dedicated no-FROM executor or user-visible
+Section 20.5 defines the no-FROM source and its exact row-occurrence semantics;
+§18.11.1 owns only the syntax that permits omission of FROM. EXPLAIN exposes
+that Values source and ordinary operators, or an optimizer-equivalent shape
+with identical semantics; no dedicated no-FROM executor or user-visible
 pseudo-relation exists.
 
 ## 20.16 Logical properties
@@ -17382,11 +17370,12 @@ NOT NULL              -> non-nullable base output
 LEFT JOIN right side  -> nullable output
 ```
 
-Such properties may support later optimization, but a rewrite based on them is not valid until its semantic proof/test exists.
+Such properties may support optimization, but a rewrite based on them is not valid until its semantic proof exists.
 
 Estimated cardinality and semantic emptiness are distinct properties. The canonical separation, approved proof sources, and statistics prohibition are defined by §35.2. Logical property derivation may preserve or compose a proof according to §20.17.10, but it MUST NOT derive one from a numerical estimate.
 
-Logical properties do not substitute for the later physical-property system.
+Logical properties do not substitute for the physical-property contracts in
+§§22.7 and 37.2–37.4.
 
 ## 20.17 Logical rewrites
 
@@ -17505,9 +17494,9 @@ remain independent requirements.
 
 Fold a subtree only when it is composed entirely of constants and uses entries
 from the closed §17 scalar registry. Result, error, binary64 rounding, NULL/3VL,
-and skipped-branch behavior are exactly §17.10.2. Future VOLATILE functions are
-never folded, and future STABLE functions are not immutable compile-time
-constants.
+and skipped-branch behavior are exactly §17.10.2. Under the frozen scalar
+registry, VOLATILE functions are never folded and STABLE functions are not
+immutable compile-time constants.
 
 ### 20.17.2 Boolean simplification
 
@@ -17674,7 +17663,7 @@ Contradiction propagation or an empty replacement must also preserve that
 demand, or carry an exact §20.17 proof that every changed evaluation is
 insensitive.
 
-These are semantic proofs only when they use exact typed constants, Chapter-17 type semantics, and trusted currently enforced catalog constraints. Statistics-derived min/max, NDV, MCV, histogram, HLL, NULL fraction, row count, or estimated join domains are not constraints and cannot participate in this contradiction proof.
+These are semantic proofs only when they use exact typed constants, Chapter-17 type semantics, and trusted enforced catalog constraints. Statistics-derived min/max, NDV, MCV, histogram, HLL, NULL fraction, row count, or estimated join domains are not constraints and cannot participate in this contradiction proof.
 
 Derived predicates retain ordinary SQL NULL semantics.
 
@@ -17695,7 +17684,9 @@ GROUP BY key properties
 
 Low estimated NDV is never treated as proof of uniqueness.
 
-Foreign-key-based rewrites and join elimination remain deferred until those constraints and semantic proofs exist.
+Foreign-key-based rewrites and join elimination are outside the v1 trusted-proof
+surface because their required enforced constraints and semantic proofs are not
+part of that surface.
 
 ### 20.17.10 Semantic-emptiness propagation
 
@@ -17761,7 +17752,8 @@ an exact §20.17 proof establishes that every demand difference is insensitive.
 
 ## 20.18 Logical-plan validation
 
-Validation runs after initial logical planning and after major rewrite phases.
+Validation runs after canonical logical-plan construction and after major
+rewrite phases.
 
 At minimum it checks:
 
@@ -17802,7 +17794,8 @@ Malformed logical plans are architecture errors detected before execution, not c
 
 Logical plans have an AST-independent debug representation.
 
-Before physical planning exists, EXPLAIN can print a tree such as:
+Logical EXPLAIN describes the validated logical representation. An illustrative
+logical tree is:
 
 ```text
 Limit 10
@@ -17817,6 +17810,10 @@ Limit 10
 Debug detail may include `LogicalSlotId`, `TableId`, `BindingId`, types, nullability, lineage, and a provably-empty proof kind distinct from estimated rows.
 
 The logical EXPLAIN representation does not depend on reparsing or pretty-printing the original AST.
+
+Sections 40.2, 40.5, and 40.8 own EXPLAIN presentation and the relationship
+between logical, selected physical, and execution-analysis information;
+Chapter 20 defines only the logical representation being described.
 
 ## 20.20 Logical-plan/rewrite invariants
 
