@@ -15802,8 +15802,20 @@ must resolve under the closed registries and TypeResolver rules. Thus
 authorize an unregistered coercion or overload.
 
 For any registry state admitting multiple equally legal descriptors, the
-registry and TypeResolver must define one deterministic winner or reject the
-ambiguity; descriptor/container iteration order is never semantic authority.
+registry and TypeResolver must define one deterministic winner. If no legal
+descriptor remains for the canonical name, call shape, arity, star/nonstar
+form, or bound argument types—or if equally legal descriptors remain without
+an owner-defined winner—binding produces `TypeError` under §§17.9.3 and
+17.10.1. Thus unknown calls, wrong arity, unauthorized star forms including
+`SUM(*)` and `foo(*)`, argument-type incompatibility, and unresolved overload
+ambiguity are TypeError rather than BindError or ParserError.
+
+Call arguments are prerequisites for registry/type resolution. If an argument
+itself fails to bind, that prerequisite error is returned without fabricating
+a call TypeError from a nonexistent argument type. Conversely, a successfully
+resolved aggregate used in a forbidden context is an aggregate-placement
+`BindError` under §19.10, not a registry TypeError. Descriptor/container
+iteration order is never semantic authority.
 
 Functions resolve through descriptors containing at least:
 
@@ -16034,14 +16046,39 @@ unsupported-semantic category remains authoritative. Successful binding
 produces one INT64-normalized count expression represented explicitly by
 §20.12 rather than hidden inside a scan.
 
-Chapter 17's mandatory constant folding and dominant-error timing remain
-authoritative during binding. After successful binding/folding, the resulting
-count expression is evaluated exactly once at execution start before any
-relational operator in the statement produces or consumes rows. Arithmetic
-and cast failures retain their Chapter-17 categories and occur at the timing
-required by §17.10.2; after successful execution-start scalar evaluation, NULL
-or a negative value produces `ExecutionError` at the count-expression
-SourceSpan. Values are never clamped or interpreted as zero.
+The canonical binding pipeline is:
+
+1. bind the raw count expression;
+2. enforce execution-start-constant eligibility;
+3. enforce the integral target context and INT64 normalization;
+4. apply every mandatory Chapter-17 scalar fold and constant-error timing rule
+   under §17.10.2; and
+5. retain the resulting folded/residual bound count expression for execution.
+
+The folded/residual expression is the bound scalar representation remaining
+after mandatory folding. It may be a literal constant or another admitted
+execution-start-constant form that Chapter 17 does not require to become a
+literal. Execution does not retain and reevaluate the original pre-fold source
+tree merely to obtain the count.
+
+A dominating constant scalar error occurs during binding with its Chapter-17
+category. For example, `LIMIT 1/0` produces `DIVISION_BY_ZERO`, and
+`LIMIT 9223372036854775807+1` produces `NUMERIC_OVERFLOW`, during binding;
+`LIMIT 1+2` instead folds to the semantic INT64 value `3`.
+
+At execution start, before any relational operator in the statement produces
+or consumes rows, the engine obtains the final count exactly once from the
+folded/residual representation. This is one execution-start count acquisition,
+not a claim that mandatory folding performed no earlier scalar work. Scalar
+work already completed during binding is not repeated.
+
+After that acquisition, NULL or a negative INT64 produces `ExecutionError` at
+the count-expression SourceSpan; a nonnegative INT64 is accepted. Thus
+`LIMIT NULL` binds/folds as typed `INT64 NULL` and fails final-domain validation
+at execution start, while `LIMIT -1` may fold to INT64 `-1` and fails at that
+same boundary. Final count-domain validation alone does not turn NULL or a
+negative value into a binding-time error. Values are never clamped or
+interpreted as zero.
 
 The normalized valid domain is nonnegative INT64. No additional
 implementation-sized row-count maximum is a SQL semantic limit; inability to
@@ -16121,7 +16158,7 @@ user errors.
 |---|---|
 | `CatalogError` | missing table/index, DROP wrong object kind, create-name/object collision, or another catalog-object lookup failure owned by catalog semantics |
 | `BindError` | unknown/ambiguous column, unknown qualifier/member, duplicate local relation qualifier, ambiguous ORDER BY output alias, invalid/out-of-range ORDER BY ordinal, illegal aggregate placement or nesting, grouped-query/HAVING legality, nonconstant LIMIT/OFFSET, duplicate INSERT target, duplicate UPDATE assignment, duplicate CREATE INDEX key, and other name/scope/semantic-shape failures not assigned a more specific category |
-| `TypeError` | unknown type name, operator/cast/coercion mismatch, non-BOOLEAN predicate, incompatible CASE/IN common type, resolved-call argument type mismatch, nonintegral LIMIT/OFFSET, or index-ineligible key type |
+| `TypeError` | unknown type name; operator/cast/coercion mismatch; non-BOOLEAN predicate; incompatible CASE/IN common type; generic scalar/aggregate call with no legal name/shape/arity/star descriptor; resolved-call argument mismatch; unresolved overload ambiguity; nonintegral LIMIT/OFFSET; or index-ineligible key type |
 | `ConstraintDefinitionError` | invalid CREATE TABLE constraint definition, including missing/repeated PK/UNIQUE member, multiple PRIMARY KEY declarations, and §21.12 default-definition restrictions |
 | `UnsupportedFeature` | `UnsupportedCorrelation` and every other explicitly frozen unsupported semantic surface |
 | `CardinalityError` | runtime scalar-subquery row cardinality and other existing cardinality owners; binding does not move those runtime checks earlier |
@@ -16162,6 +16199,9 @@ Among genuine candidate errors, the binder returns exactly one using:
 ```
 
 An existing more-specific owner keeps any priority it explicitly defines.
+Call registry/type failures belong to class 4; a successfully resolved
+aggregate's illegal placement belongs to class 2. The prerequisite rule keeps
+an argument's name-resolution failure from fabricating a later call TypeError.
 This rule orders independent source-originating binding diagnostics; it does
 not reorder resource failure, cancellation, or runtime failure timing. Binder
 traversal, hash/catalog container iteration, pointer addresses, allocation
@@ -16191,7 +16231,7 @@ layout, and thread scheduling MUST NOT select the returned semantic error.
 20. Non-BOOLEAN predicate contexts are rejected.
 21. Aggregate query-block ownership, placement, nesting, and structural grouping legality are validated before execution.
 22. Grouping legality does not infer algebraic equivalence or functional dependencies.
-23. LIMIT/OFFSET is an INT64-normalized execution-start constant; after required Chapter-17 binding/folding succeeds, its residual value is obtained once before relational row processing.
+23. LIMIT/OFFSET is an INT64-normalized execution-start constant; §17.10.2 folds or reports mandatory constant errors during binding, and execution obtains the folded/residual count once before relational row processing without reevaluating the pre-fold tree.
 24. DISTINCT remains an explicit relational semantic requirement under §20.10.
 25. CASE and IN preserve SQL NULL/three-valued behavior.
 26. INSERT, UPDATE, DELETE, and RETURNING use only their declared §19.4.3 namespaces and Chapter-21 row images.
