@@ -9022,6 +9022,1499 @@ independent binding oracles.
 
 ---
 
+### Chapter 20 Logical-Planning and Relational-Semantics Verification
+
+This section is the complete procedural owner for the logical-planning and relational-
+semantics contract in [`ARCHITECTURE.md`](ARCHITECTURE.md) Chapter 20. Chapters 16–19
+supply catalog identity, scalar semantics, source provenance, and fully bound input;
+Chapter 29 supplies aggregate value and ordinal semantics. Sections 22.4, 27.9, 30.1,
+30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, and 40.8 own the stated
+downstream composition points. These procedures verify Chapter 20 without redefining
+those owners or prescribing a logical-node representation, optimizer framework, or
+physical algorithm.
+
+#### Deterministic logical-semantics harness
+
+Use a fixture driver whose input is one fully bound Chapter-19 statement and an immutable
+catalog/snapshot model. The fixture controls:
+
+```text
+bound input:
+    query-block and statement structure
+    BindingIds and bound column references
+    bound scalar trees, types, nullability, casts, SourceSpans, and diagnostic origins
+    aggregate descriptors and canonical aggregate ordinals
+    ordered output aliases/metadata and ORDER output identities
+    folded/residual LIMIT/OFFSET expressions and validated INT64 counts
+
+catalog/snapshot:
+    immutable TableDescriptor/SchemaDescriptor identities and SchemaVer
+    TableId, ColumnId, presentation order, catalog nullability
+    transaction-visible logical base-row occurrences
+
+logical construction:
+    node kind and child relation
+    ordered output schema and LogicalSlotId equivalence relation
+    fresh, pass-through, and remapped slot events
+    row-occurrence bag and semantic-order property
+    logical nullability and lineage
+    aggregate and subquery occurrence entries
+
+rewrite:
+    canonical pre-rewrite tree
+    demanded-evaluation relation over logical occurrences
+    exact semantic proof facts and their provenance
+    executable scalar tree and non-executable metadata
+    post-rewrite tree, output mapping, aggregate mapping, and diagnostic mapping
+
+observable result:
+    output schema and slot-identity relation
+    row bag, or ordered occurrence sequence where semantic order exists
+    value / NULL / UNKNOWN result
+    logical error category, canonical diagnostic origin, and frozen precedence
+    aggregate ordinal and source-occurrence identity
+```
+
+Instrumentation records conceptual semantic events; it is not a required production API.
+The harness MAY use deterministic adapters, immutable fixture nodes, generation-tagged
+occurrence handles, and injected exact-proof facts. It MUST NOT use production planner,
+optimizer, validator, expression evaluator, hash table, comparator, or EXPLAIN output as
+the expected-result generator for the same behavior being checked.
+
+For representation perturbation, replay each applicable fixture while varying allocator
+layout, pointer addresses, opaque ID encodings, map/hash insertion order and seed, memo or
+rule visitation order, scheduler interleaving, vector/chunk boundaries, physical scan
+order, and conforming physical operator choice. No correctness procedure uses sleeps,
+wall-clock races, host container order, or byte-for-byte row sequence where Chapter 20
+defines only an unordered bag or tie-equivalence class.
+
+Canonical comparison alpha-renames opaque `BindingId`, `LogicalSlotId`, subquery-
+occurrence, and proof-node representations while preserving their equality, inequality,
+scope, nonreuse, lineage, and mapping relations. It compares ordered schema positions,
+semantic order only where required, and row occurrences by a fixture-only occurrence tag
+that is not part of SQL values.
+
+#### Independent oracle registry
+
+| Oracle | Independent construction |
+|---|---|
+| bound-to-logical | declarative translation of Chapter-19 semantic records; no SQL-name lookup |
+| schema | ordered list algebra over child schemas and node-local output declarations |
+| slot identity | whole-statement occurrence graph with an append-only retired-ID set and alpha-renaming |
+| node slot rules | declarative fresh/pass-through/remap table applied to ordered child/output occurrences |
+| lineage | tuple `(query block, BindingId, TableId, ColumnId, descriptor/SchemaVer, boundary map)` where applicable |
+| bag | mathematical multiset over fixture-only row-occurrence tags plus SQL values |
+| visible Get rows | Chapter-16/snapshot visibility fixture projected to one occurrence per visible logical row |
+| Values rows | source-list row-occurrence enumeration preserving repeated value tuples |
+| no-FROM | singleton multiset containing one zero-column occurrence |
+| Filter | per-occurrence Chapter-17 3VL selector |
+| Project | ordered expression-vector constructor producing one tagged row per input occurrence |
+| join candidate pairs | explicit finite `L × R` occurrence-pair enumeration |
+| LEFT extension | per-left TRUE-match count with one extension exactly when the count is zero |
+| join schema | left/right ordered-list concatenation over complete child schemas |
+| nullability | declarative schema transform that distinguishes catalog and contextual logical nullability |
+| grouping | runtime partition by Chapter-17 normalized non-NULL equality plus one NULL class per key position |
+| DISTINCT | one representative occurrence per independently computed grouping-equivalence class |
+| NULL equivalence | explicit NULL-class table distinct from predicate `=` |
+| FLOAT equivalence | canonical NaN and signed-zero normalization before class partitioning |
+| global group | constant one-group cardinality for no-key aggregation, including empty input |
+| explicit-group empty | constant zero-group cardinality for empty input with grouping keys |
+| aggregate occurrence | source-occurrence/ordinal table from Chapter 19 and §29.3.7, separate from aggregate values |
+| aggregate value/error | existing Chapter-29 exact-state and lowest-ordinal oracle |
+| aggregate ordinal propagation | immutable query-block source-occurrence table compared before and after rewrite |
+| ordering | §30.3 comparator model followed by equivalence classes for unspecified ties |
+| ordered Limit | exact sequence slicing after OFFSET and before LIMIT |
+| unordered Limit | child-multiset subbag predicate plus exact cardinality formula |
+| scalar subquery | final-row cardinality state machine with typed-empty, one-row, and second-row outcomes |
+| EXISTS | final-row existence state machine that omits projection-only value demand |
+| IN/NOT IN | repeated Chapter-17 equality 3VL fold over the complete final RHS multiset |
+| derived table | child-bag preservation plus explicit child/outer slot-and-name boundary map |
+| derived order | consumer-visible ordering-property model distinct from physical child emission order |
+| demand | declarative relation `(expression occurrence, relational occurrence, context)` over the unrevised canonical tree |
+| rewrite safety | pre/post observable-demand relation plus independently checked exact proof facts |
+| executable order | source-derived ordered scalar tree serialized without commutative normalization |
+| non-executable metadata | tagged metadata domain proven incapable of execution or diagnostics |
+| provenance | source-occurrence-to-origin map carrying SourceSpan, cast provenance, and precedence identity |
+| synthetic legality | exact total/error-free proof or one-source-origin inheritance predicate |
+| exact proof | closed §§20.17.10/35.2 proof calculus, disjoint from every estimate/statistic input |
+| validation | structural predicate over immutable fixture plans, independent of the production validator |
+| logical/physical boundary | owner ledger plus cross-realization semantic-equivalence comparison |
+| determinism | alpha-renamed canonical semantic serialization and allowed-result equivalence predicates |
+| ownership | cross-chapter responsibility ledger and documentation-model matrix below |
+
+#### V20-1 — Bound statement to canonical logical plan
+
+Feed the harness fully bound Chapter-19 statements. Assert that logical construction does
+not look up names, reinterpret aliases, reassign `BindingId`, re-resolve types/casts,
+reclassify ORDER aliases/ordinals, renumber aggregate occurrences, or repeat Chapter-19
+LIMIT/OFFSET admissibility and error decisions. Compare canonical pre-rewrite SELECT shape
+with §20.15, including the §20.5 no-FROM source, and compare DML relational children and
+hidden-slot requirements with §20.13 and their Chapter-21 handoff. The reference shape is
+semantic, not a physical execution sequence.
+
+#### V20-2 — Logical schema and semantic identities
+
+Construct expected output schemas as ordered semantic records containing slot identity,
+display metadata where applicable, logical type, logical nullability, lineage, and the
+system/internal flag. Verify that `LogicalSlotId` identifies one logical output occurrence
+and is unequal in meaning to `TableId`, `ColumnId`, `BindingId`, heap `SlotId`, output
+ordinal, aggregate ordinal, expression equivalence, pointer identity, and permanent vector
+position. Use one fixture in which all relevant identities and ordinals differ.
+
+#### V20-3 — Slot lifecycle, node rules, and rewrite stability
+
+Build one top-level statement containing a Get self-join, Values, duplicate projection,
+aggregate, nested scalar/EXISTS/IN side plans, derived table, and DML relational child.
+The occurrence-graph oracle requires whole-statement uniqueness with no query-block or
+side-plan reset. Retire an output through a legal rewrite, then create another output and
+assert nonreuse. Across separate statements, permit opaque representation reuse.
+
+Apply the exact node table:
+
+```text
+Get              fresh per exposed BindingId + ColumnId occurrence
+Values           fresh per output position
+Project          fresh per declared output position
+Aggregate        fresh per group-key output and aggregate occurrence
+derived boundary fresh outer slot with explicit child-to-outer mapping
+Filter           pass through
+Join             pass through left schema then right schema
+Distinct         pass through
+Sort             pass through
+Limit            pass through
+```
+
+For rewrites, preserve an ID only for the same surviving consumer-visible occurrence with
+the same definition, lineage, and semantic boundary. New or duplicated occurrences are
+fresh; removed IDs disappear and remain retired; boundary removal retains an explicit
+consumer mapping. Equivalent values alone are not identity.
+
+#### V20-4 — Bag baseline and logical sources
+
+Tag input occurrences independently of SQL values and compare mathematical multisets.
+Verify that equal rows remain separate occurrences and that multiplicity does not imply
+order. Get emits one occurrence per visible logical base row and excludes non-visible
+historical versions. Values emits one occurrence per listed row, preserves duplicates,
+and establishes no SQL order. The no-FROM source is exactly one zero-column occurrence.
+Only an operator's stated contract may remove, produce, or equivalence-collapse
+occurrences.
+
+#### V20-5 — Filter and Project
+
+For Filter, evaluate its predicate once in the oracle for each occurrence whose retention
+must be determined: TRUE maps to one output occurrence; FALSE and UNKNOWN map to none.
+For ordinary Project, evaluate every declared output expression for every produced input
+occurrence and emit exactly one projected occurrence, retaining equal projected rows as
+duplicates. Project output positions always receive fresh slots. Contrast ordinary
+Project demand with the specialized EXISTS projection-irrelevance family V20-13.
+
+#### V20-6 — INNER, LEFT, and CROSS occurrence semantics
+
+Enumerate finite `L × R` explicitly. INNER emits one output for each pair whose ON result
+is TRUE and none for FALSE/UNKNOWN. LEFT emits every TRUE pair and, for each left
+occurrence having zero TRUE pairs, exactly one right-NULL-extended occurrence; FALSE and
+UNKNOWN are nonmatches and no extra extension follows any TRUE match. CROSS emits every
+pair without an ON predicate. Include duplicate values/occurrences, `m*n` multiplicity,
+and the complete empty-side matrix. Predicate errors use the V20-15 demand relation rather
+than a physical pair-generation order.
+
+#### V20-7 — Join schema, nullability, and row order
+
+Compute join schema as the complete left child schema followed by the complete right child
+schema. Preserve all child slots. For LEFT, change only contextual logical nullability of
+right outputs; retain type, `BindingId`, slot, lineage, descriptor, and catalog `NOT NULL`.
+Compare join results only as bags: no nested-loop, hash, merge, left-major, right-major,
+RID, or scan sequence is semantic.
+
+#### V20-8 — DISTINCT, grouping, global group, and HAVING
+
+Partition rows with the grouping-equivalence oracle, not SQL predicate `=` and not a
+production hash/comparator. NULLs share one class, both zeros share one FLOAT64 class,
+all canonical NaNs share one class, VARCHAR compares exact bytes, and composite keys apply
+the rule componentwise. DISTINCT emits one occurrence per class and preserves schema and
+slots. Aggregate grouping emits one row per group; no-key aggregation over empty input
+forms one group, explicit grouping over empty input forms none. HAVING retains only TRUE.
+Keep Chapter-19 structural group-expression legality separate from runtime value grouping.
+
+#### V20-9 — Aggregate occurrence identity and sharing
+
+Compare each `LogicalAggregate` entry with the Chapter-19/§29.3.7 source-occurrence table.
+Every distinct source occurrence keeps its canonical query-block ordinal and has a fresh
+output slot even when descriptor, arguments, type, and value are identical. ORDER alias
+reuse consumes the existing output. Rewrites do not renumber, compact, reuse, merge,
+duplicate one occurrence under one ordinal, or move it across a query block; legal removal
+leaves surviving ordinals unchanged. A conceptual shared physical computation passes only
+when the mapping retains every logical occurrence, slot, ordinal, origin, output, and the
+lowest-ordinal Chapter-29 error selection.
+
+#### V20-10 — Sort and unordered results
+
+Use bound key order, direction, resolved NULL placement, and the §30.3 SQL/FLOAT
+comparator. Assert `ASC -> NULLS FIRST` and `DESC -> NULLS LAST`, preserve the exact input
+bag and slots, and compare rows equal on every key as an unordered tie class under §30.1.
+Without a semantic ordering operator, compare final results as bags; scan, join, hash,
+page, RID, and container order are never an SQL order oracle.
+
+#### V20-11 — LogicalLimit
+
+Supply only Chapter-19-admitted count expressions and their execution-start validated
+nonnegative INT64 values. Independently apply OFFSET first:
+
+```text
+after_offset = max(0, n - o)
+without LIMIT: output_count = after_offset
+with LIMIT:    output_count = min(after_offset, l)
+```
+
+Never compute `o+l`. Ordered input uses exact sequence slicing and preserves survivor
+order. Unordered input accepts any child subbag of the exact resulting cardinality and
+remains unordered; compare with a subbag predicate, not a chosen physical prefix. Verify
+zero/oversized/INT64_MAX cases, no new error, no deduplication, and exact schema/slot/
+metadata preservation. Section 27.9 physical behavior and §35.20 estimates must conform
+to, not define, this logical oracle.
+
+#### V20-12 — Scalar subqueries
+
+Drive the independent child to final rows after all relational clauses. Zero rows yield a
+typed NULL, one row yields its scalar value, and successful construction of a second row
+raises `CardinalityViolation`/SQL `CardinalityError`. Errors constructing row one or two
+precede cardinality; after two successful rows, cardinality precedes later-row work. The
+consumer demands at most two final rows, but blocking work needed to produce them remains
+demanded. Remove the check only with exact final-cardinality-at-most-one proof; estimates
+and `required_rows` do not qualify.
+
+#### V20-13 — EXISTS, IN, and NOT IN
+
+EXISTS is non-null FALSE for no final row and TRUE after the first final row. Projection-
+only values, projection-only aggregate work, DISTINCT value construction, and removable
+ORDER-key values are not demanded solely for existence; FROM/WHERE/grouping/HAVING and
+OFFSET/LIMIT work needed to establish a row remains demanded. Include global aggregate,
+LIMIT 0, OFFSET, and erroring projection fixtures.
+
+For IN, evaluate the left scalar first on first demand, then consume and validate the
+complete final RHS before returning a probe result. Fold Chapter-17 equality results:
+TRUE if any TRUE, UNKNOWN if no TRUE and any UNKNOWN, otherwise FALSE. Cover empty RHS,
+left NULL, RHS NULL, duplicates, NaN, signed zero, VARCHAR, numeric promotion, and NOT as
+exact 3VL negation. RHS duplicates may be collapsed only because truth is unchanged.
+
+#### V20-14 — Subquery occurrence state, derived tables, and rewrites
+
+Each bound expression-subquery occurrence has one stable query-local identity, independent
+logical child, semantic mode, and at-most-once state per statement attempt initialized on
+first demand. Skipped CASE/AND/OR or empty outer input does not initialize it; a retry
+discards attempt state and uses the new statement snapshot while retaining CommandId.
+Children share the containing snapshot/ReadEpochGuard and consume no nested transaction,
+snapshot, CommandId, or lock owner.
+
+Derived-table verification requires a fresh outer-slot map, derived `BindingId`, exact
+child bag preservation, namespace isolation, and no advertised outer order merely from
+child execution order. Child ORDER affects LIMIT/OFFSET but does not create an outer SQL
+ordering guarantee. Correlated/row-valued/quantified/LATERAL/set/data-modifying forms have
+no executable plan. Compare every optimized subquery against the canonical semantic mode;
+rewrite support never depends on successful decorrelation or semi/anti/marker conversion.
+
+#### V20-15 — Demanded-evaluation oracle (D20-B1)
+
+Build the demand relation from the unrevised canonical logical semantics. Its key is an
+executable scalar occurrence plus the row, pair, group, ordering occurrence, or subquery
+control context for which evaluation is required. Cover Filter, ordinary Project, JOIN ON,
+group keys, aggregate arguments, HAVING, ORDER keys, scalar final rows, EXISTS existence
+work, IN left/build work, and Chapter-17 CASE/AND/OR skipping. CPU count, vector lanes,
+physical visitation, allocation, spill, and other resource use are not demand observables.
+
+#### V20-16 — Rewrite demand safety and exact proof
+
+For every rewrite, compare pre/post demand relations and semantic observables. Any added,
+removed, moved, or duplicated potentially observable evaluation requires either exact
+preservation or an independently validated proof over the complete changed domain that it
+is total, error-free, deterministic for the same bound values, and insensitive to the
+count/order change. Statistics, samples, selectivity, row-count estimates, costs,
+heuristics, and likely ranges never authorize correctness-sensitive change.
+
+Mandatory cases include unsafe and exactly safe predicate pushdown, ordinary projection
+pruning versus EXISTS projection irrelevance, Boolean simplification, constant folding,
+join-graph/equality metadata, propagation, trusted-key reasoning, contradiction detection,
+and exact-empty replacement. A proven empty result alone cannot erase a demanded
+potentially erroring expression. All rewrites additionally preserve bags, NULL/UNKNOWN,
+outer joins, order, slots, aggregate identity, diagnostic origin, and frozen precedence.
+
+#### V20-17 — Executable scalar order (D20-B2)
+
+Serialize executable trees in semantic child order and compare before/after. Arithmetic,
+comparison, AND, OR, CASE, and every other ordered scalar construct retain Chapter-17
+left-to-right and short-circuit order. Reject commutative swapping, associative
+reassociation, executable child sorting, and comparison reversal such as `a < b` to
+`b > a`. Permit canonicalized equality classes, proof/search keys, and descriptors only
+when they are non-executable, cannot raise an error, cannot own a user diagnostic, and do
+not replace or mutate the executable tree. Reuse §17.10.2 for authorized folding.
+
+#### V20-18 — Runtime diagnostic provenance (D20-M6)
+
+The independent origin table records each source-derived executable occurrence's
+canonical SourceSpan, explicit/implicit cast provenance, more-specific error-origin data,
+and precedence identity. Movement and structural sharing preserve one origin; legal
+duplication copies it to every copy but remains D20-B1-controlled. An error-capable
+replacement preserves category, canonical origin, and precedence or is rejected.
+
+A spanless synthesized executable is accepted only with exact proof that it is total and
+error-free over its complete demand domain. An error-capable synthetic is accepted only
+when it implements exactly one identifiable source occurrence and inherits that origin
+and precedence. Non-executable metadata has no diagnostic span and cannot raise a scalar
+error. Representation as a set/list/graph is optional and never substitutes for
+deterministic diagnostic selection. Reuse §17.10.2 folding provenance and Chapter-18
+retain-or-materialize lifetime procedures; source-buffer retention is not required.
+
+#### V20-19 — Logical properties and exact semantic proof
+
+Check candidate keys, constants, lineage, nullability, semantic order, estimated rows, and
+`is_provably_empty` as distinct properties. The exact-proof oracle accepts only the closed
+§§20.17.10/35.2 sources and applies every operator-specific propagation rule, including
+LEFT preservation, global aggregate one-row behavior, grouped aggregate behavior,
+Limit-zero, and DML completion semantics. Perturb every statistic and estimate while
+holding exact facts fixed; no proof bit or correctness rewrite may change. Logical
+properties remain distinct from physical ordering/partitioning and cost/search objectives.
+
+#### V20-20 — Logical-plan validation
+
+Construct malformed immutable plans directly, one violated invariant at a time, with all
+other descriptors valid. Use the independent structural predicate to require every
+§20.18 invariant: child count and schema, whole-statement slot uniqueness/nonreuse,
+node-specific slot rules and references, resolved types/BOOLEAN predicates, aggregate
+ordinal/output identity, join schema/right nullability, Limit pass-through, hidden DML
+slots, descriptor consistency, exact-proof provenance, supported subquery shape, rewrite
+demand proof, executable diagnostic origin, and child order. Positive fixtures for every
+node family prevent a reject-all validator from passing. Validate canonical construction
+and each major rewrite output before physical consumption.
+
+#### V20-21 — DML, maintenance, and hidden logical values
+
+Verify that internal target RID/system slots are not exposed through wildcard or ordinary
+user output and survive while required. Insert accepts Values or SELECT through one
+logical contract. Update carries target identity, RID, old values, assignments, and
+RETURNING requirements; Delete preserves target RID and required old values. Analyze
+carries the resolved table descriptor, SchemaVer, visible columns/indexes, has no ordinary
+relational output, and performs no execution-time name lookup. These tests stop at the
+Chapter-20 handoff and do not redefine Chapter-15/21 write semantics.
+
+#### V20-22 — Logical/physical and EXPLAIN ownership
+
+Replay one logical plan through multiple conforming physical choices. Logical schema,
+bag/order class, demand, error, and provenance remain fixed while access path, join/sort/
+Limit algorithm, pipeline layout, vector width, partitioning, and memory strategy vary.
+Supported subqueries always retain a conforming §20.14.7 fallback; §37.17 chooses physical
+realization. Logical EXPLAIN describes the validated logical representation and exposes
+identity sufficient to distinguish required modes/boundaries without becoming an oracle
+for semantics; §§40.2, 40.5, and 40.8 own presentation and physical/analysis information.
+
+#### V20-23 — Representation and environment determinism
+
+Canonical semantic serialization MUST remain equivalent under hash seed, map iteration,
+pointer/address, allocation order, opaque numeric ID representation, TableId/ColumnId
+numeric order, optimizer visitation, scheduler, source-buffer release, physical scan
+order, and conforming join/sort/aggregate/Limit realization. Where order is unspecified,
+compare bags or tie classes; where slot values are opaque, compare the identity graph.
+These perturbations may affect costs, resource use, and allowed unordered choices but not
+the required semantic equivalence class or diagnostic origin.
+
+#### V20-24 — Error and diagnostic composition
+
+Inject deterministic scalar errors at Filter, Project, JOIN ON, group key, aggregate
+argument/finalization, HAVING, ORDER key, scalar subquery rows, IN build, and each rewrite
+boundary. Compare the unrevised demand/origin/precedence oracle and §§39.1–39.3 category
+owner. A logical validator defect remains an internal architecture error. Verification of
+transaction consequences delegates to the existing statement-write-boundary family and
+does not let logical planning choose ACTIVE versus MUST_ABORT.
+
+#### V20-25 — Cross-chapter composition and mandatory matrices
+
+Run every matrix below and the cross-chapter owner ledger. Reused lower-layer procedures
+are accepted only when their owning family is already COMPLETE and the V20 fixture checks
+the Chapter-20 handoff. Architecture prose, a production implementation, or a reference
+DBMS is not an oracle.
+
+#### V20-26 — Documentation-model verification
+
+Audit this section and its cross-references for analytical, timeless, deterministic
+procedures. It contains no implementation progress, phase narration, source/class layout,
+optimizer framework, physical algorithm mandate, historical result count, sleep-based
+race, or architecture invention. Every procedure states how to verify a frozen contract
+and leaves opaque identity, allocator, container, memo, execution, and provenance
+representation choices free.
+
+#### V20-27 — Atomic closure
+
+The coverage ledger below is generated from a complete reread of final Chapter 20, not a
+target count. A row is COMPLETE only when its named V20 procedure or a precise already-
+complete lower-layer family supplies both a deterministic procedure and an independent
+oracle. Closure requires every row COMPLETE and zero PARTIAL, MISSING, or CONTRADICTORY
+rows.
+
+#### Mandatory Chapter-20 matrices
+
+The matrix cells are expected semantic results, not production implementation sketches.
+Each row is exercised directly and through every applicable rewrite, provenance, and
+determinism perturbation family.
+
+##### LogicalSlotId matrix
+
+| Case | Producer | Fresh/pass-through/remap | BindingId | ColumnId lineage | Uniqueness domain | Survives rewrite? | Persistent? |
+|---|---|---|---|---|---|---|---:|
+| base Get output | Get | fresh | base occurrence | exact source column | whole statement | while same output survives | no |
+| self-join left | left Get | fresh | left occurrence | same source allowed | whole statement | same occurrence only | no |
+| self-join right | right Get | fresh | right occurrence | same source allowed | whole statement | same occurrence only | no |
+| Values column | Values | fresh | n/a | n/a | whole statement | same output position only | no |
+| direct-column Project | Project | fresh | lineage retained | source column retained | whole statement | Project occurrence only | no |
+| duplicate Project output | Project | fresh per position | lineage may match | lineage may match | whole statement | positions remain distinct | no |
+| equivalent Project expression | Project | fresh per position | lineage may match | lineage may match | whole statement | equivalence does not merge | no |
+| Filter output | Filter | pass-through | unchanged | unchanged | whole statement | yes | no |
+| Join left output | Join | pass-through | unchanged | unchanged | whole statement | yes | no |
+| Join right output | Join | pass-through | unchanged | unchanged | whole statement | yes | no |
+| Aggregate group key | Aggregate | fresh | retained in lineage where applicable | retained in lineage where applicable | whole statement | same aggregate output only | no |
+| Aggregate occurrence | Aggregate | fresh | source lineage where applicable | source lineage where applicable | whole statement | distinct from ordinal | no |
+| Distinct | Distinct | pass-through | unchanged | unchanged | whole statement | yes | no |
+| Sort | Sort | pass-through | unchanged | unchanged | whole statement | yes | no |
+| Limit | Limit | pass-through | unchanged | unchanged | whole statement | yes | no |
+| derived child output | child plan | existing child identity | child scope | child lineage | whole statement | while child occurrence survives | no |
+| derived outer output | SubqueryScan boundary | remap fresh | derived relation | mapped child lineage | whole statement | explicit boundary map | no |
+| nested scalar side-plan output | side plan | node rule | side-plan scope | as produced | whole statement | same occurrence only | no |
+| surviving rewrite output | rewrite | preserve | unchanged | unchanged | whole statement | yes, same definition/lineage/boundary | no |
+| duplicated rewrite output | rewrite | fresh duplicate | mapped | mapped | whole statement | original and duplicate differ | no |
+| eliminated output | rewrite | retire | n/a | n/a | whole statement | no; ID never reused | no |
+
+##### Bag/occurrence matrix
+
+| Operator/case | Input occurrence rule | Output occurrence rule | Duplicate preservation | Equivalence collapse? | Order effect |
+|---|---|---|---|---:|---|
+| Get | visible logical base rows | one per visible row | equal rows retained | no | none |
+| Values | listed rows | one per listed row | repeated rows retained | no | none from source position |
+| no-FROM | no relational input | one zero-column row | n/a | no | none |
+| Filter TRUE | one input occurrence | one output occurrence | retained independently | no | none established |
+| Filter FALSE | one input occurrence | zero | occurrence removed | no | none |
+| Filter UNKNOWN | one input occurrence | zero | occurrence removed | no | none |
+| Project | one input occurrence | one projected occurrence | equal projected rows retained | no | none established |
+| INNER JOIN | every `L × R` pair | one per TRUE pair | full pair multiplicity | no | none |
+| LEFT JOIN | each left and every right candidate | TRUE pairs or one extension | full matches/left preservation | no | none |
+| CROSS JOIN | every `L × R` pair | one per pair | full Cartesian multiplicity | no | none |
+| Aggregate | input bag | one per runtime group | inputs combine by group | yes, grouping | group order unspecified |
+| Distinct | input bag | one per equivalence class | one representative class occurrence | yes | none |
+| Sort | input bag | identical occurrence multiset | all retained | no | semantic key order |
+| Limit | child occurrences | exact selected sequence/subbag | selected duplicates remain duplicates | no | preserves ordered input; unordered stays unordered |
+| derived table | child bag | same child multiplicity | all retained | no | child order not exported by itself |
+
+##### Join matrix
+
+| Case | Candidate occurrences | Output multiplicity | NULL extension | Schema | Slot behavior | Logical order |
+|---|---|---:|---|---|---|---|
+| INNER TRUE | one exact left/right occurrence pair | one | none | left then right | pass-through | none |
+| INNER FALSE | one exact pair | zero | none | left then right | pass-through | none |
+| INNER UNKNOWN | one exact pair | zero | none | left then right | pass-through | none |
+| INNER duplicate matches | every duplicate occurrence pair | one per TRUE pair | none | left then right | pass-through | none |
+| LEFT zero match | all right candidates for one left | one | exactly one right-side extension | left then right | pass-through | none |
+| LEFT one match | all right candidates for one left | one matched row | none | left then right | pass-through | none |
+| LEFT multiple match | all right candidates for one left | number of TRUE pairs | none | left then right | pass-through | none |
+| LEFT FALSE-only | all right candidates for one left | one | exactly one | left then right | pass-through | none |
+| LEFT UNKNOWN-only | all right candidates for one left | one | exactly one | left then right | pass-through | none |
+| CROSS | every `L × R` occurrence pair | one per pair | none | left then right | pass-through | none |
+| empty left | no candidate pairs | zero for every join type | none | still left then right | pass-through | none |
+| empty right | no candidate pairs | INNER/CROSS zero; LEFT one per left | LEFT only | left then right | pass-through | none |
+
+##### Nullability matrix
+
+| Output | Catalog nullability | Logical nullability | TypeId | Source lineage | Reason |
+|---|---|---|---|---|---|
+| Get NOT NULL column | NOT NULL | non-nullable | unchanged | exact source | descriptor contract |
+| Get nullable column | nullable | nullable | unchanged | exact source | descriptor contract |
+| Filter output | unchanged | child value | unchanged | unchanged | schema-preserving selector |
+| Project scalar | source metadata unchanged | bound expression result | resolved expression TypeId | expression lineage | new projected occurrence |
+| INNER left | unchanged | left child value | unchanged | unchanged | no null extension |
+| INNER right | unchanged | right child value | unchanged | unchanged | no null extension |
+| LEFT left | unchanged | left child value | unchanged | unchanged | preserved side |
+| LEFT right | unchanged, including NOT NULL | nullable | unchanged | unchanged | unmatched-row null extension |
+| Aggregate output | descriptor/source unchanged | bound key/aggregate result | resolved output TypeId | aggregate/key source | fresh aggregate output |
+| scalar subquery | child metadata unchanged | always nullable | child output TypeId | subquery occurrence | zero rows yield typed NULL |
+| derived table | child/catalog metadata unchanged | exported child logical value | unchanged | child-to-outer map | namespace/slot boundary |
+
+##### DISTINCT matrix
+
+| Values | Equivalent? | Output multiplicity | Owner/order |
+|---|---:|---:|---|
+| identical non-NULL | yes | one/class | Chapter-17 normalized equality; no order |
+| NULL / NULL | yes | one/class | §20.9 grouping equivalence |
+| NULL / non-NULL | no | separate | §20.9 |
+| NaN / NaN | yes | one/class | canonical FLOAT64 equality |
+| +0.0 / -0.0 | yes | one/class | canonical FLOAT64 equality |
+| byte-identical VARCHAR | yes | one/class | exact bytes |
+| byte-distinct VARCHAR | no | separate | exact bytes |
+| composite equal/different | componentwise | one/class | all key positions |
+
+##### Grouping matrix
+
+| Case | Same group? | Group count | Output row count | Aggregate invocation | Retained? |
+|---|---:|---:|---:|---|---:|
+| equal normal key | yes | one class | one/group | one state/group | yes |
+| unequal key | no | two classes | two | one state/class | yes |
+| NULL / NULL | yes | one NULL class | one | one state | yes |
+| NaN / NaN | yes | one NaN class | one | one state | yes |
+| +0.0 / -0.0 | yes | one zero class | one | one state | yes |
+| multi-column equal | componentwise yes | one tuple class | one | one state | yes |
+| multi-column one difference | no | two tuple classes | two | one state/class | yes |
+| zero input + GROUP BY | n/a | zero | zero | no runtime group | n/a |
+| zero input + global aggregate | n/a | one | one | one global state/finalize | yes |
+| HAVING TRUE | n/a | preexisting | one/group | already formed | yes |
+| HAVING FALSE | n/a | preexisting | zero for group | already formed | no |
+| HAVING UNKNOWN | n/a | preexisting | zero for group | already formed | no |
+
+##### Order matrix
+
+| Case | Comparator | NULL placement | Tie rule | Semantic order? | Legal alternative sequences |
+|---|---|---|---|---:|---|
+| ASC normal | §30.3 ascending | resolved per key | no stability beyond keys | yes | every key-consistent sequence |
+| DESC normal | §30.3 descending | resolved per key | no stability beyond keys | yes | every key-consistent sequence |
+| ASC NULL | §30.3 | NULLS FIRST | NULL peers tie when other keys tie | yes | permutations within full-key ties |
+| DESC NULL | §30.3 | NULLS LAST | NULL peers tie when other keys tie | yes | permutations within full-key ties |
+| NaN | canonical FLOAT order | resolved per key | canonical NaNs tie | yes | NaN peer permutations |
+| +0.0/-0.0 | one canonical equality class | resolved per key | zeros tie | yes | either zero-peer order |
+| equal single key | §30.3 | resolved | no stable relative order | yes | any full-key tie permutation |
+| equal prefix + secondary key | lexicographic key sequence | per key | secondary/following keys decide | yes | only final full-key ties vary |
+| no ORDER BY | none | n/a | n/a | no | every bag-equivalent sequence |
+
+##### LIMIT/OFFSET matrix
+
+| Case | `after_offset` | Output count | Ordered selection | Unordered allowed bag | Schema preserved? | Slots preserved? | New error? |
+|---|---:|---:|---|---|---:|---:|---:|
+| OFFSET 0 | `n` | remaining or limited | unchanged prefix basis | whole child or limited subbag | yes | yes | no |
+| LIMIT 0 | `n` after offset | `0` | empty | empty | yes | yes | no |
+| LIMIT 1 | `max(0,n-o)` | `min(after_offset,1)` | next one | any one-member subbag if available | yes | yes | no |
+| offset only | `max(0,n-o)` | `after_offset` | ordered suffix | any child subbag of count | yes | yes | no |
+| limit only | `n` | `min(n,l)` | ordered prefix | any child subbag of count | yes | yes | no |
+| offset + limit | `max(0,n-o)` | `min(after_offset,l)` | skip then take | any valid exact-count subbag | yes | yes | no |
+| offset >= n | `0` | `0` | empty | empty | yes | yes | no |
+| limit > remaining | `max(0,n-o)` | `after_offset` | all remainder | any valid remainder-count subbag | yes | yes | no |
+| INT64_MAX counts | formula without `o+l` | formula result | semantic slice | exact-count subbag | yes | yes | no |
+| ordered child | formula | formula result | exact sequence slice | n/a | yes | yes | no |
+| unordered child | formula | formula result | n/a | any valid child subbag | yes | yes | no |
+| empty child | `0` | `0` | empty | empty | yes | yes | no |
+
+##### Subquery matrix
+
+| Case | Demanded? | Output | NULL/3VL | Cardinality/error | Multiplicity | Order behavior | Owner |
+|---|---:|---|---|---|---|---|---|
+| scalar zero | when outer control reaches occurrence | typed NULL | NULL | zero-row success | one scalar value | child final-row semantics | §20.14.4 |
+| scalar one | yes | selected value | selected NULL preserved | one-row success | one scalar value | child final-row semantics | §20.14.4 |
+| scalar many | first two final rows | no value | n/a | second successful row -> cardinality | n/a | later rows suppressed | §20.14.4 |
+| scalar skipped branch | no | surrounding control result | surrounding rule | no child error | none | n/a | §§17.7.3, 20.14.8 |
+| EXISTS empty | until exhaustion | FALSE | non-null Boolean | success | zero child final rows | child order irrelevant | §20.14.5 |
+| EXISTS nonempty | through first final row | TRUE | non-null Boolean | later rows suppressed | at least one child row | first demanded row only | §20.14.5 |
+| EXISTS erroring projection | projection value no | TRUE/FALSE from relation | non-null | no projection-only error | relation cardinality only | projection order irrelevant | §20.14.5 |
+| IN empty | left then complete empty build | FALSE | exact 3VL | success | RHS duplicates absent | unordered build | §20.14.6 |
+| IN match | left then complete build | TRUE | exact 3VL | build errors precede result | duplicates truth-neutral | unordered build | §20.14.6 |
+| IN no match | left then complete build | FALSE absent NULL | exact 3VL | success | duplicates truth-neutral | unordered build | §20.14.6 |
+| IN RHS NULL | left then complete build | UNKNOWN absent match | NULL Boolean | success | NULL marker | unordered build | §20.14.6 |
+| left NULL/nonempty | left then complete build | UNKNOWN | NULL Boolean | success | RHS multiplicity truth-neutral | unordered build | §20.14.6 |
+| NOT IN RHS NULL | ordinary NOT after IN | UNKNOWN absent match | NULL Boolean | success | RHS multiplicity truth-neutral | unordered build | §20.14.6 |
+| derived table | ordinary relational demand | child rows | child values | ordinary child errors | exact child multiplicity | no outer order by itself | §20.14.3 |
+| derived ORDER | as child requires | child bag | child values | ordinary child errors | unchanged except child operators | not exported by itself | §20.14.10 |
+| derived LIMIT | as child requires | selected child rows | child values | Limit errors upstream-owned | exact selected bag | child ORDER controls selection | §§20.12, 20.14.10 |
+| unsupported correlation | no executable demand | no plan | n/a | bind-time UnsupportedCorrelation | n/a | n/a | §§19.18, 20.14.2 |
+
+##### Rewrite-safety matrix
+
+| Rewrite family | Executable change? | Demand change? | Exact proof required? | Operand order preserved? | Provenance preserved? | Bag safe? | Order safe? | NULL safe? | Aggregate ordinal safe? | Status |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| constant folding | yes | possible | §17.10.2 equivalence | yes | folded-owner rule | yes | yes | yes | yes | COMPLETE |
+| Boolean simplification | yes | possible | when observable demand changes | yes | yes | yes | yes | 3VL exact | yes | COMPLETE |
+| predicate pushdown | yes | often | yes for enlarged/moved observable demand | yes | yes | yes | join/order constraints | yes | yes | COMPLETE |
+| projection pruning | yes | suppresses candidate work | ordinary error-capable expression yes | yes | yes | yes | yes | yes | yes | COMPLETE |
+| expression canonicalization | metadata only unless exact legal transform | no executable reordering | exact folding rule where executable | yes | yes | yes | yes | yes | yes | COMPLETE |
+| join graph extraction | no, metadata | no | no for metadata | executable tree unchanged | metadata no diagnostic | yes | outer boundaries retained | yes | yes | COMPLETE |
+| equality classes | metadata or derived predicate | possible for derived executable | exact proof for executable effect | yes | inherited/exact | yes | outer boundaries retained | yes | yes | COMPLETE |
+| constant propagation | may synthesize predicate | possible | yes | yes | exact source/safe synthetic | yes | yes | yes | yes | COMPLETE |
+| contradiction detection | may replace relation | may suppress | yes plus demand safety | yes | yes | exact bag empty | schema/order class preserved | TRUE-only context exact | yes | COMPLETE |
+| trusted-key metadata | no by itself | no | enforced fact required for later rewrite | n/a | metadata no diagnostic | n/a | n/a | n/a | yes | COMPLETE |
+| semantic emptiness | may replace relation | possible | approved proof plus demand safety | yes | yes | exact empty semantics | output order class preserved | context exact | yes | COMPLETE |
+
+##### Demand matrix
+
+| Context | Demand domain | May skip? | Specialized owner | Error observable? | Rewrite proof requirement |
+|---|---|---|---|---:|---|
+| Filter predicate | each retention occurrence | only if row not semantically reached | §§20.6, 20.17 | yes | preserve or exact insensitivity |
+| ordinary Project | each expression for each produced input occurrence | no by ancestor nonuse alone | §§20.7, 20.17.4 | yes | preserve or exact total/error-free |
+| JOIN ON | semantically required candidate pairs | pairs outside domain | §§20.8, 20.17 | yes | preserve pair domain or exact proof |
+| group key | applicable aggregate input rows | only undemanded rows | §20.9 | yes | preserve or exact proof |
+| aggregate argument | applicable rows/occurrence | descriptor-defined NULL handling occurs after expression | §§20.9, 29.3 | yes | preserve or exact proof |
+| HAVING | produced groups whose retention is determined | absent groups | §20.9 | yes | preserve or exact proof |
+| ORDER key | logical rows reaching Sort | rows not reaching Sort | §20.11 | yes | preserve or exact proof |
+| scalar subquery | demanded occurrence and work for up to two final rows | skipped outer control path | §20.14.4 | yes | preserve cardinality/error precedence |
+| EXISTS projection | row existence, not projection-only values | projection-only work | §20.14.5 | projection-only no | specialized irrelevance or exact proof |
+| IN build | complete final RHS after demanded left | only while occurrence dormant | §20.14.6 | yes | preserve left/build precedence |
+| CASE branch | source-ordered selected path | unselected branches | §17.7.3 | yes | preserve child/control order |
+| AND/OR RHS | Chapter-17 short-circuit path | skipped RHS | §17.7.3 | yes | preserve child/control order |
+
+##### Provenance matrix
+
+| Expression state | SourceSpan | Cast provenance | Error origin | Precedence identity | Allowed? | Governing owner |
+|---|---|---|---|---|---:|---|
+| unchanged source expression | original | original explicit/implicit | original | original | yes | §20.17 |
+| moved source expression | unchanged | unchanged | unchanged | unchanged | demand-safe only | §§20.17, 20.17.3 |
+| shared source expression | same canonical span | same | same semantic origin | same | yes | §20.17 |
+| duplicated source expression | copied to each | copied | copied | copied | only if D20-B1 legal | §20.17 |
+| error-capable replacement | replaced occurrence span | preserved | preserved category/origin | preserved | exact only | §20.17 |
+| safe spanless synthetic | none | n/a | cannot error | n/a | exact total/error-free only | §20.17 |
+| error-capable synthetic mapped to source | inherited one source span | inherited as applicable | inherited | inherited | exact one-source implementation only | §20.17 |
+| illegal source-less error-capable synthetic | none | unknown | none | none | no | §20.17 |
+| non-executable metadata | none required | n/a | cannot originate diagnostic | n/a | yes as metadata | §§20.17, 20.17.5 |
+| Chapter-17 folded expression | §17.10.2 rule | §17.10.2 rule | §17.10.2 rule | §17.10.2 rule | delegated | §17.10.2 |
+
+##### Aggregate-occurrence matrix
+
+| Case | Aggregate ordinal | LogicalSlotId | Logical occurrence count | Rewrite behavior | Provenance | Error selection |
+|---|---|---|---:|---|---|---|
+| one aggregate | upstream ordinal | fresh | one | retained unless legally removed | source occurrence | its ordinal |
+| same descriptor twice at different source occurrences | two ordinals | two fresh slots | two | no merge/renumber | distinct source origins | lowest failing ordinal |
+| SELECT aggregate + ORDER alias | existing ordinal | existing output slot | one | reference reuse | same origin | existing ordinal |
+| legal demand-safe removal | removed ordinal disappears | slot retires | one fewer | survivors unchanged/no compact | removed with occurrence | survivors keep ordinals |
+| physical shared computation | every original ordinal | every original slot | unchanged | exact logical map | each origin retained | lowest original failing ordinal |
+| aggregate across nested query block | ordinal local to each block | slots unique statement-wide | distinct per source occurrence | no cross-block move | each block occurrence | per frozen ordinal rule |
+
+##### No-FROM/constant-query matrix
+
+| Query shape | Source cardinality | Final bag cardinality | Slots | Order | Errors |
+|---|---:|---:|---|---|---|
+| `SELECT 1` | one zero-column row | one | fresh Project output | unordered singleton | none |
+| `SELECT NULL` | one zero-column row | one | fresh typed Project output | unordered singleton | bound NULL rules |
+| `SELECT 1 WHERE TRUE` | one | one | Filter pass-through then fresh Project | unordered singleton | predicate demanded |
+| `SELECT 1 WHERE FALSE` | one | zero | output schema still defined | unordered empty | no projection-row evaluation |
+| `SELECT COUNT(*)` | one | one global aggregate row | fresh aggregate output | unordered singleton | Chapter-29 value rule |
+| `SELECT COUNT(*) WHERE FALSE` | one source, zero after Filter | one global aggregate row | fresh aggregate output | unordered singleton | count zero |
+| `SELECT 1 ORDER BY 1` | one | one | Project then Sort pass-through | semantic key order | ordinary key demand |
+| `SELECT 1 LIMIT 0` | one | zero | schema/slot preserved by Limit | unordered empty | no new count error |
+| `SELECT 1 OFFSET 1` | one | zero | schema/slot preserved by Limit | unordered empty | no error |
+| scalar subquery containing no-FROM SELECT | independent one-row source | zero/one after child clauses | independent child slots | child order rules | scalar cardinality rules |
+
+##### Error/diagnostic matrix
+
+| Condition | Logical demand point | Category owner | SourceSpan/origin | Rewrite effect | Transaction consequence owner | Status |
+|---|---|---|---|---|---|---|
+| scalar subquery second row | second successfully produced final row | §§20.14.4, 39.3 | subquery occurrence/cardinality origin | check removable only by exact proof | §39.1 | COMPLETE |
+| error-capable Filter | each retention decision | Chapters 17, 39 | predicate origin | no unsafe suppression/enlargement | §39.1 | COMPLETE |
+| error-capable Project | each ordinary output expression/row | Chapters 17, 39 | expression origin | ancestor nonuse insufficient | §39.1 | COMPLETE |
+| JOIN predicate error | demanded candidate pair | Chapters 17, 39 | ON expression origin | pair-domain movement proof required | §39.1 | COMPLETE |
+| aggregate argument error | demanded argument row | Chapters 17, 29, 39 | argument origin | no unsafe removal/duplication | §39.1 | COMPLETE |
+| aggregate finalization | after complete demanded input | §§29.3.7, 39 | lowest failing source ordinal | physical sharing preserves selection | §39.1 | COMPLETE |
+| HAVING error | produced group retention | Chapters 17, 39 | HAVING origin | group-demand preservation | §39.1 | COMPLETE |
+| ORDER-key error | row reaching Sort | Chapters 17, 39 | ORDER expression origin | sort removal demand-safe only | §39.1 | COMPLETE |
+| IN build error | complete demanded final RHS | §§20.14.6, 39 | RHS expression origin | precedes possible match | §39.1 | COMPLETE |
+| unsafe pushdown/pruning/empty | changed demand domain | §20.17 | original source origin | reject rewrite | §39.1 | COMPLETE |
+| error-capable synthesized/replacement | replacement demand point | §§20.17, 39 | exact inherited origin or none | exact mapping required or invalid | §39.1 | COMPLETE |
+
+##### Exact-proof matrix
+
+| Fact | Exact? | May authorize demand-changing rewrite? | Owner | Reason |
+|---|---:|---:|---|---|
+| exact literal evaluation | yes | yes when complete/error-safe | §§17.10.2, 35.2 | closed scalar semantics |
+| exact type/domain rule | yes | yes when complete/error-safe | Chapters 17/35 | authoritative domain |
+| exact nullability | yes | yes within its exact domain | §§20.16, 35.2 | semantic property |
+| trusted enforced constraint | yes | yes within whitelist | §§20.17.9, 35.2 | runtime-enforced fact |
+| exact semantic emptiness | yes | only with separate demand safety | §§20.17.10, 35.2 | output fact does not erase errors by itself |
+| histogram | no | no | Chapter 34 | approximate/stale statistics |
+| selectivity | no | no | Chapter 35 | estimate only |
+| sample | no | no | Chapter 34 | incomplete observation |
+| cardinality estimate | no | no | Chapter 35 | numerical planning metadata |
+| cost estimate | no | no | Chapter 38 | physical choice only |
+| heuristic/likely range | no | no | optimizer policy | not a semantic fact |
+
+##### Determinism matrix
+
+| Perturbation | May affect logical schema? | Slot equality? | Bag? | Required ordering? | Error/provenance? | Allowed effect |
+|---|---:|---:|---:|---:|---:|---|
+| hash seed | no | no | no | no | no | internal work/cost only |
+| map iteration | no | no | no | no | no | internal work/cost only |
+| pointer addresses | no | no | no | no | no | none observable |
+| allocation order | no | no | no | no | no | opaque representations may differ |
+| LogicalSlotId numeric encoding | no | no after alpha-renaming | no | no | no | numeric labels differ |
+| TableId numeric ordering | no | no | no | no | no | identity labels only |
+| ColumnId numeric ordering | no | no | no | no | no | lineage labels only |
+| physical scan order | no | no | no | no semantic order created | no | unordered sequence/subbag variation |
+| join algorithm | no | no | no | no semantic order created | no | physical work/order |
+| sort algorithm | no | no | no | no outside allowed ties | no | tie permutations |
+| optimizer rule traversal | no | no | no | no | no | equivalent plan choice |
+| scheduler interleaving | no | no | no | no | no | timing only |
+| source-buffer lifetime | no | no | no | no | no dangling/changed origin | retain/materialize presentation choice |
+
+##### Cross-chapter composition matrix
+
+| Owner | Mechanism | Upstream input | Chapter-20 responsibility | Downstream handoff | Verification owner | Duplication? | Consistency |
+|---|---|---|---|---|---|---:|---|
+| Chapter 16 | IDs/descriptors/SchemaVer/presentation/snapshot | immutable catalog semantics and visible rows | consume stable lineage and source occurrences | logical schema/Get to physical planning | V16 COMPLETE + V20-1/2/4 | no | COMPLETE |
+| Chapter 17 | types/3VL/order/casts/evaluation/folding | resolved scalar semantics | preserve executable values, demand, order, and errors | expression execution | Type-System/Expression + V20-5/15/17 | no | COMPLETE |
+| Chapter 18 | source order/SourceSpan/lifetime | canonical source origins | preserve provenance without forced buffer retention | diagnostics | V18 COMPLETE + V20-18 | no | COMPLETE |
+| Chapter 19 | BindingId/bound outputs/ordinals/ORDER/LIMIT | fully bound statement | construct logical identity/relations without rebinding | Chapter-20 plan | V19 COMPLETE + V20-1/9/11 | no | COMPLETE |
+| Chapter 20 | logical relations/properties/rewrites | bound statement and exact facts | define all logical semantics | physical planning and diagnostics | V20-1–27 | canonical local statement only | COMPLETE |
+| Chapter 21 | DML/DDL statement semantics | logical DML relational child | preserve hidden row identity and resolved target handoff | write execution | V20-21 | no Chapter-21 redefinition | COMPLETE |
+| §22.4 | physical vocabulary | validated logical nodes | prohibit physical choice in logical identity | physical operator selection | V20-22 | no | COMPLETE |
+| Chapters 24–26 | memory/state/pipeline | logical demand/state contracts | remain implementation-independent | physical memory/expression/pipeline | V20-14/22/23 | no | COMPLETE |
+| §27.9 | PhysicalLimit | LogicalLimit counts/order class | define occurrence selection | conforming physical Limit | V20-11/22 | no | COMPLETE |
+| Chapter 29 | aggregate values/errors/ordinal | descriptor/ordinal semantics | preserve logical aggregate occurrences/mapping | aggregate execution | Aggregate families + V20-8/9/24 | no | COMPLETE |
+| §§30.1/30.3 | ties/comparator | physical comparator contract | carry exact logical key requirement | sort realization | Sort families + V20-10 | no | COMPLETE |
+| §§34.1/35.2 | estimates/exact proofs | disjoint estimate/proof domains | accept only exact semantic authority | optimizer reasoning | Semantic Emptiness + V20-16/19 | no | COMPLETE |
+| §35.20 | Limit cardinality | logical count values | own semantic selection/cardinality | estimate derivation | V20-11/19 | no | COMPLETE |
+| §37.17 | subquery physical planning | logical mode/fallback | require conforming rewrite/fallback semantics | physical subquery plan | V20-12–14/22 | no | COMPLETE |
+| §§39.1–39.3 | categories/transaction effects | semantic/runtime errors | preserve category/origin/precedence | command/transaction outcome | Error families + V20-18/24 | no | COMPLETE |
+| §§40.2/40.5/40.8 | EXPLAIN presentation | validated logical representation | define logical information only | UI/presentation and physical analysis | V20-22 | no format duplication | COMPLETE |
+| §41 | verification architecture | frozen architecture obligations | provide deterministic independent procedures | maintained verification contract | V20-25–27 | no architecture restatement as oracle | COMPLETE |
+
+##### Documentation-model matrix
+
+| Requirement | Status | Verification |
+|---|---|---|
+| no chronology | CONSISTENT | prose audit |
+| no current implementation status | CONSISTENT | prose audit |
+| no phase narration | CONSISTENT | prose audit |
+| no DEVELOPMENT sequencing | CONSISTENT | owner audit |
+| no optimizer framework mandate | CONSISTENT | representation audit |
+| no physical algorithm mandate | CONSISTENT | V20-22 |
+| no allocator/ID representation mandate | CONSISTENT | V20-3/23 |
+| no historical result count | CONSISTENT | prose audit |
+| logical-plan boundary precise | CONSISTENT | V20-1 |
+| LogicalSlotId precise | CONSISTENT | V20-2/3 |
+| bag semantics precise | CONSISTENT | V20-4 |
+| join semantics precise | CONSISTENT | V20-6/7 |
+| LEFT nullability precise | CONSISTENT | V20-7 |
+| grouping/DISTINCT precise | CONSISTENT | V20-8 |
+| order semantics precise | CONSISTENT | V20-10 |
+| Limit semantics precise | CONSISTENT | V20-11 |
+| subquery semantics precise | CONSISTENT | V20-12–14 |
+| demanded evaluation precise | CONSISTENT | V20-15 |
+| rewrite proof boundary precise | CONSISTENT | V20-16/19 |
+| operand order precise | CONSISTENT | V20-17 |
+| aggregate occurrence precise | CONSISTENT | V20-9 |
+| provenance precise | CONSISTENT | V20-18 |
+| logical/physical ownership precise | CONSISTENT | V20-22 |
+| EXPLAIN ownership precise | CONSISTENT | V20-22 |
+| deterministic methodology | CONSISTENT | harness/V20-23 |
+| independent oracles | CONSISTENT | oracle registry |
+| implementation freedom | CONSISTENT | V20-22/23/26 |
+| timelessness | CONSISTENT | prose audit |
+
+##### High-level case matrix
+
+| Fixture | Architecture owner | Independent oracle | Expected semantic result | Verification family | Status |
+|---|---|---|---|---|---|
+| self join same column | §§20.2, 20.4 | occurrence/lineage graph | distinct BindingIds and slots | V20-3 | COMPLETE |
+| `SELECT a,a` | §§20.2, 20.7 | schema occurrence graph | two fresh output slots | V20-3 | COMPLETE |
+| equivalent Project expressions | §§20.2, 20.7 | schema occurrence graph | distinct slots/one row per input | V20-3/5 | COMPLETE |
+| nested child slot domain | §20.2 | whole-statement graph | no collisions | V20-3 | COMPLETE |
+| derived slot remapping | §§20.2, 20.14.3 | boundary map | fresh outer slots | V20-3/14 | COMPLETE |
+| duplicate Values rows | §20.5 | multiset | duplicates retained | V20-4 | COMPLETE |
+| duplicate Get rows | §20.4 | visibility/multiset | visible occurrences retained | V20-4 | COMPLETE |
+| no-FROM SELECT | §§20.5, 20.15 | singleton zero-column source | one source row | V20-1/4 | COMPLETE |
+| Filter TRUE/FALSE/UNKNOWN | §20.6 | 3VL selector | one/zero/zero | V20-5 | COMPLETE |
+| INNER duplicate matches | §20.8.1 | cross product | every TRUE pair | V20-6 | COMPLETE |
+| LEFT no match | §20.8.1 | per-left match count | one NULL extension | V20-6 | COMPLETE |
+| LEFT multiple matches | §20.8.1 | per-left match count | every TRUE pair, no extension | V20-6 | COMPLETE |
+| CROSS duplicates | §20.8.1 | cross product | `m*n` | V20-6 | COMPLETE |
+| LEFT NOT NULL right column | §20.8.3 | nullability transform | logically nullable/catalog unchanged | V20-7 | COMPLETE |
+| DISTINCT NULL | §§20.9–20.10 | partition oracle | one NULL class | V20-8 | COMPLETE |
+| DISTINCT NaN | §§20.9–20.10 | normalized FLOAT partition | one NaN class | V20-8 | COMPLETE |
+| DISTINCT signed zero | §§20.9–20.10 | normalized FLOAT partition | one zero class | V20-8 | COMPLETE |
+| GROUP BY NULL | §20.9 | partition oracle | one NULL group | V20-8 | COMPLETE |
+| global aggregate empty | §20.9 | grouping cardinality | one group | V20-8 | COMPLETE |
+| explicit grouping empty | §20.9 | grouping cardinality | zero groups | V20-8 | COMPLETE |
+| HAVING UNKNOWN | §20.9 | 3VL selector | group removed | V20-8 | COMPLETE |
+| Sort NULL | §20.11 | order oracle | ASC first/DESC last | V20-10 | COMPLETE |
+| Sort NaN | §20.11 | §30.3 comparator oracle | canonical FLOAT order | V20-10 | COMPLETE |
+| equal ORDER ties | §20.11 | tie equivalence | any equal-key permutation | V20-10 | COMPLETE |
+| unordered final SELECT | §§20.1, 20.14.10 | bag oracle | no physical order | V20-10/23 | COMPLETE |
+| ordered Limit | §20.12 | sequence slice | exact ordered survivors | V20-11 | COMPLETE |
+| unordered Limit | §20.12 | subbag predicate | any valid exact-cardinality subbag | V20-11 | COMPLETE |
+| LIMIT 0 | §20.12 | count formula | empty, schema retained | V20-11 | COMPLETE |
+| oversized OFFSET | §20.12 | count formula | empty/no error | V20-11 | COMPLETE |
+| scalar zero rows | §20.14.4 | cardinality state machine | typed NULL | V20-12 | COMPLETE |
+| scalar more than one | §20.14.4 | cardinality state machine | second-row error | V20-12 | COMPLETE |
+| EXISTS erroring projection | §20.14.5 | existence-demand oracle | projection error suppressed | V20-13 | COMPLETE |
+| IN RHS NULL | §20.14.6 | repeated equality 3VL | UNKNOWN absent match | V20-13 | COMPLETE |
+| derived ORDER | §§20.14.3, 20.14.10 | order-boundary oracle | no outer order by itself | V20-14 | COMPLETE |
+| duplicate aggregate source occurrence | §§20.9, 29.3.7 | occurrence table | two ordinals/slots | V20-9 | COMPLETE |
+| ORDER alias aggregate reuse | §§19.13, 20.9 | output identity table | no new occurrence | V20-9 | COMPLETE |
+| pushdown error case | §§20.17, 20.17.3 | demand relation | reject without exact proof | V20-16 | COMPLETE |
+| projection-pruning error case | §§20.7, 20.17.4 | demand relation | retain ordinary expression | V20-16 | COMPLETE |
+| contradiction-to-empty error case | §§20.17, 20.17.10 | proof+demand oracle | reject unsafe erasure | V20-16 | COMPLETE |
+| comparison reversal | §20.17.5 | ordered tree serializer | executable rewrite rejected | V20-17 | COMPLETE |
+| safe synthetic TRUE | §20.17 | proof/origin table | spanless only if total/error-free | V20-18 | COMPLETE |
+| source-less error-capable synthetic | §20.17 | proof/origin table | invalid | V20-18 | COMPLETE |
+| moved erroring source expression | §20.17 | provenance map | same origin plus demand-safe | V20-18 | COMPLETE |
+| physical aggregate sharing | §20.9 | occurrence/error mapping | identities and lowest ordinal retained | V20-9 | COMPLETE |
+
+#### Complete Chapter-20 architecture-obligation coverage map
+
+The following ledger is the authoritative atomic inventory for this verification section.
+`Procedure` names the deterministic V20 family; `Oracle` names an independent expected-
+result construction from the registry or matrices above.
+
+| Atomic obligation | Architecture owner | Verification owner | Deterministic procedure/reference | Independent oracle | Status |
+|---|---|---|---|---|---|
+| V20-1.1 — Logical planning consumes a fully bound Chapter-19 statement | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.2 — Logical planning performs no SQL-name rebinding | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.3 — BindingId equality and inequality are preserved | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.4 — Bound column TableId and ColumnId identities are preserved | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.5 — Bound scalar TypeId and nullability are preserved | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.6 — Explicit and implicit cast provenance is preserved | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.7 — Aggregate ordinals are consumed rather than reassigned | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.8 — ORDER alias and ordinal output identities are consumed unchanged | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.9 — LIMIT/OFFSET bound-expression and validated-count ownership remains Chapter 19 | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.10 — Logical plans are immutable relational-semantic trees once published | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.11 — Every logical node exposes kind, children, output schema, properties, and debug representation semantically | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.12 — Logical operators describe required relations rather than physical algorithms | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.13 — Helper nodes represent real relation or statement semantics rather than physical algorithms | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.14 — Canonical SELECT shape begins with explicit FROM/JOIN or the no-FROM source | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.15 — Canonical SELECT clause composition follows §20.15 before legal rewrites | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-1.16 — Canonical logical shape is not asserted as physical execution order | §§20.1, 20.3, 20.13, 20.15; Chapter 19 | V20-1 | V20-1 procedure and applicable mandatory-matrix row | bound-to-logical oracle and canonical-shape table | COMPLETE |
+| V20-2.1 — Every logical output position carries a LogicalSlotId | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.2 — Every output position carries deterministic display metadata where applicable | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.3 — Every output position carries resolved logical type | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.4 — Every output position carries contextual logical nullability | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.5 — Every output position carries lineage where applicable | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.6 — Internal/system visibility metadata remains distinguishable | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.7 — One LogicalSlotId identifies exactly one logical output occurrence | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.8 — LogicalSlotId is distinct from TableId | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.9 — LogicalSlotId is distinct from ColumnId | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.10 — LogicalSlotId is distinct from BindingId | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.11 — LogicalSlotId is distinct from persisted heap SlotId | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.12 — LogicalSlotId is distinct from output ordinal | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.13 — LogicalSlotId is distinct from aggregate ordinal | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.14 — LogicalSlotId is distinct from expression-equivalence identity | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.15 — LogicalSlotId is distinct from pointer/object identity | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-2.16 — LogicalSlotId is not a permanent physical vector position | §20.2 | V20-2 | V20-2 procedure and applicable mandatory-matrix row | ordered schema algebra and semantic-identity fixture | COMPLETE |
+| V20-3.1 — LogicalSlotId uniqueness spans the whole top-level statement | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.2 — Nested query-block outputs participate in the same uniqueness domain | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.3 — Scalar/EXISTS/IN side-plan outputs participate in the same uniqueness domain | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.4 — Derived-table child outputs participate in the same uniqueness domain | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.5 — DML relational-child outputs participate in the same uniqueness domain | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.6 — No distinct logical output occurrences share a LogicalSlotId | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.7 — An eliminated LogicalSlotId is never reused during the statement lifetime | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.8 — Different top-level statements may reuse opaque representation values | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.9 — LogicalSlotId is runtime-only | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.10 — LogicalSlotId is absent from catalog and WAL state | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.11 — LogicalSlotId is not recovered or encoded in tuple/page formats | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.12 — LogicalSlotId width and numeric allocation order are nonsemantic | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.13 — LogicalGet creates a fresh slot per exposed BindingId plus ColumnId occurrence | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.14 — Self-join Get occurrences have distinct BindingIds and slots | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.15 — LogicalValues creates a fresh slot per output column position | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.16 — LogicalProject creates a fresh slot per declared output position | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.17 — SELECT a,a has distinct Project output slots | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.18 — SELECT a AS x,a AS y has distinct Project output slots | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.19 — SELECT a+1,a+1 has distinct Project output slots | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.20 — LogicalAggregate creates fresh grouping-key output slots | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.21 — LogicalAggregate creates a fresh slot per aggregate occurrence | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.22 — LogicalFilter passes child slots through unchanged | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.23 — LogicalDistinct passes child slots through unchanged | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.24 — LogicalSort passes child slots through unchanged | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.25 — LogicalLimit passes child slots through unchanged | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.26 — LogicalJoin passes child slots through unchanged | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.27 — Derived-table export remaps each child slot to a fresh outer slot | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.28 — Derived remap retains child slot, outer slot, derived BindingId, and exported metadata | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.29 — A surviving identical logical output occurrence preserves its slot through rewrite | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.30 — A newly introduced or duplicated output occurrence receives a fresh slot | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.31 — An eliminated occurrence disappears and remains retired | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.32 — Equivalent value computation alone never proves slot identity | §§20.2, 20.4–20.12, 20.14.3, 20.17 | V20-3 | V20-3 procedure and applicable mandatory-matrix row | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-4.1 — Logical relations use bags of row occurrences | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.2 — Equal SQL-valued rows remain distinct occurrences | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.3 — Multiplicity and semantic row order are independent | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.4 — No unnamed operator implicitly collapses value-equivalent rows | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.5 — LogicalGet emits one occurrence per snapshot-visible logical base row | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.6 — Distinct visible base rows with equal values remain distinct occurrences | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.7 — Non-visible physical historical versions add no logical occurrences | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.8 — LogicalGet performs no duplicate elimination | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.9 — LogicalGet establishes no physical scan order | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.10 — LogicalValues emits one occurrence per listed row | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.11 — LogicalValues preserves duplicate listed rows | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.12 — VALUES source order is not an SQL result order by itself | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.13 — The no-FROM source has exactly one row occurrence | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.14 — The no-FROM source has exactly zero columns | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.15 — LogicalSort preserves the complete input occurrence bag | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.16 — LogicalLimit removes occurrences without duplicate-equivalence collapse | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.17 — A derived-table boundary preserves child occurrence multiplicity | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.18 — Only DISTINCT and grouping collapse value-equivalence classes | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-4.19 — Filter, Join, and Limit change multiplicity only by their explicit contracts | §§20.1, 20.4–20.5, 20.10–20.12, 20.14.3 | V20-4 | V20-4 procedure and applicable mandatory-matrix row | fixture-tagged mathematical multiset | COMPLETE |
+| V20-5.1 — LogicalFilter output schema equals child schema | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.2 — LogicalFilter preserves child slots | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.3 — Filter TRUE maps one input occurrence to one output occurrence | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.4 — Filter FALSE maps one input occurrence to zero output occurrences | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.5 — Filter UNKNOWN maps one input occurrence to zero output occurrences | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.6 — Filter treats duplicate input occurrences independently | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.7 — Filter performs no duplicate elimination | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.8 — Filter predicate is demanded for each retention decision | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.9 — LogicalProject emits one output occurrence per input occurrence | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.10 — Project preserves equal-valued row multiplicity | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.11 — Project performs no implicit DISTINCT | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.12 — Project output expression order follows declared output positions | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.13 — Every ordinary Project expression is demanded for every produced row | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.14 — Ancestor slot nonuse alone does not suppress ordinary Project demand | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.15 — EXISTS projection-value irrelevance is a specialized exception | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-5.16 — Project demand/error semantics are independent of physical evaluation strategy | §§20.6–20.7, 20.14.5, 20.17 | V20-5 | V20-5 procedure and applicable mandatory-matrix row | per-occurrence 3VL selector and projection constructor | COMPLETE |
+| V20-6.1 — INNER and LEFT candidate multiplicity is defined over L cross R occurrences | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.2 — Join pair semantics do not require materializing a Cartesian product | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.3 — INNER ON TRUE emits exactly one occurrence per candidate pair | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.4 — INNER ON FALSE emits no occurrence | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.5 — INNER ON UNKNOWN emits no occurrence | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.6 — INNER preserves every TRUE duplicate occurrence pair | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.7 — INNER is not first-match or existence semantics | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.8 — LEFT emits one joined occurrence for every TRUE right match | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.9 — LEFT treats FALSE as a nonmatch | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.10 — LEFT treats UNKNOWN as a nonmatch | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.11 — LEFT with zero TRUE matches emits exactly one NULL-extended occurrence per left occurrence | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.12 — LEFT with one TRUE match emits exactly one matched occurrence | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.13 — LEFT with multiple TRUE matches emits all matched occurrences | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.14 — LEFT emits no extra NULL-extended row when any TRUE match exists | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.15 — LEFT with only FALSE/UNKNOWN candidates emits one NULL-extended occurrence | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.16 — CROSS emits one occurrence for every L cross R pair | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.17 — CROSS has no ON predicate | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.18 — CROSS duplicate multiplicity is m times n | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.19 — INNER with empty left is empty | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.20 — INNER with empty right is empty | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.21 — CROSS with empty left is empty | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.22 — CROSS with empty right is empty | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.23 — LEFT with empty left is empty | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.24 — LEFT with empty right emits one NULL-extended row per left occurrence | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-6.25 — Join predicate errors are observed only for semantically demanded candidate pairs | §20.8.1 | V20-6 | V20-6 procedure and applicable mandatory-matrix row | finite occurrence-pair cross product and per-left TRUE-match counts | COMPLETE |
+| V20-7.1 — Join output schema contains all left outputs first | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.2 — Join output schema then contains all right outputs | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.3 — Join schema order ignores TableId numeric order | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.4 — Join schema order ignores ColumnId numeric order | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.5 — Join schema order ignores slot numeric representation | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.6 — Join creates no fresh slots merely for crossing the boundary | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.7 — LEFT right outputs become logically nullable | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.8 — LEFT left-output nullability remains unchanged | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.9 — LEFT contextual nullability does not alter catalog NOT NULL metadata | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.10 — LEFT contextual nullability does not alter TypeId | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.11 — LEFT contextual nullability does not alter BindingId, slot, or lineage | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.12 — No logical join establishes semantic row order | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.13 — No physical pair-generation sequence is a join result-order oracle | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-7.14 — ON and WHERE remain semantically distinct | §§20.8.1–20.8.3 | V20-7 | V20-7 procedure and applicable mandatory-matrix row | join schema concatenation and contextual-nullability transform | COMPLETE |
+| V20-8.1 — Grouping runtime equality is distinct from Chapter-19 structural expression equality | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.2 — Grouping places NULL values in one equivalence class | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.3 — Grouping equates negative and positive FLOAT64 zero | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.4 — Grouping equates all canonical NaNs | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.5 — Grouping compares VARCHAR by exact binary bytes | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.6 — Grouping applies equality componentwise to multi-column keys | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.7 — Grouping retains unequal normal values in separate classes | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.8 — LogicalAggregate emits one row occurrence per runtime group | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.9 — No-key aggregate forms one global group over empty input | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.10 — Explicit grouping over empty input forms zero groups | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.11 — Global aggregate row count remains Chapter-20-owned while values remain Chapter-29-owned | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.12 — HAVING TRUE retains one produced group occurrence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.13 — HAVING FALSE removes the produced group occurrence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.14 — HAVING UNKNOWN removes the produced group occurrence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.15 — LogicalDistinct is explicit duplicate-elimination semantics | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.16 — LogicalDistinct emits one occurrence per grouping-equivalence class | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.17 — LogicalDistinct preserves child output schema | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.18 — LogicalDistinct preserves child LogicalSlotIds | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.19 — DISTINCT NULL/NULL collapses to one occurrence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.20 — DISTINCT NaN/NaN collapses to one occurrence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.21 — DISTINCT signed zeros collapse to one occurrence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.22 — DISTINCT byte-identical VARCHAR values collapse | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.23 — DISTINCT byte-distinct VARCHAR values remain distinct | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.24 — DISTINCT composite rows use componentwise equivalence | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.25 — DISTINCT result row order is not established | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-8.26 — Grouping and DISTINCT never substitute ordinary NULL comparison semantics | §§20.9–20.10; §§17.7, 17.10.3; §29.5 | V20-8 | V20-8 procedure and applicable mandatory-matrix row | normalized grouping-equivalence partition | COMPLETE |
+| V20-9.1 — LogicalAggregate outputs only group-key and aggregate-derived values | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.2 — Each bound source aggregate occurrence becomes one logical aggregate occurrence | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.3 — Every logical aggregate entry carries its upstream canonical ordinal | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.4 — Aggregate ordinal remains query-block-local source-occurrence identity | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.5 — Chapter 20 does not assign ordinal from logical traversal | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.6 — Identical aggregate descriptors may have distinct logical occurrences | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.7 — Identical aggregate arguments may have distinct logical occurrences | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.8 — Distinct aggregate occurrences receive distinct fresh output slots | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.9 — Aggregate ordinal and LogicalSlotId remain distinct identities | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.10 — ORDER BY alias reuses an existing aggregate output occurrence | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.11 — ORDER BY alias creates no new aggregate ordinal | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.12 — Rewrite cannot renumber aggregate ordinals | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.13 — Rewrite cannot compact surviving aggregate ordinals | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.14 — Rewrite cannot reuse a removed aggregate ordinal | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.15 — Rewrite cannot merge distinct aggregate occurrences | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.16 — Rewrite cannot duplicate one occurrence under the same ordinal | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.17 — Rewrite cannot move an occurrence across query blocks | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.18 — Legal aggregate-occurrence removal leaves surviving ordinals unchanged | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.19 — Physical computation sharing may preserve multiple logical occurrences | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.20 — Physical sharing retains every logical output slot | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.21 — Physical sharing retains every aggregate ordinal | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.22 — Physical sharing retains diagnostic provenance and output mapping | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.23 — Physical sharing retains Chapter-29 lowest-ordinal error selection | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.24 — Aggregate occurrence provenance survives logical rewrites | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-9.25 — Aggregate argument/group/HAVING demand composes with D20-B1 | §20.9; §§19.10–19.13; §29.3.7 | V20-9 | V20-9 procedure and applicable mandatory-matrix row | source-occurrence/ordinal table plus Chapter-29 error oracle | COMPLETE |
+| V20-10.1 — LogicalSort carries bound sort-key sequence without rebinding | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.2 — LogicalSort preserves ASC direction | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.3 — LogicalSort preserves DESC direction | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.4 — LogicalSort stores resolved NULL placement | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.5 — ASC defaults to NULLS FIRST | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.6 — DESC defaults to NULLS LAST | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.7 — LogicalSort uses the canonical SQL type comparator | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.8 — FLOAT64 order uses canonical NaN and signed-zero semantics | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.9 — LogicalSort preserves child schema | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.10 — LogicalSort preserves child slots | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.11 — LogicalSort preserves every input row occurrence | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.12 — LogicalSort performs no duplicate elimination | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.13 — LogicalSort establishes semantic key-sequence order | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.14 — Rows equal on all ORDER keys have no stable relative-order guarantee | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.15 — Sort-key expressions are demanded for rows to which Sort applies | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.16 — No ORDER BY leaves a result unordered unless another exact rule establishes order | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.17 — Heap/page/RID/index/hash order is not an SQL result order | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-10.18 — Physical sort algorithm may alter only unspecified tie order | §§20.1, 20.11, 20.14.10; §§30.1, 30.3 | V20-10 | V20-10 procedure and applicable mandatory-matrix row | canonical SQL comparator plus tie-equivalence classes | COMPLETE |
+| V20-11.1 — Chapter 19 owns LIMIT/OFFSET admissibility | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.2 — Chapter 19 owns execution-start constancy and type normalization | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.3 — Chapter 19 owns mandatory folding and count-expression errors | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.4 — LogicalLimit receives a validated nonnegative INT64 offset | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.5 — LogicalLimit receives an optional validated nonnegative INT64 limit | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.6 — LogicalLimit applies OFFSET before LIMIT | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.7 — after_offset equals max of zero and n minus o | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.8 — No-LIMIT output cardinality equals after_offset | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.9 — Limited output cardinality equals min of after_offset and l | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.10 — LogicalLimit never requires o plus l arithmetic | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.11 — LIMIT-only means offset zero | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.12 — OFFSET-only returns all remaining occurrences | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.13 — OFFSET zero removes nothing | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.14 — LIMIT zero returns an empty bag | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.15 — Limit larger than remaining cardinality returns every remainder occurrence | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.16 — Offset at least child cardinality returns empty | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.17 — Zero and oversized cases introduce no new error | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.18 — Ordered child selection skips the first o ordered occurrences | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.19 — Ordered child selection takes at most the next l occurrences | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.20 — Ordered child survivor order is preserved | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.21 — Unordered child has no canonical first occurrence | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.22 — Unordered Limit accepts any valid exact-cardinality child subbag | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.23 — Unordered Limit output remains unordered | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.24 — No physical traversal order becomes Limit semantics | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.25 — LogicalLimit preserves schema, slots, metadata, type, nullability, and lineage | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.26 — LogicalLimit does not deduplicate | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-11.27 — PhysicalLimit and optimizer cardinality conform to Chapter-20 semantics | §20.12; §19.14; §§27.9, 35.20 | V20-11 | V20-11 procedure and applicable mandatory-matrix row | ordered sequence slice or unordered exact-subbag predicate | COMPLETE |
+| V20-12.1 — Scalar subquery requires exactly one bound output column | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.2 — Scalar subquery result TypeId equals its bound output TypeId | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.3 — Scalar subquery result is conservatively nullable | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.4 — Zero final rows produce a typed NULL scalar | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.5 — Exactly one final row produces its selected scalar value | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.6 — A SQL NULL selected value remains SQL NULL rather than empty | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.7 — Successful construction of a second final row raises CardinalityViolation | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.8 — Scalar cardinality observes final rows after all child relational clauses | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.9 — Scalar empty result does not remove the outer row | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.10 — Scalar consumer semantically demands at most two final rows | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.11 — Blocking work needed to establish final rows remains demanded | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.12 — Error constructing the first final selected value precedes cardinality | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.13 — Error constructing the second final selected value precedes cardinality | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.14 — After two successful rows cardinality precedes every later-row error | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.15 — Scalar never returns an arbitrary first/last row from a multirow result | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.16 — Exact final cardinality at most one may remove the check | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.17 — LIMIT 1 supplies an exact at-most-one cap | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.18 — Estimate or required_rows cannot remove cardinality checking | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.19 — DISTINCT applies before scalar cardinality | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-12.20 — OFFSET alone does not cap scalar cardinality | §§20.14.1, 20.14.4, 20.14.10–20.14.12 | V20-12 | V20-12 procedure and applicable mandatory-matrix row | scalar final-row cardinality state machine | COMPLETE |
+| V20-13.1 — EXISTS empty final relation returns non-null FALSE | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.2 — EXISTS nonempty final relation returns non-null TRUE | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.3 — NOT EXISTS is ordinary non-null Boolean NOT | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.4 — EXISTS stops after the first demanded final row | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.5 — EXISTS does not demand later rows after existence is known | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.6 — EXISTS does not demand projection-only scalar values | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.7 — EXISTS does not demand projection-only aggregate arguments/results | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.8 — EXISTS may remove DISTINCT value construction used only for existence | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.9 — EXISTS may remove ORDER-key value work used only for existence | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.10 — EXISTS still demands FROM/WHERE/grouping/HAVING and OFFSET/LIMIT existence work | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.11 — Global aggregate EXISTS performs ordinary child work before its one row unless exact proof permits skipping | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.12 — LIMIT zero makes EXISTS false | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.13 — Positive LIMIT permits first-row stop only after OFFSET | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.14 — IN binds one scalar left value and one scalar RHS output | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.15 — IN uses the Chapter-17 resolved equality/common type | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.16 — IN returns TRUE if any comparison is TRUE | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.17 — IN returns UNKNOWN when no TRUE and at least one comparison is UNKNOWN | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.18 — IN returns FALSE when no TRUE and no UNKNOWN | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.19 — IN over empty RHS is FALSE even for NULL left | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.20 — NOT IN over empty RHS is TRUE even for NULL left | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.21 — IN with nonempty RHS and NULL left is UNKNOWN | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.22 — IN exact non-NULL match is TRUE despite RHS NULLs | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.23 — IN no match plus RHS NULL is UNKNOWN | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.24 — NOT IN is exact 3VL NOT of IN | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.25 — RHS duplicates do not change IN truth | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.26 — IN equality normalization covers NaN, signed zero, VARCHAR, and numeric promotion | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.27 — First demanded IN evaluation evaluates left scalar before dormant build | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.28 — Demanded IN consumes and validates the complete final RHS before any probe result | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.29 — Any build error precedes a possible match result | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-13.30 — Later demanded outer selections reuse the completed occurrence build | §§20.14.5–20.14.6, 20.14.8–20.14.12; §17.10.3 | V20-13 | V20-13 procedure and applicable mandatory-matrix row | existence state machine and repeated-equality 3VL fold | COMPLETE |
+| V20-14.1 — Every expression-subquery occurrence has stable query-local identity | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.2 — Every expression subquery has one independent logical child | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.3 — Scalar, EXISTS, and IN modes remain semantically distinct | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.4 — NOT wrappers remain ordinary Boolean nodes | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.5 — Every supported mode has a conforming executable fallback | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.6 — Fallback support does not depend on a successful optimizer rewrite | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.7 — Each uncorrelated occurrence initializes at most once per statement attempt | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.8 — Occurrence initialization happens only on first semantic demand | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.9 — An undemanded occurrence never executes | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.10 — A successful occurrence state is reused for later outer rows | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.11 — A failed occurrence fails the statement and is not retried for a different outcome | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.12 — Skipped CASE and AND/OR branches leave subqueries dormant | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.13 — Empty outer input may leave a subquery dormant | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.14 — Statement-attempt retry discards prior subquery state | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.15 — Retry uses a fresh statement snapshot and retains logical CommandId | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.16 — Subquery child uses containing attempt snapshot and ReadEpochGuard | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.17 — Subquery child consumes no new CommandId | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.18 — Subquery child creates no nested transaction or lock owner | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.19 — Derived table receives one relation BindingId and namespace boundary | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.20 — Derived child outputs remap to fresh outer slots | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.21 — Derived boundary preserves child bag multiplicity | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.22 — Derived aliases/hidden columns do not leak outward | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.23 — Derived output order follows child projection positions | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.24 — Derived boundary is not a semantic materialization barrier | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.25 — Derived child ORDER does not by itself advertise outer order | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.26 — Derived ORDER is consumed by child LIMIT/OFFSET when applicable | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.27 — Outer ORDER establishes its own semantic order | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.28 — Correlation is rejected by Chapter 19 and creates no OuterRef/Apply plan | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.29 — Row-valued scalar/IN forms have no v1 executable plan | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.30 — ANY/SOME/ALL quantified forms have no v1 executable plan | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.31 — LATERAL/outer-reference forms have no v1 executable plan | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.32 — CTE/set-operation/data-modifying subqueries have no v1 executable plan | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.33 — Subquery rewrite preserves lazy demand, snapshot/CommandId, 3VL, duplicates, cardinality, and errors | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.34 — Exact-empty scalar/EXISTS/NOT EXISTS rewrites use their specified values | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.35 — Exact-empty IN/NOT IN still preserves required once-only left evaluation | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.36 — Estimate/statistics/required_rows cannot authorize subquery semantic rewrite | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.37 — Vector batch size cannot alter subquery error precedence | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-14.38 — Parser/AST capacity cannot add a supported semantic form | §§20.14.1–20.14.13; §§19.18, 37.17 | V20-14 | V20-14 procedure and applicable mandatory-matrix row | subquery occurrence/state graph and derived-boundary model | COMPLETE |
+| V20-15.1 — Demand is defined for executable scalar occurrences | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.2 — Demand is indexed by logical row/pair/group/other relational occurrence | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.3 — Demand is derived from unrevised logical relational semantics | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.4 — Demand is independent of optimizer scheduling | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.5 — Demand is independent of physical visitation order | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.6 — Demand is independent of CPU evaluation count and vector lanes | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.7 — Filter predicate demand covers every required retention decision | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.8 — Ordinary Project demand covers every declared expression/produced row | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.9 — JOIN ON demand covers semantically required candidate pairs | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.10 — Group-key demand covers aggregate input rows | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.11 — Aggregate-argument demand covers applicable rows and occurrences | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.12 — HAVING demand covers produced groups whose retention is determined | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.13 — ORDER-key demand covers rows to which Sort applies | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.14 — Scalar-subquery demand follows surrounding Chapter-17 control flow | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.15 — EXISTS projection-value demand remains specialized and absent | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.16 — IN left demand precedes complete build demand | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.17 — CASE unselected branch is undemanded | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.18 — AND/OR skipped right operand is undemanded | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.19 — Demand observables include value and NULL/UNKNOWN behavior | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.20 — Demand observables include success/error category and origin | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.21 — Demand observables include Chapter-17 child order/short circuit | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.22 — Demand observables include frozen error precedence | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-15.23 — Resource-use differences are excluded from logical demand observables | §§20.6–20.12, 20.14, 20.17 | V20-15 | V20-15 procedure and applicable mandatory-matrix row | unrevised canonical-tree demand relation | COMPLETE |
+| V20-16.1 — Every rewrite preserves all correctness-observable demanded evaluations or supplies exact proof | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.2 — Demand-changing proof covers the complete newly affected domain | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.3 — Proof establishes totality | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.4 — Proof establishes error freedom | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.5 — Proof establishes determinism for the same bound values | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.6 — Proof establishes insensitivity to changed evaluation count/order | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.7 — Absent proof potentially erroring expressions are treated conservatively | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.8 — Existing error category is preserved | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.9 — Existing diagnostic origin is preserved | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.10 — Existing frozen precedence is preserved | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.11 — Statistics cannot authorize a correctness-sensitive rewrite | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.12 — Samples cannot authorize a correctness-sensitive rewrite | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.13 — Selectivity/cardinality estimates cannot authorize a correctness-sensitive rewrite | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.14 — Costs and heuristics cannot authorize a correctness-sensitive rewrite | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.15 — Constant folding delegates exact semantics to §17.10.2 | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.16 — Boolean simplification preserves 3VL and demand | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.17 — Potentially erroring Boolean work is not hidden or newly forced | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.18 — Predicate pushdown checks slot and join semantics | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.19 — Side-local reference is necessary but insufficient for pushdown | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.20 — Pushdown enlarging demand requires exact total/error-free proof | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.21 — LEFT JOIN pushdown retains outer-join null-preservation requirements | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.22 — Projection pruning retains every ancestor-required value and hidden DML slot | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.23 — Ancestor nonuse alone cannot prune error-capable ordinary projection | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.24 — Exactly total/error-free ordinary projection may be pruned when all else is unchanged | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.25 — EXISTS projection irrelevance permits its specialized pruning | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.26 — Join graph/equality metadata does not alter executable semantics | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.27 — Constant propagation preserves SQL NULL and outer-join boundaries | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.28 — Contradiction detection uses exact typed semantics and trusted constraints | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.29 — Exact-empty proof alone cannot suppress demanded potentially erroring work | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-16.30 — Empty replacement preserves output schema and statement/operator semantics | §§20.17, 20.17.1–20.17.4, 20.17.6–20.17.10; §§34.1, 35.2 | V20-16 | V20-16 procedure and applicable mandatory-matrix row | pre/post demand relation plus closed exact-proof calculus | COMPLETE |
+| V20-17.1 — Executable binary expressions preserve semantic left child | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.2 — Executable binary expressions preserve semantic right child | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.3 — Executable arithmetic operands are not commutatively swapped | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.4 — Executable comparison operands are not commutatively swapped | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.5 — Executable comparison reversal is prohibited | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.6 — Executable AND child order is preserved | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.7 — Executable OR child order is preserved | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.8 — Executable CASE condition/branch order is preserved | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.9 — Executable associative reassociation is prohibited | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.10 — Executable children are not sorted for canonicalization | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.11 — Value commutativity does not imply evaluation commutativity | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.12 — Short-circuit demand remains Chapter-17 exact | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.13 — Non-executable equality facts may be canonicalized | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.14 — Non-executable lookup/search keys may be canonicalized | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.15 — Non-executable proof/comparison descriptors may be canonicalized | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.16 — Non-executable metadata cannot replace the executable expression | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.17 — Non-executable metadata cannot define a user error or SourceSpan | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-17.18 — Chapter-17 authorized constant folding remains permitted | §§20.17, 20.17.5; §§17.7.3, 17.10.2 | V20-17 | V20-17 procedure and applicable mandatory-matrix row | ordered executable-tree serializer and metadata/nonmetadata partition | COMPLETE |
+| V20-18.1 — Every source-derived executable occurrence retains canonical SourceSpan | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.2 — Every source-derived executable occurrence retains explicit/implicit cast provenance | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.3 — Every source-derived executable occurrence retains specific error-origin metadata | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.4 — Every source-derived executable occurrence retains precedence identity | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.5 — Moving an unchanged occurrence preserves diagnostic origin exactly | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.6 — Movement creates no new diagnostic origin | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.7 — Structural sharing preserves the same semantic origin | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.8 — Provenance equality is independent of pointer sharing | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.9 — Every legal duplicate copies the canonical origin | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.10 — Copied provenance does not itself authorize duplication | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.11 — D20-B1 independently governs duplication legality | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.12 — Error-capable replacement preserves observable error category | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.13 — Error-capable replacement preserves canonical diagnostic origin | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.14 — Error-capable replacement preserves frozen precedence | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.15 — Replacement choosing an arbitrary equivalent expression span is illegal | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.16 — Spanless synthetic executable requires exact total/error-free proof | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.17 — Spanless synthetic proof covers the complete demand domain | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.18 — Proven safe constants/NULL markers/direct slot identities may be spanless | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.19 — No comparison/cast/arithmetic family is presumed safe without proof | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.20 — Error-capable synthetic requires one identifiable source occurrence | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.21 — Error-capable synthetic inherits that occurrence origin and precedence | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.22 — Source-less error-capable synthetic execution is illegal | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.23 — Non-executable metadata requires no diagnostic SourceSpan | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.24 — Non-executable metadata cannot raise a user-visible scalar error | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.25 — Provenance container representation is not prescribed | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.26 — A provenance collection is not a diagnostic-selection rule | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.27 — Constant-fold provenance remains §17.10.2-owned | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-18.28 — Numeric SourceSpan may outlive source bytes without permanent buffer retention | §20.17; §§17.10.2, 18.8, 18.14 | V20-18 | V20-18 procedure and applicable mandatory-matrix row | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-19.1 — Logical properties include output slots and lineage | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.2 — Logical properties distinguish logical nullability | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.3 — Logical properties may carry candidate keys and known constants | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.4 — Logical properties distinguish semantic ordering | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.5 — Estimated cardinality remains a placeholder/estimate | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.6 — Semantic is_provably_empty carries exact proof provenance | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.7 — Estimated zero never implies semantic emptiness | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.8 — Only enforced trusted constraints establish key proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.9 — Low estimated NDV never proves uniqueness | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.10 — LogicalValues is provably empty exactly for zero listed rows | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.11 — LogicalGet emptiness requires complete exact predicate proof rather than statistics | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.12 — LogicalFilter propagates child emptiness or exact no-TRUE predicate proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.13 — LogicalProject preserves child emptiness proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.14 — INNER/CROSS propagate empty required child proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.15 — INNER may use exact no-TRUE ON proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.16 — LEFT is empty exactly when its preserved left child is empty | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.17 — Empty LEFT right or no-TRUE ON proves no matches rather than empty output | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.18 — Grouped Aggregate preserves empty-child proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.19 — Global Aggregate is not empty merely because child is empty | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.20 — Distinct and Sort preserve empty-child proof | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.21 — LogicalLimit exact SQL LIMIT zero proves empty | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.22 — DML empty input proves zero input/targets but preserves completion semantics | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.23 — LogicalAnalyze is not eliminated from a zero statistic | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.24 — Predicate TRUE-only row-rejecting contexts interpret exact FALSE/UNKNOWN correctly | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.25 — Empty replacement requires approved provenance and preserves schema/demand | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-19.26 — Logical properties do not substitute for physical property contracts | §§20.16, 20.17.9–20.17.10; §§34.1, 35.2, 35.20 | V20-19 | V20-19 procedure and applicable mandatory-matrix row | closed exact-proof calculus disjoint from estimate model | COMPLETE |
+| V20-20.1 — Validator checks every referenced slot exists in required child output | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.2 — Validator checks whole-statement slot uniqueness | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.3 — Validator checks eliminated slot IDs are not reused | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.4 — Validator checks Get/Values/Project/Aggregate fresh-slot rules | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.5 — Validator checks schema-preserving pass-through slot rules | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.6 — Validator checks derived remapping | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.7 — Validator checks resolved expression return types | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.8 — Validator checks Filter/HAVING/Join predicates are BOOLEAN | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.9 — Validator checks aggregate reference legality | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.10 — Validator checks every aggregate entry has unchanged ordinal and distinct slot | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.11 — Validator checks node output schema matches expressions | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.12 — Validator checks join schema left then right and child slots preserved | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.13 — Validator checks LEFT right logical nullability | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.14 — Validator checks LogicalLimit schema/slot preservation | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.15 — Validator checks required hidden DML slots | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.16 — Validator checks descriptor/SchemaVer consistency | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.17 — Validator checks exact-empty annotation/replacement provenance | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.18 — Validator checks supported subquery mode/child/arity/type/nullability/mapping | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.19 — Validator checks every rewrite has demand preservation or exact proof | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.20 — Validator checks executable provenance and non-executable diagnostic exclusion | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-20.21 — Validator checks executable child order | §20.18 | V20-20 | V20-20 procedure and applicable mandatory-matrix row | independent structural plan predicate | COMPLETE |
+| V20-21.1 — Canonical logical operator inventory is represented without adding physical algorithms | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.2 — Hidden target RID/system slots are marked internal | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.3 — Hidden system slots are excluded from wildcard/user-visible enumeration | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.4 — Projection pruning retains required hidden slots | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.5 — LogicalInsert carries target TableId and canonical target ColumnIds | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.6 — LogicalInsert accepts Values and SELECT input under one logical contract | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.7 — LogicalInsert carries coercion/default expressions and optional RETURNING | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.8 — LogicalUpdate carries target TableId and BindingId | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.9 — LogicalUpdate child supplies exact target RID | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.10 — LogicalUpdate child supplies required old values | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.11 — LogicalUpdate carries assignments keyed by ColumnId and optional RETURNING | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.12 — LogicalDelete child supplies exact target RID and required old values | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.13 — LogicalDelete targets one base table | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.14 — LogicalAnalyze carries resolved TableId and immutable descriptor | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.15 — LogicalAnalyze carries analyzed SchemaVer and visible ColumnId/IndexId set | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.16 — LogicalAnalyze has no ordinary relational output requirement | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.17 — LogicalAnalyze performs no execution-time name lookup | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-21.18 — LogicalAnalyze does not choose statistics algorithms or bypass visibility | §§20.3, 20.13 | V20-21 | V20-21 procedure and applicable mandatory-matrix row | statement-node schema and hidden-value contract table | COMPLETE |
+| V20-22.1 — LogicalGet does not choose sequential versus index access | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.2 — LogicalJoin does not select a physical join algorithm | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.3 — LogicalSort does not prescribe a sorting algorithm | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.4 — LogicalLimit semantics do not prescribe an implementation algorithm | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.5 — Logical properties remain distinct from physical ordering/partitioning | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.6 — Subquery fallback semantics exist independently of physical rewrite success | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.7 — Physical subquery planning remains §37.17-owned | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.8 — Memory/expression-state/pipeline mechanics remain Chapters 24–26-owned | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.9 — Multiple conforming physical plans preserve one logical bag/order class | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.10 — Physical vector width cannot alter logical values/errors | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.11 — Physical aggregate sharing retains exact logical mapping | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.12 — Logical EXPLAIN describes the validated logical representation | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.13 — Logical EXPLAIN is independent of reparsing/AST pretty-printing | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.14 — Logical EXPLAIN may show semantic IDs/types/nullability/lineage/proofs | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.15 — EXPLAIN presentation remains §§40.2/40.5/40.8-owned | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-22.16 — No exact output string becomes a semantics oracle | §§20.1, 20.4–20.14, 20.16, 20.19; §§22.4, 27.9, 30.1, 30.3, 37.17, 40.2, 40.5, 40.8 | V20-22 | V20-22 procedure and applicable mandatory-matrix row | cross-realization semantic equivalence and owner ledger | COMPLETE |
+| V20-23.1 — Hash seed cannot change logical schema | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.2 — Container iteration cannot change slot equality or bag semantics | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.3 — Pointer addresses cannot define logical identity | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.4 — Allocation order cannot define logical identity | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.5 — Opaque LogicalSlotId numeric values are alpha-renamable | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.6 — TableId numeric order cannot reorder output schema | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.7 — ColumnId numeric order cannot reorder output schema | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.8 — Physical scan order cannot create semantic order | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.9 — Physical join algorithm cannot change occurrence multiplicity | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.10 — Physical sort algorithm cannot change comparator order | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.11 — Physical aggregate reduction cannot change logical occurrence mapping | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.12 — Physical Limit choice cannot select outside the allowed result class | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.13 — Optimizer rule visitation cannot change semantic result/error | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.14 — Scheduler interleaving cannot change semantic result/provenance | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.15 — Vector/chunk boundaries cannot change subquery or scalar error precedence | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.16 — Source-buffer release cannot invalidate retained numeric SourceSpan | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.17 — Unspecified tie orders compare by tie-equivalence class | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-23.18 — Unordered results compare by row-occurrence bag rather than sequence | §§20.1–20.2, 20.8, 20.11–20.12, 20.17, 20.20 | V20-23 | V20-23 procedure and applicable mandatory-matrix row | alpha-renamed canonical semantic serialization | COMPLETE |
+| V20-24.1 — Filter scalar errors retain their Chapter-17/39 category and predicate origin | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.2 — Project scalar errors retain their category and expression origin | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.3 — Join predicate errors retain pair demand and source origin | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.4 — Group-key errors retain row demand and source origin | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.5 — Aggregate argument errors precede that row's aggregate update | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.6 — Aggregate finalization chooses lowest canonical failing ordinal | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.7 — HAVING errors retain group demand and source origin | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.8 — ORDER-key errors retain sorted-row demand and source origin | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.9 — Scalar-subquery cardinality maps to SQL CardinalityError | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.10 — Scalar row-construction errors obey first/second-row precedence | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.11 — EXISTS suppresses undemanded projection/later-row errors | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.12 — IN build errors precede possible probe results | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.13 — Unsafe pushdown/pruning/empty rewrite is rejected rather than changing error | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.14 — Error-capable replacement retains category/origin/precedence | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.15 — Invalid source-less error-capable synthetic is rejected by plan validation | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.16 — Logical validator failure is an internal architecture error | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-24.17 — Logical planning does not independently choose transaction ACTIVE/MUST_ABORT effect | §§20.6–20.14, 20.17–20.18; §§39.1–39.3 | V20-24 | V20-24 procedure and applicable mandatory-matrix row | demand/origin/precedence trace plus existing error-category table | COMPLETE |
+| V20-25.1 — Chapter-16 identity/descriptor/SchemaVer/presentation/snapshot semantics are consumed unchanged | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.2 — Chapter-17 type/3VL/comparison/order/evaluation/folding semantics are consumed unchanged | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.3 — Chapter-18 SourceSpan/source-lifetime semantics are consumed unchanged | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.4 — Chapter-19 BindingId/output/ordinal/ORDER/LIMIT semantics are consumed unchanged | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.5 — Chapter-29 aggregate value/error/ordinal semantics are consumed unchanged | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.6 — Physical operator vocabulary does not redefine logical semantics | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.7 — PhysicalLimit conforms to Chapter-20 selection semantics | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.8 — Sort tie/comparator owners conform to Chapter-20 ordering requirement | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.9 — Statistics remain approximate and cannot originate proof | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.10 — §35.2 exact-proof whitelist remains closed | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.11 — §35.20 Limit estimate matches logical formula | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.12 — §37.17 subquery physical planning preserves fallback semantics | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.13 — §§39.1–39.3 preserve error categories and transaction ownership | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.14 — §§40.2/40.5/40.8 retain EXPLAIN presentation ownership | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.15 — §41 verification obligations are covered by deterministic V20 families | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.16 — Chapter-21 DML handoff is observed without conducting Chapter-21 review | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-25.17 — All mandatory Chapter-20 matrices are present and status-complete | Architecture Chapters 16–20, 29; §§22.4, 27.9, 30.1, 30.3, 34.1, 35.2, 35.20, 37.17, 39.1–39.3, 40.2, 40.5, 40.8, 41 | V20-25 | V20-25 procedure and applicable mandatory-matrix row | cross-chapter owner ledger and mandatory matrices | COMPLETE |
+| V20-26.1 — Verification prose contains no project chronology | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.2 — Verification prose contains no current implementation status | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.3 — Verification prose contains no phase narration | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.4 — Verification prose contains no development sequencing | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.5 — Verification prose contains no source/class/file-layout mandate | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.6 — Verification prose contains no optimizer-framework mandate | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.7 — Verification prose contains no physical-algorithm mandate | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.8 — Verification prose contains no allocator or ID-representation mandate | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.9 — Verification prose contains no provenance-container mandate | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.10 — Verification prose contains no historical test result count | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.11 — Verification procedures are analytical and timeless | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.12 — Verification procedures are deterministic | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.13 — Correctness procedures use no sleeps | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.14 — Every semantic family has an independent oracle | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.15 — Production logical planner does not verify itself | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.16 — Production optimizer does not verify itself | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.17 — Production validator does not verify itself | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.18 — Production EXPLAIN does not verify semantics | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.19 — Reference DBMS behavior is not an oracle | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.20 — Opaque identities are compared by equality graph and alpha-renaming | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.21 — Unordered results are not compared as byte-for-byte sequences | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.22 — Architecture ownership is referenced rather than redefined | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.23 — Logical representation freedom is preserved | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.24 — Optimizer search/memo freedom is preserved | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.25 — Physical execution freedom is preserved | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.26 — Source-buffer ownership freedom is preserved | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.27 — No new Architecture semantic rule is introduced | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-26.28 — Separation of Architecture, Verification, Development, Project State, and devlog roles is preserved | Architecture front matter; Chapter 20; §41 | V20-26 | V20-26 procedure and applicable mandatory-matrix row | documentation-model matrix and prose/reference audit | COMPLETE |
+| V20-1.17 — Bound join expressions map resolved relation occurrences to LogicalSlotIds without rebinding | §§20.2, 20.8.2; Chapter 19 | V20-1 | V20-1 bound-predicate handoff fixture | bound-to-logical oracle and lineage map | COMPLETE |
+| V20-3.33 — Every other explicitly schema-preserving node passes slots through unchanged | §20.2 | V20-3 | V20-3 node-rule table | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-3.34 — Boundary elimination preserves every surviving external identity through explicit mapping | §§20.2, 20.17 | V20-3 | V20-3 boundary-rewrite fixture | whole-statement occurrence graph with retired-ID set | COMPLETE |
+| V20-8.27 — Every grouping/DISTINCT hash or comparison realization agrees with grouping equivalence | §§20.9–20.10 | V20-8 | V20-8 cross-realization matrix | normalized grouping-equivalence partition | COMPLETE |
+| V20-9.26 — Expressions above Aggregate reference aggregate outputs rather than arbitrary pre-aggregate columns | §20.9 | V20-9 | V20-9 schema/reference fixture | source-occurrence/ordinal table plus schema oracle | COMPLETE |
+| V20-10.19 — Physical sorting and ordering-property matching consume stored resolved NULL order rather than infer it | §20.11; §§30.1, 30.3 | V20-10 | V20-10 logical/physical handoff fixture | canonical SQL comparator plus key descriptor | COMPLETE |
+| V20-11.28 — The folded/residual count expression is acquired once at execution start rather than reevaluated from source | §§19.14, 20.12 | V20-11 | V20-11 ownership-boundary fixture | Chapter-19 count-expression record plus Limit oracle | COMPLETE |
+| V20-11.29 — LogicalLimit introduces no count-expression category, error timing, or reevaluation | §20.12; §19.14 | V20-11 | V20-11 error-boundary fixture | Chapter-19 count-error oracle | COMPLETE |
+| V20-14.39 — Duplicate derived exported names fail at the derived boundary | §20.14.3; §19.5 | V20-14 | V20-14 derived-name fixture | bound exported-name table | COMPLETE |
+| V20-14.40 — A generated presentation name must be explicitly aliased before derived export | §20.14.3; §19.5 | V20-14 | V20-14 derived-name fixture | bound exported-name table | COMPLETE |
+| V20-14.41 — Qualified derived wildcard follows child projection order | §20.14.3 | V20-14 | V20-14 derived-wildcard fixture | ordered exported-schema oracle | COMPLETE |
+| V20-14.42 — Supported expression subqueries retain the closed legal-context table | §20.14.9 | V20-14 | V20-14 context matrix | closed context-admission table | COMPLETE |
+| V20-14.43 — LIMIT/OFFSET, defaults, generated/catalog expressions, and unsupported constraints admit no subquery side plan | §20.14.9 | V20-14 | V20-14 negative context matrix | closed context-admission table | COMPLETE |
+| V20-14.44 — Only SELECT query blocks appear as subqueries | §20.14.9 | V20-14 | V20-14 unsupported-form matrix | closed support table | COMPLETE |
+| V20-14.45 — DML subquery errors retain §39.1 before/after-write transaction consequences | §§20.14.9, 39.1 | V20-14 | V20-14/V20-24 DML error fixture | statement-write-boundary oracle | COMPLETE |
+| V20-14.46 — IN occurrence state records match, build-has-null, and build-empty semantics without prescribing storage | §§20.14.6–20.14.7 | V20-14 | V20-13/14 build-state matrix | repeated-equality 3VL fold | COMPLETE |
+| V20-14.47 — Subquery values, sets, and spill state are query-local and add no persistent format | §20.14.12 | V20-14 | V20-14 lifetime/persistence fixture | persistence owner ledger | COMPLETE |
+| V20-14.48 — Logical observability distinguishes scalar, EXISTS, IN, lazy state, and surviving derived boundaries | §20.14.12 | V20-14 | V20-14/V20-22 EXPLAIN identity fixture | semantic-mode occurrence graph | COMPLETE |
+| V20-14.49 — Every forbidden §20.14.13 implementation is rejected by the closed support/demand/cardinality oracle | §20.14.13 | V20-14 | V20-12–14 forbidden-case table | scalar/EXISTS/IN/derived independent oracles | COMPLETE |
+| V20-16.31 — Rewrites do not duplicate, drop, or reorder any represented VOLATILE occurrence | §20.17.2 | V20-16 | V20-16 volatility-boundary fixture | demand relation and descriptor classification | COMPLETE |
+| V20-16.32 — STABLE functions are not treated as immutable compile-time constants | §§20.17.1–20.17.2; §17.10.2 | V20-16 | V20-16 folding-boundary fixture | Chapter-17 folding oracle | COMPLETE |
+| V20-16.33 — Foreign-key rewrites and join elimination remain outside the trusted v1 proof surface | §20.17.9 | V20-16 | V20-16 trusted-proof negative fixture | closed exact-proof calculus | COMPLETE |
+| V20-16.34 — Only constraints actually enforced by the engine establish logical key properties | §20.17.9 | V20-16 | V20-16 key-proof fixture | trusted-constraint ledger | COMPLETE |
+| V20-18.29 — No rewrite invents a source-byte position or optimizer-generated user diagnostic site | §20.17 | V20-18 | V20-18 origin-negative fixture | source-occurrence diagnostic-origin map | COMPLETE |
+| V20-19.27 — Exact-proof provenance is planner/query-lifetime metadata and adds no persistent format | §§20.16, 35.2 | V20-19 | V20-19 lifetime fixture | proof-provenance owner ledger | COMPLETE |
+| V20-19.28 — Estimates may affect cost and physical choice but never logical equivalence | §§20.16, 34.1, 35.2 | V20-19 | V20-19 estimate-perturbation fixture | exact-proof/estimate partition | COMPLETE |
+| V20-20.22 — Validation runs after canonical construction and after every major rewrite phase | §20.18 | V20-20 | V20-20 phase-boundary injection | independent structural plan predicate | COMPLETE |
+| V20-22.17 — Every supported subquery physical realization conforms to the logical fallback's value, demand, state, and error contract | §§20.14.7, 37.17 | V20-22 | V20-22 cross-realization fixture | canonical subquery fallback oracle | COMPLETE |
+| V20-24.18 — Chapter-20 errors compose with §39.1 transaction consequences without redefining them | §§20.14.9, 20.17, 39.1–39.3 | V20-24 | V20-24 before/after-write composition fixture | existing statement-write-boundary oracle | COMPLETE |
+| V20-25.18 — Chapter-20 semantics introduce no page, tuple, catalog, WAL, or recovery-format change | Chapter 20; Chapters 3–16 | V20-25 | V20-25 persistence-owner audit | cross-chapter owner ledger | COMPLETE |
+| V20-27.1 — Every final Chapter-20 atomic obligation has one ledger row | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | mechanical ledger enumeration and status aggregation | COMPLETE |
+| V20-27.2 — Every ledger row names a deterministic procedure or complete reusable family | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | mechanical ledger enumeration and status aggregation | COMPLETE |
+| V20-27.3 — Every ledger row names an independent oracle | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | mechanical ledger enumeration and status aggregation | COMPLETE |
+| V20-27.4 — Every ledger row is COMPLETE | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | mechanical ledger enumeration and status aggregation | COMPLETE |
+| V20-27.5 — PARTIAL, MISSING, and CONTRADICTORY totals are zero | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | mechanical ledger enumeration and status aggregation | COMPLETE |
+| V20-27.6 — No frozen Chapter-20 semantic question remains | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | mechanical ledger enumeration and status aggregation | COMPLETE |
+
+The actual inventory derived from the final Chapter-20 text contains **618 atomic obligations**:
+
+```text
+COMPLETE:       618
+PARTIAL:          0
+MISSING:          0
+CONTRADICTORY:    0
+```
+
+| Verification family | Atomic obligations | Status |
+|---|---:|---|
+| V20-1 | 17 | COMPLETE |
+| V20-2 | 16 | COMPLETE |
+| V20-3 | 34 | COMPLETE |
+| V20-4 | 19 | COMPLETE |
+| V20-5 | 16 | COMPLETE |
+| V20-6 | 25 | COMPLETE |
+| V20-7 | 14 | COMPLETE |
+| V20-8 | 27 | COMPLETE |
+| V20-9 | 26 | COMPLETE |
+| V20-10 | 19 | COMPLETE |
+| V20-11 | 29 | COMPLETE |
+| V20-12 | 20 | COMPLETE |
+| V20-13 | 30 | COMPLETE |
+| V20-14 | 49 | COMPLETE |
+| V20-15 | 23 | COMPLETE |
+| V20-16 | 34 | COMPLETE |
+| V20-17 | 18 | COMPLETE |
+| V20-18 | 29 | COMPLETE |
+| V20-19 | 28 | COMPLETE |
+| V20-20 | 22 | COMPLETE |
+| V20-21 | 18 | COMPLETE |
+| V20-22 | 17 | COMPLETE |
+| V20-23 | 18 | COMPLETE |
+| V20-24 | 18 | COMPLETE |
+| V20-25 | 18 | COMPLETE |
+| V20-26 | 28 | COMPLETE |
+| V20-27 | 6 | COMPLETE |
+
+All V20 families are closed. The inventory, procedures, independent oracles, and matrices cover every final Chapter-20 obligation without using Architecture text or production planner/optimizer behavior as its own oracle. No frozen semantic question or cross-owner contradiction remains.
+
+---
+
 ### Front-End Error and Source-Span Tests
 
 Drive one representative failure through each architecture-owned category in §§21.16 and
@@ -11220,65 +12713,32 @@ and publication/lifetime relationships.
 
 ### Logical Planner Tests
 
-Given bound statements, assert canonical logical-plan shapes.
-
-Examples:
-
-```sql
-SELECT a FROM t WHERE b > 5;
-```
-
-becomes:
-
-```text
-Project(a)
-  Filter(b > 5)
-    Get(t)
-```
-
-Aggregate example:
-
-```sql
-SELECT dept, COUNT(*)
-FROM emp
-WHERE active
-GROUP BY dept
-HAVING COUNT(*) > 3;
-```
-
-becomes canonical:
-
-```text
-Project
-  Filter(HAVING)
-    Aggregate
-      Filter(WHERE)
-        Get(emp)
-```
-
-Add representative canonical shapes for no-FROM Values, INNER/LEFT/CROSS joins, DISTINCT,
-Sort/Limit, INSERT VALUES/SELECT, UPDATE/DELETE with hidden RID and required old values,
-supported DDL/control statements, derived-table `LogicalSubqueryScan`, and scalar/EXISTS/IN
-independent child modes. Inspect LogicalSlotId identity, output order/type/nullability,
-stable descriptor references, and hidden-system visibility. Do not assert physical access
-or join algorithms.
+The complete Chapter-20 logical-planner procedure is V20-1 through V20-14 above. Retain
+small SQL-to-canonical-shape integration fixtures here for no-FROM, Get/Values,
+Filter/Project, INNER/LEFT/CROSS joins, Aggregate/HAVING, DISTINCT, Sort/Limit, DML hidden
+values, derived tables, and scalar/EXISTS/IN children. Their expected plans come from the
+V20 bound-to-logical, schema, slot, bag, join, grouping, ordering, Limit, and subquery
+oracles. They do not rebind names, use EXPLAIN strings as the oracle, or assert physical
+access, join, aggregation, sorting, Limit, or subquery algorithms.
 
 ---
 
 ### Logical-Plan Validator Tests
 
-Test the logical validator independently by constructing immutable malformed plans that
-bypass parser/binder construction. Supply otherwise valid descriptors so each test isolates
-one invariant. Validator failure is an internal architecture error, not a user SQL syntax
-error, and occurs before optimization or execution.
+V20-20 is the complete Chapter-20 validator procedure. Construct immutable malformed plans
+that bypass parser/binder construction and violate exactly one §20.18 invariant while all
+other descriptors remain valid. The structural expected result is produced by V20-20's
+independent predicate, never by the production validator. Failure is an internal
+architecture error before physical planning or execution, not a user SQL syntax error.
 
 | Area | Malformed logical state | Required assertion |
 |---|---|---|
-| Slots/schema | Missing child slot, sibling/unavailable slot reference, duplicate output LogicalSlotId, output/expression order mismatch, or schema inconsistent with child/output expressions | Reject without assigning a physical interpretation |
+| Slots/schema | Missing child slot, sibling/unavailable slot reference, whole-statement duplicate or reused LogicalSlotId, wrong fresh/pass-through/remap rule, output/expression order mismatch, or schema inconsistent with child/output expressions | Reject without assigning a physical interpretation |
 | Types | Unresolved expression, non-BOOLEAN Filter/HAVING/Join predicate, incompatible comparison/cast, aggregate result mismatch, or output type/nullability contradiction | Reject using the already-resolved type contract |
-| Operator shape | Wrong child count, condition on CROSS, missing required join condition, misplaced aggregate reference, impossible DML/DDL child, or hidden target RID removed | Reject before rewrite/search |
+| Operator shape | Wrong child count, condition on CROSS, missing required join condition, misplaced/renumbered/merged aggregate occurrence, impossible DML/DDL child, or hidden target RID removed | Reject before rewrite/search |
 | Catalog/nullability | Inconsistent TableId/SchemaVer descriptor, mutated/stale identity pairing, or LEFT JOIN right output not null-extended | Reject rather than repair from names/current cache |
-| Semantic proof | Empty annotation/replacement with missing, statistics-derived, or operator-invalid provenance | Reject under §§20.17.10 and 35.2 |
+| Rewrite/proof | Empty annotation/replacement with missing, statistics-derived, or operator-invalid provenance; demanded-evaluation change without exact proof; or executable child-order change | Reject under §§20.17, 20.17.5, 20.17.10, and 35.2 |
+| Diagnostic provenance | Missing/changed source origin, arbitrary replacement span, source-less potentially erroring synthetic executable, or metadata used as a diagnostic origin | Reject under §20.17 |
 | Subquery state | Unsupported mode, wrong arity/type/nullability, missing/multiple independent child, OuterRef/correlated slot, invalid derived slot/name map, or NOT wrapper inconsistent with the mode | Reject using §20.14 without executing the support matrix again |
 
 Maintain positive validator fixtures for every canonical logical family above so a
@@ -11297,67 +12757,48 @@ plan.
 
 ### Logical Rewrite Tests
 
-For every rewrite rule:
-
-```text
-input logical plan
-expected transformed plan
-```
-
-plus, when an execution implementation is available:
-
-```text
-differential semantic test:
-    original plan result == rewritten plan result
-```
-
-Use randomized data with NULLs.
-
-This is particularly important for:
-
-- boolean simplification,
-- predicate pushdown,
-- outer joins,
-- DISTINCT,
-- aggregates.
-
-For every rule, run structural input/output tests both when its preconditions hold and at
-the nearest non-matching boundary. Validate the input before matching and the output after
-the phase as described above. Differential tests use NULL-rich and FLOAT64 edge data,
-controlled errors, and normalized unordered results.
+V20-15 through V20-19 are the complete rewrite procedure. Every rule receives an immutable
+input plan, an independently derived expected output or rejection, a pre/post demanded-
+evaluation relation, exact-proof facts where required, executable-tree serialization,
+slot/aggregate/provenance mappings, and bag/order/nullability oracles. Exercise both the
+exact matching boundary and the nearest nonmatching boundary, then validate input and
+output with V20-20. Differential execution, when available, supplements but never replaces
+these independent structural and semantic oracles.
 
 #### Volatility, folding, and Boolean 3VL
 
-Use test registry descriptors for IMMUTABLE, STABLE, and VOLATILE expressions without
-changing the v1 user-visible empty scalar-function registry. Count evaluations and inject
-errors to assert rewrites never duplicate/drop/reorder VOLATILE work, fold STABLE/VOLATILE
-expressions as immutable constants, or hide/newly force an error.
-
 Constant folding covers deterministic scalar results, NULL, casts, arithmetic errors,
 searched CASE, and short-circuited branches using §17.10.2 precedence. Boolean
-simplification runs complete TRUE/FALSE/UNKNOWN fixtures; accept only identities valid
-under SQL 3VL and the architecture's evaluation-demand rules.
+simplification runs complete TRUE/FALSE/UNKNOWN fixtures. Accept only identities valid
+under SQL 3VL, §17.10.2, D20-B1 demand preservation, D20-B2 executable child order, and
+D20-M6 provenance; an unproven potentially erroring occurrence is conservative.
 
 #### Predicate pushdown and projection pruning
 
 For predicate pushdown, construct INNER/CROSS and LEFT JOIN plans with left-local,
-right-local, cross-side, NULL-sensitive, and volatile/erroring predicates. Assert legal
-inner-side pushdown, preserved ON-versus-WHERE meaning, and no movement across a LEFT JOIN
-null-extension boundary without a separately proven transformation. A lower estimate is
-not rewrite authority.
+right-local, cross-side, NULL-sensitive, and error-capable predicates. A side-local
+reference is necessary but not sufficient: compare pre/post demand domains and reject
+movement that adds potentially observable evaluation unless the independent exact-proof
+oracle establishes total/error-free demand insensitivity. Preserve ON-versus-WHERE meaning
+and LEFT null extension. An estimate is never rewrite authority.
 
 Projection-pruning fixtures place required values in parent projection, filters, join
 conditions, grouping/aggregate arguments, sorting, DML assignments/RETURNING, hidden target
-RID/system slots, and subquery/derived-slot maps. Assert only truly unused outputs are
-removed and all retained LogicalSlotIds keep their semantic identity.
+RID/system slots, and subquery/derived-slot maps. Ancestor nonuse alone does not permit
+removing an ordinary demanded error-capable Project expression. Removal requires the
+EXISTS specialized irrelevance rule or exact total/error-free proof with all other
+semantics unchanged. Retained occurrences keep their LogicalSlotIds; newly introduced or
+duplicated occurrences receive fresh IDs, and retired IDs are not reused.
 
 #### Exact-empty and subquery-sensitive rewrites
 
 Exercise every §20.17.10 propagation case with approved proof provenance and with an
-otherwise identical numerical-zero estimate lacking proof. Only the former may introduce a
-schema-equivalent empty/no-op plan. Preserve LEFT JOIN rows, global-aggregate one-row
-semantics, DML completion/affected-row behavior, and subquery lazy demand/left evaluation.
-Cross-reference the §41.6 Semantic Emptiness Tests rather than repeating estimator setup.
+otherwise identical numerical-zero estimate lacking proof. Only the former establishes
+semantic emptiness, and even it may introduce a schema-equivalent empty/no-op plan only
+when V20-15/16 prove that no demanded potentially observable evaluation is suppressed.
+Preserve LEFT rows, global-aggregate one-row semantics, DML completion/affected-row
+behavior, and subquery lazy demand/left evaluation. Reuse the §41.6 Semantic Emptiness
+Tests for estimator fixtures without letting them define the demand oracle.
 
 For supported subquery semi/anti/marker or boundary-removal rewrites, compare against the
 canonical independent fallback. Preserve 3VL, duplicate behavior, cardinality checks,
