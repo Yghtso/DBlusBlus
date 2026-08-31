@@ -15444,9 +15444,10 @@ constraint/type validation
 It does not choose physical access/join algorithms, estimate cardinality, or access heap/B+ pages directly.
 
 Catalog-backed binding consumes the transaction-visible immutable descriptors
-selected under §21.3 and Chapter 16. It does not redefine statement/transaction
-snapshot visibility, own earlier DDL visibility, SchemaVer selection, or
-descriptor lifetime, and a catalog cache cannot override those owners.
+selected under §§16.6, 16.10, and 21.3. It does not redefine
+statement/transaction snapshot visibility, own earlier DDL visibility,
+SchemaVer selection, or descriptor lifetime, and a catalog cache cannot
+override those owners.
 
 ## 19.2 Binding scopes and BindingId
 
@@ -15462,7 +15463,7 @@ parent scope link
 ```
 
 Every query block owns exactly one local relation-qualifier namespace keyed by
-the canonical identifier bytes defined by Chapters 16 and 18. Every visible
+the canonical identifier bytes defined by §§16.2 and 18.4. Every visible
 relation occurrence exposes exactly one qualifier in that namespace:
 
 - an unaliased base table exposes the final component of its object name, so
@@ -15506,7 +15507,7 @@ is classified through the unsupported-correlation rule in §19.18.
 For `left_subtree JOIN right_relation ON predicate`, the ON predicate sees
 exactly every relation binding in the accumulated left subtree plus the
 current right relation. It does not see any later join relation. This follows
-the left-associated Chapter-18 join structure: in
+the left-associated §18.11 join structure: in
 `a INNER JOIN b ON p LEFT JOIN c ON q`, `p` sees `a,b`, while `q` sees
 `a,b,c`.
 
@@ -15524,9 +15525,9 @@ GROUP BY has neither an output-alias shortcut nor an ordinal shortcut: each
 item binds as an ordinary input-scope expression, so `GROUP BY 1` groups by the
 integer constant expression rather than projection ordinal 1.
 
-The parent-scope structure is retained only for §19.18's correlation diagnostic
-and a future architecture. V1 resolution never searches it for a subquery
-column and never emits executable OuterRef state.
+The parent-scope structure exists only for §19.18's correlation diagnostic.
+V1 resolution never searches it for a subquery column and never emits
+executable OuterRef state.
 
 ## 19.3 Bound column references
 
@@ -15541,7 +15542,7 @@ nullable
 source span
 ```
 
-Logical planning later assigns output-slot identity.
+Logical-plan construction assigns output-slot identity under §20.2.
 
 Bound column semantics are never represented solely by the original textual column name.
 For a base-table column, relation-occurrence identity and catalog-column
@@ -15588,11 +15589,11 @@ row relation scope for VALUES expressions. For example,
 `INSERT INTO t(a) VALUES(a)` does not bind `a` as target column `t.a` merely
 because `t` is the INSERT target. An INSERT SELECT source binds as an ordinary
 independent SELECT query block and likewise receives no relation visibility
-from the INSERT target; target mapping and §17.8.5 assignment coercion occur
-after source binding.
+from the INSERT target; §21.11 target mapping and §17.8.5 assignment coercion
+occur after source binding.
 
-UPDATE and DELETE each create one target-row relation binding. Because Chapter
-18 excludes DML target aliases, its sole exposed qualifier is the target
+UPDATE and DELETE each create one target-row relation binding. Because
+§18.10.3 excludes DML target aliases, its sole exposed qualifier is the target
 table's canonical final name component. UPDATE target columns are visible,
 unqualified or through that qualifier, to every SET right-hand expression,
 WHERE, and RETURNING. Each SET left-hand name resolves directly against the
@@ -15600,7 +15601,7 @@ target descriptor rather than through multi-relation expression ambiguity.
 DELETE exposes its target columns to WHERE and RETURNING under the same
 unaliased qualifier rule. No other ordinary relation binding is introduced.
 
-RETURNING binds names/types against the Chapter-15/§21.15 row image:
+RETURNING binds names/types against the §21.15 row image:
 
 ```text
 INSERT -> inserted/new row
@@ -15609,10 +15610,10 @@ DELETE -> deleted/old row
 ```
 
 This namespace rule does not redefine physical row-version creation,
-publication, retry, or result buffering. Direct aggregate expressions remain
-forbidden in DML expressions, including RETURNING, under §19.10; aggregates
-inside an independently bound supported child SELECT remain owned by that
-child query block.
+publication, retry, or result buffering owned by §§21.11 and 21.13–21.15.
+Direct aggregate expressions remain forbidden in DML expressions, including
+RETURNING, under §19.10; aggregates inside an independently bound supported
+child SELECT remain owned by that child query block.
 
 ### 19.4.4 DDL declaration and object binding
 
@@ -15620,13 +15621,14 @@ CREATE TABLE declared columns form one statement-local declaration namespace.
 Table-level PRIMARY KEY and UNIQUE member names resolve only against that
 namespace. An unknown member, a repeated member within one constraint, or a
 second PRIMARY KEY declaration produces `ConstraintDefinitionError` at the
-responsible declaration span, subject to any stricter §21.6–§21.7 rule.
+responsible declaration span, subject to the constraints in §§21.6.1 and 21.7.
 
-CREATE INDEX binding resolves its target table in the §21.3 catalog snapshot,
-then resolves each key name against that descriptor while preserving Chapter-
-18 source order. A repeated key column produces `BindError`; a key whose type
-is not index-eligible produces `TypeError`. Physical construction and UNIQUE
-enforcement remain Chapters 8, 11, and 21 responsibilities.
+CREATE INDEX binding composes with §21.8.1: it resolves its target table in the
+§21.3 catalog snapshot, then resolves each key name against that descriptor
+while preserving §18.13 source order. A repeated key column produces
+`BindError`; a key whose type is not index-eligible produces `TypeError`.
+Physical construction and UNIQUE enforcement remain owned by §§21.8.2 and
+11.10, respectively.
 
 DROP binding resolves exactly the requested object kind. A missing object, or
 a name visible only as the wrong requested kind, produces `CatalogError`.
@@ -15645,9 +15647,9 @@ query block it is a bind error rather than an empty expansion. Qualified
 is an unknown-qualifier bind error.
 
 Expansion order remains visible relation-occurrence source order followed by
-each descriptor's logical presentation column order. Qualified `u.*` resolves
-exactly one local qualifier; duplicate qualifiers cannot exist because §19.2
-rejects them.
+each descriptor's §16.8 logical presentation column order. Qualified `u.*`
+resolves exactly one local qualifier; duplicate qualifiers cannot exist
+because §19.2 rejects them.
 
 Execution never performs wildcard expansion.
 
@@ -15689,8 +15691,8 @@ forms the exact-match candidate set in that explicit-alias namespace:
 ```
 
 The one-match result preserves output-slot semantic identity; it does not
-rebind or independently re-evaluate the aliased raw expression. Chapter 20 may
-assign the concrete LogicalSlotId or an equivalent downstream identity.
+rebind or independently re-evaluate the aliased raw expression. The concrete
+LogicalSlotId or equivalent downstream identity is owned by §20.2.
 
 Generated display names are presentation metadata, not stable catalog identity.
 They never become binder lookup entries or ORDER BY alias candidates, may
@@ -15700,7 +15702,7 @@ duplicate freely at top level, and define no persistent format.
 
 After binding, expressions are typed semantic nodes.
 
-Initial kinds include:
+The v1 bound-expression kinds include:
 
 ```text
 BoundConstant
@@ -15728,11 +15730,12 @@ source span
 
 A bound cast additionally retains explicit-versus-implicit provenance. An
 explicit source `CAST(expr AS T)` is marked explicit and carries the complete
-Chapter-18 CAST-expression SourceSpan. A binder-inserted implicit cast is a
-synthetic semantic node marked implicit and carries the SourceSpan of the
-operand expression being coerced, not the span of the parent operator or call
-whose resolution selected the cast. The distinction is retained wherever
-later diagnostics or semantic analysis observes cast provenance.
+raw CAST-expression SourceSpan under §§18.8 and 18.13. A binder-inserted
+implicit cast is a synthetic semantic node marked implicit and carries the
+SourceSpan of the operand expression being coerced, not the span of the parent
+operator or call whose resolution selected the cast. The distinction is
+retained wherever downstream diagnostics or semantic analysis observes cast
+provenance.
 
 Cast provenance is runtime bound-expression metadata, not a TypeId, catalog
 field, WAL field, or persisted tuple value. Borrowed source-derived metadata
@@ -15740,7 +15743,8 @@ obeys §18.14; its concrete representation is implementation-defined.
 
 The executor receives resolved types and does not redo SQL type inference.
 
-Bound expressions remain semantic nodes but are required to be compatible with later vectorized evaluation conceptually of the form:
+Bound expressions satisfy the §25.1 vectorized expression-execution handoff,
+conceptually of the form:
 
 ```text
 Evaluate(input DataChunk, selection) -> output Vector
@@ -15771,35 +15775,40 @@ A rewrite creates a new expression or structurally shares immutable children; it
 
 Expression lifetime is query/plan scoped.
 
-Arena ownership or shared immutable nodes are both architecture-compatible.
-
-The design should avoid one independently reference-counted heap allocation per tiny expression unless measurement justifies it.
+Bound-expression allocation, ownership, sharing, and storage representation
+are implementation-defined. Any representation is conforming if it preserves
+the immutable semantic structure, the §18.14 backing-lifetime contract, and
+the §19.2 BindingId identity rules, and if pointer or allocation identity is
+not observable query semantics.
 
 ## 19.8 Operator registry
 
 Arithmetic/comparison resolution is centralized and uses exactly the closed
-§§17.6–17.7 tables. No representative/polymorphic signature expands that
+§17.6 operator and §17.7.1 comparison tables. No
+representative/polymorphic signature expands that
 registry.
 
-The Binder first applies TypeResolver coercion/promotion rules, inserts required implicit casts, then selects the final operator implementation/signature.
+The Binder first applies the §17.10.1 TypeResolver coercion/promotion rules,
+inserts required implicit casts, then selects the final operator
+implementation/signature.
 
-Operator type rules are not scattered across AST classes.
+Raw-AST node kinds are not independent type-rule authorities.
 
 ## 19.9 Function registry and volatility
 
-The concrete v1 named scalar-function registry is empty under §17.9.3.
-The descriptor model below is retained for later versions and does not authorize
-binding any v1 scalar function call.
+The v1 named scalar-function registry is empty under §17.9.3. The descriptor
+model below defines bound-call metadata but does not authorize any v1 scalar
+function call.
 
-Chapter 18 supplies only generic `f()`, `f(expr,...)`, and `f(*)` shapes. Call
-binding considers registered scalar and aggregate descriptors by canonical
-name and argument shape without parser special-casing. Ordinary argument calls
-consider descriptors whose arity/shape can match; a star call considers only a
-descriptor explicitly authorizing star syntax. Exactly one semantic descriptor
-must resolve under the closed registries and TypeResolver rules. Thus
-`COUNT(*)` resolves only through Chapter 29's star-capable descriptor, while
-`SUM(*)` and `foo(*)` have no legal star descriptor. Bound argument types never
-authorize an unregistered coercion or overload.
+The generic `f()`, `f(expr,...)`, and `f(*)` shapes are supplied by §18.12.4.
+Call binding considers registered scalar and aggregate descriptors by
+canonical name and argument shape without parser special-casing. Ordinary
+argument calls consider descriptors whose arity/shape can match; a star call
+considers only a descriptor explicitly authorizing star syntax. Exactly one
+semantic descriptor must resolve under the closed registries and TypeResolver
+rules. Thus `COUNT(*)` resolves only through the §29.3.2 star-capable
+descriptor, while `SUM(*)` and `foo(*)` have no legal star descriptor. Bound
+argument types never authorize an unregistered coercion or overload.
 
 For any registry state admitting multiple equally legal descriptors, the
 registry and TypeResolver must define one deterministic winner. If no legal
@@ -15840,7 +15849,9 @@ STABLE
 VOLATILE
 ```
 
-When later registered, only IMMUTABLE functions with constant arguments are eligible for ordinary compile/bind-time constant folding.
+Only an IMMUTABLE function with constant arguments is eligible for ordinary
+compile/bind-time constant folding. The empty v1 registry admits no such
+named scalar call.
 
 VOLATILE expressions are never constant-folded as though their result were stable.
 
@@ -15848,7 +15859,7 @@ Bound function nodes retain the resolved semantic implementation identity rather
 
 ## 19.10 Aggregate expressions
 
-Initial aggregate expressions are:
+The v1 aggregate expressions are:
 
 ```text
 COUNT(*)
@@ -15861,9 +15872,12 @@ AVG(expr)
 
 A bound aggregate is semantically distinct from a scalar function call.
 
-The Binder resolves aggregate argument coercions, return type, and nullability from the same aggregate registry semantics executed by Chapter 29.
+The Binder resolves aggregate argument coercions, return type, and nullability
+from the aggregate registry semantics in §29.3.
 
-The initial COUNT/SUM/MIN/MAX/AVG signatures and empty-input/nullability rules in §29.3 are therefore semantic binding rules as well as execution rules; execution does not choose a different return type later.
+The COUNT/SUM/MIN/MAX/AVG signatures and empty-input/nullability rules in
+§29.3.2 are semantic binding rules as well as execution rules; execution uses
+the same return type.
 
 Aggregate DISTINCT and FILTER syntax are not v1 registry entries; parser
 recognition, generic function-call AST support, or a physical deduplication
@@ -15976,7 +15990,7 @@ Only a bare, unparenthesized, unsigned integer-literal raw-AST node occupying
 the complete ORDER BY expression is an ordinal attempt. Parenthesized,
 explicitly signed, compound, cast, and FLOAT forms—including `(1)`, `+1`,
 `-1`, `1+0`, `CAST(1 AS INT32)`, and `1.0`—bind as ordinary expressions.
-This classification uses Chapter-18 raw provenance rather than reconstructed
+This classification uses §18.13 raw provenance rather than reconstructed
 SQL or a host numeric parser.
 
 Let `N` be the bound SELECT output count. A bare ordinal magnitude in `1..N`
@@ -15994,9 +16008,10 @@ Each ORDER BY item therefore resolves in this semantic order:
 Alias and ordinal binding reference existing output semantic identity rather
 than independently rebinding or reevaluating the output expression.
 
-Physical sorting belongs to later planning/execution.
+The logical ordering requirement is owned by §20.11; physical sorting is owned
+by §30.1.
 
-V1 ORDER BY accepts exactly the Chapter-17 SQL-orderable types: INT32, INT64,
+V1 ORDER BY accepts exactly the §17.7.1 SQL-orderable types: INT32, INT64,
 FLOAT64, VARCHAR, DATE, and TIMESTAMP. BOOLEAN has physical key order but no v1
 SQL ordering semantics and is rejected as an ORDER BY key unless explicitly
 cast to another supported type.
@@ -16028,11 +16043,11 @@ any other relational dependency
 ```
 
 Binding supplies an integral target context. The only accepted final semantic
-types are INT32 and INT64; INT32 is normalized to INT64 using Chapter 17's
-existing implicit widening edge. The binder does not synthesize FLOAT64,
-VARCHAR, BOOLEAN, DATE, or TIMESTAMP conversion to an integer. A raw
-underconstrained NULL receives contextual type `INT64 NULL`, but a final NULL
-count is not reinterpreted as zero.
+types are INT32 and INT64; INT32 is normalized to INT64 using the §17.8.5
+implicit widening edge. The binder does not synthesize FLOAT64, VARCHAR,
+BOOLEAN, DATE, or TIMESTAMP conversion to an integer. A raw underconstrained
+NULL receives contextual type `INT64 NULL`, but a final NULL count is not
+reinterpreted as zero.
 
 Binding failure categories are:
 
@@ -16051,17 +16066,17 @@ The canonical binding pipeline is:
 1. bind the raw count expression;
 2. enforce execution-start-constant eligibility;
 3. enforce the integral target context and INT64 normalization;
-4. apply every mandatory Chapter-17 scalar fold and constant-error timing rule
-   under §17.10.2; and
+4. apply every mandatory scalar fold and constant-error timing rule under
+   §17.10.2; and
 5. retain the resulting folded/residual bound count expression for execution.
 
 The folded/residual expression is the bound scalar representation remaining
 after mandatory folding. It may be a literal constant or another admitted
-execution-start-constant form that Chapter 17 does not require to become a
+execution-start-constant form that §17.10.2 does not require to become a
 literal. Execution does not retain and reevaluate the original pre-fold source
 tree merely to obtain the count.
 
-A dominating constant scalar error occurs during binding with its Chapter-17
+A dominating constant scalar error occurs during binding with its §17.10.2
 category. For example, `LIMIT 1/0` produces `DIVISION_BY_ZERO`, and
 `LIMIT 9223372036854775807+1` produces `NUMERIC_OVERFLOW`, during binding;
 `LIMIT 1+2` instead folds to the semantic INT64 value `3`.
@@ -16082,7 +16097,7 @@ interpreted as zero.
 
 The normalized valid domain is nonnegative INT64. No additional
 implementation-sized row-count maximum is a SQL semantic limit; inability to
-produce an INT64 under Chapter-17 semantics retains the corresponding
+produce an INT64 under §§17.6 and 17.8 retains the corresponding
 arithmetic/cast/overflow result.
 
 ## 19.15 DISTINCT
@@ -16107,10 +16122,10 @@ result.
 
 The architecture does not require rewriting IN lists into OR chains.
 
-Later execution may choose linear comparison, hashing, or sorted lookup according to list size/type semantics.
-It may do so only after preserving §17.7.3's once-only left evaluation and
-left-to-right error/short-circuit boundary; a physical hash/sort strategy is not
-permission to evaluate dynamic/erroring list expressions in another order.
+The physical IN-list evaluation strategy is implementation-defined, but it
+MUST preserve §17.7.3's once-only left evaluation and left-to-right
+error/short-circuit boundary. A physical strategy cannot evaluate
+dynamic/erroring list expressions in another order.
 
 ## 19.18 Subquery binding boundary
 
@@ -16142,17 +16157,17 @@ binding and output-name rules are §20.14.3.
 
 ## 19.19 Parameters
 
-Prepared-statement parameter syntax such as `$1` or `?` is deferred from the initial parser target.
-
-The type system/binder remains compatible with future parameter typing through `UNKNOWN` plus contextual type inference.
+Prepared-statement parameter syntax such as `$1` or `?` is outside the v1 SQL
+grammar and therefore has no v1 binder semantics.
 
 ## 19.20 Binder/expression invariants
 
 ### 19.20.1 Binder error categories
 
-The binder uses the existing §§39.2–39.3 categories; it does not create a
-generic semantic-error category or convert operational resource failures into
-user errors.
+The binder uses the semantic categories owned by §39.2; execution-stage
+categories referenced below remain §39.3-owned. It does not create a generic
+semantic-error category or convert operational resource failures into user
+errors.
 
 | Category | Chapter-19 conditions |
 |---|---|
@@ -16163,7 +16178,7 @@ user errors.
 | `UnsupportedFeature` | `UnsupportedCorrelation` and every other explicitly frozen unsupported semantic surface |
 | `CardinalityError` | runtime scalar-subquery row cardinality and other existing cardinality owners; binding does not move those runtime checks earlier |
 
-An unknown type name that Chapter 18 accepted structurally produces
+An unknown type name that §18.12.5 accepted structurally produces
 `TypeError` at the type-name SourceSpan, never ParserError or CatalogError. For
 `q.col`, absence of local `q` with no outer diagnostic match produces
 `BindError` at the qualifier span; a present `q` with no `col` produces
@@ -16195,13 +16210,13 @@ Among genuine candidate errors, the binder returns exactly one using:
 2. structural semantic placement/shape
 3. constraint-definition legality
 4. type/coercion resolution
-5. later cardinality legality
+5. cardinality legality
 ```
 
 An existing more-specific owner keeps any priority it explicitly defines.
 Call registry/type failures belong to class 4; a successfully resolved
 aggregate's illegal placement belongs to class 2. The prerequisite rule keeps
-an argument's name-resolution failure from fabricating a later call TypeError.
+an argument's name-resolution failure from fabricating a call TypeError.
 This rule orders independent source-originating binding diagnostics; it does
 not reorder resource failure, cancellation, or runtime failure timing. Binder
 traversal, hash/catalog container iteration, pointer addresses, allocation
@@ -16234,14 +16249,13 @@ layout, and thread scheduling MUST NOT select the returned semantic error.
 23. LIMIT/OFFSET is an INT64-normalized execution-start constant; §17.10.2 folds or reports mandatory constant errors during binding, and execution obtains the folded/residual count once before relational row processing without reevaluating the pre-fold tree.
 24. DISTINCT remains an explicit relational semantic requirement under §20.10.
 25. CASE and IN preserve SQL NULL/three-valued behavior.
-26. INSERT, UPDATE, DELETE, and RETURNING use only their declared §19.4.3 namespaces and Chapter-21 row images.
+26. INSERT, UPDATE, DELETE, and RETURNING use only their declared §19.4.3 namespaces and §21.15 row images.
 27. CREATE TABLE declaration, CREATE INDEX key, and DROP object-kind binding follow §19.4.4.
 28. Runtime function/operator implementation IDs are not persisted as v1 default metadata.
 29. The closed §§17.2–17.10 registry alone determines literal types, overloads, casts, CASE/IN common types, and the empty scalar-function set.
-30. Future parameter typing can reuse UNKNOWN/contextual inference.
-31. A no-FROM query block has an empty local relation namespace; omission never creates an implicit relation, column, qualifier, or outer reference.
-32. Ordinary semantic errors use prerequisite-aware SourceSpan ordering and never catalog/hash iteration order.
-33. Binding performs no persistent catalog/file publication and does not alter §39.1 transaction consequences.
+30. A no-FROM query block has an empty local relation namespace; omission never creates an implicit relation, column, qualifier, or outer reference.
+31. Ordinary semantic errors use prerequisite-aware SourceSpan ordering and never catalog/hash iteration order.
+32. Binding performs no persistent catalog/file publication and does not alter §39.1 transaction consequences.
 ---
 
 # 20. Logical Plans, Properties, and Rewrites
