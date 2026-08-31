@@ -16288,9 +16288,21 @@ LogicalSort   != one particular sorting algorithm
 
 Physical choices belong to later planning.
 
+The canonical relational model is a **bag of row occurrences** unless a named
+logical operator explicitly changes multiplicity or forms equivalence classes.
+Two row occurrences remain distinct even when all of their SQL values are
+equal. Multiplicity and semantic row order are separate dimensions: a bag does
+not by itself establish any ordering among its occurrences.
+
+`LogicalDistinct` and grouping explicitly collapse value-equivalence classes.
+`LogicalFilter`, `LogicalJoin`, and `LogicalLimit` may remove or produce
+occurrences under their own contracts, but they do not perform implicit
+duplicate-equivalence collapse. No relational operator changes occurrence
+multiplicity except as its named contract states.
+
 ## 20.2 Logical output schema and `LogicalSlotId`
 
-Every logical output value has one query-local:
+Every logical output occurrence has one opaque runtime identity:
 
 ```text
 LogicalSlotId
@@ -16309,22 +16321,75 @@ lineage
 system/internal flag
 ```
 
-`LogicalSlotId` is not:
+One `LogicalSlotId` identifies exactly one logical value occurrence flowing
+through the logical plan. It is not:
 
 ```text
 ColumnId
 BindingId
 heap SlotId
+output ordinal
+aggregate ordinal
+an expression-equivalence class
+a pointer or object address
 a permanent physical vector position
 ```
 
-It identifies one semantic value flowing through a logical plan.
+`LogicalSlotId` values are unique across the entire top-level logical statement,
+including nested query blocks, subquery side plans, derived-table children, DML
+relational children, and every logical node belonging to that statement. Two
+distinct logical output occurrences in that domain MUST NOT share an ID. An ID
+MUST NOT be reused during the statement lifetime after its occurrence
+disappears. Different top-level statements may reuse the same opaque
+representation.
 
-A direct pass-through value SHOULD preserve its `LogicalSlotId` across operators that do not create a new semantic value.
+The identity is runtime-only. It is not catalog or WAL state, is not recovered,
+and is not stored in tuple or page formats. Its numeric width, allocation order,
+and concrete representation are not normative.
 
-A new computed/projected/aggregate output receives a fresh query-local `LogicalSlotId`.
+Slot creation and propagation obey these rules:
 
-This distinction is required for self-joins, aliases, duplicate column names, computed expressions, rewrites, and hidden system values.
+```text
+LogicalGet          fresh slot per exposed BindingId + ColumnId occurrence
+LogicalValues       fresh slot per output column position
+LogicalProject      fresh slot per declared output position
+LogicalAggregate    fresh slot per grouping-key and aggregate output occurrence
+derived boundary    fresh outer slot per exported child output
+
+LogicalFilter       preserve child slots
+LogicalJoin         preserve child slots, left outputs then right outputs
+LogicalDistinct     preserve child slots
+LogicalSort         preserve child slots
+LogicalLimit        preserve child slots
+```
+
+Any other node explicitly defined as schema-preserving follows the same
+pass-through rule.
+
+Every `LogicalProject` output position is a distinct occurrence even when two
+positions reference the same child slot, contain equivalent expressions, or
+produce equal values. Thus `SELECT a,a`, `SELECT a AS x,a AS y`, and
+`SELECT a+1,a+1` each have two distinct Project output `LogicalSlotId` values.
+Physical computation sharing does not merge those identities.
+
+A derived-table boundary records a semantic mapping from each child
+`LogicalSlotId` to a fresh outer `LogicalSlotId`, the derived relation's
+`BindingId`, and its exported name and metadata. Child IDs do not become the
+outer query block's exported identities directly.
+
+A rewrite preserves an ID exactly when the same logical output occurrence,
+with the same consumer-visible definition, lineage, and semantic boundary,
+survives. A newly introduced or duplicated occurrence receives a fresh ID; an
+eliminated occurrence's ID disappears and is not reassigned within the same
+statement. Boundary elimination or substitution preserves an externally
+visible surviving identity through an explicit semantic mapping. Equivalent
+value computation alone does not establish occurrence identity.
+
+These rules are explicit semantic metadata and never depend on pointer identity,
+node allocation, container position, or traversal order. They preserve
+self-join, alias, duplicate-column, computed-expression, rewrite, and hidden
+system-value distinctions without prescribing an allocator or node
+representation.
 
 ## 20.3 Initial logical operator family
 
@@ -16371,6 +16436,18 @@ Its meaning is:
 produce rows of this logical relation
 ```
 
+For each exposed column occurrence under the resolved descriptor,
+`LogicalGet` creates a fresh `LogicalSlotId` and retains lineage equivalent to
+`BindingId + TableId + ColumnId + SchemaVer/descriptor identity`. Self-joins
+therefore have distinct `BindingId` and `LogicalSlotId` values even when they
+refer to the same `TableId` and source `ColumnId` values.
+
+Under the frozen transaction snapshot, `LogicalGet` emits exactly one logical
+row occurrence per visible logical base row. Physical historical tuple versions
+that are not independently visible logical rows do not add occurrences. Two
+distinct visible rows with equal values remain two occurrences. `LogicalGet`
+neither eliminates duplicates nor establishes a physical scan order.
+
 It does not decide sequential versus index access.
 
 A later optimizer may attach/push logical predicates to the Get while preserving the original query semantics.
@@ -16388,6 +16465,12 @@ SELECT 1;
 
 Every row contains typed bound expressions.
 
+`LogicalValues` creates one fresh output `LogicalSlotId` per logical column
+position and emits exactly one row occurrence per listed row. Repeated listed
+rows remain repeated occurrences. Their source order and provenance do not
+become semantic result ordering unless another frozen rule explicitly
+establishes such an order.
+
 Every SELECT query block without FROM uses exactly one zero-column logical
 input row. Ordinary filtering, aggregation, projection, ordering, and limiting
 then apply; `SELECT 1` is the simplest
@@ -16403,13 +16486,15 @@ child
 BOOLEAN predicate
 ```
 
-Its output schema is identical to its child's schema.
+Its output schema, including all child `LogicalSlotId` values, is identical to
+its child's schema.
 
 For every child row whose retention decision the filter must determine, the
-predicate evaluation is **demanded**. TRUE retains the row; FALSE and UNKNOWN
-reject it under Chapter 17. A logically equivalent form may not demand the
-predicate for additional rows or suppress it for such a row when that change
-could introduce or hide an observable error.
+predicate evaluation is **demanded**. For each input row occurrence, TRUE
+produces exactly one output occurrence, while FALSE and UNKNOWN produce none.
+The filter never performs duplicate elimination. A logically equivalent form
+may not demand the predicate for additional rows or suppress it for such a row
+when that change could introduce or hide an observable error.
 
 It does not specify whether the predicate will later be vectorized into a selection mask, used to form an index bound, fused with a scan, or evaluated by another physical strategy.
 
@@ -16422,6 +16507,11 @@ expr_0 -> output LogicalSlotId
 expr_1 -> output LogicalSlotId
 ...
 ```
+
+It creates one fresh `LogicalSlotId` for every declared output position. For
+each input row occurrence it produces exactly one output row occurrence; equal
+projected rows remain distinct, and projection performs no duplicate
+elimination.
 
 Projection may reorder values, duplicate a source value, calculate expressions, rename outputs, or drop unused input values.
 
@@ -16457,6 +16547,46 @@ CROSS
 
 CROSS has no join condition.
 
+Let `L` and `R` be the left and right input bags of row occurrences. INNER and
+LEFT joins conceptually consider occurrence pairs from `L x R`; this specifies
+semantic multiplicity and does not require materializing a Cartesian product or
+using any particular join algorithm.
+
+INNER JOIN evaluates its ON predicate for each semantically required pair under
+Chapter 17 and §20.17. A TRUE result emits exactly one joined occurrence;
+FALSE or UNKNOWN emits none. Every TRUE pair is preserved, so duplicate input
+occurrences and duplicate matching values contribute their full multiplicative
+occurrence count. This is not first-match or existence semantics.
+
+For each left occurrence, LEFT JOIN emits one joined occurrence for every right
+occurrence whose ON result is TRUE. FALSE and UNKNOWN are nonmatches. If no
+right occurrence produces TRUE for that left occurrence, the join emits exactly
+one occurrence consisting of the left occurrence plus NULL for every right-side
+output. It emits no additional NULL-extended occurrence when at least one TRUE
+match exists.
+
+CROSS JOIN emits exactly one occurrence for every pair in `L x R`. If
+equivalent left and right values have multiplicities `m` and `n`, the paired
+output multiplicity is `m*n`.
+
+Empty inputs have these exact results:
+
+```text
+INNER: left empty or right empty -> empty
+CROSS: left empty or right empty -> empty
+LEFT:  left empty                -> empty
+LEFT:  right empty               -> one NULL-extended occurrence per left occurrence
+```
+
+Every join output schema contains all left-child outputs in their existing
+schema order followed by all right-child outputs in their existing schema
+order. Child `LogicalSlotId` values pass through unchanged; no fresh IDs are
+created merely by crossing the join boundary.
+
+No logical join establishes semantic row order. In particular, it promises no
+left-major, right-major, nested-loop, hash, merge, RID, or scan order. Output
+schema order is defined; result-row order is not.
+
 For a join with a condition, predicate evaluation is demanded only for
 candidate row pairs that the logical join semantics require to test. Logical
 semantics do not prescribe a physical pair-generation order. Moving a
@@ -16483,9 +16613,14 @@ ON and WHERE remain semantically distinct.
 
 ### 20.8.3 LEFT JOIN null extension
 
-Every right-side output of a LEFT JOIN becomes nullable in the join output even when the base column is `NOT NULL`.
+Every right-side output of a LEFT JOIN becomes logically nullable in the join
+output even when the base column is `NOT NULL`. Left-side nullability remains
+that of the left child.
 
-The logical schema records that nullability change.
+The logical schema records that contextual nullability change without altering
+the catalog `NOT NULL` metadata, source descriptor, `TypeId`, `BindingId`,
+`LogicalSlotId`, or lineage. Catalog nullability and logical output nullability
+are distinct concepts.
 
 ### 20.8.4 Predicate decomposition
 
@@ -16512,7 +16647,41 @@ aggregate expressions
 child
 ```
 
-Its outputs consist only of group-key outputs and aggregate outputs.
+Its outputs consist only of group-key outputs and aggregate outputs. It creates
+a fresh `LogicalSlotId` for every grouping-key output and every logical
+aggregate occurrence output.
+
+`LogicalAggregate` emits exactly one row occurrence per runtime group under the
+existing grouping-equivalence contract. A no-key global aggregate forms its
+one group even over empty input, while an empty input with explicit grouping
+keys forms no groups, as frozen by §29.5 and §20.14.10.
+
+Every distinct bound source aggregate occurrence becomes one distinct logical
+aggregate occurrence, and each aggregate entry carries the canonical aggregate
+ordinal assigned by Chapter 19 under §29.3.7. Chapter 20 neither derives nor
+renumbers that ordinal from logical traversal. Occurrences with identical
+descriptors, arguments, output types, and values remain logically distinct when
+their ordinals differ, and their output `LogicalSlotId` values are distinct.
+The ordinal identifies a source aggregate occurrence within its query block;
+the slot identifies that occurrence's logical output within the statement.
+
+A downstream reference to an existing aggregate output reuses that logical
+output identity and creates no aggregate occurrence or ordinal. Thus the
+`ORDER BY s` in `SELECT SUM(x) AS s ORDER BY s` consumes the existing output
+selected by Chapter 19 alias resolution.
+
+Logical rewrites MUST NOT renumber or compact aggregate ordinals, reuse a
+removed ordinal, merge distinct logical aggregate occurrences, duplicate one
+logical occurrence under the same ordinal, or move an occurrence to another
+query block. If an occurrence is legitimately removed under §20.17, its
+ordinal disappears and every remaining ordinal stays unchanged.
+
+Physical execution may share computation for equivalent logical aggregate
+occurrences only behind a semantic mapping that preserves every distinct
+logical occurrence, `LogicalSlotId`, aggregate ordinal, diagnostic provenance,
+output mapping, and Chapter 29's lowest-ordinal aggregate-error behavior. This
+permission does not merge logical occurrence identity or require a particular
+sharing strategy.
 
 Expressions above the aggregate refer to those outputs, not arbitrary pre-aggregate columns.
 
@@ -16538,6 +16707,10 @@ Hashing and comparison implementations used later for aggregate/DISTINCT must ag
 
 `SELECT DISTINCT` is represented as explicit duplicate-elimination semantics using `LogicalDistinct` or an explicitly equivalent aggregate-like node.
 
+`LogicalDistinct` preserves the child schema and `LogicalSlotId` values while
+collapsing each class under the grouping-equivalence rule to one row
+occurrence. It is an explicit exception to the bag multiplicity baseline.
+
 DISTINCT is not hidden as an opaque projection flag.
 
 The optimizer and physical planner must be able to reason about its cost, keys, ordering opportunities, and memory requirements.
@@ -16551,6 +16724,10 @@ expression / LogicalSlotId
 ASC | DESC
 resolved NULL order
 ```
+
+It preserves the child schema, all child `LogicalSlotId` values, and exactly
+the same bag of row occurrences. It changes only semantic ordering and performs
+no duplicate elimination.
 
 V1 default ordering is:
 
@@ -16578,7 +16755,42 @@ optional limit
 offset
 ```
 
-Both have already passed the binder's nonnegative integral / execution-start-constant checks.
+Chapter 19 exclusively owns LIMIT/OFFSET admissibility, execution-start
+constancy, type resolution, INT32-to-INT64 normalization, mandatory folding,
+and NULL/negative count validation. The logical-plan representation carries
+Chapter 19's folded/residual count expressions until their one execution-start
+acquisition. The relational selection contract below receives only the
+resulting validated nonnegative INT64 offset and optional validated nonnegative
+INT64 limit. It introduces no count-expression error or reevaluation.
+
+`LogicalLimit` applies OFFSET first and LIMIT second. For child occurrence
+cardinality `n`, validated offset `o`, and validated limit `l` when present:
+
+```text
+after_offset = max(0, n - o)
+
+without LIMIT: output cardinality = after_offset
+with LIMIT:    output cardinality = min(after_offset, l)
+```
+
+The contract never requires computing `o + l`, so it introduces no arithmetic
+overflow path. LIMIT alone means offset zero; OFFSET alone returns all
+occurrences remaining after the offset. OFFSET zero removes nothing, LIMIT zero
+returns an empty bag, a limit larger than the remaining cardinality returns all
+remaining occurrences, and an offset at least as large as the child cardinality
+returns an empty bag. None of these cases is an error.
+
+For a semantically ordered child, the operator skips the first `o` ordered
+occurrences, emits at most the next `l` occurrences when a limit exists, and
+preserves the surviving order. For a child with no semantic row order, there is
+no canonical first occurrence: it returns any sub-bag with the exact resulting
+cardinality allowed by §20.14.10, and the output remains unordered. Heap, page,
+RID, index, hash-iteration, thread, and physical scan order never become
+semantic.
+
+`LogicalLimit` preserves the child output schema, `LogicalSlotId` values,
+display metadata, types, nullability, and lineage unchanged. It only removes
+row occurrences and never deduplicates them.
 
 The optimizer may later use safe LIMIT pushdown or Top-N alternatives without changing the logical limit semantics.
 
@@ -16739,10 +16951,16 @@ generated presentation name must be explicitly aliased before it can define a
 derived table. Derived output names must be unique; duplicates are a bind error
 at the derived-table boundary rather than an implementation-chosen reference.
 
-The boundary maps each child output `LogicalSlotId` to one derived relation
-`BindingId`/output slot/name. Child table aliases and hidden columns are not
-visible outside. `SELECT d.*` expands the unique named outputs in child
-projection order.
+The boundary maps each child output `LogicalSlotId` to one fresh outer
+`LogicalSlotId`, the derived relation `BindingId`, and its exported name and
+metadata. Child IDs do not become outer exported identities directly. Child
+table aliases and hidden columns are not visible outside. `SELECT d.*` expands
+the unique named outputs in child projection order.
+
+The derived boundary preserves the child's bag of row occurrences exactly;
+slot and namespace remapping does not alter multiplicity. Only an explicit
+operator inside the child, such as DISTINCT or grouping, may already have
+changed that multiplicity.
 
 `LogicalSubqueryScan` expresses that namespace/slot boundary. It is not a
 materialization barrier. The optimizer may inline it, push safe predicates, or
@@ -17223,6 +17441,66 @@ Consequently, a legal rewrite preserves relational values, NULL behavior,
 multiplicity and result-order guarantees where defined, demanded scalar
 evaluations, Chapter-17 evaluation ordering, and observable errors.
 
+Rewrite output identity follows §20.2 independently of value equivalence. The
+same surviving logical output occurrence preserves its `LogicalSlotId`; a new
+or duplicated occurrence receives a fresh ID; an eliminated ID is never reused
+in the same statement. Replacing or eliminating a semantic boundary must retain
+an explicit mapping for every consumer-visible occurrence that survives.
+
+Every executable logical scalar occurrence originating from a Chapter-19 bound
+source expression retains its canonical diagnostic origin. This includes its
+`SourceSpan`, explicit/implicit cast provenance, any more-specific error-origin
+metadata already represented, and source-occurrence information required by a
+frozen error-precedence rule. The representation of this origin is not
+normative.
+
+Diagnostic provenance transforms according to the following rules:
+
+- moving an unchanged source-derived executable occurrence preserves its
+  origin exactly and creates no new diagnostic origin;
+- structural sharing by multiple consumers preserves that same semantic
+  origin independently of pointer sharing;
+- duplicating an occurrence copies its canonical origin to every duplicate,
+  but §20.17 demand safety still determines whether duplication is legal;
+- replacing a source-derived occurrence with an executable expression capable
+  of a user-visible semantic error MUST preserve the replaced occurrence's
+  observable error category, canonical diagnostic origin, and frozen
+  precedence; otherwise the replacement is illegal;
+- a synthesized executable expression with no canonical source diagnostic site
+  is legal only when exact proof establishes that it is total and error-free
+  over its complete demanded evaluation domain;
+- an error-capable synthesized executable expression is legal only when it
+  semantically implements exactly one identifiable source-derived occurrence
+  and inherits that occurrence's canonical origin and precedence.
+
+No rewrite invents a source-byte position, selects an arbitrary span from an
+equivalent expression, or uses an optimizer-generated location as a
+user-facing scalar diagnostic. Spanless synthesized expressions may include
+exactly proven total/error-free constants, safe NULL markers, or direct slot
+identities; the classification is proof-based, and does not presume that all
+comparisons, casts, or arithmetic are safe.
+
+Non-executable optimizer metadata—equivalence facts, lookup/search keys, proof
+facts, estimates, memo metadata, or join-graph metadata—requires no diagnostic
+`SourceSpan` because it is not executed and cannot itself raise a user-visible
+scalar error. Such metadata MUST NOT become the origin of one. An
+implementation may retain source origins in a set, list, graph, or another
+lineage form, but a provenance collection is not itself a diagnostic-selection
+rule: the canonical responsible source occurrence for any potentially erroring
+executable expression must remain deterministically identifiable.
+
+Section 17.10.2 remains the sole owner of folded value, binding-time error,
+folded-expression provenance, and evaluation-equivalence semantics. The rules
+above govern Chapter-20 rewrites outside that specialized contract. Numeric
+`SourceSpan` values may outlive source backing under Chapter 18; retaining the
+original SQL buffer is not required, and existing retain-or-materialize rules
+govern any later rendered source text.
+
+Each logical aggregate occurrence retains its own source diagnostic provenance
+alongside its canonical ordinal. Provenance preservation never authorizes a
+rewrite: §20.17 demand/error safety and §20.17.5 executable child-order safety
+remain independent requirements.
+
 ### 20.17.1 Constant folding
 
 Fold a subtree only when it is composed entirely of constants and uses entries
@@ -17318,8 +17596,8 @@ required.
 Chapter-17-authorized constant folding under §17.10.2 remains permitted because
 that owner defines its exact value, error, skipped-branch, and timing
 equivalence. Existing source-child provenance remains attached to its original
-semantic occurrence; this rule does not define provenance for newly synthesized
-expressions.
+semantic occurrence; synthesized and transformed provenance follows the
+general §20.17 contract.
 
 ### 20.17.6 Join graph extraction
 
@@ -17489,12 +17767,18 @@ At minimum it checks:
 
 ```text
 every referenced LogicalSlotId exists in the required child output
-output slot IDs are unique where required
+every distinct logical output occurrence has a whole-statement-unique
+LogicalSlotId, including nested/side plans, and no eliminated ID is reused
+Get/Values/Project/Aggregate/derived-boundary fresh-slot rules and every
+schema-preserving pass-through slot rule agree with §20.2
 expression return types are resolved
 filter/HAVING/join predicates are BOOLEAN
-aggregate references are legal
+aggregate references are legal; every logical aggregate entry carries its
+unchanged canonical ordinal and a distinct output LogicalSlotId
 node output schemas agree with expressions
-LEFT JOIN right-side nullability is preserved
+join output schemas are left-child outputs followed by right-child outputs,
+with child slots preserved and LEFT JOIN right-side nullability applied
+LogicalLimit preserves its child's schema and slots
 hidden DML RID/system slots survive when required
 catalog descriptor/schema-version references are internally consistent
 every provably-empty annotation or empty-result replacement has approved
@@ -17505,6 +17789,11 @@ scalar/IN child arity, subquery result TypeId/nullability, derived-table output
 names/slot maps, and NOT wrappers agree with §20.14
 every accepted rewrite is justifiable as demand-preserving or by an exact
 demand-insensitivity proof under §20.17
+every executable source-derived or synthesized expression has valid canonical
+diagnostic provenance under §20.17, and no non-executable metadata is a
+user-facing diagnostic origin
+every executable scalar tree preserves Chapter-17 semantic child order under
+§20.17.5
 ```
 
 Malformed logical plans are architecture errors detected before execution, not conditions left for executor crashes.
@@ -17532,26 +17821,30 @@ The logical EXPLAIN representation does not depend on reparsing or pretty-printi
 ## 20.20 Logical-plan/rewrite invariants
 
 1. Logical operators encode relational/statement semantics, not physical algorithms.
-2. `LogicalSlotId` is distinct from ColumnId, BindingId, heap SlotId, and physical vector position.
+2. `LogicalSlotId` identifies exactly one statement-wide logical output occurrence, is never reused during that statement lifetime, and is distinct from catalog/binding/ordinal/pointer identities and persistent formats.
 3. Logical nodes and bound expressions are immutable once published.
-4. LEFT JOIN null extension is represented in output nullability.
-5. ON and WHERE remain semantically distinct.
-6. Aggregate outputs contain only grouping/aggregate-derived values.
-7. GROUP BY and DISTINCT use SQL grouping equivalence, including one NULL group.
-8. Sort keys always carry resolved ASC/DESC and NULL order.
-9. Hidden DML RID slots are not user-visible and are preserved while required.
-10. SELECT planning begins from one deterministic canonical logical shape.
-11. Rewrites preserve NULL, FLOAT64, volatility, and outer-join semantics.
-12. Attempted correlated references are detected distinctly and rejected; no executable v1 logical plan contains OuterRef/Apply state.
-13. Logical validation occurs before execution/physical planning consumes a plan.
-14. `LogicalAnalyze` carries a resolved table/schema/index set and does not perform name lookup during execution.
-15. EXPLAIN consumes the bound/logical representation rather than AST syntax alone.
-16. Semantic emptiness is derived only from §35.2 exact facts and propagates by §20.17.10; estimated zero is not a rewrite proof.
-17. Literal/operator/cast/predicate/scalar-function binding uses only the closed §§17.2–17.10 registry.
-18. Every accepted subquery is one closed §20.14 uncorrelated form with its required logical child, cardinality/3VL contract, and physical fallback.
-19. Subquery rewrites preserve lazy demand, error precedence, snapshot/CommandId, and exact proof provenance defined by §§34.1 and 35.2.
-20. Every logical rewrite preserves correctness-observable demanded evaluations and existing error category, source-derived SourceSpan, and frozen precedence unless exact semantic proof establishes the demand difference is insensitive.
-21. Executable scalar expressions preserve Chapter-17 child order; commutative, associative, or comparison-reversal normalization is confined to non-executable metadata and never replaces executable order.
+4. Logical relations are bags of row occurrences; equal values do not merge implicitly, and multiplicity does not establish row order.
+5. INNER, LEFT, and CROSS joins preserve exact occurrence-pair multiplicity; join schema is left outputs then right outputs, LEFT null-extends exactly one row on zero TRUE matches, and no join establishes row order.
+6. LEFT JOIN null extension is represented as logical right-output nullability without changing catalog nullability, type, lineage, or child slot identity.
+7. ON and WHERE remain semantically distinct.
+8. Aggregate outputs contain only grouping/aggregate-derived values; every source aggregate occurrence retains its upstream ordinal, distinct output slot, and diagnostic provenance through logical rewrites.
+9. GROUP BY and DISTINCT use SQL grouping equivalence, including one NULL group.
+10. Sort keys always carry resolved ASC/DESC and NULL order.
+11. `LogicalLimit` applies validated OFFSET before validated LIMIT, selects occurrences without deduplication, preserves schema/slots and ordered-child order, and introduces no physical order for an unordered child.
+12. Hidden DML RID slots are not user-visible and are preserved while required.
+13. SELECT planning begins from one deterministic canonical logical shape.
+14. Rewrites preserve NULL, FLOAT64, volatility, and outer-join semantics.
+15. Attempted correlated references are detected distinctly and rejected; no executable v1 logical plan contains OuterRef/Apply state.
+16. Logical validation occurs before execution/physical planning consumes a plan.
+17. `LogicalAnalyze` carries a resolved table/schema/index set and does not perform name lookup during execution.
+18. EXPLAIN consumes the bound/logical representation rather than AST syntax alone.
+19. Semantic emptiness is derived only from §35.2 exact facts and propagates by §20.17.10; estimated zero is not a rewrite proof.
+20. Literal/operator/cast/predicate/scalar-function binding uses only the closed §§17.2–17.10 registry.
+21. Every accepted subquery is one closed §20.14 uncorrelated form with its required logical child, cardinality/3VL contract, and physical fallback.
+22. Subquery rewrites preserve lazy demand, error precedence, snapshot/CommandId, and exact proof provenance defined by §§34.1 and 35.2.
+23. Every logical rewrite preserves correctness-observable demanded evaluations and existing error category, source-derived SourceSpan, and frozen precedence unless exact semantic proof establishes the demand difference is insensitive.
+24. Executable scalar expressions preserve Chapter-17 child order; commutative, associative, or comparison-reversal normalization is confined to non-executable metadata and never replaces executable order.
+25. Source-derived executable provenance survives movement, sharing, duplication, and error-capable replacement under §20.17; spanless synthetic execution is confined to exactly proven total/error-free expressions.
 
 ---
 
