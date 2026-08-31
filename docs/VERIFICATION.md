@@ -7688,66 +7688,1337 @@ independent lexical, grammar, raw-tree, span, lifetime, and resource oracles abo
 
 ---
 
-### Binder Tests
+### Chapter 19 Binding and Expression Semantics Verification
 
-Use immutable mock descriptors and snapshot-aware catalog fixtures. For successful binding,
-assert resolved `BindingId`, stable TableId/ColumnId, logical type, nullability, source
-span, and inserted casts/operator identity—not merely later query success.
+This section is the complete procedural owner for the binding and bound-expression
+contract in [`ARCHITECTURE.md`](ARCHITECTURE.md) Chapter 19. Chapters 16–18 supply the
+catalog, type, raw-AST, SourceSpan, and lifetime primitives; Chapters 20, 21, and 29 own
+the downstream logical, statement, and aggregate semantics; §§39.1–39.3 own transaction
+and error consequences. The procedures here verify their Chapter-19 composition without
+creating a second semantic registry.
 
-#### Name resolution and wildcards
+#### Deterministic binder harness and oracle discipline
 
-Cover:
+Use a fixture driver that accepts one exact Chapter-18 raw AST plus its immutable source
+backing, one transaction-visible catalog snapshot, and the frozen scalar and aggregate
+registries. A fixture controls canonical identifier bytes, SourceSpans, parenthesis and
+integer-literal provenance, statement/query-block boundaries, descriptor presentation
+order, SchemaVer, and transaction-local catalog visibility.
+
+The harness records architecture-visible conceptual events:
 
 ```text
-unknown table
-unknown column
-ambiguous column
-aliases
-self-joins
-qualified references
-SELECT *
-table.*
+input:
+    raw node entered; source child visited; SourceSpan/provenance observed
+catalog:
+    snapshot selected; object-kind lookup; immutable descriptor selected
+scope:
+    query block entered/exited; relation occurrence created; qualifier exposed
+binding:
+    local candidates collected; outer diagnostic lookup; name/type/call resolved
+    wildcard expanded; implicit cast inserted; aggregate classified/numbered
+    output metadata appended; ORDER item classified; LIMIT expression classified/folded
+error:
+    prerequisite satisfied/failed; candidate category/span/class; selected error
+publication:
+    complete immutable bound statement published or private state discarded
+resource:
+    checked front-end budget admitted/refused; required allocation succeeded/failed
 ```
 
-For self-joins, prove distinct BindingIds despite one TableId. Distinguish unknown qualifier
-from unknown qualified column, and never accept a leftmost ambiguous match.
+These are observations, not required production APIs. Deterministic adapters, event
+sentinels, injected descriptors, and fault points may expose them. Correctness never uses
+sleeps, wall-clock ordering, production container iteration, pointer values, source class
+names, or a production binder/type resolver as its own oracle.
 
-Expand `SELECT *` in visible FROM-relation order and each descriptor's logical presentation
-order; expand `u.*` only from that binding. Cover aliases, self-joins, a missing qualifier,
-and no-FROM queries. Assert hidden/system columns are absent and output identities/types/
-nullability are explicit. ColumnId numerical order is not the wildcard ordering oracle.
+Canonical comparison serializes a successful bound result as ordered semantic data:
 
-#### Types, predicates, and aggregates
+```text
+statement/query-block structure
+relation occurrences and opaque-equivalence BindingId classes
+TableId / ColumnId / SchemaVer descriptor identities
+bound expression kind, logical type, nullability, semantic children
+resolved operator/function/aggregate descriptor identity
+explicit/implicit cast provenance and SourceSpan
+ordered output metadata and wildcard expansion
+aggregate ordinal
+ORDER output identity or ordinary expression
+folded/residual LIMIT/OFFSET expression
+```
 
-Table-driven binding covers implicit numeric promotion, explicit and assignment casts,
-invalid casts, standalone/contextual NULL, all predicate BOOLEAN requirements, 3VL
-nullability, and exact operator/aggregate overload selection from Chapters 17 and 29.
+BindingId numeric values are alpha-renamed by first relation-occurrence source order before
+cross-run comparison. This preserves equality/inequality and rewrite stability without
+making a representation or allocation sequence observable.
 
-Aggregate legality cases include WHERE/JOIN aggregate rejection, unsupported nested or
-DISTINCT/FILTER aggregate forms, grouped and nongrouped SELECT/HAVING expressions, grouping
-constants, HAVING type/visibility, aggregate result type/nullability, and empty-input
-metadata. Assert SELECT aliases are not visible in HAVING.
+Independent oracles are:
 
-#### ORDER BY, LEFT JOIN, and DML
+| Domain | Independent oracle |
+|---|---|
+| raw input | Chapter-18 canonical raw-tree serializer and exact byte-span/provenance tables |
+| BindingId | declarative whole-statement relation-occurrence graph with alpha-renamed identities |
+| qualifiers/scopes | query-block-local qualifier maps plus explicit parent diagnostic links |
+| columns | complete local candidate-set cardinality model over ordered immutable descriptors |
+| catalog | Chapter-16/21 snapshot visibility model keyed by stable object identity and SchemaVer |
+| wildcards | source relation order crossed with §16.8 presentation order |
+| output names | explicit-alias/direct-column/source-byte-slice decision table |
+| clause visibility | closed clause-by-name matrix below, independent of binder traversal |
+| types/casts | complete Chapter-17 table-driven TypeResolver oracle already owned by Type-System Property Tests |
+| calls | union of §17.9.3 and §29.3 descriptor tables plus star/arity/shape filtering |
+| grouping | independent fully-bound structural comparator and recursive group-validity predicate |
+| ORDER BY | raw-provenance classifier followed by explicit-alias and input-scope models |
+| LIMIT/OFFSET | recursive dependency classifier, Chapter-17 type/fold oracle, and final INT64-domain oracle |
+| DML/DDL | closed statement-local namespace and object-kind tables below |
+| subqueries | explicit child-scope graph plus §20.14 shape/result handoff tables |
+| errors | prerequisite-filtered candidate list sorted by `(start, length, validation_class)` |
+| resources/lifetime | deterministic failure schedule and generation-tagged ownership graph |
+| environment | canonical serialization replay under permuted containers, locales, addresses, and schedules |
 
-For ORDER BY, bind an ordinary expression, output alias, and 1-based ordinal; cover alias
-versus input-name precedence, ambiguity, invalid ordinals, unsupported BOOLEAN ordering,
-and resolved ASC/DESC/NULL order. Inspect the resulting bound expression or slot identity.
+Production binder code MUST NOT construct the expected result used to verify itself.
 
-For LEFT JOIN, assert preserved-side nullability remains unchanged and every right-side
-output becomes nullable, including expressions and descriptors derived from otherwise NOT
-NULL columns. Repeat through nested LEFT/INNER structures.
+#### V19-1 — Raw-AST and bound-result boundary
 
-For INSERT/UPDATE/DELETE, cover target-table and target-column lookup, canonical INSERT
-column order, omitted/default/typed-NULL handling, duplicate assignments/column-list names,
-closed assignment coercions, BOOLEAN WHERE, hidden target RID/old-value requirements, and
-RETURNING row-image binding. Inspect resolved UNIQUE/PRIMARY KEY/NOT NULL metadata without
-rederiving it from physical indexes. Binding allocates no persistent object/File IDs and
-performs no execution.
+Feed exact Chapter-18 raw trees directly and compare their successful output with the
+canonical bound serialization. Assert complete resolution of names, types, nullability,
+operator/call identities, casts, spans, provenance, relation identities, and ordered output
+metadata. The binder neither reinterprets grammar nor chooses physical access/join
+algorithms, estimates cardinality, reads heap/RID state, allocates persistent object/File
+IDs, writes WAL, mutates catalog/database state, or leaves executor-time SQL name lookup.
+Assert the closed v1 expression-kind inventory and the return type, conservative
+nullability, and SourceSpan on every node. The expression handoff may feed vectorized
+evaluation but owns no operator scheduling or pipeline state. On failure the binder
+publishes no successful or executable bound prefix.
 
-Binder tests should not require physical execution.
+#### V19-2 — BindingId identity and lifetime
 
-Use an in-memory/mock catalog implementation where useful.
+Build statements containing one table, aliased and unaliased self-joins, multiple joins,
+scalar/EXISTS/IN children, derived tables, and the same TableId repeated in several child
+blocks. Compare against the relation-occurrence graph: every distinct occurrence in the
+whole top-level statement has a distinct BindingId, including nested blocks, and no child
+scope reset permits reuse. Corresponding self-join columns may share TableId and ColumnId
+but not BindingId. Different statements may alpha-rename/reuse opaque values.
+
+Apply an abstract logical rewrite fixture. A surviving semantic occurrence retains its
+BindingId, a removed occurrence disappears, and a newly distinct occurrence cannot inherit
+an existing identity. Assert no persistence, WAL/catalog representation, width, numeric
+ordering, pointer identity, or cross-statement value is required.
+
+#### V19-3 — Qualifier namespace, alias hiding, and diagnostic shadowing
+
+The scope oracle constructs exactly one canonical-byte qualifier map per query block.
+`main.t` exposes `t`; `t AS x` exposes only `x`; a derived table exposes only its mandatory
+alias. Duplicate insertion reports `BindError` at the later conflicting qualifier span,
+including an unaliased self-join; distinct explicit aliases make a self-join legal. No
+first/last win, automatic alias, or hidden disambiguator is accepted.
+
+For qualified `q.col`, local `q` is authoritative. A missing member is a local BindError and
+does not inspect an outer `q`. For unqualified `col`, collect the entire local candidate set
+before any outer lookup: zero permits diagnostic outer search, one binds locally, and two
+or more is local ambiguity. A local miss plus outer resolution is
+`UnsupportedFeature/UnsupportedCorrelation`; absence everywhere is ordinary BindError.
+
+#### V19-4 — Column resolution
+
+Enumerate zero/one/many unqualified candidates and qualifier-zero/member-zero/one qualified
+cases over descriptors whose storage and insertion orders are permuted. The expected bound
+reference contains the exact BindingId, TableId, ColumnId, logical type, nullability, and
+source span. Unknown qualifier uses the qualifier span; known qualifier with unknown member
+uses the member span; ambiguity uses the complete column-reference span. No leftmost,
+catalog-order, hash-order, or alias/base-name fallback is legal.
+
+#### V19-5 — Catalog snapshot, descriptor, and SchemaVer binding
+
+Reuse the Catalog Tests snapshot oracle with committed visible descriptors, own completed
+earlier DDL, another transaction's uncommitted DDL, old snapshots, cache hits/misses, and
+cache replacement. The selected immutable descriptor, TableId/ColumnId, and SchemaVer are
+stable for the bound statement. Same raw AST plus same snapshot produces the same object
+identity regardless of cache layout; binding does not duplicate MVCC or publication tests.
+
+#### V19-6 — Wildcards and output metadata
+
+Cross source relation order with each descriptor's logical presentation order. Scramble
+TableId, ColumnId, descriptor storage, and hash insertion order. `*` expands that exact
+cross-product; `x.*` expands one qualifier; unknown `x` is BindError; no-FROM `*` is
+BindError. Duplicate source names remain distinct ordered bound outputs, and execution
+never performs wildcard expansion.
+
+For each output independently derive `(expression, display_name, logical_type, nullable)`.
+Display-name priority is explicit AS alias, direct source-column canonical name, then the
+exact original source-byte slice selected by the expression SourceSpan. Preserve spelling
+and whitespace; do not pretty-print, normalize, or expose inserted-cast text. Duplicate
+top-level names and explicit aliases are legal distinct slots. Generated/direct-column
+names without AS never enter the output-alias namespace. Exercise §18.14 retention and
+materialization when source backing ends.
+
+#### V19-7 — SELECT aliases and clause visibility
+
+Use the clause matrix below as the independent oracle. Explicit SELECT AS aliases are
+visible only in ORDER BY, not in the same SELECT item list, JOIN ON, WHERE, GROUP BY,
+HAVING, LIMIT, or OFFSET. For one complete unqualified ORDER identifier, consider only
+explicit AS aliases: zero falls back to input scope, one references the existing output
+identity, and multiple produce ambiguous-output-alias BindError. Generated names and
+unaliased direct-column display names are excluded. An alias reference never rebinds its
+expression or creates another aggregate occurrence.
+
+#### V19-8 — FROM and JOIN visibility
+
+Derived tables bind as independent uncorrelated child blocks and see neither earlier nor
+later FROM siblings. A sibling reference reaches unsupported-correlation diagnosis rather
+than LATERAL semantics. For `left JOIN right ON p`, `p` sees all accumulated-left bindings
+plus current right and no future relation. After the tree is complete, WHERE, GROUP BY,
+HAVING, SELECT, and ordinary ORDER fallback see its local relations; LIMIT/OFFSET does not.
+
+#### V19-9 — Type names, literals, NULL, and TypeResolver handoff
+
+Resolve every admitted Chapter-18 type-name node to the exact frozen TypeId and report an
+unknown type as TypeError at its type-name span. Reuse the complete Chapter-17 literal and
+TypeResolver oracles for integer, FLOAT64, VARCHAR, BOOLEAN, and unresolved NULL. Exercise
+NULL in projection, comparison, explicit cast, CASE, IN, INSERT/UPDATE assignment, and
+LIMIT/OFFSET. Context must resolve it to one concrete type or the frozen underconstrained
+error; no persistent UNKNOWN TypeId survives binding. Bound return type and conservative
+nullability are compared with the Chapter-17/20 owner tables. The nullability table covers
+NOT NULL and nullable columns, arithmetic, comparison, IS NULL, COUNT, SUM, scalar
+subqueries, EXISTS/NOT EXISTS, and IN/NOT IN subqueries independently.
+
+#### V19-10 — Casts, assignment, operators, predicates, CASE, and IN
+
+Reuse the exhaustive Chapter-17 operator, comparison, cast, assignment, CASE, IN, and 3VL
+matrices, but inspect the Chapter-19 bound tree. Required implicit widening produces one
+synthetic cast with exact target type, implicit provenance, and the coerced operand span.
+Explicit `CAST(expr AS T)` retains explicit provenance and the complete CAST span. The two
+origins remain distinguishable and runtime-only under §18.14.
+
+INSERT/UPDATE use only §17.8.5 assignment coercion, never general explicit-cast reachability.
+JOIN ON, WHERE, HAVING, and CASE WHEN require BOOLEAN with no integer truthiness. CASE and
+IN preserve source order, contextual NULL typing, common type, inserted casts, and the
+Chapter-17 evaluation handoff. No binder-specific overload or cast matrix is an oracle.
+
+#### V19-11 — Generic calls and registry/type error classification
+
+Construct Chapter-18 generic ordinary/star calls without parser name special-casing. Filter
+the frozen scalar and aggregate descriptors by canonical name, call shape, arity,
+star authorization, and argument types. Exactly one legal descriptor binds. Unknown name,
+wrong arity/shape, unauthorized star form (`foo(*)`, `sum(*)` where absent), argument type
+mismatch, and unresolved overload ambiguity are TypeError. `count(*)` succeeds only through
+the §29.3 descriptor. If an argument such as `unknown_column` fails, its prerequisite
+BindError is returned without a fabricated call TypeError. A resolved aggregate in an
+illegal clause remains placement BindError. The v1 named scalar registry stays empty.
+
+For each resolved call, compare canonical name, argument signature or polymorphic rule,
+return-type rule, volatility, NULL handling, and runtime implementation identity. The
+implementation identity is not persistent default metadata. Verify the IMMUTABLE-only
+constant-folding gate, that VOLATILE expressions are never folded as stable, and that the
+bound node carries dispatch identity without executor-time name lookup.
+
+#### V19-12 — Aggregate classification, placement, nesting, and ordinal
+
+Classify calls from §29.3 before applying placement. Direct aggregates are legal only in
+SELECT, HAVING, and ORDER BY; reject direct aggregate use in JOIN ON, WHERE, GROUP BY,
+LIMIT/OFFSET, DML expressions/RETURNING, and schema defaults as BindError. Reject a same-
+block aggregate inside another aggregate; an aggregate in a child query block belongs only
+to that child. Aggregate DISTINCT and FILTER forms remain absent from the v1 aggregate
+registry even if another layer recognizes related syntax or operators.
+
+Build source layouts where SELECT/HAVING/ORDER traversal differs from byte order. The
+independent span sorter assigns aggregate ordinal by first aggregate source-byte occurrence
+per query block, retains one ordinal for shared occurrences, and verifies ORDER alias
+references do not duplicate an aggregate. Rewrites preserve the ordinal as §29.3.7 requires.
+
+#### V19-13 — Aggregate-query and grouped-expression legality
+
+The classification oracle marks a block aggregate when GROUP BY exists or a block-owned
+aggregate occurs in SELECT, HAVING, or ORDER BY. Child aggregates do not classify a parent;
+aggregate without GROUP BY creates one global group. HAVING is legal only for an aggregate
+query; HAVING alone without GROUP BY or any aggregate is BindError.
+
+Use an independent comparator over fully bound expressions. Ignore SourceSpan,
+parenthesis-only provenance, and display aliases; include BindingId, TableId/ColumnId,
+literal value/type, TypeId, operator/call descriptor, explicit and implicit casts, child
+order, and every semantic child. Do not infer commutativity, associativity, constant-
+folding equivalence, keys, uniqueness, predicates, or functional dependencies.
+
+The recursive group-validity oracle admits current-block aggregates, complete exact
+group-key subtrees, execution-independent constants, and scalar nodes whose row-dependent
+children are group-valid. Thus `GROUP BY a` admits `a+1`, while `GROUP BY a+1` does not
+admit bare `a`. GROUP BY aliases and ordinals are absent; `GROUP BY 1` is an ordinary
+integer expression.
+
+#### V19-14 — ORDER BY aliases and ordinals
+
+Classify an ordinal only when the complete raw expression is a bare, unparenthesized,
+unsigned integer-literal node. `(1)`, `+1`, `-1`, `1+0`, `CAST(1 AS INT32)`, and `1.0` are
+ordinary expressions. Compare the lossless magnitude without host signed conversion:
+`1..N` references the output, while zero, `N+1`, and arbitrarily large magnitudes are
+BindError ordinal attempts.
+
+For every item apply ordinal classification first, explicit-AS alias lookup second, and
+ordinary input binding third. Alias/input collisions and duplicate aliases prove this
+priority. Output references retain existing semantic identity. ORDER expressions use the
+§17.7.1 orderable-type oracle; BOOLEAN is rejected absent an explicit legal cast.
+
+#### V19-15 — LIMIT/OFFSET folding and execution-start validation
+
+The recursive eligibility oracle admits typed literals/NULL, casts, scalar operators,
+comparisons/predicates, CASE, and an IMMUTABLE scalar call whose children qualify. It
+rejects columns, relation references, output aliases, aggregates, scalar/EXISTS/IN
+subqueries, and every row-dependent construct. The v1 empty scalar registry means no named
+source call qualifies. LIMIT/OFFSET has no relation or output-alias namespace.
+
+Apply the Chapter-17 type oracle: only INT32/INT64 are accepted, INT32 widens to INT64, raw
+NULL receives INT64 NULL context, nonconstant is BindError, and nonintegral is TypeError.
+Then apply mandatory §17.10.2 folding and error timing. Required cases are:
+
+| Source | Binding result | Execution-start result |
+|---|---|---|
+| `1+2` | folded/residual INT64 `3` | acquire `3` once |
+| `1/0` | `DIVISION_BY_ZERO` | not reached |
+| `INT64_MAX+1` | `NUMERIC_OVERFLOW` | not reached |
+| `NULL` | typed/folded INT64 NULL | `ExecutionError` |
+| `-1` | folded/residual INT64 `-1` | `ExecutionError` |
+| column or subquery | BindError | not reached |
+| `1.5` | TypeError | not reached |
+
+Execution consumes the folded/residual representation once before any relational operator
+produces or consumes rows; it does not reevaluate completed pre-fold work. Final NULL and
+negative validation occurs only at that boundary, with no clamping or implementation-sized
+semantic maximum. Use deterministic event barriers, never sleeps.
+
+#### V19-16 — DML namespaces
+
+INSERT VALUES expressions have no target-row scope; `VALUES(a)` does not see target `t.a`.
+INSERT SELECT is an independent query block, with target mapping after source binding.
+UPDATE creates one unaliased target binding visible to SET RHS, WHERE, and RETURNING;
+DELETE exposes it to WHERE and RETURNING. The qualifier is the final target table-name
+component, and assignment LHS lookup is direct against the target descriptor. Verify
+duplicate INSERT targets and UPDATE assignments as BindError with deterministic spans.
+
+Compose with §21.15 row images: INSERT/UPDATE RETURNING bind new/final rows and DELETE
+RETURNING binds the old row. Aggregates remain forbidden. Verify namespace/type binding
+only; physical writes, affected rows, publication, MVCC, and result buffering stay in the
+Chapter-15/21 procedures.
+
+#### V19-17 — DDL, maintenance-target, and EXPLAIN binding
+
+CREATE TABLE uses one statement-local declared-column namespace. Valid, missing, repeated,
+and multiply declared PRIMARY KEY/UNIQUE members produce the exact
+ConstraintDefinitionError outcomes in §§21.6–21.7; defaults reuse §21.12.
+
+CREATE INDEX resolves the catalog-visible table and source-ordered descriptor columns;
+duplicate key is BindError and an ineligible type is TypeError. DROP resolves exactly TABLE
+or INDEX; missing/wrong-kind is CatalogError. No physical creation, publication,
+dependency, retirement, or ID allocation is tested here. VACUUM/ANALYZE target lookup uses
+the same canonical snapshot oracle. EXPLAIN's inner SELECT canonical binding/error must
+equal ordinary SELECT binding; the wrapper cannot alter resolution.
+
+#### V19-18 — Subquery scopes and unsupported correlation
+
+For scalar, EXISTS, IN, and derived forms, create a child query block with statement-unique
+BindingIds and local resolution. The bound form records stable query-local identity, exact
+subquery kind, typed logical child plan, result type/nullability, and SourceSpan. Derived
+tables expose only their mandatory alias and Chapter-20 exported schema. Scalar/IN output
+shape, scalar runtime cardinality, EXISTS result, IN comparison result, and derived
+exported-name restrictions are asserted through the complete Subquery Tests rather than
+redefined.
+
+Qualified and unqualified outer-only references produce UnsupportedCorrelation only after
+the local lookup rules run. Local qualifier shadowing, missing local member, and local
+ambiguity suppress outer fallback. No OuterRef, sibling LATERAL visibility, correlated
+bound expression, or downstream SQL name lookup is produced.
+
+#### V19-19 — Error categories and deterministic precedence
+
+Populate the error matrix below with one row per condition. Verify CatalogError, BindError,
+TypeError, ConstraintDefinitionError, UnsupportedFeature, downstream CardinalityError,
+FrontEndResourceLimit, and OutOfMemory without category drift. Call registry failures are
+type/coercion class; resolved aggregate placement is structural-placement class.
+
+Only errors with satisfied semantic prerequisites enter the independent candidate list.
+Sort genuine ordinary candidates by earliest SourceSpan start, then shorter span, then the
+identical-span class order `name, placement/shape, constraint, type/coercion, cardinality`.
+Use cross-clause errors and synthetic equal-start/equal-span fixtures. Permute binder
+traversal, descriptor order, and containers; the selected error remains unchanged.
+Resource/cancellation behavior is immediate under Chapters 18 and 39 and is not reordered
+behind an ordinary semantic diagnostic.
+
+#### V19-20 — Immutability, source lifetime, and resource cleanup
+
+Completed bound expressions are immutable. A rewrite creates a new expression or shares
+immutable children; no assertion prescribes tree/arena/refcount ownership. Use generation-
+tagged source backing to prove borrowed output names and diagnostics remain valid only while
+backing survives, or are materialized before release; numeric SourceSpan intervals may
+survive independently.
+
+Inject checked budget refusal and required-allocation failure after relation identity,
+scope, cast, output, aggregate, and error-candidate creation. Expect
+FrontEndResourceLimit/OutOfMemory, complete private unwind, no successful partial bound
+object, no persistent state, and no executable prefix. Reuse the Chapter-18 resource and
+§39 transaction oracles.
+
+#### V19-21 — Environment and representation determinism
+
+Replay each canonical fixture under permuted descriptor/cache storage, hash seeds, alias
+insertion, allocation addresses, opaque BindingId values, scheduler event orders, locales,
+and byte-character signedness simulation. Alpha-renamed canonical bound results and errors
+must match. Identifier comparison uses Chapter-18 canonical bytes only—no locale folding,
+Unicode normalization, quoted-name folding, pointer identity, or cache/container order.
+
+#### V19-22 — Cross-owner and documentation-model closure
+
+The composition matrix below verifies that Chapter 19 consumes rather than redefines the
+canonical Chapter-16 catalog, Chapter-17 type, Chapter-18 syntax/lifetime, Chapter-20
+logical/subquery, Chapter-21 statement, Chapter-29 aggregate, and §39 error contracts. The
+documentation-model matrix is part of maintenance verification: procedures remain
+timeless, deterministic, implementation-independent, and free of progress narration,
+development sequencing, allocator/source-layout mandates, historical counts, and review
+chronology.
+
+The owner ledger also verifies that DISTINCT is handed off as a logical duplicate-
+elimination requirement, only searched CASE is admitted, and IN/NOT IN retains its semantic
+node and once-only left-to-right boundary without requiring an OR rewrite. Parameter syntax
+has no v1 binder semantics, a no-FROM block has an empty relation namespace, and binding
+does not alter §39.1 transaction consequences.
+
+#### Mandatory procedural matrices
+
+##### Bound-expression boundary matrix
+
+| Contract | Independent expected result | Forbidden result | Status |
+|---|---|---|---|
+| admitted kinds | Constant, ColumnRef, Unary, Binary, Comparison, Boolean, Cast, Function, Aggregate, Case, IsNull, InList, Subquery | parser-only or physical-plan node | COMPLETE |
+| common metadata | resolved return type, conservative nullability, SourceSpan | unresolved name/type or missing span | COMPLETE |
+| semantic identity | resolved IDs, descriptor/operator identity, casts/provenance, ordered children | executor-time SQL lookup | COMPLETE |
+| execution handoff | immutable typed expression compatible with vector evaluation | operator scheduling or pipeline ownership | COMPLETE |
+| side effects | none | cardinality estimation, heap/RID access, WAL, persistent ID allocation, catalog/database mutation | COMPLETE |
+| failure | private state discarded | executable partial bound statement | COMPLETE |
+
+##### BindingId matrix
+
+| Relation case | TableId | BindingId oracle | ColumnId behavior | Qualifier | Persistence/rewrite |
+|---|---|---|---|---|---|
+| one base table | descriptor ID | one occurrence identity | descriptor column | final name | runtime; preserve if occurrence survives |
+| two base tables | respective IDs | distinct | respective | each exposed name | same rule |
+| aliased base | descriptor ID | one | unchanged | alias only | base qualifier hidden |
+| self-join aliases | same | distinct | may be same | aliases distinct | both survive independently |
+| self-join unaliased | same | second insertion fails | N/A | duplicate final name | BindError |
+| derived table | none as base identity | distinct relation occurrence | exported slots/identity | mandatory alias | statement-local |
+| scalar/EXISTS/IN child relations | descriptor IDs | distinct from every parent/child occurrence | descriptor columns | child-local | whole-statement domain |
+| repeated table in child blocks | same | all distinct | may be same | block-local | no scope-reset reuse |
+
+##### Qualifier and name-resolution matrix
+
+| Case | Local candidates/qualifier | Outer diagnostic lookup | Result | Category/span |
+|---|---|---|---|---|
+| unaliased `main.t` | qualifier `t` | no | exposed | — |
+| `t AS x` | `x` only | no | `t` hidden | — |
+| duplicate qualifier | insertion conflict | no | failure | BindError/conflicting qualifier |
+| unqualified zero | 0 | yes | outer-only unsupported; absent unknown | UnsupportedFeature or BindError/reference |
+| unqualified one | 1 | no | exact bound column | — |
+| unqualified many | >1 | no | ambiguity | BindError/reference |
+| qualified local/member present | qualifier then member | no | exact bound column | — |
+| qualified local/member absent | qualifier present | no | local unknown member | BindError/member |
+| qualified outer only | local qualifier absent | yes | unsupported correlation | UnsupportedFeature/reference |
+| local shadows outer | local authoritative | no | local result/error | local span |
+
+##### Clause-visibility matrix
+
+| Context | Input relations | Current JOIN right | Future relation | SELECT alias | Outer binding | Aggregate | Ordinal | Status |
+|---|---|---|---|---|---|---|---|---|
+| FROM primary | none from siblings; a derived child is child-local | N/A | no | no | diagnostic only | child rules | no | COMPLETE |
+| JOIN ON | accumulated left | yes | no | no | diagnostic only | forbidden | no | COMPLETE |
+| WHERE | completed FROM | N/A | N/A | no | diagnostic only | forbidden | no | COMPLETE |
+| GROUP BY | completed FROM | N/A | N/A | no | diagnostic only | forbidden | no | COMPLETE |
+| HAVING | completed FROM/group keys | N/A | N/A | no | diagnostic only | allowed | no | COMPLETE |
+| SELECT item | completed FROM | N/A | N/A | no same-list | diagnostic only | allowed | no | COMPLETE |
+| ORDER BY | completed FROM fallback | N/A | N/A | explicit AS only | diagnostic only | allowed | bare-int ordinal | COMPLETE |
+| LIMIT | none | N/A | N/A | no | no | forbidden | no | COMPLETE |
+| OFFSET | none | N/A | N/A | no | no | forbidden | no | COMPLETE |
+
+##### Wildcard and output matrix
+
+| Form | Resolution/order | Display name | Alias namespace | Duplicate result |
+|---|---|---|---|---|
+| `*` | relation source order × descriptor presentation order | source columns | no unless explicit AS impossible here | preserved |
+| `x.*` | one qualifier, descriptor presentation order | source columns | no | preserved |
+| self-join `*` | each occurrence in source order | may duplicate | no | distinct BindingIds/slots |
+| direct column | exact bound column | source column | no | legal |
+| direct column `AS x` | exact bound column | `x` | yes | legal |
+| expression | bound expression | exact SourceSpan slice | no | legal |
+| expression `AS x` | bound expression | `x` | yes | legal |
+| duplicate explicit aliases | ordered expressions | duplicate `x` | two candidates | top-level legal; ORDER `x` ambiguous |
+
+##### Type-resolution matrix
+
+| Form | Raw/context | Oracle | Bound result | Failure owner |
+|---|---|---|---|---|
+| type name | canonical identifier | TypeId registry | exact TypeId | TypeError |
+| literals | raw spelling/kind | Chapter-17 literal tables | typed constant/unresolved NULL | Chapter 17 |
+| NULL | contextual candidate | TypeResolver | concrete typed NULL | TypeError if underconstrained |
+| unary/arithmetic | operand types | §§17.6, 17.10.1 | operator + casts + type | TypeError |
+| comparison/BOOLEAN | operand/context | §§17.7, 17.10.1 | BOOLEAN/nullability | TypeError |
+| CASE/IN | ordered children | §§17.8.5, 17.9 | common type + casts | TypeError |
+| explicit CAST | source/target | §17.8 | explicit cast/full span | TypeError or scalar category |
+| implicit cast | resolver edge | §17.8.5 | implicit cast/operand span | TypeError if no edge |
+| function/aggregate | descriptor candidates | §§17.9.3, 29.3 | one descriptor | TypeError |
+| assignment | destination type | §17.8.5 assignment graph | destination-typed expression | TypeError |
+| LIMIT/OFFSET | integral context | §§17.8.5, 17.10.2 | INT64 folded/residual | BindError/TypeError/scalar error |
+
+##### Nullability matrix
+
+| Bound form | Independent expected nullability/type | Status |
+|---|---|---|
+| NOT NULL column reference | non-nullable source type | COMPLETE |
+| nullable column reference | nullable source type | COMPLETE |
+| arithmetic `x op y` | nullable iff either operand is nullable | COMPLETE |
+| comparison `x cmp y` | nullable BOOLEAN iff either operand is nullable | COMPLETE |
+| `IS NULL(x)` | non-nullable BOOLEAN | COMPLETE |
+| `COUNT(*)` | non-nullable INT64 | COMPLETE |
+| `SUM(nullable_input)` | nullable registry result type | COMPLETE |
+| scalar subquery | nullable even if child output expression is NOT NULL | COMPLETE |
+| EXISTS / NOT EXISTS | non-nullable BOOLEAN | COMPLETE |
+| IN / NOT IN subquery | conservatively nullable BOOLEAN | COMPLETE |
+
+##### Function-descriptor and volatility matrix
+
+| Condition | Independent expected result | Status |
+|---|---|---|
+| resolved descriptor | canonical name, signature/rule, return rule, volatility, NULL rule, runtime implementation identity | COMPLETE |
+| implementation identity | process/runtime dispatch metadata, no executor name lookup | COMPLETE |
+| persisted catalog default | typed scalar only; no implementation identity | COMPLETE |
+| IMMUTABLE + constant arguments | eligible for ordinary folding | COMPLETE |
+| IMMUTABLE + nonconstant argument | not eligible through volatility alone | COMPLETE |
+| STABLE | not admitted by the IMMUTABLE folding gate | COMPLETE |
+| VOLATILE | never folded as stable | COMPLETE |
+| v1 named scalar registry | empty | COMPLETE |
+
+##### Aggregate and grouping matrix
+
+| Case | Aggregate block? | Placement/group result | Category/ordinal |
+|---|---|---|---|
+| GROUP BY, no aggregate | yes | grouped legality | no aggregate ordinal |
+| aggregate SELECT, no GROUP | yes/global group | legal if group-valid | source ordinal |
+| aggregate HAVING/ORDER | yes | legal | source ordinal |
+| HAVING alone nonaggregate | no | illegal | BindError |
+| aggregate WHERE/JOIN/GROUP/LIMIT | classification after resolution | forbidden | BindError |
+| aggregate DML/default | owning block/context | forbidden | BindError |
+| nested same-block aggregate | yes | forbidden | BindError |
+| aggregate in child subquery | child only | parent unaffected | child ordinal domain |
+
+##### Group-key equality matrix
+
+| Pair | Structurally equal? | Reason/group result |
+|---|---|---|
+| `a` / `a` same bound identity | yes | exact key |
+| `a` / `(a)` | yes | parenthesis-only provenance ignored |
+| `a+b` / same bound `a+b` | yes | child/order/descriptor identities equal |
+| `a+b` / `b+a` | no | no commutativity |
+| `a` / `a+0` | no | no algebraic equivalence |
+| same ColumnId under different BindingIds | no | relation occurrence differs |
+| implicit-cast(`a`) / `a` | no | cast is semantic |
+| same value/different TypeId | no | type is semantic |
+| same tree/different SourceSpan | yes | span ignored |
+
+##### ORDER BY matrix
+
+| Source | Ordinal? | Alias lookup | Input fallback | Expected |
+|---|---|---|---|---|
+| `1` | yes | no | no | output 1 or range BindError |
+| `0`, `N+1`, huge integer | yes | no | no | BindError |
+| `(1)`, `+1`, `-1`, `1+0`, `CAST(1 AS INT32)`, `1.0` | no | only identifier forms qualify | yes | ordinary expression result |
+| unique explicit alias `x` | no | one | no | existing output identity |
+| duplicate explicit alias `x` | no | many | no | BindError |
+| no alias, input `x` | no | zero | yes | input expression |
+| alias and input `x` | no | one | no | alias wins |
+
+##### LIMIT/OFFSET matrix
+
+| Source | Constant? / type | Binding/fold | Execution-start result |
+|---|---|---|---|
+| `1`, INT32/INT64 literal | yes / integral | INT64 folded/residual | accepted |
+| `1+2` | yes / INT64 | folds to 3 | accepted 3 |
+| `1/0` | yes / integral | DIVISION_BY_ZERO | not reached |
+| `INT64_MAX+1` | yes / integral | NUMERIC_OVERFLOW | not reached |
+| `NULL` | yes / INT64 NULL | typed/folded NULL | ExecutionError |
+| `-1` | yes / INT64 | folded/residual -1 | ExecutionError |
+| column/output alias/aggregate/subquery | no | BindError | not reached |
+| FLOAT or other nonintegral | eligibility independent | TypeError | not reached |
+| explicit legal CAST to INT64 | recursive | folded/residual | value/domain result |
+| constant CASE | recursive | §17.10.2 result/error | value/domain result |
+
+##### DML matrix
+
+| Context | Target row visible? | Qualifier/unqualified names | Coercion/aggregate | Row image |
+|---|---|---|---|---|
+| INSERT VALUES | no | no target names | assignment after expression; aggregate forbidden | new row only in RETURNING |
+| INSERT SELECT | no target in child | child SELECT scope | target coercion after child | new row in RETURNING |
+| UPDATE SET RHS/WHERE | yes | final table name + unqualified | assignment/BOOLEAN; aggregate forbidden | final new row |
+| UPDATE RETURNING | yes | same target | aggregate forbidden | final new row |
+| DELETE WHERE | yes | final table name + unqualified | BOOLEAN; aggregate forbidden | old row |
+| DELETE RETURNING | yes | same target | aggregate forbidden | old row |
+
+##### DDL matrix
+
+| Form | Namespace/validation | Failure | Downstream owner |
+|---|---|---|---|
+| CREATE TABLE column/type | declaration namespace/type registry | CatalogError/TypeError | §21.6 |
+| PK/UNIQUE member | declaration namespace | ConstraintDefinitionError | §§21.6–21.7 |
+| repeated member/second PK | statement constraint | ConstraintDefinitionError | §§21.6–21.7 |
+| DEFAULT | closed expression/type | ConstraintDefinitionError/type owner | §21.12 |
+| CREATE INDEX key | target descriptor/source order | unknown/catalog, duplicate BindError, type TypeError | §21.8 |
+| DROP TABLE/INDEX | requested object kind | CatalogError missing/wrong kind | §21.9 |
+| VACUUM/ANALYZE | table snapshot lookup | catalog owner | maintenance owner |
+| EXPLAIN | ordinary inner SELECT binding | same inner error | Chapter 40 |
+
+##### Subquery matrix
+
+| Form | Child scope/BindingId | Outer lookup | Bound result | Downstream owner |
+|---|---|---|---|---|
+| scalar | independent/statement-unique | diagnostic only | typed subquery | §20.14.4 cardinality |
+| EXISTS | independent/statement-unique | diagnostic only | non-NULL BOOLEAN handoff | §20.14.5 |
+| IN | independent/statement-unique | diagnostic only | comparison-type handoff | §20.14.6 |
+| derived | independent/relation BindingId | no sibling visibility | aliased exported schema | §20.14.3 |
+| correlated qualified/unqualified | local rules first | outer match only diagnoses | UnsupportedCorrelation | §20.14.2 |
+| local alias shadows outer | local authoritative | none | local result/error | §19.18 |
+| local ambiguity plus outer match | ambiguity | none | BindError | §19.18 |
+
+##### Error-category matrix
+
+| Condition | Prerequisite | Category | Responsible span | Class |
+|---|---|---|---|---|
+| missing table | table lookup attempted | CatalogError | table name | name |
+| missing index | index lookup attempted | CatalogError | index name | name |
+| wrong DROP object kind | requested-kind lookup attempted | CatalogError | object name | name |
+| create-name/object collision | snapshot lookup complete | CatalogError | object name | name |
+| unknown column | local/outer diagnostic lookup complete | BindError | reference | name |
+| ambiguous unqualified column | complete local candidate set | BindError | complete reference | name |
+| unknown qualifier | local/outer diagnostic lookup complete | BindError | qualifier | name |
+| known qualifier, unknown member | qualifier resolved | BindError | member | name |
+| duplicate qualifier | prior qualifier installed | BindError | later qualifier | name |
+| ambiguous output alias | output aliases bound | BindError | ORDER identifier | name |
+| ordinal zero | output width known | BindError | ORDER integer | placement/shape |
+| ordinal above output width | output width known | BindError | ORDER integer | placement/shape |
+| illegal aggregate placement | call resolved | BindError | aggregate expression | placement/shape |
+| nested same-block aggregate | both calls resolved/owned | BindError | nested aggregate | placement/shape |
+| grouped-query legality failure | group keys/expressions bound | BindError | responsible expression | placement/shape |
+| HAVING legality failure | aggregate classification complete | BindError | HAVING clause/expression | placement/shape |
+| nonconstant LIMIT/OFFSET | expression bound | BindError | count expression | placement/shape |
+| duplicate INSERT target | target descriptor known | BindError | later target | placement/shape |
+| duplicate UPDATE assignment | target descriptor known | BindError | later assignment target | placement/shape |
+| duplicate CREATE INDEX key | target descriptor known | BindError | later key | placement/shape |
+| unknown type | type syntax present | TypeError | type name | type/coercion |
+| operator overload mismatch | operands bound | TypeError | operator expression | type/coercion |
+| cast/coercion mismatch | source/target known | TypeError | cast/coerced expression | type/coercion |
+| non-BOOLEAN predicate | expression typed | TypeError | predicate expression | type/coercion |
+| incompatible CASE common type | arms bound | TypeError | CASE expression | type/coercion |
+| incompatible IN common type | operands bound | TypeError | IN expression | type/coercion |
+| unknown generic call | arguments bound as required | TypeError | call | type/coercion |
+| wrong call shape or arity | arguments bound as required | TypeError | call | type/coercion |
+| unauthorized star call | star raw form bound | TypeError | call | type/coercion |
+| call argument type mismatch | arguments bound | TypeError | call | type/coercion |
+| unresolved overload ambiguity | candidates typed | TypeError | call | type/coercion |
+| nonintegral LIMIT/OFFSET | expression typed | TypeError | count expression | type/coercion |
+| index-ineligible key type | key resolved/typed | TypeError | key | type/coercion |
+| missing PK/UNIQUE member | declaration namespace built | ConstraintDefinitionError | member | constraint |
+| repeated constraint member | declaration namespace built | ConstraintDefinitionError | later member | constraint |
+| multiple PRIMARY KEY declarations | declarations parsed/bound | ConstraintDefinitionError | later declaration | constraint |
+| invalid default definition | default syntax/type prerequisites | ConstraintDefinitionError owner | default expression | constraint |
+| outer-only reference | local miss and outer match | UnsupportedFeature | reference | placement/shape |
+| scalar runtime row cardinality | child executes | CardinalityError owner | subquery | cardinality |
+| deliberate front-end budget | guard reached | FrontEndResourceLimit | operational | immediate |
+| required allocation fails | allocation attempted | OutOfMemory | operational | immediate |
+
+##### SourceSpan and precedence matrix
+
+| Condition | Canonical span | Tie/class behavior |
+|---|---|---|
+| unknown qualifier | qualifier | name class |
+| unknown qualified member | member | name class |
+| ambiguous unqualified column | complete reference | name class |
+| duplicate qualifier/target/key | later conflicting construct | name or placement class |
+| invalid ordinal | complete ordinal expression | placement class |
+| aggregate placement | aggregate expression | placement class |
+| type/call mismatch | responsible expression/call | type class |
+| constraint member | member/declaration | constraint class |
+| LIMIT nonconstant | count expression | placement class |
+| implicit cast metadata | coerced operand | provenance, not error candidate itself |
+| explicit CAST metadata | complete CAST expression | provenance, not error candidate itself |
+
+##### Catalog and determinism matrix
+
+| Perturbation | Candidate set | Presentation order | Selected error/result | Canonical authority |
+|---|---|---|---|---|
+| descriptor/cache storage order | unchanged | unchanged | unchanged | snapshot + source/presentation order |
+| hash seed/container order | unchanged | unchanged | unchanged | complete sets + explicit sorter |
+| TableId/ColumnId numeric order | identities only | unchanged | unchanged | descriptors/§16.8 |
+| source relation order | defined change | defined change | defined semantic change | raw AST |
+| descriptor presentation order | columns unchanged | defined change | defined semantic change | §16.8 |
+| alias insertion order | source conflict span only | N/A | source-defined | qualifier namespace |
+| allocation/pointer addresses | unchanged | unchanged | unchanged | explicit semantic identity |
+| locale/Unicode environment | unchanged | unchanged | unchanged | canonical bytes |
+| scheduler interleaving | unchanged | unchanged | unchanged | deterministic semantic contract |
+
+##### Cross-chapter composition matrix
+
+| Owner | Chapter-19 handoff | Existing verification reused | New composition | Status |
+|---|---|---|---|---|
+| Chapter 16 | names, IDs, descriptors, SchemaVer, snapshot/presentation order | Catalog Tests | bind selected identities | COMPLETE |
+| Chapter 17 | types, NULL, coercions, calls, folding/errors | Type-System Property Tests | inspect bound tree/count pipeline | COMPLETE |
+| Chapter 18 | raw AST, provenance, spans, lifetime/resources | Chapter 18 verification | raw-to-bound handoff | COMPLETE |
+| Chapter 19 | identity, scopes, resolution, legality, precedence | this section | direct owner | COMPLETE |
+| Chapter 20 | slots, grouping/DISTINCT/ORDER/LIMIT/subqueries | Subquery/Logical Planner Tests | handoff shape/identity | COMPLETE |
+| Chapter 21 | DML/DDL/default/RETURNING/publication | Catalog and DML tests | namespace/validation only | COMPLETE |
+| Chapter 29 | aggregate descriptors/signatures/ordinal | Aggregate Tests | resolution/placement/ordinal | COMPLETE |
+| §39.1 | transaction consequences | Statement Failure tests | no redefinition | COMPLETE |
+| §39.2 | front-end categories | Front-End Error tests | exact binder map | COMPLETE |
+| §39.3 | execution/resource categories | Execution-failure tests | LIMIT final/resource handoff | COMPLETE |
+| §41.4 | required binder verification families | this section/matrices | closure ledger | COMPLETE |
+
+##### Documentation-model matrix
+
+| Requirement | Status |
+|---|---|
+| no chronology or review history | CONSISTENT |
+| no current implementation narration | CONSISTENT |
+| no phase/progress narration | CONSISTENT |
+| no development sequencing | CONSISTENT |
+| no binder traversal/algorithm mandate | CONSISTENT |
+| no allocator/ownership representation mandate | CONSISTENT |
+| no source-layout or class-name coupling | CONSISTENT |
+| no historical test totals/results | CONSISTENT |
+| BindingId domain/lifetime precise | CONSISTENT |
+| qualifier/alias/shadowing precise | CONSISTENT |
+| column ambiguity and errors precise | CONSISTENT |
+| wildcard/output naming precise | CONSISTENT |
+| TypeResolver/cast ownership precise | CONSISTENT |
+| call TypeError boundary precise | CONSISTENT |
+| aggregate/grouping/ordinal precise | CONSISTENT |
+| ORDER alias/ordinal priority precise | CONSISTENT |
+| LIMIT eligibility/folding/final boundary precise | CONSISTENT |
+| DML/DDL namespaces precise | CONSISTENT |
+| error categories/precedence precise | CONSISTENT |
+| cross-owner references precise | CONSISTENT |
+| deterministic no-sleep methodology | CONSISTENT |
+| independent expected-result oracles | CONSISTENT |
+| implementation freedom preserved | CONSISTENT |
+| lifetime/resource procedures timeless | CONSISTENT |
+
+##### High-level Chapter-19 case matrix
+
+| Case | Independent oracle | Expected result | Family | Status |
+|---|---|---|---|---|
+| self-join with aliases | occurrence graph | same TableId, distinct BindingIds | V19-2 | COMPLETE |
+| unaliased self-join | qualifier map | duplicate-qualifier BindError | V19-3 | COMPLETE |
+| alias hides base name | qualifier map | alias only | V19-3 | COMPLETE |
+| two distinct relations expose one duplicate qualifier | qualifier map | later-qualifier BindError | V19-3 | COMPLETE |
+| local shadows outer | scope graph | local result/error | V19-3 | COMPLETE |
+| outer-only reference | scope graph | UnsupportedCorrelation | V19-3/18 | COMPLETE |
+| ambiguous unqualified column | candidate set | BindError | V19-4 | COMPLETE |
+| self-join wildcard | order cross-product | duplicate names, distinct identities | V19-6 | COMPLETE |
+| expression display name | byte-slice oracle | exact source bytes | V19-6 | COMPLETE |
+| duplicate explicit aliases | output/alias models | legal outputs; ORDER ambiguity | V19-6/7 | COMPLETE |
+| ORDER BY duplicate explicit alias | alias candidate set | ambiguous-output-alias BindError | V19-7 | COMPLETE |
+| unknown type | TypeId table | TypeError/type span | V19-9 | COMPLETE |
+| underconstrained standalone NULL | TypeResolver table | TypeError | V19-9 | COMPLETE |
+| implicit/explicit cast | TypeResolver/span table | exact cast/provenance | V19-10 | COMPLETE |
+| `foo()`, `foo(*)`, illegal `sum(*)` | call descriptor model | TypeError | V19-11 | COMPLETE |
+| `count(*)` | aggregate table | bound aggregate | V19-11/12 | COMPLETE |
+| aggregate in WHERE/nested | placement/block oracle | BindError | V19-12 | COMPLETE |
+| HAVING alone | aggregate classifier | BindError | V19-13 | COMPLETE |
+| GROUP `a`, SELECT `a+1` | structural recursion | valid | V19-13 | COMPLETE |
+| GROUP `a+1`, SELECT `a` | structural recursion | BindError | V19-13 | COMPLETE |
+| ORDER `1`, `(1)`, `+1`, `0`, huge | provenance/magnitude model | exact ordinal/ordinary outcomes | V19-14 | COMPLETE |
+| LIMIT `1+2`, `1/0`, overflow, NULL, -1 | fold/domain models | exact bind/execution outcomes | V19-15 | COMPLETE |
+| LIMIT column/FLOAT | dependency/type models | BindError/TypeError | V19-15 | COMPLETE |
+| INSERT VALUES target reference | DML namespace | target not visible | V19-16 | COMPLETE |
+| UPDATE qualification/DELETE RETURNING | DML namespace/row image | exact target/new-old binding | V19-16 | COMPLETE |
+| repeated index key/wrong DROP kind | DDL tables | BindError/CatalogError | V19-17 | COMPLETE |
+| correlated derived/scalar child | scope graph | UnsupportedCorrelation | V19-18 | COMPLETE |
+| multiple independent errors | candidate sorter | canonical one error | V19-19 | COMPLETE |
+| allocation failure mid-bind | failure schedule/ownership graph | resource error, no partial bound object | V19-20 | COMPLETE |
+| permuted locale/container/address | canonical serialization | identical result/error | V19-21 | COMPLETE |
+
+#### Complete Chapter-19 architecture-obligation coverage map
+
+Each row below is one independently checkable Chapter-19 obligation. A row is COMPLETE only
+because the referenced deterministic procedure has an expected-result oracle independent
+of production traversal, or precisely reuses an already-complete lower-layer oracle. The
+primary-family codes are the closed Chapter-19 inventory domains:
+
+| Code | Primary obligation family | Atomic rows |
+|---|---|---:|
+| A | BINDER INPUT CONTRACT | 6 |
+| B | RAW-AST → BOUND REPRESENTATION | 16 |
+| C | BINDINGID DOMAIN | 6 |
+| D | BINDINGID LIFETIME | 8 |
+| E | TABLEID / COLUMNID DISTINCTION | 5 |
+| F | QUERY-BLOCK SCOPE | 3 |
+| G | RELATION QUALIFIER NAMESPACE | 7 |
+| H | ALIAS HIDING | 5 |
+| I | LOCAL / OUTER SHADOWING | 3 |
+| J | CORRELATION DIAGNOSTIC LOOKUP | 5 |
+| K | UNQUALIFIED COLUMN RESOLUTION | 2 |
+| L | QUALIFIED COLUMN RESOLUTION | 4 |
+| M | AMBIGUITY | 3 |
+| N | CATALOG SNAPSHOT | 5 |
+| O | SCHEMAVER / DESCRIPTOR IDENTITY | 5 |
+| P | WILDCARD EXPANSION | 6 |
+| Q | WILDCARD ORDER | 4 |
+| R | OUTPUT METADATA | 3 |
+| S | OUTPUT DISPLAY NAMES | 7 |
+| T | DUPLICATE OUTPUT NAMES | 3 |
+| U | SELECT OUTPUT-ALIAS NAMESPACE | 5 |
+| V | CLAUSE VISIBILITY | 10 |
+| W | FROM/JOIN VISIBILITY | 8 |
+| X | TYPE-NAME RESOLUTION | 2 |
+| Y | LITERAL BINDING | 4 |
+| Z | NULL CONTEXT | 18 |
+| AA | TYPERESOLVER HANDOFF | 4 |
+| AB | IMPLICIT CAST INSERTION | 2 |
+| AC | CAST PROVENANCE | 5 |
+| AD | ASSIGNMENT COERCION | 2 |
+| AE | OPERATOR RESOLUTION | 3 |
+| AF | BOOLEAN CONTEXTS | 2 |
+| AG | CASE BINDING | 2 |
+| AH | IN / NOT IN BINDING | 3 |
+| AI | FUNCTION REGISTRY | 17 |
+| AJ | STAR-CALL RESOLUTION | 4 |
+| AK | AGGREGATE CLASSIFICATION | 4 |
+| AL | AGGREGATE PLACEMENT | 11 |
+| AM | NESTED AGGREGATES | 2 |
+| AN | AGGREGATE ORDINAL | 4 |
+| AO | GROUPED-QUERY CLASSIFICATION | 5 |
+| AP | GLOBAL GROUP | 1 |
+| AQ | HAVING LEGALITY | 4 |
+| AR | GROUP-KEY EQUALITY | 10 |
+| AS | GROUP-VALID EXPRESSION | 3 |
+| AT | NO FUNCTIONAL DEPENDENCIES | 2 |
+| AU | ORDER BY ALIAS RESOLUTION | 5 |
+| AV | ORDER BY ORDINAL RECOGNITION | 8 |
+| AW | ORDER BY ORDINAL RANGE | 5 |
+| AX | ORDER BY RESOLUTION PRIORITY | 2 |
+| AY | LIMIT/OFFSET CONSTANT ELIGIBILITY | 13 |
+| AZ | LIMIT/OFFSET TYPE CONTEXT | 7 |
+| BA | LIMIT/OFFSET CONSTANT FOLDING | 4 |
+| BB | LIMIT/OFFSET EXECUTION-START CONSUMPTION | 1 |
+| BC | LIMIT/OFFSET FINAL DOMAIN VALIDATION | 3 |
+| BD | INSERT BINDING | 8 |
+| BE | UPDATE BINDING | 7 |
+| BF | DELETE BINDING | 4 |
+| BG | RETURNING BINDING | 3 |
+| BH | CREATE TABLE BINDING | 9 |
+| BI | CREATE INDEX BINDING | 3 |
+| BJ | DROP BINDING | 3 |
+| BK | VACUUM / ANALYZE TARGET BINDING | 3 |
+| BL | EXPLAIN BINDING | 1 |
+| BM | SCALAR SUBQUERY | 8 |
+| BN | EXISTS | 2 |
+| BO | IN SUBQUERY | 2 |
+| BP | DERIVED TABLE | 4 |
+| BQ | UNSUPPORTED CORRELATION | 6 |
+| BR | BINDER ERROR CATEGORY MAP | 34 |
+| BS | ERROR PREREQUISITES | 5 |
+| BT | SOURCE-SPAN ERROR PRECEDENCE | 2 |
+| BU | SAME-SPAN PRIORITY | 3 |
+| BV | RESOURCE FAILURE | 6 |
+| BW | NO PARTIAL BOUND OBJECT | 1 |
+| BX | BINDER DETERMINISM | 2 |
+| BY | CONTAINER / CATALOG ORDER INDEPENDENCE | 5 |
+| BZ | LOCALE / PLATFORM INDEPENDENCE | 3 |
+| CA | BOUND-EXPRESSION IMMUTABILITY | 2 |
+| CB | REPRESENTATION FREEDOM | 4 |
+| CC | SOURCE-BACKING LIFETIME | 9 |
+| CD | CROSS-CHAPTER COMPOSITION | 10 |
+| CE | DOCUMENTATION-MODEL VERIFICATION | 8 |
+| CF | OTHER | 1 |
+
+| Atomic ID | Primary family | Atomic obligation | Architecture owner | Verification owner | Deterministic procedure/reference | Independent oracle | Status |
+|---|---|---|---|---|---|---|---|
+| V19-1.1 | A | Input is one Chapter-18 unbound raw AST | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.2 | A | Canonical identifier bytes reach binding unchanged | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.3 | A | Raw SourceSpans reach binding unchanged | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.4 | A | Parenthesis provenance reaches binding unchanged | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.5 | A | Integer-literal provenance reaches binding unchanged | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.6 | A | Binder does not reinterpret grammar | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.7 | B | Success is a fully resolved typed semantic representation | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.8 | B | Success includes conservative nullability | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.9 | B | Success includes all downstream semantic identities | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.10 | B | Physical access and join algorithms are excluded | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.11 | B | Heap pages and RIDs are not consulted by ordinary binding | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.12 | B | Binding writes no WAL | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.13 | B | Binding mutates no database state | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.14 | B | Binding does not estimate cardinality | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.15 | B | Executor-time SQL name resolution is forbidden | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.16 | B | Failure publishes no successful executable bound prefix | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.17 | B | Bound nodes use only the v1 bound-expression kind inventory | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.18 | B | Every bound expression carries a resolved return type | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.19 | B | Every bound expression carries conservative nullability | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.20 | B | Every bound expression carries its SourceSpan | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.21 | B | Execution receives resolved types and performs no SQL type inference | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-1.22 | B | Expression nodes own neither operator scheduling nor pipeline state | §§19.1, 19.3, 19.6 | V19-1 | V19-1 boundary procedure | raw-tree/bound serialization | COMPLETE |
+| V19-2.1 | C | Every base-table occurrence receives one BindingId | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.2 | C | Every derived-table relation occurrence receives one BindingId | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.3 | C | Every other visible relation-like occurrence uses the same identity rule | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.4 | C | BindingId uniqueness spans the whole top-level statement | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.5 | C | Nested query blocks share that uniqueness domain | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.6 | D | Child-scope completion does not permit identity reuse | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.7 | C | Distinct relation occurrences never compare equal | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.8 | D | Different statements may reuse opaque values | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.9 | D | BindingId is runtime-only | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.10 | D | BindingId is absent from catalog state | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.11 | D | BindingId is absent from WAL | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.12 | D | BindingId has no recovery identity | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.13 | E | Self-join occurrences may share TableId | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.14 | E | Self-join occurrences have distinct BindingIds | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.15 | E | Corresponding self-join columns may share ColumnId | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.16 | E | Bound column identity cannot reduce to TableId or ColumnId alone | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.17 | D | A surviving relation occurrence retains BindingId through logical construction/rewrites | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-2.18 | D | A newly distinct relation occurrence cannot inherit an existing BindingId | §§19.2–19.3 | V19-2 | V19-2 occurrence/rewrite fixtures | whole-statement occurrence graph | COMPLETE |
+| V19-3.1 | F | Each query block has exactly one local qualifier namespace | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.2 | G | Qualifier keys use canonical identifier bytes | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.3 | H | Unaliased main.t exposes final component t | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.4 | H | Aliased t AS x exposes only x | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.5 | H | An alias hides the base-table qualifier | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.6 | H | A derived table exposes only its mandatory alias | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.7 | G | Every exposed local qualifier is unique | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.8 | G | A later duplicate qualifier produces BindError | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.9 | G | The conflicting qualifier span is responsible | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.10 | G | No first or last qualifier wins | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.11 | G | No automatic or numeric disambiguator is invented | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.12 | G | Distinct aliases make a self-join legal | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.13 | H | An unaliased self-join with duplicate qualifier fails | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.14 | I | A local qualified binding is authoritative | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.15 | J | A missing member on a local qualifier does not search outer scope | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.16 | I | Unqualified lookup collects the complete local candidate set first | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.17 | J | Zero local candidates permit diagnostic outer lookup | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.18 | I | One local candidate binds locally | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.19 | J | Multiple local candidates produce local ambiguity without outer lookup | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.20 | J | Local miss plus outer match is UnsupportedCorrelation | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-3.21 | J | Absence in local and outer scopes is ordinary BindError | §§19.2, 19.4, 19.18 | V19-3 | V19-3 qualifier/scope fixtures | local qualifier maps and parent diagnostic links | COMPLETE |
+| V19-4.1 | K | Unqualified zero matches is unknown-column BindError | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.2 | K | Unqualified one match binds that exact occurrence/column | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.3 | M | Unqualified multiple matches is ambiguous-column BindError | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.4 | M | No leftmost match is accepted | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.5 | L | Qualified lookup resolves qualifier before member | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.6 | L | Unknown qualifier is distinct from unknown member | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.7 | L | Unknown qualifier uses the qualifier span | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.8 | L | Known qualifier with unknown member uses the member span | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.9 | E | Bound columns carry BindingId TableId ColumnId type nullability and span | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-4.10 | M | Descriptor/hash iteration cannot select a column result | §§19.3–19.4 | V19-4 | V19-4 column-resolution matrix | complete candidate cardinality model | COMPLETE |
+| V19-5.1 | O | Binding consumes transaction-visible immutable descriptors | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.2 | N | Own completed earlier DDL is visible under the frozen snapshot rules | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.3 | N | Another transaction's uncommitted DDL is invisible | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.4 | O | Selected TableId is stable | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.5 | O | Selected ColumnId is stable | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.6 | O | Selected SchemaVer/descriptor identity is stable for the bound statement | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.7 | N | Catalog cache layout cannot override snapshot selection | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.8 | O | Cache hit and cache miss bind to equivalent canonical identity | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.9 | N | Same AST and same snapshot produce the same selected identities | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-5.10 | N | Table/index/DROP lookups distinguish the requested object kind | §§19.1–19.3; §§16.6, 16.10, 21.3 | V19-5 | V19-5 catalog-snapshot composition | Chapter-16/21 snapshot model | COMPLETE |
+| V19-6.1 | P | SELECT star expands during binding | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.2 | P | Unqualified star requires at least one visible FROM relation | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.3 | P | No-FROM unqualified star is BindError | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.4 | P | Qualified star resolves exactly one local qualifier | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.5 | P | Unknown qualified-star qualifier is BindError | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.6 | Q | Wildcard relation order is source relation-occurrence order | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.7 | Q | Wildcard column order is descriptor presentation order | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.8 | Q | TableId numeric order does not control expansion | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.9 | Q | ColumnId numeric order does not control expansion | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.10 | P | Execution performs no wildcard expansion | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.11 | R | Every output records an ordered bound expression | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.12 | S | Every output records a display name | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.13 | R | Every output records logical type | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.14 | R | Every output records nullability | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.15 | S | Explicit AS alias has first display-name priority | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.16 | S | Direct bound source column has second display-name priority | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.17 | S | Generated names preserve source spelling | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.18 | S | Generated names omit binder-inserted cast text | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.19 | T | Duplicate top-level display names are legal | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.20 | U | Generated/direct unaliased display names do not enter alias lookup | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.21 | CC | Generated display names obey source-backing lifetime | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.22 | T | Duplicate outputs remain distinct ordered slots | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.23 | S | Generated names are the exact original source-byte slice designated by SourceSpan | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.24 | S | Generated names use no normalization pretty printer or reconstructed SQL | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.25 | T | Duplicate top-level display names and explicit aliases remain legal distinct slots | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-6.26 | U | Generated names are presentation metadata with no persistent format or binder lookup identity | §§19.5–19.7 | V19-6 | V19-6 wildcard/output procedures | order cross-product and source-slice model | COMPLETE |
+| V19-7.1 | U | Only explicit SELECT AS aliases enter the output-alias namespace | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.2 | U | Generated display names are excluded from output-alias lookup | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.3 | U | Direct-column display names without AS are excluded | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.4 | V | SELECT aliases are visible in ORDER BY | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.5 | V | SELECT aliases are not visible in the same SELECT list | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.6 | V | SELECT aliases are not visible in JOIN ON | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.7 | V | SELECT aliases are not visible in WHERE | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.8 | V | SELECT aliases are not visible in GROUP BY | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.9 | V | SELECT aliases are not visible in HAVING | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.10 | V | SELECT aliases are not visible in LIMIT | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.11 | V | SELECT aliases are not visible in OFFSET | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.12 | AU | Zero explicit ORDER alias matches falls back to input binding | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.13 | AU | One explicit ORDER alias match references the existing output identity | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.14 | AU | Multiple explicit ORDER alias matches produce BindError | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.15 | AU | ORDER alias binding does not rebind or reevaluate the output expression | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.16 | V | GROUP BY has no output-alias shortcut | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-7.17 | V | GROUP BY has no ordinal shortcut | §§19.2.2, 19.5, 19.13 | V19-7 | V19-7 clause/alias matrix | closed clause visibility and alias candidate tables | COMPLETE |
+| V19-8.1 | W | V1 has no lateral table-reference visibility | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.2 | W | A derived table binds as an independent child block | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.3 | W | A derived child sees neither earlier nor later siblings | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.4 | W | A sibling reference uses unsupported-correlation diagnosis | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.5 | W | JOIN ON sees every accumulated-left relation | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.6 | W | JOIN ON sees the current right relation | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.7 | W | JOIN ON excludes future join relations | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-8.8 | W | Completed FROM scope feeds WHERE GROUP BY HAVING SELECT and ordinary ORDER fallback but not LIMIT/OFFSET | §19.2.1 | V19-8 | V19-8 FROM/JOIN visibility fixtures | left-associated relation-scope graph | COMPLETE |
+| V19-9.1 | X | Each recognized type name resolves to its exact frozen TypeId | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.2 | X | Unknown type name is TypeError at the type-name span | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.3 | Y | Integer literal classification delegates to Chapter 17 | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.4 | Y | FLOAT64 literal classification delegates to Chapter 17 | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.5 | Y | VARCHAR literal classification delegates to Chapter 17 | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.6 | Y | BOOLEAN literal classification delegates to Chapter 17 | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.7 | Z | Raw NULL begins with the unresolved marker rather than a persistent type | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.8 | Z | Comparison/cast context may resolve NULL | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.9 | Z | CASE/IN context may resolve NULL | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.10 | Z | Assignment context may resolve NULL | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.11 | Z | LIMIT/OFFSET resolves raw NULL to INT64 NULL | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.12 | Z | Standalone underconstrained NULL follows the frozen TypeError rule | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.13 | Z | No unresolved marker reaches an executable bound expression | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.14 | AA | Every bound expression has one resolved logical return type | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.15 | Z | Bound nullability follows the frozen conservative owner rules | §§19.6, 19.8, 19.16–19.17, 19.20.1 | V19-9 | V19-9 type/NULL composition | Chapter-17 TypeResolver tables | COMPLETE |
+| V19-9.16 | Z | A NOT NULL column reference is non-nullable | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.17 | Z | A nullable column reference is nullable | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.18 | Z | Arithmetic nullability is the disjunction of operand nullability | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.19 | Z | Comparison nullability is the disjunction of operand nullability | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.20 | Z | IS NULL produces non-nullable BOOLEAN | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.21 | Z | COUNT star produces non-nullable INT64 | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.22 | Z | SUM over nullable input remains nullable | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.23 | Z | A scalar subquery remains nullable even for a non-nullable output expression | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.24 | Z | EXISTS and NOT EXISTS produce non-nullable BOOLEAN | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-9.25 | Z | IN and NOT IN subqueries produce conservatively nullable BOOLEAN | §19.6 | V19-9 | V19-9 nullability table | Chapter-17/20 nullability owner tables | COMPLETE |
+| V19-10.1 | AE | Operator selection uses only the closed Chapter-17 registries | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.2 | AA | TypeResolver owns coercion/promotion and overload selection | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.3 | AB | Required implicit casts appear explicitly in the bound tree | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.4 | AA | No unsupported cast chain is synthesized | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.5 | AB | An implicit cast is marked implicit | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.6 | AC | An implicit cast uses the coerced operand SourceSpan | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.7 | AA | An explicit CAST is marked explicit | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.8 | AC | An explicit CAST uses the complete CAST-expression SourceSpan | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.9 | AC | Explicit and implicit provenance remain distinguishable | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.10 | AC | Cast provenance is runtime-only and nonpersistent | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.11 | AC | Borrowed provenance obeys the Chapter-18 lifetime rule | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.12 | AD | INSERT/UPDATE assignment uses only the assignment-coercion graph | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.13 | AD | General explicit-cast legality is not borrowed for assignment | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.14 | AF | JOIN ON WHERE HAVING and CASE WHEN require BOOLEAN | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.15 | AF | Integer truthiness is absent | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.16 | AG | CASE preserves source order common typing contextual NULL and exact inserted casts | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-10.17 | AH | IN and NOT IN preserve source order common typing contextual NULL and exact inserted casts | §§19.6, 19.8, 19.16–19.17 | V19-10 | V19-10 cast/operator procedures | Chapter-17 resolver plus span table | COMPLETE |
+| V19-11.1 | AJ | Parser supplies only generic ordinary/star call shapes | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.2 | AI | Binder does not special-case source function names | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.3 | AI | Scalar and aggregate registries are both considered as defined | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.4 | AJ | Star calls consider only descriptors authorizing star | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.5 | AI | Exactly one legal descriptor is required | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.6 | AI | Unknown function name is TypeError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.7 | AI | Wrong arity is TypeError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.8 | AI | Unsupported call shape is TypeError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.9 | AJ | Unauthorized star form is TypeError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.10 | AI | Argument semantic-type mismatch is TypeError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.11 | AI | Unresolved overload ambiguity is TypeError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.12 | AI | Argument binding failure remains its prerequisite error | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.13 | AL | A resolved aggregate in an illegal context is placement BindError | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.14 | AJ | COUNT star resolves only through Chapter 29 | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.15 | AI | The v1 named scalar registry stays empty | §§19.9, 19.20.1–19.20.2 | V19-11 | V19-11 call-resolution fixtures | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.16 | AI | Bound call metadata contains canonical name signature return rule volatility NULL handling and implementation identity | §19.9 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.17 | AI | Function implementation identity is process/runtime dispatch identity | §19.9 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.18 | AI | Catalog defaults do not persist function implementation identity | §19.9; §21.12 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.19 | AI | Volatility uses exactly IMMUTABLE STABLE and VOLATILE | §19.9 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.20 | AI | Only IMMUTABLE calls with constant arguments qualify for ordinary folding | §19.9 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.21 | AI | VOLATILE expressions are never folded as stable | §19.9 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-11.22 | AI | Bound function nodes carry dispatch identity without executor-time name lookup | §19.9 | V19-11 | V19-11 descriptor-metadata table | scalar/aggregate descriptor filter | COMPLETE |
+| V19-12.1 | AK | The v1 aggregate call inventory is exactly registry-driven | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.2 | AK | A bound aggregate is distinct from a scalar call | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.3 | AK | Aggregate argument/result/nullability use Chapter-29 signatures | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.4 | AL | Direct aggregate is legal in SELECT | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.5 | AL | Direct aggregate is legal in HAVING | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.6 | AL | Direct aggregate is legal in ORDER BY | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.7 | AL | Direct aggregate is forbidden in JOIN ON | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.8 | AL | Direct aggregate is forbidden in WHERE | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.9 | AL | Direct aggregate is forbidden in GROUP BY | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.10 | AL | Direct aggregate is forbidden in LIMIT | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.11 | AL | Direct aggregate is forbidden in OFFSET | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.12 | AL | Direct aggregate is forbidden in DML expressions and RETURNING | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.13 | AL | Direct aggregate is forbidden in defaults | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.14 | AM | Same-query-block nested aggregate is BindError | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.15 | AM | Child-query aggregate is not parent nesting | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.16 | AN | Aggregate ordinal is per query block | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.17 | AN | Ordinal follows first aggregate source-byte occurrence | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.18 | AN | Shared/aliased aggregate references do not create duplicate ordinals | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.19 | AN | Rewrites retain the aggregate ordinal | §§19.9–19.10; §29.3 | V19-12 | V19-12 aggregate placement/ordinal fixtures | aggregate registry and source-span sorter | COMPLETE |
+| V19-12.20 | AK | Aggregate DISTINCT and FILTER are absent from the v1 aggregate registry | §19.10; §29.3 | V19-12 | V19-12 aggregate registry fixture | aggregate registry and source-span sorter | COMPLETE |
+| V19-13.1 | AO | GROUP BY presence classifies an aggregate query | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.2 | AO | A block-owned SELECT aggregate classifies the block | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.3 | AQ | A block-owned HAVING aggregate classifies the block | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.4 | AO | A block-owned ORDER aggregate classifies the block | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.5 | AO | A child-block aggregate does not classify the parent | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.6 | AP | Aggregate without GROUP BY creates one global group | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.7 | AQ | HAVING with GROUP BY is eligible | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.8 | AQ | HAVING with an aggregate in SELECT/HAVING/ORDER is eligible | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.9 | AQ | HAVING alone in a nonaggregate query is BindError | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.10 | AR | Group-key equality compares fully bound structure | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.11 | AR | SourceSpan is ignored by group-key equality | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.12 | AR | Parenthesis-only provenance is ignored | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.13 | AO | Output alias/display metadata is ignored | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.14 | AR | BindingId and catalog column identity participate | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.15 | AR | TypeId and literal value participate in structural equality | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.16 | AR | Operator/call descriptor identity participates in structural equality | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.17 | AR | Commutativity is excluded | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.18 | AR | Associativity is excluded | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.19 | AR | Algebraic/constant-folding equivalence is excluded | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.20 | AS | GROUP BY a admits a+1 | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.21 | AS | GROUP BY a+1 does not admit bare a | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.22 | AR | Commutativity associativity and algebraic equivalence are excluded | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.23 | AT | Functional dependencies keys and uniqueness are excluded | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.24 | AT | Recursive group validity admits exact keys aggregates and constants | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-13.25 | AS | Arbitrary selection of a non-grouped row-varying column is rejected | §§19.11–19.12 | V19-13 | V19-13 grouping classifier/comparator | independent bound structural model | COMPLETE |
+| V19-14.1 | AV | Only a bare unsigned integer literal can be an ordinal | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.2 | AV | The integer node must be the complete ORDER expression | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.3 | AV | Parenthesized integer is ordinary expression | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.4 | AV | Unary plus integer is ordinary expression | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.5 | AV | Unary minus integer is ordinary expression | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.6 | AV | Composed integer expression is ordinary | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.7 | AV | CAST integer is ordinary | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.8 | AV | FLOAT literal is ordinary | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.9 | AW | Ordinals are one-based | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.10 | AW | Ordinal zero is BindError | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.11 | AW | Ordinal greater than output width is BindError | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.12 | AW | Arbitrarily large integer remains an ordinal attempt | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.13 | AW | Host integer overflow cannot alter classification | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.14 | AX | Ordinal classification precedes alias lookup | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.15 | AX | Alias lookup precedes ordinary input fallback | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.16 | AU | Alias/input collision resolves to the explicit alias | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.17 | AE | ORDER accepts exactly the Chapter-17 SQL-orderable types | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-14.18 | AE | ORDER rejects BOOLEAN absent an explicit legal cast | §19.13 | V19-14 | V19-14 ORDER matrix | raw provenance and lossless magnitude model | COMPLETE |
+| V19-15.1 | AY | LIMIT/OFFSET has no relation-column namespace | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.2 | AY | LIMIT/OFFSET has no SELECT-alias namespace | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.3 | AY | Execution-start constant eligibility is recursive | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.4 | AZ | Literals and contextually typed NULL are eligible leaves | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.5 | AY | Casts scalar operators comparisons and CASE are recursively eligible | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.6 | AY | Only IMMUTABLE calls with eligible children qualify | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.7 | AY | The empty v1 scalar registry admits no named source call | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.8 | AY | Bound column dependency is forbidden | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.9 | AY | Relation dependency is forbidden | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.10 | AY | Output alias dependency is forbidden | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.11 | AY | Aggregate dependency is forbidden | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.12 | AY | Scalar EXISTS and IN subqueries are forbidden | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.13 | AY | Every other row-dependent construct is forbidden | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.14 | AZ | Only INT32 and INT64 final semantic types are accepted | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.15 | AZ | INT32 is normalized to INT64 | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.16 | AZ | No implicit FLOAT VARCHAR BOOLEAN DATE or TIMESTAMP conversion is synthesized | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.17 | AZ | Raw NULL receives INT64 NULL context | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.18 | AY | Nonconstant expression is BindError | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.19 | AZ | Nonintegral expression is TypeError | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.20 | BA | Mandatory Chapter-17 constant folding occurs during binding | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.21 | BA | Dominating constant scalar errors retain Chapter-17 binding-time category | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.22 | BA | The folded/residual expression is handed to execution | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.23 | BA | Completed pre-fold work is not reevaluated | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.24 | BB | Final count is acquired exactly once before relational row processing | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.25 | BC | Final NULL is ExecutionError | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.26 | AZ | Final negative INT64 is ExecutionError | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.27 | BC | LIMIT/OFFSET never clamps NULL or negative values | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-15.28 | BC | No implementation-sized semantic maximum is introduced | §19.14 | V19-15 | V19-15 LIMIT/OFFSET matrix | dependency/type/fold/domain models | COMPLETE |
+| V19-16.1 | BD | INSERT target identity/columns do not create VALUES target-row scope | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.2 | BD | INSERT VALUES target-column-looking names use ordinary scalar lookup | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.3 | BD | INSERT SELECT binds as an independent query block | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.4 | BD | INSERT target mapping occurs after source SELECT binding | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.5 | BE | UPDATE creates one target-row relation occurrence | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.6 | BE | UPDATE target is visible in every SET RHS | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.7 | BE | UPDATE target is visible in WHERE | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.8 | BE | UPDATE target is visible in RETURNING | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.9 | BE | UPDATE exposes final target table-name qualifier | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.10 | BE | UPDATE assignment LHS resolves directly against target descriptor | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.11 | BF | DELETE creates one target-row relation occurrence | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.12 | BF | DELETE target is visible in WHERE | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.13 | BF | DELETE target is visible in RETURNING | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.14 | BF | DELETE exposes final target table-name qualifier | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.15 | BD | DML target aliases remain absent | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.16 | BG | INSERT RETURNING uses the new row image | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.17 | BG | UPDATE RETURNING uses the final new row image | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.18 | BG | DELETE RETURNING uses the old deleted row image | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.19 | BD | Duplicate INSERT targets are BindError | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.20 | BE | Duplicate UPDATE targets are BindError | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.21 | BD | Aggregates remain forbidden in DML expressions | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-16.22 | BD | DML binding does not redefine physical row-version publication retry or result buffering | §19.4.3 | V19-16 | V19-16 DML namespace matrix | closed target-row namespace table | COMPLETE |
+| V19-17.1 | BH | CREATE TABLE columns form one statement-local declaration namespace | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.2 | BH | PK/UNIQUE members resolve only in that namespace | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.3 | BH | Unknown constraint member is ConstraintDefinitionError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.4 | BH | Repeated constraint member is ConstraintDefinitionError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.5 | BH | Second PRIMARY KEY declaration is ConstraintDefinitionError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.6 | BH | Default restrictions delegate to the Chapter-21 owner | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.7 | BI | CREATE INDEX resolves target table in the catalog snapshot | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.8 | BI | CREATE INDEX resolves source-ordered key columns | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.9 | BI | Duplicate index key is BindError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.10 | BH | Index-ineligible key type is TypeError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.11 | BJ | DROP TABLE resolves only table kind | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.12 | BJ | DROP INDEX resolves only index kind | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.13 | BJ | Missing DROP object is CatalogError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.14 | BH | DDL binding performs no physical build/publication/dependency action | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.15 | BK | VACUUM target lookup uses ordinary canonical table binding | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.16 | BK | ANALYZE target lookup uses ordinary canonical table binding | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.17 | BL | EXPLAIN inner SELECT uses ordinary canonical binding | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.18 | BH | DDL binding allocates no persistent object or File ID | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-17.19 | BJ | A DROP name visible only as the wrong object kind is CatalogError | §19.4.4; §§18.10.4, 21.6–21.12 | V19-17 | V19-17 DDL/control matrix | declaration/object-kind tables | COMPLETE |
+| V19-18.1 | BM | Scalar subquery creates an independent child query block | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.2 | BN | EXISTS creates an independent child query block | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.3 | BO | IN subquery creates an independent child query block | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.4 | BP | Derived table creates an independent child query block | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.5 | F | Child relation BindingIds remain whole-statement unique | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.6 | BP | Derived relation receives its own BindingId and mandatory alias | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.7 | BP | Derived child has no sibling lateral visibility | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.8 | BM | Scalar output shape remains Chapter-20-owned | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.9 | BM | Scalar runtime row cardinality remains downstream-owned | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.10 | BN | EXISTS result semantics remain Chapter-20-owned | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.11 | BO | IN one-column/type/3VL semantics remain Chapter-20/17-owned | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.12 | BP | Derived exported names and restrictions remain Chapter-20-owned | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.13 | BQ | Outer-only qualified references diagnose UnsupportedCorrelation | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.14 | BQ | Outer-only unqualified references diagnose UnsupportedCorrelation | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.15 | BQ | A local missing member does not fall through | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.16 | BQ | Local ambiguity does not fall through | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.17 | BQ | A locally absent name with no enclosing match remains ordinary BindError | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.18 | BQ | No executable OuterRef or correlated bound expression is produced | §19.18; §20.14 | V19-18 | V19-18 subquery matrix | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.19 | BM | A bound subquery records stable query-local identity | §19.18; §20.14 | V19-18 | V19-18 subquery metadata fixture | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.20 | BM | A bound subquery records its exact semantic kind | §19.18; §20.14 | V19-18 | V19-18 subquery metadata fixture | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.21 | BM | A bound subquery records its typed logical child plan | §19.18; §20.14 | V19-18 | V19-18 subquery metadata fixture | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.22 | BM | A bound subquery records result type and nullability | §19.18; §20.14 | V19-18 | V19-18 subquery metadata fixture | child-scope graph and downstream shape tables | COMPLETE |
+| V19-18.23 | BM | A bound subquery records its SourceSpan | §19.18; §20.14 | V19-18 | V19-18 subquery metadata fixture | child-scope graph and downstream shape tables | COMPLETE |
+| V19-19.1 | BR | Missing table is CatalogError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.2 | BR | Unknown column is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.3 | BR | Unknown qualifier is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.4 | BR | Unknown qualified member is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.5 | BR | Wrong DROP object kind is CatalogError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.6 | BR | Other canonical catalog lookup failure is CatalogError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.7 | BR | Illegal aggregate placement is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.8 | BR | Nested aggregate is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.9 | BR | Duplicate INSERT target is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.10 | BR | Duplicate UPDATE assignment is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.11 | BR | Operator mismatch is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.12 | BR | Unknown generic call is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.13 | BR | Nonintegral LIMIT/OFFSET is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.14 | BR | Invalid CREATE TABLE constraint definition is ConstraintDefinitionError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.15 | BR | Invalid default definition uses its frozen ConstraintDefinitionError owner | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.16 | BR | Unauthorized star call is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.17 | BV | FrontEndResourceLimit retains its resource category | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.18 | BV | OutOfMemory retains its resource category | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.19 | BS | Unknown names do not fabricate dependent type errors | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.20 | BS | Unknown names do not fabricate dependent grouping errors | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.21 | BS | Unknown names do not fabricate dependent call errors | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.22 | BR | Non-BOOLEAN predicate is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.23 | BR | CASE common-type mismatch is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.24 | BR | IN common-type mismatch is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.25 | BV | Resource/cancellation timing remains immediate | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.26 | BR | Hash catalog and traversal order cannot select the semantic error | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.27 | BR | Unknown qualifier/member is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.28 | BR | Duplicate local qualifier is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.29 | BR | Ambiguous ORDER output alias is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.30 | BR | Invalid/out-of-range ordinal is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.31 | BR | Aggregate placement nesting grouping and HAVING legality failures are BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.32 | BR | Nonconstant LIMIT/OFFSET is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.33 | BR | Duplicate DML/index target is BindError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.34 | BR | Unknown type is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.35 | BR | Operator cast coercion predicate CASE and IN mismatch is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.36 | BR | Unresolvable generic call/arity/star/overload/argument mismatch is TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.37 | BR | Nonintegral LIMIT/OFFSET and index-ineligible key are TypeError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.38 | BR | Invalid CREATE TABLE constraint/default definition uses ConstraintDefinitionError | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.39 | BR | Unsupported correlation uses UnsupportedFeature | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.40 | BR | Runtime scalar-subquery cardinality remains CardinalityError owner | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.41 | BV | FrontEndResourceLimit and OutOfMemory retain distinct resource categories | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.42 | BS | Only errors with satisfied semantic prerequisites become candidates | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.43 | BS | Unknown names do not fabricate dependent type/group/call errors | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.44 | BT | Earliest responsible SourceSpan start wins | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.45 | BT | Equal starts choose the shorter represented span | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.46 | BU | Identical spans use name placement constraint type cardinality class order | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.47 | BU | Call registry TypeError is class four | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.48 | BU | Resolved aggregate placement BindError is class two | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-19.49 | BV | Resource/cancellation timing is immediate and hash/catalog/traversal order cannot select the error | §§19.20.1–19.20.2 | V19-19 | V19-19 error/precedence matrices | prerequisite-filtered candidate sorter | COMPLETE |
+| V19-20.1 | CA | Completed bound expressions are immutable | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.2 | CA | Rewrite creates a new expression or shares immutable children | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.3 | CB | Allocation ownership and storage representation are implementation-defined | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.4 | CB | Pointer/allocation identity is nonsemantic | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.5 | CC | Bound object may borrow source only while backing is retained | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.6 | CC | Required display/diagnostic bytes are materialized before backing release | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.7 | CC | Numeric SourceSpan intervals may outlive source bytes | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.8 | CC | Cast provenance is runtime-only | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.9 | CC | Checked budget refusal is FrontEndResourceLimit | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.10 | BV | Unsatisfied required allocation is OutOfMemory | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.11 | CC | Mid-bind resource failure unwinds private scopes identities casts outputs and candidates | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.12 | BW | No resource failure publishes a partial executable bound statement | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.13 | CC | Binding resource state has no persistent/recovery representation | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-20.14 | CC | Resource/transaction consequences reuse Chapters 18 and 39 | §§19.6–19.7, 19.20; §§18.14, 18.17 | V19-20 | V19-20 lifetime/resource faults | ownership graph and failure schedule | COMPLETE |
+| V19-21.1 | BX | Same AST snapshot and registries produce the same result or error | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.2 | BY | Descriptor/cache storage order is nonsemantic | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.3 | BY | Hash seed and container iteration are nonsemantic | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.4 | BY | TableId/ColumnId numeric order does not control presentation | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.5 | CB | Allocation addresses and layout are nonsemantic | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.6 | CB | Opaque BindingId numeric values are alpha-renamable | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.7 | BX | Scheduler interleaving cannot alter binding | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.8 | BZ | Locale cannot alter canonical identifier comparison | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.9 | BZ | Unicode normalization is absent | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.10 | BZ | Quoted identifiers are not case-folded by binder | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.11 | BY | Source relation and descriptor presentation order remain the only defined presentation orders | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-21.12 | BY | Error selection is independent of traversal and catalog order | §§19.2, 19.4–19.5, 19.20.2 | V19-21 | V19-21 environment replay | alpha-renamed canonical serialization | COMPLETE |
+| V19-22.1 | CD | Chapter-16 identifiers descriptors SchemaVer and snapshot rules are consumed unchanged | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.2 | CD | Chapter-17 TypeIds NULL TypeResolver casts calls and folding rules are consumed unchanged | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.3 | CD | Chapter-18 grammar raw AST provenance SourceSpan lifetime and resources are consumed unchanged | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.4 | CD | Chapter-20 LogicalSlotId grouping DISTINCT ORDER LIMIT and subquery handoffs are preserved | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.5 | CD | Chapter-21 DML DDL default RETURNING and publication ownership is preserved | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.6 | CD | Chapter-29 descriptor signature and aggregate ordinal ownership is preserved | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.7 | CD | Sections 39.1–39.3 error transaction and resource ownership is preserved | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.8 | CD | Section 41.4 binder verification obligations are covered | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.9 | CE | Verification prose contains no implementation-progress narration | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.10 | CE | Verification prose contains no phase or development sequencing | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.11 | CE | No binder algorithm allocator source-layout or class-name mandate is introduced | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.12 | CE | No review chronology or historical result count is introduced | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.13 | CE | Procedures use deterministic barriers and independent oracles | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.14 | CE | Every atomic Chapter-19 obligation has one closure-ledger row | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.15 | CE | All mandatory procedural matrices are present | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.16 | CE | No new Architecture semantic rule is invented | Architecture front matter; Chapters 16–21, 29, 39, 41 | V19-22 | V19-22 composition/document audit | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.17 | CD | DISTINCT is handed off as an explicit logical duplicate-elimination requirement | §§19.15, 20.10 | V19-22 | V19-22 composition ledger | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.18 | AG | Only searched CASE is admitted by the v1 binder semantics | §19.16; §17.9.1 | V19-22 | V19-22 composition ledger | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.19 | AH | IN and NOT IN remain their own semantic node rather than a required OR rewrite | §19.17; §17.9.2 | V19-22 | V19-22 composition ledger | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.20 | AH | IN and NOT IN preserve once-only left evaluation and left-to-right error/short-circuit boundaries | §19.17; §17.7.3 | V19-22 | V19-22 composition ledger | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.21 | CF | Parameter syntax has no v1 binder semantics | §19.19; Chapter 18 | V19-22 | V19-22 grammar/binder boundary fixture | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.22 | F | A no-FROM block has an empty local relation namespace and no implicit relation or OuterRef | §19.20.3 | V19-22 | V19-22 no-FROM fixture | owner ledger and documentation-model matrix | COMPLETE |
+| V19-22.23 | CD | Binding does not alter Section 39.1 transaction consequences | §19.20.3; §39.1 | V19-22 | V19-22 composition ledger | owner ledger and documentation-model matrix | COMPLETE |
+
+The actual inventory derived from the final Chapter-19 text contains 449 atomic
+obligations:
+
+```text
+COMPLETE:       449
+PARTIAL:          0
+MISSING:          0
+CONTRADICTORY:    0
+```
+
+| Verification family | Atomic obligations | Status |
+|---|---:|---|
+| V19-1 | 22 | COMPLETE |
+| V19-2 | 18 | COMPLETE |
+| V19-3 | 21 | COMPLETE |
+| V19-4 | 10 | COMPLETE |
+| V19-5 | 10 | COMPLETE |
+| V19-6 | 26 | COMPLETE |
+| V19-7 | 17 | COMPLETE |
+| V19-8 | 8 | COMPLETE |
+| V19-9 | 25 | COMPLETE |
+| V19-10 | 17 | COMPLETE |
+| V19-11 | 22 | COMPLETE |
+| V19-12 | 20 | COMPLETE |
+| V19-13 | 25 | COMPLETE |
+| V19-14 | 18 | COMPLETE |
+| V19-15 | 28 | COMPLETE |
+| V19-16 | 22 | COMPLETE |
+| V19-17 | 19 | COMPLETE |
+| V19-18 | 23 | COMPLETE |
+| V19-19 | 49 | COMPLETE |
+| V19-20 | 14 | COMPLETE |
+| V19-21 | 12 | COMPLETE |
+| V19-22 | 23 | COMPLETE |
+
+All V19 families are closed. No fuzzer, production binder, debug formatter, reference
+database, container implementation, or downstream executor substitutes for these
+independent binding oracles.
 
 ---
 
