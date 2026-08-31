@@ -18008,25 +18008,17 @@ Before a DDL transaction may enter its terminal COMMIT sequence, every physical 
 
 ## 21.6 CREATE TABLE
 
-### 21.6.1 Binding
+### 21.6.1 Bound-definition handoff
 
-Binder validates:
+CREATE TABLE execution consumes the fully bound and validated definition from
+§§19.4.4 and 19.20. The bound statement supplies the canonical table name and
+one typed schema/constraint specification; Chapter 21 does not resolve names,
+types, constraint members, or default expressions again.
 
-```text
-table name is not already visible in main
-column names are unique
-types are supported
-PRIMARY KEY shape
-UNIQUE constraints
-NOT NULL constraints
-default expressions
-```
+The v1 CREATE TABLE constraint set is PRIMARY KEY, UNIQUE, and NOT NULL.
+Foreign keys and CHECK constraints are outside the v1 architecture.
 
-Initial table constraints are PRIMARY KEY, UNIQUE, and NOT NULL.
-
-Foreign keys and CHECK constraints are deferred.
-
-The bound statement contains a schema/constraint specification without allocating persistent object/File IDs.
+Binding allocates no persistent object or FileId.
 
 ### 21.6.2 Execution/publication
 
@@ -18039,7 +18031,7 @@ Under SchemaLock:
 3. acquire TableWriterGate(TableId) exclusive for the newly identified table
 4. allocate heap FileId and FSM FileId
 5. create/initialize private heap/FSM files
-6. assign initial ColumnIds 1..N
+6. assign ColumnIds 1..N for tuple schema version 1
 7. build any required primary/unique index objects as private files through
    their DDL protocol
 8. complete §4.7.4 durable final-name publication for the entire required
@@ -18062,7 +18054,7 @@ later CREATE INDEX on that transaction-local table without a lock upgrade:
 the exclusive gate subsumes the DML shared request and is reused by the index
 build. Its terminal-lifetime rule remains §21.2.1.
 
-Initial tuple schema version is `1`.
+The created table's tuple schema version is `1`.
 
 If the transaction aborts, its catalog rows remain invisible and created files become orphan-retirement candidates.
 
@@ -18090,22 +18082,23 @@ Every PRIMARY KEY component is runtime-enforced NOT NULL before duplicate checki
 
 ## 21.8 CREATE INDEX
 
-### 21.8.1 Binding
+### 21.8.1 Bound-index handoff
 
-Initial index keys reference base table columns only.
+The v1 CREATE INDEX key is an ordered list of base-table columns. Expression
+indexes are outside the v1 architecture.
 
-Expression indexes are deferred.
-
-Binder resolves:
+CREATE INDEX execution consumes the immutable index specification produced by
+§§19.4.4 and 19.20:
 
 ```text
 target TableId
 ordered key ColumnIds
 uniqueness
-index name
+canonical index name
 ```
 
-and creates an immutable index specification.
+Chapter 21 does not repeat table/name lookup, key-column resolution, duplicate-
+key rejection, or indexable-type validation.
 
 The eventual catalog publication changes the target table's applicable index
 manifest and therefore participates in §14.17.1's short object/statistics
@@ -18292,7 +18285,7 @@ DDL MUST NOT mutate descriptors already retained by active plans.
 
 After durable COMMIT, failure to allocate/install a new cache entry cannot change the transaction outcome. The coordinator must safely publish the new immutable entry or invalidate/bypass affected cache lookup so §16.10's snapshot-aware catalog path remains authoritative before COMMIT acknowledgement. Failure to establish either coherent state is database-noncontinuable under §39.1.5.
 
-## 21.11 INSERT binding
+## 21.11 INSERT bound-statement handoff
 
 For:
 
@@ -18300,14 +18293,15 @@ For:
 INSERT INTO t(a,c) VALUES (...);
 ```
 
-Binder resolves the target table, verifies target columns are unique, maps omitted columns, binds input expressions, inserts allowed implicit casts, fills catalog defaults or typed NULL where legal, rejects statically impossible NOT NULL cases, and produces one canonical full target-column order.
+INSERT execution consumes the fully bound statement produced by §§19.4.3 and
+19.20. It receives the resolved target identity, canonical full target-column
+order, bound source expressions, selected §17.8.5 assignment coercions, and
+per-omitted-column persisted-default or typed-NULL action. Execution applies
+that mapping to construct each candidate row; it neither resolves target names
+nor selects a different conversion.
 
-The only automatic target coercions are the closed §17.8.5 assignment matrix;
-an explicit-cast conversion is never borrowed implicitly for DML.
-
-Execution never resolves target column names again.
-
-`INSERT ... SELECT` uses the same canonical target-column contract after binding the source relation.
+`INSERT ... SELECT` uses the same canonical target-column contract after the
+source relation has been bound independently.
 
 INSERT VALUES/SELECT expressions may contain only §20.14's supported
 uncorrelated expression subqueries. Each occurrence retains lazy once-per-
@@ -18344,7 +18338,7 @@ If folding, casting, or constraint validation fails, the DDL statement fails rat
 
 Execution of INSERT therefore consumes one persisted typed constant default and does not reopen/re-resolve an operator/function tree.
 
-This deliberately keeps the first persistent default format small and stable while preserving the semantics of immutable default expressions.
+This keeps the v1 persistent default format small and stable while preserving the semantics of immutable default expressions.
 
 ### 21.12.1 DefaultValueBlob v1
 
@@ -18393,22 +18387,21 @@ scalar TypeId == target column TypeId
 
 before exposing the default to binding/execution.
 
-Default format dispatch is exact under §4.14.2. With `DBLUSDEF` magic, version zero or malformed version-1 bytes are corrupt required default metadata; a positive version greater than one is `UNSUPPORTED_DEFAULT_FORMAT`. Either prevents reconstruction of the owning required column descriptor. V1 does not parse a future expression-bearing blob as a scalar or ignore unknown trailing bytes.
+Default format dispatch is exact under §4.14.2. With `DBLUSDEF` magic, version zero or malformed version-1 bytes are corrupt required default metadata; a positive version greater than one is `UNSUPPORTED_DEFAULT_FORMAT`. Either prevents reconstruction of the owning required column descriptor. V1 does not parse an expression-bearing blob as a scalar or ignore unknown trailing bytes.
 
 Original SQL text MAY additionally be retained for display/debugging, but it is not execution authority.
 
-A future architecture may define a new blob version containing a persistent expression tree with stable function/operator identities.
+An expression-bearing persistent default requires a distinct blob version with
+stable function/operator identities. V1 stores no such expression tree because
+only the fully folded, final destination-typed result is persistent authority.
 
-V1 does not need such identities because only the fully folded, final
-destination-typed result is persisted.
+## 21.13 UPDATE operation planning
 
-## 21.13 UPDATE binding/planning
-
-Binder validates target table, assignment column names, no duplicate target assignments, assignment expression types, and a BOOLEAN WHERE predicate.
-
-Every assignment uses only §17.8.5's closed automatic assignment coercions;
-narrowing/string/temporal conversions require an explicit CAST in the SQL
-expression.
+UPDATE planning consumes the fully bound target and SET/WHERE/RETURNING
+expressions from §§19.4.3 and 19.20. Each assignment supplies a resolved
+`ColumnId`, typed bound right-hand expression, and the already-selected
+§17.8.5 assignment coercion. Chapter 21 does not rebind target or expression
+names, reject duplicate SET targets again, or choose a new conversion.
 
 UPDATE WHERE, assignment, and RETURNING expressions may use §20.14's supported
 uncorrelated forms. WHERE evaluation remains in target materialization; a later
@@ -18429,7 +18422,7 @@ For every distinct finalized UPDATE target, the operation uses this semantic
 sequence:
 
 ```text
-revalidate/finalize the old target under the Chapter-15 target rules
+revalidate/finalize the old target under the §15.3 target rules
 evaluate every SET right-hand expression against that complete old-row image
 apply the bound §17.8.5 assignment coercions
 construct the complete candidate replacement row, copying every unmentioned
@@ -18460,11 +18453,13 @@ consequence; this rule adds no physical statement undo. A value-preserving
 assignment such as `SET x=x` still acts on and counts the finalized target
 under §15.3 after its complete row passes the same validation.
 
-The resulting `LogicalUpdate` feeds Chapter 15's update protocol.
+The resulting `LogicalUpdate` feeds §15.3's physical UPDATE version protocol.
 
-## 21.14 DELETE binding/planning
+## 21.14 DELETE operation planning
 
-Binder resolves the target table and BOOLEAN WHERE predicate.
+DELETE planning consumes the fully bound target, optional BOOLEAN WHERE
+predicate, and RETURNING metadata from §§19.4.3 and 19.20. Chapter 21 performs
+no target, predicate, or RETURNING name/type resolution.
 
 DELETE WHERE and RETURNING may use only §20.14's supported uncorrelated forms.
 
@@ -18518,7 +18513,7 @@ independent query block under §20.14.2.
 
 The exact physical buffering mechanism is defined by the execution stage.
 
-Chapter 15's retry rule still applies: before persistent statement writes READ COMMITTED may restart internally; after persistent writes the transaction aborts rather than replaying the same attempt under the same TxnId.
+The §15.7 statement-attempt retry rule still applies: before persistent statement writes READ COMMITTED may restart internally; after persistent writes the transaction aborts rather than replaying the same attempt under the same TxnId.
 
 No externally visible RETURNING row is emitted from an attempt that may still restart.
 
@@ -18608,15 +18603,19 @@ CommandId reuse across internal retry, discarded abandoned-attempt errors and
 results, the pre-write retry boundary, and the post-write mandatory-abort rule
 remain unchanged.
 
-## 21.17 Parser error recovery
+## 21.17 Front-end handoff
 
-For one statement, the initial parser may stop at the first syntax error.
+Chapter 18 owns lexing, parsing, request/batch framing and recovery, raw-AST
+construction, and parse failures; the relevant boundaries are §§18.10.1,
+18.13, and 18.17.2–18.17.3. Chapter 21 applies only after Chapter 18 has
+produced an independent raw statement and Chapter 19 has successfully bound
+it. Chapter 21 defines no token or semicolon synchronization algorithm.
 
-For a multi-statement input batch it may synchronize at semicolon or end-of-input and continue reporting later independent statement errors where practical.
+A parse failure therefore produces no Chapter-21 operation and is not a DML
+runtime failure. Statement admission, CommandId allocation, and transaction
+consequences remain owned by §§9.6 and 39.1.
 
-IDE-grade error recovery is not required.
-
-### 21.17.1 ANALYZE binding and transaction boundary
+### 21.17.1 ANALYZE bound-statement and transaction boundary
 
 For:
 
@@ -18624,7 +18623,8 @@ For:
 ANALYZE table_name;
 ```
 
-binding resolves exactly one currently visible base table through the normal catalog snapshot.
+Chapter 21 consumes the fully bound statement produced under §19.1 for exactly
+one base table visible through the normal catalog snapshot.
 
 The bound statement captures:
 
@@ -18681,9 +18681,9 @@ For autocommit, global publication occurs only after the statement's owning tran
 
 A failed/cancelled ANALYZE publishes neither a partial descriptor nor a global cache entry. If it had already published any transaction-owned `sys_statistics` row, §39.1 requires automatic transaction abort; otherwise the explicit transaction may remain `ACTIVE`.
 
-## 21.18 SQL v1 supported target
+## 21.18 SQL v1 statement surface
 
-The intended first serious SQL surface includes:
+The v1 statement surface includes:
 
 ```text
 CREATE TABLE
@@ -18717,9 +18717,9 @@ IR capacity—is the complete subquery surface.
 
 The purpose of this surface is to exercise the real relational engine, not to claim broad SQL-standard compatibility.
 
-## 21.19 Explicitly deferred SQL/front-end features
+## 21.19 SQL/front-end features outside v1
 
-V1 deliberately defers:
+The v1 architecture excludes:
 
 ```text
 ALTER TABLE
@@ -18756,7 +18756,7 @@ CTEs and SQL set operations
 data-modifying subqueries
 ```
 
-These are future architecture-compatible features, not hidden requirements of the initial engine.
+These features are not implicit requirements of the v1 SQL/front-end contract.
 
 ## 21.20 Upper semantic-layer invariants
 
