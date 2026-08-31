@@ -17939,6 +17939,14 @@ REPEATABLE READ:
 
 Therefore uncommitted DDL from another transaction is invisible, a long-running REPEATABLE READ transaction does not suddenly resolve a newly committed object, and the current transaction may observe its own completed earlier DDL statement through ordinary self/CommandId visibility.
 
+Catalog visibility and namespace reservation are distinct. A successful DROP
+may make an object invisible to later commands of the dropping transaction
+through catalog MVCC while its canonical name remains reserved by that
+transaction. V1 retains that reservation until the transaction reaches a
+terminal outcome, so the dropping transaction cannot assign the name to a
+replacement object. The reservation applies within the existing §16.5 name
+class: table and named-index names remain separate classes.
+
 The catalog cache cannot override this rule.
 
 A cached descriptor is usable only if it is visible to the binding snapshot.
@@ -18025,26 +18033,34 @@ The bound statement contains a schema/constraint specification without allocatin
 Under SchemaLock:
 
 ```text
-1. revalidate table-name availability against current committed catalog state
+1. revalidate table-name availability against the canonical current catalog
+   owner view and names reserved by this transaction's earlier DROP statements
 2. allocate TableId
-3. allocate heap FileId and FSM FileId
-4. create/initialize private heap/FSM files
-5. assign initial ColumnIds 1..N
-6. build any required primary/unique index objects as private files through
+3. acquire TableWriterGate(TableId) exclusive for the newly identified table
+4. allocate heap FileId and FSM FileId
+5. create/initialize private heap/FSM files
+6. assign initial ColumnIds 1..N
+7. build any required primary/unique index objects as private files through
    their DDL protocol
-7. complete §4.7.4 durable final-name publication for the entire required
+8. complete §4.7.4 durable final-name publication for the entire required
    heap/FSM/index physical file set
-8. only then install transaction-owned MVCC catalog rows/descriptors that
+9. only then install transaction-owned MVCC catalog rows/descriptors that
    name those final physical files using the exact §16.5 schema-v1 rows
-9. finish the DDL statement while retaining DDL exclusivity until the owning transaction is terminal
-10. before COMMIT, reverify that the transaction's required file set remains
+10. finish the DDL statement while retaining DDL exclusivity until the owning transaction is terminal
+11. before COMMIT, reverify that the transaction's required file set remains
     durably final-name-published
-11. if/when the owning transaction reaches terminal COMMITTED publication:
+12. if/when the owning transaction reaches terminal COMMITTED publication:
        publish new committed descriptor-cache/name entries
-12. on ABORT:
+13. on ABORT:
        keep catalog rows invisible and retire private/final-uncommitted files later
-13. release DDL exclusivity only at that terminal boundary
+14. release DDL exclusivity only at that terminal boundary
 ```
+
+No pre-existing transaction can own the fresh TableId's writer gate. Retaining
+its exclusive ownership permits the creating transaction to perform DML and a
+later CREATE INDEX on that transaction-local table without a lock upgrade:
+the exclusive gate subsumes the DML shared request and is reused by the index
+build. Its terminal-lifetime rule remains §21.2.1.
 
 Initial tuple schema version is `1`.
 
@@ -18111,10 +18127,13 @@ V1 builds indexes offline with conservative writer exclusion:
 1. acquire SchemaLock
 2. acquire target TableWriterGate exclusive
 3. wait until pre-existing target-table writers are terminal
-4. revalidate table/index-name/catalog state
+4. revalidate table identity and index-name availability against the canonical
+   current catalog owner view and names reserved by this transaction's earlier
+   DROP statements
 5. allocate IndexId and B+ FileId
 6. create one private empty B+ tree
-7. scan the target table's current logically live committed row versions
+7. enumerate the complete current logical owner set in the transaction-local
+   target-table state at this command boundary
 8. encode keys using the table/index descriptors
 9. insert every physical (key,RID) through ordinary B+ MTRs
 10. validate uniqueness when requested
@@ -18134,11 +18153,40 @@ V1 builds indexes offline with conservative writer exclusion:
     terminal boundary according to §15.5 C5 / §15.6 A3
 ```
 
-Step 7 is a DDL maintenance/current-state scan after target writers have drained; it is not allowed to omit rows merely because the DDL transaction has an older REPEATABLE READ snapshot. For a UNIQUE build, step 10 applies §11.10.9: fully non-NULL duplicate groups use the canonical encoded equality/current-owner rules, while any-NULL keys do not conflict. The exclusive writer gate permits a bulk sorted/grouped duplicate check instead of per-row UNIQUE_KEY locks.
+Step 7 uses a special DDL current-owner build view after target writers have
+drained. It is not ordinary SQL snapshot visibility, committed-only visibility,
+or raw physical-version enumeration. Its complete row set contains current
+live owners committed by other transactions and the DDL transaction's own
+live rows from earlier commands, including current replacement versions from
+earlier UPDATE commands. It excludes aborted versions, superseded historical
+versions, rows deleted by an earlier command of the DDL transaction, and
+nonterminal versions owned by other transactions that cannot belong to this
+transaction's committed table state.
+
+The build view is fixed at the CREATE INDEX command boundary. An older
+REPEATABLE READ query snapshot MUST NOT omit current owners required for index
+publication; ordinary REPEATABLE READ SELECT visibility is unchanged. CREATE
+INDEX performs no table-row mutation to include recursively, and the build view
+does not invent visibility of a later command. For a table created earlier by
+the same transaction, the retained exclusive writer gate from §21.6.2 is
+reused, and intervening DML shared ownership was already subsumed rather than
+upgraded.
+
+For a UNIQUE build, step 10 applies §11.10.9 over exactly this same build set:
+fully non-NULL duplicate groups use the canonical encoded equality/current-
+owner rules, while any-NULL keys do not conflict. The exclusive writer gate
+permits any conforming complete duplicate check; neither build-row order nor a
+physical scan algorithm is semantic.
 
 Readers may continue while the index is built because the private index is not visible to their catalog snapshots.
 
 New target-table writers are blocked until the index commit/abort boundary, preventing missing entries.
+
+At committed catalog publication, every current logical owner belonging to the
+DDL transaction's committed target-table state MUST have its required entry in
+the index. In particular, CREATE TABLE, INSERT, and CREATE INDEX in successive
+commands of one transaction cannot commit an index that omits the inserted
+rows.
 
 A half-built index is never visible to planning.
 
@@ -18159,6 +18207,8 @@ acquire SchemaLock
 acquire the owning table's TableWriterGate exclusive
 acquire MANIFEST_CHANGE for the table/index scope
 revalidate current object identity, manifest, and LIVE state
+for standalone DROP INDEX, reject an IndexId referenced by a live
+    PRIMARY KEY or UNIQUE sys_constraints row
 only then publish LIVE -> RETIRING for the affected identity
 mark the relevant catalog rows deleted by the DDL transaction
 do not unlink physical files immediately
@@ -18173,9 +18223,36 @@ Once RETIRING publishes, no new object/statistics claim is admitted. Aborting
 the DROP restores LIVE only through the object-publication protocol, and gate
 release still waits for ABORTED publication.
 
+A constraint-owned backing index is an index referenced by a live PRIMARY KEY
+or UNIQUE constraint through §16.5.6. Although its canonical §16.5.4 index name
+is NULL and therefore is not ordinarily name-resolvable as a standalone index,
+standalone DROP INDEX MUST reject any resolved IndexId with that ownership.
+The dependency check precedes catalog deletion, descriptor retirement,
+`LIVE -> RETIRING`, and physical-file retirement eligibility. Rejection neither
+drops nor mutates the constraint, deletes an index catalog row, nor changes the
+file lifecycle. It reports the existing `CatalogError` family at the DROP INDEX
+target-name construct. DROP TABLE remains one semantic operation that retires
+its table, dependent constraints, and backing indexes.
+
 On abort, the deletion `xmax` is ineffective and the object remains.
 
 On commit, new catalog snapshots no longer resolve the object, while older snapshots/descriptors may still legally reference it.
+
+Once a DROP statement has successfully made its catalog deletion visible to
+its owning transaction, that transaction retains a reservation for the
+dropped canonical name through COMMITTED or ABORTED publication. CREATE TABLE
+or CREATE INDEX in a later command of the same live transaction rejects the
+reserved name even though the predecessor is no longer visible to that command.
+On abort, the predecessor deletion is ineffective and no replacement identity
+exists. After committed DROP, a later transaction may reuse the name subject to
+ordinary current-owner revalidation; the replacement receives fresh
+nonreusable object IDs and FileIds.
+
+Name availability after committed DROP is independent of predecessor resource
+retirement. Old snapshots and immutable descriptors may retain the predecessor,
+and its file may remain `RETIRED_LINKED`, open, pinned, or awaiting unlink,
+while a later object with the same SQL name has distinct persistent identity
+and physical resources. Immediate unlink is not a condition of name reuse.
 
 Physical file retirement therefore waits until:
 
@@ -18348,6 +18425,41 @@ Unmentioned columns retain their old values.
 
 Logical planning requests target RID, old values needed by assignment expressions, old values needed to construct the complete new physical tuple, and values needed by RETURNING.
 
+For every distinct finalized UPDATE target, the operation uses this semantic
+sequence:
+
+```text
+revalidate/finalize the old target under the Chapter-15 target rules
+evaluate every SET right-hand expression against that complete old-row image
+apply the bound §17.8.5 assignment coercions
+construct the complete candidate replacement row, copying every unmentioned
+    column from the old row
+validate every column whose bound target descriptor declares NOT NULL
+only then admit the target to immediate UNIQUE validation and publication
+```
+
+The NOT NULL check is descriptor-wide, not limited to PRIMARY KEY columns,
+explicit SET targets, or indexed columns. It occurs after simultaneous
+assignment evaluation and complete-row construction, so `SET a=b, b=a`
+continues to read both values from the old row. An unmentioned nonnullable
+column retains its old value and is checked with the rest of the candidate.
+
+A NULL in any descriptor-nonnullable candidate column reports the canonical
+§39.3 `ConstraintViolation` family used by INSERT NOT NULL enforcement. No new
+tuple version, old-version `xmax/cmax`, or new referring index entry for that
+target may publish. For an explicitly assigned column, the responsible
+diagnostic origin is the SET right-hand/value expression whose final coerced
+value is NULL, retaining its Chapter-19/20 SourceSpan and provenance. In an
+architecture-valid old row, a copied unmentioned nonnullable column cannot be
+NULL; structural detection of the contrary remains an existing descriptor/
+tuple corruption condition and does not invent a synthetic SQL offset.
+
+If an earlier target of the same statement already crossed §39.1's first-
+published-write boundary, the violation has the existing mandatory-abort
+consequence; this rule adds no physical statement undo. A value-preserving
+assignment such as `SET x=x` still acts on and counts the finalized target
+under §15.3 after its complete row passes the same validation.
+
 The resulting `LogicalUpdate` feeds Chapter 15's update protocol.
 
 ## 21.14 DELETE binding/planning
@@ -18381,6 +18493,24 @@ INSERT -> inserted/new row
 UPDATE -> updated/new row
 DELETE -> deleted/old row
 ```
+
+Every v1 DML RETURNING result is a bag of row occurrences and establishes no
+semantic row order:
+
+```text
+INSERT -> one final-new-row occurrence per successfully inserted logical input
+          occurrence in the final successful statement attempt
+UPDATE -> one final-new-row occurrence per distinct finalized target acted upon
+DELETE -> one retained-old-row occurrence per distinct finalized target
+```
+
+An ordered INSERT source does not transfer its order to RETURNING. UPDATE
+target discovery duplicates do not create duplicate result occurrences, and
+RID order, source encounter order, spool order, mutation order, and physical
+reclamation order are nonsemantic. Executions that produce different sequences
+with equal RETURNING bags are equivalent. This freedom changes neither row
+images, multiplicity, affected-row count, errors, nor the statement-result
+envelope.
 
 An uncorrelated subquery inside RETURNING cannot capture that row image; only
 ordinary local RETURNING column references can. The side plan remains an
@@ -18416,6 +18546,67 @@ CardinalityError
 Where source syntax exists, the error carries the smallest useful source span and a human-readable message.
 
 Storage/transaction errors retain their lower-layer category and may later be mapped to SQLSTATE-like surface codes.
+
+### 21.16.1 Ordinary multi-row DML runtime-error precedence
+
+An **ordinary row-semantic error candidate** is a correctness error from a DML
+row occurrence whose source/target occurrence belongs to the finalized
+statement attempt and whose binding, logical, target-revalidation, and other
+semantic prerequisites have succeeded far enough to establish that error.
+This domain includes demanded scalar or subquery errors, descriptor-wide final-
+row NOT NULL violations, immediate UNIQUE violations, and any other supported
+row constraint with an existing owner.
+
+Errors from abandoned retry attempts, target occurrences removed by canonical
+deduplication, stale targets not retained as finalized targets, and skipped or
+nonqualifying occurrences are not candidates. Cancellation,
+`FrontEndResourceLimit`, `OutOfMemory`, deadlock victimization, storage/I/O
+failure, transaction-state failure, stale-target or serialization failure, and
+other independently owned dynamic failures retain their Chapter-11/15/39
+behavior and are not reordered by this ordinary-candidate rule.
+
+Every ordinary candidate carries the responsible source diagnostic selected by
+its scalar, subquery, or constraint owner. Among candidates for one final
+statement attempt, the public error is selected by:
+
+1. smallest responsible `SourceSpan.start_byte_offset`;
+2. for equal starts, the shorter and therefore more-specific represented
+   `SourceSpan`;
+3. for an identical responsible span, this row-semantic phase order:
+
+```text
+1. scalar/subquery/final-row expression evaluation
+2. descriptor-wide final-row NOT NULL validation
+3. immediate UNIQUE validation
+4. any other already-supported row constraint class
+```
+
+An existing more-specific owner keeps its internal precedence within a phase.
+If start, specificity, phase, public category, and diagnostic origin are all
+identical, the candidates are observationally equivalent; Chapter 21 adds no
+RID, page, source-row index, spool/vector/batch position, hash/index order,
+physical-operator order, or scheduler tie-breaker.
+
+Semantic ordering of a Chapter-20 DML input does not replace this diagnostic
+precedence with first-row-encountered behavior. An unordered input remains an
+unordered bag. Within one executable scalar occurrence, Chapter 17 and Chapter
+20 continue to own child evaluation and short-circuit order; this section only
+arbitrates already-defined ordinary candidates across DML occurrences.
+
+Physical visitation MUST NOT let work associated with a lower-precedence
+ordinary candidate cross the first-published-write boundary in a way that
+makes an already-determinable higher-precedence candidate unreachable or
+changes that candidate's §39.1 statement/transaction consequence. Before such
+publication, execution must establish that no higher-precedence ordinary
+candidate exists. This is an observable semantic requirement, not a prescribed
+prevalidation, staging, spooling, sorting, or multi-pass algorithm.
+
+The rule does not require prediction of a later deadlock, I/O failure,
+concurrency invalidation, resource exhaustion, or other condition whose
+occurrence is not yet established. One CommandId per admitted statement,
+CommandId reuse across internal retry, discarded abandoned-attempt errors and
+results, the pre-write retry boundary, and the post-write mandatory-abort rule
+remain unchanged.
 
 ## 21.17 Parser error recovery
 
@@ -18584,7 +18775,7 @@ These are future architecture-compatible features, not hidden requirements of th
 13. Catalog visibility follows the caller's MVCC snapshot; cache hits cannot bypass it.
 14. Uncommitted DDL is never globally published as committed metadata.
 15. Schema-changing DDL is conservatively serialized in v1.
-16. Offline CREATE INDEX blocks target-table writers so the published index is complete.
+16. Offline CREATE INDEX blocks target-table writers and covers the complete transaction-local current-owner row set that can become committed with the DDL transaction.
 17. CREATE abort may leave physical garbage but never a visible half-created object.
 18. DROP file unlink waits until old catalog snapshots/descriptors can no longer reference the object and is not durably complete until its parent directory is synchronized.
 19. Catalog-object IDs/FileIds that may have entered persistent state are never reused.
@@ -18595,6 +18786,12 @@ These are future architecture-compatible features, not hidden requirements of th
 24. Unsupported SQL fails explicitly rather than being partially reinterpreted.
 25. CREATE catalog commitment is forbidden until every required physical file has completed durable final-name publication under §4.7.
 26. DML accepts only §20.14's uncorrelated expression subqueries; defaults/DDL expressions reject every subquery, and §39.1 alone owns any runtime error consequence.
+27. Every finalized UPDATE candidate satisfies every descriptor NOT NULL constraint before its replacement, old-version delete metadata, or referring index entries publish.
+28. A live PRIMARY KEY/UNIQUE constraint's backing index cannot be removed by standalone DROP INDEX.
+29. Physical DML row visitation cannot select among competing ordinary row-semantic errors or change their §39.1 consequence.
+30. DML RETURNING is an unordered bag with operation-specific row-image and occurrence multiplicity semantics.
+31. A canonical name dropped by a live transaction remains reserved against recreation by that transaction through terminal outcome.
+32. Committed DROP name reuse, predecessor descriptor lifetime, and predecessor physical-file retirement are independent; replacement objects always have fresh persistent identities.
 ---
 
 # Part VI — Physical Execution
