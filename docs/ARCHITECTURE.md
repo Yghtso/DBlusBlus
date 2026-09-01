@@ -19136,10 +19136,10 @@ STANDARD_VECTOR_SIZE = 1024
 
 The constant is centralized and benchmark-configurable; operator code MUST NOT scatter literal `1024`.
 
-A v1 DataChunk capacity MUST satisfy:
+A DataChunk participating in operator execution MUST satisfy:
 
 ```text
-capacity <= 65535
+1 <= capacity <= 65535
 ```
 
 so a uint16 SelectionVector can address every physical position.
@@ -19152,9 +19152,18 @@ Every normal column in one chunk has the same logical cardinality, with:
 
 A final stream chunk may be partially filled.
 
-`cardinality = 0` is an empty batch, **not** an end-of-stream marker.
+`cardinality = 0` is an empty batch, **not** an end-of-stream marker and not
+`FINISHED`.
 
 Source completion is represented explicitly by runtime status.
+
+An implementation MAY have a zero-capacity container as an uninitialized,
+default, moved-from, or bookkeeping state. Such a container is outside the
+executable DataChunk domain and MUST NOT be emitted or consumed as a normal
+execution batch. Attempting to use one as an executable batch is an invalid
+internal runtime state, not a public SQL error. Positive custom capacities
+through 65535 remain permitted where the surrounding operator contract allows
+them; object-construction and allocation mechanics are not architectural.
 
 ## 23.2 Why 1024
 
@@ -19185,11 +19194,17 @@ DICTIONARY
 
 Stores/references contiguous typed values for physical positions.
 
+An active logical position `i` resolves to fully initialized payload and
+validity position `i`.
+
 ### CONSTANT
 
 Represents one scalar value repeated for all logical rows.
 
 The scalar may itself be NULL.
+
+Its active logical positions remain `0..cardinality-1`, and each resolves to
+the one scalar payload and repeated validity state at physical position zero.
 
 ### DICTIONARY
 
@@ -19197,7 +19212,9 @@ References another Vector plus one SelectionVector.
 
 It does not own an independent value array.
 
-The logical row `i` maps to the child physical position selected by the dictionary.
+The logical row `i` maps through the dictionary selection to an active logical
+position of its immediate child; that child's representation then resolves the
+payload and validity position.
 
 Later representations such as:
 
@@ -19271,9 +19288,35 @@ A standard SelectionVector stores:
 uint16 indices[capacity]
 ```
 
-A selection maps logical active position `i` to an underlying physical position `indices[i]`.
+A selection maps active logical position `i` to logical position `indices[i]`
+of its immediate child vector or child view. It does not make allocated
+capacity part of the child's active logical domain. Every selected index MUST
+satisfy:
 
-Every selected index MUST be within the referenced vector's physical bounds.
+```text
+0 <= indices[i] < child logical cardinality
+```
+
+Resolution after that check is representation-specific: FLAT position `j`
+uses initialized physical payload/validity position `j`; every valid CONSTANT
+position uses scalar position zero; and a DICTIONARY position resolves through
+that dictionary's selection and immediate child.
+
+Repeated indices are legal repeated logical occurrences. Unsorted indices are
+also legal; the listed selection order is the logical occurrence order. Neither
+case performs implicit deduplication or sorting.
+
+Every active logical position MUST resolve to fully initialized payload,
+validity, and representation state. Allocated but inactive positions are
+semantically inaccessible and MUST NOT be selected, even if stale physical
+bytes remain after reuse or a partial fill.
+
+An index outside the immediate child's active logical domain is an invalid
+internal runtime representation. It MUST be prevented or rejected before any
+payload, validity, StringRef, or child-mapping access. It never exposes a stale
+value and is not a public SQL error. Construction invariants or explicit
+boundary validation may enforce this rule; no particular validation API is
+required.
 
 Common uses include:
 
@@ -19304,6 +19347,12 @@ inner_sel[...] -> base physical row
 ```
 
 the effective selection is flattened to the resulting base physical index.
+
+Each outer selection addresses an active logical position of its immediate
+child. Composition MUST validate every intermediate logical index against that
+child view's cardinality before following or flattening it. Normalization MUST
+NOT legalize an invalid intermediate index merely because an allocated payload
+position exists.
 
 Normalization occurs before a representation reaches a hot vector kernel when chain depth would otherwise exceed one effective indirection.
 
@@ -19339,7 +19388,10 @@ FLAT vs CONSTANT vs DICTIONARY
 
 For CONSTANT input, the effective selection maps every logical row to scalar position zero.
 
-For DICTIONARY input, nested selections are composed into one effective selection before the hot loop.
+For DICTIONARY input, valid nested logical selections are composed into one
+effective selection before the hot loop. UnifiedVectorFormat therefore
+preserves the active logical domain and cannot expose allocated but inactive
+payload positions.
 
 UnifiedVectorFormat is an adapter/view; it does not become a persistent materialization format.
 
@@ -19358,6 +19410,32 @@ StringRef {
 and is naturally 16 bytes on a 64-bit process.
 
 `length` is the exact byte length.
+
+The compact StringRef form exactly represents byte lengths through
+`UINT32_MAX`. A value whose exact byte length exceeds `UINT32_MAX` is outside
+this compact form's applicability; the length is never truncated, wrapped,
+reduced modulo the field width, semantically split, clipped at a NUL byte, or
+otherwise reinterpreted to fit StringRef. The logical value remains one exact
+Chapter-17 byte string.
+
+An implementation MAY provide another exact runtime representation for a
+larger VARCHAR, provided it preserves Chapter-17 byte-string semantics, the
+ownership/lifetime rules in this chapter, and downstream execution semantics.
+No concrete alternate representation or integer width is required. When such
+an exact representation is supported and available, a StringRef-only
+realization is inapplicable to the over-domain value; execution MUST NOT fail
+merely because an incapable compact realization was chosen.
+
+If no supported exact runtime representation is available, attempting to
+materialize the value raises controlled `ExecutionError` with a runtime
+value-representability/resource-limit cause under §39.3. Actual failure to
+allocate memory for an otherwise supported exact representation remains
+`OutOfMemory` under Chapters 24 and 39.
+
+This is a runtime representability/resource boundary, not a VARCHAR parser,
+type, cast, corruption, or persistent-format maximum. In particular, the heap
+tuple size limit is not a universal runtime VARCHAR limit, and StringRef does
+not alter tuple, catalog, statistics, spill, or WAL formats.
 
 No trailing NUL is required.
 
@@ -19394,7 +19472,31 @@ This agrees with Chapter 17's binary VARCHAR collation.
 
 ## 23.10 String ownership
 
-A StringRef is valid only while its byte owner remains alive.
+A borrowed StringRef or vector view is valid only while its backing owner
+remains alive, but owner liveness alone is insufficient. Every borrowed,
+reference, dictionary, or selection-backed view denotes a **value-stable
+logical view** for its declared borrow interval. All backing state required to
+resolve that view MUST remain alive and observationally unchanged throughout
+the interval.
+
+That backing state includes, where applicable:
+
+```text
+active logical cardinality
+type and representation metadata
+reachable scalar payload and validity
+selection storage and entries
+dictionary child/base relationship
+required backing addresses and ranges
+StringRef length, prefix, and data reference
+referenced VARCHAR bytes
+```
+
+The owner MUST NOT reset, reuse, overwrite, incompatibly reallocate, or mutate
+reachable backing state in a way that changes the borrowed logical view.
+Inactive storage unreachable from that view MAY change. Capacity itself need
+not remain fixed when changing it preserves every required address, range,
+mapping, and logical value.
 
 Valid owners include:
 
@@ -19415,7 +19517,17 @@ temporary expression scratch
 a spilled/in-memory block whose storage was released
 ```
 
-Any operator retaining a VARCHAR beyond the current input-consumption lifetime deep-copies the bytes into its own query/operator-owned storage.
+Any operator retaining a VARCHAR beyond the current input-consumption lifetime
+obtains a new valid owner or deep-copies the bytes into its own
+query/operator-owned storage.
+
+Retention beyond any declared borrow interval requires a new valid owner or
+materialization/copy under these rules. Failure to allocate memory required by
+that exact materialization remains the existing resource failure.
+
+Access to an expired or observably unstable borrowed view is an internal
+lifetime/aliasing invariant violation, not a public SQL error, and MUST be
+prevented before dereferencing its backing state.
 
 ## 23.11 DataChunk StringHeap
 
@@ -19439,6 +19551,24 @@ The StringHeap may be reset only when no downstream borrowed vector/chunk still 
 
 Streaming operators may return reference/dictionary vectors borrowing input storage when the pipeline guarantees synchronous downstream consumption before the owner is reset.
 
+For the full synchronous borrow interval, payload, validity, selection state,
+dictionary relationships, StringRef metadata, and referenced bytes reachable
+through the borrowed view remain value-stable. Input/output aliasing is legal
+only while every live alias continues to observe its required stable logical
+values.
+
+An implementation MAY satisfy this contract through immutable backing
+storage, delayed mutation, ownership transfer, copy-on-write, retained valid
+ownership, pinning under an already-defined owner contract, materialization,
+deep copy, or another exact mechanism. Borrowing does not itself require
+copying or prescribe an ownership mechanism.
+
+Before a write makes one logical occurrence diverge from a shared CONSTANT or
+DICTIONARY representation, the implementation MUST establish storage or a
+representation capable of preserving every live logical view. A live
+dictionary's selection, child/base relationship, and reachable values cannot
+otherwise be mutated observably.
+
 Typical cases:
 
 ```text
@@ -19456,7 +19586,11 @@ The pipeline executor owns this lifetime guarantee.
 
 Operators reuse DataChunk/vector buffers instead of allocating/freeing them for each batch.
 
-A reusable output chunk may be reset only after its previous contents are no longer borrowed.
+A reusable output chunk may be reset only after its previous contents are no
+longer borrowed or after every borrower has obtained independent valid
+ownership through an exact mechanism. Reset/reuse MUST NOT mutate any reachable
+backing state while a live borrower still depends on its value-stable logical
+view.
 
 Reset conceptually:
 
@@ -19472,19 +19606,34 @@ Large reusable buffers remain memory-accounted through the query memory contract
 ## 23.14 Vector/string invariants
 
 1. Every DataChunk column has one common logical cardinality.
-2. Empty chunk is not end-of-stream.
-3. V1 standard selection indices are uint16 and chunk capacity never exceeds 65535.
-4. Validity bit `1` means non-NULL and `0` means NULL.
-5. Vector representation does not change SQL NULL semantics.
-6. Dictionary chains are normalized to bounded effective indirection.
-7. UnifiedVectorFormat performs representation dispatch per batch, not per row.
-8. BOOLEAN execution values are byte-per-value in v1.
-9. StringRef length is byte length and requires no terminator.
-10. StringRef prefix has the exact big-endian first-four-byte meaning in §23.9.1.
-11. A borrowed vector never outlives its owner.
-12. A chunk never exposes VARCHAR pointers into an unpinned heap page.
-13. Blocking/retaining boundaries own/deep-copy varlen data.
-14. Chunk reuse never resets storage that remains borrowed.
+2. An executable DataChunk has capacity `1..65535` and cardinality `0..capacity`.
+3. Empty chunk is not end-of-stream; a zero-capacity container is not executable batch state.
+4. V1 standard selection indices are uint16 and chunk capacity never exceeds 65535.
+5. A selection addresses active logical positions of its immediate child, never inactive allocated capacity.
+6. Every selected and active logical position resolves to initialized payload, validity, and representation state.
+7. Repeated/unsorted selections preserve listed occurrence order and multiplicity.
+8. Invalid intermediate or final selections are rejected before dereference as internal invalid runtime representation, not public SQL errors.
+9. Validity bit `1` means non-NULL and `0` means NULL.
+10. Vector representation does not change SQL NULL semantics.
+11. Dictionary chains are normalized to bounded effective indirection only after every intermediate logical index is valid.
+12. UnifiedVectorFormat performs representation dispatch per batch, not per row.
+13. BOOLEAN execution values are byte-per-value in v1.
+14. Compact StringRef exactly represents byte lengths through `UINT32_MAX`, requires no terminator, and never truncates or wraps a larger value.
+15. An exact alternate runtime VARCHAR representation is permitted; absence of any exact form is controlled `ExecutionError`, while allocation failure for a supported form is `OutOfMemory`.
+16. StringRef prefix has the exact big-endian first-four-byte meaning in §23.9.1.
+17. A borrowed view never outlives its owner and remains value-stable for its full borrow interval.
+18. Reachable payload, validity, selection, representation, and referenced VARCHAR state cannot be observably mutated while borrowed.
+19. Writes that diverge shared CONSTANT/DICTIONARY occurrences first establish a representation preserving every live logical view.
+20. A chunk never exposes VARCHAR pointers into an unpinned heap page.
+21. Blocking/retaining boundaries retain valid ownership or own/deep-copy varlen data.
+22. Chunk reuse never resets or mutates storage that remains borrowed without first establishing independent stable ownership.
+
+Malformed selection, borrow, or executable-chunk state MUST be prevented or
+rejected before it can cause out-of-bounds access, stale-value exposure,
+dangling access, arbitrary mutation, or persistent corruption. These are
+internal invariant failures rather than normal SQL errors. Construction
+invariants or boundary validation may enforce the valid-state contract; a
+universal validation mechanism is not prescribed.
 
 ---
 
@@ -20044,6 +20193,11 @@ FINISHED
 
 and end-of-stream is never encoded as an empty chunk.
 
+When a source returns `HAVE_MORE` with an empty executable chunk, it MUST still
+advance finite source or operator state. An unbounded sequence of empty
+`HAVE_MORE` batches without state progress MUST NOT substitute for `FINISHED`;
+producing one is an invalid pipeline implementation/liveness violation.
+
 A streaming operator supports conceptually:
 
 ```text
@@ -20090,6 +20244,10 @@ This lets later scheduling parallelize pipelines without redesigning every opera
 
 The executor may pass borrowed vectors/chunks synchronously across streaming operators.
 
+Such borrowed data remains a value-stable logical view under §23.10 for the
+entire downstream consumption interval; keeping the owner merely allocated is
+not sufficient.
+
 Before the upstream owner is reset/reused:
 
 ```text
@@ -20097,7 +20255,8 @@ all immediate downstream users of that borrowed data
 must have completed consumption
 ```
 
-A sink that retains data across calls or beyond the current batch copies/materializes it.
+A sink that retains data across calls or beyond the current batch retains a
+valid owner or copies/materializes it.
 
 Pipeline scheduling MUST NOT asynchronously queue a borrowed DataChunk for later execution after its owner has been recycled.
 
@@ -20150,10 +20309,10 @@ Worker-pool scheduling, morsels, local-state combining, and concrete parallel op
 
 1. A pipeline is Source -> streaming operators -> Sink.
 2. Blocking/finalization dependencies form an explicit DAG.
-3. Empty chunks are not used as end-of-stream.
+3. Empty chunks are not used as end-of-stream, and empty `HAVE_MORE` output advances finite execution state.
 4. Physical-plan construction and runtime pipeline state are distinct.
-5. Borrowed batch data is consumed before the owner is recycled.
-6. A retaining sink owns/deep-copies retained values.
+5. Borrowed batch data remains value-stable and is consumed before the owner is recycled.
+6. A retaining sink retains valid ownership or owns/deep-copies retained values.
 7. Global and local runtime state remain distinct even in single-worker execution.
 8. Query cancellation and safe pipeline early-stop are different mechanisms.
 9. Cancellation releases query resources but transaction locks follow the transaction terminal path.
@@ -26572,6 +26731,13 @@ TransactionConflict
 execution-exclusive category. This section owns its execution-layer reporting
 and cleanup when execution has begun; a front-end or binding occurrence uses
 the same cause under §§18.17 and 39.2.
+
+If a valid VARCHAR value cannot be materialized because no supported runtime
+representation can express its exact byte length, execution reports controlled
+`ExecutionError` with a runtime value-representability/resource-limit cause as
+defined in §23.9. This does not make the value invalid and does not authorize
+truncation or wraparound. If an exact supported representation exists but its
+required allocation cannot be obtained, the cause remains `OutOfMemory`.
 
 Lower-layer structured causes are preserved rather than erased. Examples include:
 
