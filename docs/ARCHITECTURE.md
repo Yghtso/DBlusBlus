@@ -4430,9 +4430,9 @@ Explicit I/O keeps control over:
 - dirty writeback,
 - WAL-before-data ordering,
 - page lifetime,
-- later prefetch/writeback policy.
+- prefetch and writeback policy within the ownership rules defined here.
 
-Direct I/O, `io_uring`, asynchronous prefetch, and similar alternatives remain deferred experiments rather than baseline requirements.
+Direct I/O, `io_uring`, asynchronous prefetch, and similar alternatives are outside the v1 architecture baseline.
 
 ## 7.3 DiskManager responsibility boundary
 
@@ -5062,9 +5062,10 @@ A dirty victim MUST be flushed according to the WAL-before-data and dirty-state 
 
 CLOCK operates only on process-local frame/replacement metadata. It does not inspect database tuple or index contents.
 
-The replacement abstraction SHOULD remain separable so alternatives can be measured later.
+The replacement abstraction SHOULD remain separable from BufferPool correctness
+and ownership semantics.
 
-Deferred replacement experiments include:
+Replacement mechanisms outside the v1 architecture baseline include:
 
 - CLOCK-Pro,
 - LRU-K,
@@ -5233,7 +5234,9 @@ The first eleven categories before `STORAGE_NONCONTINUABLE` are explicit operati
 
 The primary general-purpose persistent index is a page-backed B+ tree.
 
-The production tree operates through the real BufferPool and MUST NOT be implemented as a separate in-memory pointer tree whose persistence is added later.
+The production tree operates through the real BufferPool and MUST be persistent
+under the page and WAL ownership rules of Chapters 7 and 12. A separate
+in-memory pointer tree is not a conforming v1 index.
 
 The v1 architecture supports:
 
@@ -6244,7 +6247,7 @@ The child is pinned and latched before the parent latch is released.
 
 ### 8.19.2 Write traversal
 
-Initial insert/delete uses top-down write latch crabbing:
+V1 insert/delete uses top-down write latch crabbing:
 
 ```text
 write-latch parent
@@ -14609,7 +14612,7 @@ statement ; statement ;
 
 Empty statements are forbidden. A leading semicolon, repeated semicolons, or
 an extra semicolon after the optional final terminator is a `ParserError` under
-§21.16. A request containing only whitespace and/or comments likewise contains
+§39.2. A request containing only whitespace and/or comments likewise contains
 zero statements and is rejected as an empty SQL request.
 
 Successful request parsing MUST consume all non-whitespace/non-comment input
@@ -14619,11 +14622,16 @@ valid. No trailing token suffix is ignored. A token that is neither a valid
 continuation of the current statement nor, after the required separator, the
 start of another admitted statement produces `ParserError`.
 
-The request/batch AST preserves exact statement source order. This section owns
-only request framing; parser recovery remains §21.17's responsibility, and
-transaction/execution behavior for multiple statements remains with its
-respective downstream owners. Explicit framing prevents empty entries or
-ignored suffixes from becoming implementation-dependent batch behavior.
+The request/batch AST preserves exact statement source order. Chapter 18 owns
+request framing and parser recovery. Recovery MAY synchronize at a semicolon
+to continue diagnosing later independent statement syntax, but a request with
+any `ParserError` fails as a whole and MUST NOT publish a successfully bindable
+or executable prefix, or any recovery artifact, as a successful raw AST.
+Recovery does not change the accepted grammar, statement source order, or
+multiplicity. Transaction/execution behavior for independently completed
+statements remains with its respective downstream owners. Explicit framing
+prevents empty entries or ignored suffixes from becoming implementation-
+dependent batch behavior.
 
 The equivalent request production is:
 
