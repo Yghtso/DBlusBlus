@@ -19128,6 +19128,30 @@ DataChunk {
 }
 ```
 
+Each DataChunk exchanged by a physical operator realizes that operator's
+ordered physical output schema from §22.3. For a physical output schema `S`:
+
+```text
+columns.size == S.width
+columns[j]   = runtime vector for physical output schema entry S[j]
+```
+
+The runtime type of `columns[j]` MUST agree with `S[j]`. The semantic output
+identity remains the `LogicalSlotId` carried by `S[j]`; column position `j` is
+only the addressing position within that DataChunk. Equal-valued columns remain
+distinct outputs when their schema entries have distinct `LogicalSlotId`s, and
+projection reordering or derived-boundary remapping follows the corresponding
+ordered output schema rather than payload equality or a prior ordinal.
+
+For active logical row position `i`, `(i, j)` locates one runtime scalar
+occurrence of schema entry `S[j]`. Neither row position `i` nor column position
+`j` is a semantic identity. FLAT, CONSTANT, DICTIONARY, selection, and borrowed
+representations change row-position resolution or storage/lifetime only; they
+do not change the column's schema entry or `LogicalSlotId`. This positional
+association does not require each Vector to store duplicate `LogicalSlotId`
+metadata; §22.3 remains the canonical owner of the physical output-schema
+identity mapping.
+
 The standard v1 vector capacity is:
 
 ```text
@@ -19182,7 +19206,7 @@ The chosen size is an execution tuning constant, not a persistent-format value.
 
 ## 23.3 Vector kinds
 
-The initial vector representations are:
+The v1 vector representations are:
 
 ```text
 FLAT
@@ -19216,14 +19240,15 @@ The logical row `i` maps through the dictionary selection to an active logical
 position of its immediate child; that child's representation then resolves the
 payload and validity position.
 
-Later representations such as:
+Representations such as:
 
 ```text
 SEQUENCE
 RLE
 ```
 
-are deferred until measurement justifies them.
+are outside the v1 architecture baseline. The v1 representation vocabulary is
+intentionally limited to the three forms above.
 
 ## 23.4 Flat fixed-width vectors
 
@@ -19246,9 +19271,8 @@ DATE       int32
 TIMESTAMP  int64
 ```
 
-BOOLEAN deliberately uses one byte per execution value.
-
-It is not bit-packed in the initial executor.
+V1 runtime BOOLEAN vectors deliberately use one byte per execution value and
+are not bit-packed.
 
 This choice is independent of persistent storage representation.
 
