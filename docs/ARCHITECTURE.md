@@ -18840,8 +18840,6 @@ cost-based search
 
 Its performance purpose is to amortize branches, dispatch, synchronization, allocation, and tuple decoding across batches instead of paying those costs once per row.
 
-A row-at-a-time reference executor MAY exist for differential/correctness testing, but it is not the production execution architecture.
-
 ## 22.2 Immutable physical plan versus execution state
 
 The architecture distinguishes:
@@ -18857,7 +18855,7 @@ LocalOperatorState
     mutable state owned by one worker/task
 ```
 
-A physical plan may later be cached or reused.
+A physical plan MAY be cached or reused.
 
 Runtime state is created per execution.
 
@@ -18891,7 +18889,7 @@ but execution methods/state are not SQL AST methods and do not perform binding a
 
 The detailed optimizer rules that choose one physical operator are owned by the optimizer chapters.
 
-## 22.4 Initial physical operator family
+## 22.4 V1 physical operator family
 
 The execution architecture includes:
 
@@ -18942,7 +18940,9 @@ execution algorithms are specified in Chapters 28–31.
 
 ### 22.4.1 Physical implementation availability
 
-The physical operator family is the architecture's algorithm vocabulary; runtime capability determines which algorithms are currently eligible for physical planning.
+The physical operator family is the architecture's algorithm vocabulary;
+runtime capability determines which algorithms are eligible for physical
+planning.
 
 The physical planner has an explicit capability/implementation registry.
 
@@ -18981,7 +18981,7 @@ are baseline physical implementations. The subquery roles may reuse any
 capability-enabled child algorithms, but a final v1 plan cannot depend on a
 semi/anti rewrite in place of their fallback.
 
-Algorithms described as later/conditional in their execution chapters, including:
+Capability-conditional algorithms in their execution chapters include:
 
 ```text
 PhysicalMergeJoin
@@ -18989,7 +18989,7 @@ PhysicalSortAggregate
 ordered/streaming DISTINCT
 ```
 
-are costed/enumerated only after their runtime capability is enabled.
+They are costed/enumerated only when their runtime capability is enabled.
 
 An unavailable algorithm can never appear in the final PhysicalPlan merely because the cost model has a formula for it.
 
@@ -19054,54 +19054,56 @@ No runtime pointer may be persisted or placed into a catalog/storage format.
 
 ## 22.7 Physical properties
 
-Physical nodes expose explicit properties rather than requiring later components to infer semantics from operator names.
+Physical nodes carry explicit property metadata; consumers MUST NOT infer
+required or provided properties from operator names or incidental output.
+Chapter 37 is the canonical owner of the v1 physical-property taxonomy,
+definitions, satisfaction rules, and operator preservation/provision rules.
 
-Relevant properties include:
-
-```text
-output ordering
-candidate/unique keys
-partitioning
-rewindability
-blocking/streaming nature
-estimated cardinality
-estimated memory
-spill capability
-```
-
-Ordering is an ordered list of descriptors:
+The tracked v1 property set is exactly:
 
 ```text
-LogicalSlotId / resolved expression
-ASC | DESC
-NULLS FIRST | NULLS LAST
-collation / type-order semantics
+OrderingProperty
+RequiredSlotSet
 ```
 
-Examples:
+`OrderingProperty` represents required and provided row ordering.
+`RequiredSlotSet` represents the exact `LogicalSlotId` values a planning
+subproblem must provide. Sections 37.2–37.5 define their structures,
+satisfaction, and baseline operator rules; Chapter 22 does not define a second
+property system.
+
+Other plan information remains distinct from physical properties:
 
 ```text
-SeqScan:
-    no guaranteed SQL ordering
+candidate/unique-key facts:
+    exact logical/proof metadata under their canonical owners
 
-forward compatible IndexScan:
-    index-prefix ASC / NULLS FIRST ordering
+partitioning / rewindability / materialization:
+    reserved extension points, not tracked v1 physical properties
 
-HashJoin / HashAggregate:
-    no guaranteed ordering
+blocking/streaming nature and spill support:
+    algorithm capability and runtime-execution traits
 
-Sort:
-    exact requested ordering
+estimated cardinality and estimated memory:
+    estimates used by costing, never exact properties or proofs
+
+RequiredRowsObjective:
+    cost/search metadata under §38.16, not a physical property
+
+PhysicalTopN exact K support:
+    algorithm applicability/capability under §§22.4.1 and 30.7
 ```
 
-An operator that cannot preserve a required property MUST NOT advertise it merely because its current single-threaded implementation happens to emit rows in a convenient order.
+An operator MUST advertise only ordering guaranteed by its execution contract;
+incidental output from a particular execution strategy does not establish a
+provided property.
 
 ## 22.8 Foundation invariants
 
 1. Production execution is vectorized/chunk-at-a-time.
 2. Physical plans are immutable after publication.
 3. Per-execution mutable state is separate from the plan.
-4. Global and local worker state are distinct from day one.
+4. Global and local worker state are distinct.
 5. Execution consumes resolved IDs/types/slots and never performs SQL name resolution.
 6. Transaction/snapshot/read-epoch state is execution context, not plan state.
 7. A physical operator represents an execution algorithm or resolved statement-execution role, not unresolved SQL syntax.
