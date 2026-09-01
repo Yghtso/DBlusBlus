@@ -19663,6 +19663,24 @@ universal validation mechanism is not prescribed.
 
 # 24. Query Memory, Row Storage, and Spill
 
+Chapter 17 owns SQL scalar domains, and Chapter 20 owns relational row-count and
+bag-multiplicity semantics, required ordering, and `LIMIT`/`OFFSET` semantics.
+This chapter instead owns execution-resource policy: memory budgets, accounting
+and hard limits, operator and `RowCollection` block targets, spill thresholds,
+and temporary/runtime representation applicability govern whether and how an
+execution can obtain finite resources. They do not redefine those upstream SQL
+semantics or any persistent tuple/database format.
+
+Resource policy and capability MAY determine whether execution succeeds or
+reports a controlled resource failure under §39.3. For any two legal executions
+that both succeed, differences in memory budget, spill threshold, block size,
+spill path, exact retained-row representation, allocation layout, or block/run/
+reload layout MUST NOT change scalar values, NULL state, row-occurrence
+multiplicity, required SQL order, demanded semantic errors, transaction effects,
+or the persistent database result. `RowCollection` insertion/block order and
+spill/run/reload order are physical and establish no SQL order unless the
+canonical ordering contract of the owning operator requires that order.
+
 ## 24.1 Execution RowLayout
 
 Blocking operators use a query-temporary row layout distinct from:
@@ -19710,13 +19728,13 @@ concrete integer type is required.
 
 `RowCollection` stores temporary rows in append-oriented blocks.
 
-The initial target block size is:
+Ordinary `RowCollection` blocks use a target size of:
 
 ```text
 256 KiB
 ```
 
-and is configuration/tuning state, not persistent format.
+This target is configuration/tuning state, not persistent format.
 
 The target block size, ordinary `RowLayout`, and ordinary offset/length
 descriptor domains are runtime representation choices, not correctness maxima,
@@ -20095,13 +20113,13 @@ large sequential writes
 large sequential reads
 ```
 
-The initial operator-level target is:
+The operator-level I/O target is:
 
 ```text
 ~1 MiB I/O blocks
 ```
 
-and is configurable.
+This target is configurable.
 
 Operators buffer enough serialized rows/blocks to avoid issuing one tiny write per row.
 
