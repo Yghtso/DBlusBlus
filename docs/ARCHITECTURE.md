@@ -18948,6 +18948,21 @@ The physical planner has an explicit capability/implementation registry.
 
 It enumerates an alternative only when the corresponding runtime implementation is available and validated.
 
+Eligibility is specific to the logical-plan instance. A physical algorithm is
+eligible only when every algorithm-specific exact requirement is representable
+and satisfiable by the selected implementation. For `PhysicalTopN`, this
+includes the exact mathematical first-K requirement defined by §30.7. If that
+implementation cannot represent and honor the exact K, `PhysicalTopN` is
+ineligible for the plan instance; the SQL statement does not acquire a new
+LIMIT/OFFSET validity condition or user-visible arithmetic error.
+
+Physical capability affects plan shape, resource use, and performance, not the
+validity or frozen semantics of a logical query for which another conforming
+realization exists. Search MUST retain a conforming alternative when an
+optional physical algorithm is ineligible. Cost may choose only among legal
+alternatives and cannot change result values or ordering, mandatory errors, or
+transaction state.
+
 In particular:
 
 ```text
@@ -21450,13 +21465,26 @@ ORDER BY ... LIMIT N [OFFSET M]
 
 a physical planner may choose `PhysicalTopN`.
 
-Define with checked arithmetic:
+For validated nonnegative INT64 `N` and `OFFSET`, define the physical
+algorithm's required prefix size mathematically:
 
 ```text
 K = N + OFFSET
 ```
 
-Overflow is an execution/planning error rather than wraparound.
+`K` is an exact physical-algorithm requirement, not a SQL INT64 value or a
+user-visible arithmetic operation. `PhysicalTopN` is eligible only when the
+selected implementation can represent and honor exact K. If it cannot,
+`PhysicalTopN` is ineligible and physical search uses another conforming
+realization under §§30.8 and 38.15; the LIMIT/OFFSET statement remains valid
+and no public count-overflow error is raised.
+
+An implementation MAY use a wider or otherwise domain-specific exact internal
+representation to retain Top-N eligibility. No concrete numeric representation
+is required. A saturated or clamped retained-K bound MUST NOT be used unless an
+independent exact architecture proof establishes that the reduced bound cannot
+under-read in the applicable domain. V1 defines no global relation-cardinality
+bound that supplies such a proof.
 
 If `K = 0`, the result is empty without consuming unnecessary upstream work when pipeline dependencies permit.
 
@@ -21476,6 +21504,10 @@ Heap/internal container order is never exposed as SQL sort order.
 
 For very large K, a full/external sort may be the better physical plan.
 
+Exact-K representability is resolved by physical eligibility; genuine
+execution failures such as `OutOfMemory`, `SpillIOError`, or cancellation
+remain governed by their existing resource and runtime owners.
+
 ## 30.8 Sorting invariants
 
 1. Sort is a pipeline breaker and does not emit final rows before input/run finalization.
@@ -21485,9 +21517,17 @@ For very large K, a full/external sort may be the better physical plan.
 5. In-memory, spill-run, merge, and Top-N comparison semantics are identical.
 6. External sort may use multiple merge passes under bounded memory.
 7. Sort runs are temporary and never WAL logged/crash recovered.
-8. Top-N retains at most checked `N + OFFSET` records.
+8. An eligible Top-N uses the exact mathematical K from §30.7 as its retention
+   bound and retains at most K records; an unproved saturated/clamped bound is
+   forbidden.
 9. Top-N sorts retained output before emission.
 10. Equal-key SQL sort need not be stable unless another explicit semantic requirement says otherwise.
+11. An eligible Top-N is semantically equivalent to an exact ordering provider
+    followed by `PhysicalLimit`, including bag, semantic order, comparator,
+    tie, demanded-error, and transaction behavior.
+12. When Top-N is ineligible, search retains another legal exact ordering
+    provider followed by `PhysicalLimit`; this includes `PhysicalSort` followed
+    by `PhysicalLimit` when no existing provider satisfies the required order.
 
 ---
 
@@ -25753,7 +25793,12 @@ When the root requirement is:
 ORDER BY + finite LIMIT/OFFSET
 ```
 
-the planner also considers `PhysicalTopN` where semantically equivalent.
+the planner also considers `PhysicalTopN` only where it is semantically
+equivalent, its runtime capability applies, and the selected implementation can
+represent and honor the exact mathematical K from §30.7. Otherwise Top-N is
+not a legal alternative, and search retains an exact ordering provider followed
+by `PhysicalLimit`, inserting `PhysicalSort` when no existing provider
+satisfies the required order.
 
 For final ORDER BY compare:
 
@@ -25769,7 +25814,9 @@ possibly more expensive naturally ordered plan
 
 such as an ordered IndexScan or capability-enabled MergeJoin/ordered aggregate.
 
-The lowest active objective cost wins.
+The lowest active objective cost wins among legal alternatives. Cost, search
+order, and optional capability availability cannot turn valid LIMIT/OFFSET SQL
+into an error or otherwise change its semantics.
 
 The optimizer never inserts Sort merely because an ORDER BY exists if an already-provided property satisfies it.
 
@@ -25795,13 +25842,43 @@ For full-result planning:
 objective = total_cost
 ```
 
-For a semantically safe finite root requirement:
+The following quantities are distinct:
 
 ```text
-required_rows = LIMIT + OFFSET
+LogicalLimit count:
+    semantic under §§19.14 and 20.12
+
+mathematical first-K:
+    exact derived requirement for a physical algorithm that needs it
+
+RequiredRowsObjective:
+    cost/search metadata
+
+PhysicalTopN K:
+    algorithm-specific exact requirement under §30.7
+
+estimated cardinality:
+    estimate, never the actual or proven relation cardinality
 ```
 
-with checked arithmetic.
+For a semantically safe finite root LIMIT/OFFSET requirement, the optimizer
+MAY carry `FIRST_K_ROWS(K)` when the exact mathematical K is representable in
+its exact objective domain. It MAY instead use a wider or otherwise
+domain-specific exact representation; no concrete numeric representation is
+required.
+
+When exact K is not representable in the active objective domain, the canonical
+fallback is `ALL_ROWS`, no finite row goal, or an equivalent unbounded
+objective, unless another exact representation is available. Inability to
+represent the finite objective MUST NOT fail the query, remove all legal plans,
+or become the retained-K bound of `PhysicalTopN`.
+
+A saturated finite value MAY be used only as explicitly approximate costing
+metadata under the ordinary estimate rules. It MUST NOT affect plan legality,
+act as semantic proof, become an executor row cap or exact Top-N K, authorize
+semantic early termination, or change query validity. The exact objective and
+algorithmic Top-N bound therefore remain distinct even when both originate
+from the same LIMIT/OFFSET pair.
 
 A streaming/early-terminating plan may use a partial objective:
 
@@ -25835,6 +25912,10 @@ Join:
 Finite `required_rows` affects cost/search only.
 
 It never changes result semantics or becomes an executor row cap in a location where SQL does not permit one.
+
+It also never proves relation emptiness or cardinality, uniqueness,
+scalar-subquery cardinality, safe expression pruning, or safe early
+termination. Those facts require their existing exact semantic owners.
 
 This remains true when the objective is `FIRST_K_ROWS(0)`: only an actual `LogicalLimit` with SQL LIMIT 0 supplies the §35.2 semantic proof.
 
@@ -26042,6 +26123,8 @@ join types/outer constraints preserved
 predicates assigned only where semantically legal
 DML hidden target slots preserved
 every selected physical algorithm is capability-enabled
+every selected PhysicalTopN can represent and honor the node's exact
+mathematical K within the selected implementation's advertised exact domain
 memory/spill annotations are finite/nonnegative
 every empty-result/no-op replacement and semantic-empty annotation has an
 approved exact proof under §§20.17.10 and 35.2 rather than numerical or
@@ -26051,6 +26134,14 @@ path even when estimated rows are zero
 ```
 
 The result then passes to the execution-layer `PhysicalPlanValidator`.
+
+A selected `PhysicalTopN` that fails its exact-K capability condition is an
+invalid physical plan. Validation MUST reject it before execution, and no
+execution, DML, storage, catalog, WAL, or other side effect may begin. This is
+an internal optimizer/plan-validation failure, not a user-visible LIMIT/OFFSET
+overflow or a new SQL count-domain restriction. Correct physical search avoids
+constructing or selecting that node and retains a conforming alternative under
+§38.15.
 
 A cost mistake may choose a slow valid plan.
 
