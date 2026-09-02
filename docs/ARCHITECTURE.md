@@ -17477,6 +17477,12 @@ exactly proven total/error-free constants, safe NULL markers, or direct slot
 identities; the classification is proof-based, and does not presume that all
 comparisons, casts, or arithmetic are safe.
 
+Chapter 20 owns semantic demand, executable child order, and preservation of
+source-derived diagnostic provenance. Section 25.1.1 owns deterministic selection
+among multiple ordinary non-DML occurrence-level runtime expression-error
+candidates after those Chapter-17/20 rules establish them. Ordinary DML
+candidate selection remains the separate §21.16.1 contract.
+
 Non-executable optimizer metadata—equivalence facts, lookup/search keys, proof
 facts, estimates, memo metadata, or join-graph metadata—requires no diagnostic
 `SourceSpan` because it is not executed and cannot itself raise a user-visible
@@ -20249,6 +20255,99 @@ runs/finalizes that side plan once, then supplies a CONSTANT result vector or
 vectorized IN probe for precisely the demanded rows. Empty/skipped selections
 do not initialize it.
 
+### 25.1.1 Ordinary non-DML runtime expression-error selection
+
+An **ordinary non-DML expression-error candidate** exists for each semantically
+demanded scalar evaluation occurrence whose canonical Chapter-17 and Chapter-20
+evaluation reaches an ordinary runtime scalar semantic error. Demand is the
+semantic property defined by §20.17, not physical evaluation or discovery. An
+undemanded CASE branch, short-circuited AND/OR operand, skipped IN-list work,
+per-row expression with no demanded row occurrence, or speculative undemanded
+evaluation creates no candidate even if a physical kernel computes an error.
+
+Within one demanded scalar occurrence, Chapter 17 and §§20.17 and 20.17.5 remain
+authoritative for child order, short-circuiting, CASE/AND/OR/IN demand and order,
+and the responsible failing subexpression. This section compares only the
+occurrence-level ordinary failures already established by those rules.
+
+Every candidate conceptually retains its canonical responsible source-derived
+expression occurrence and diagnostic provenance, responsible `SourceSpan`,
+public top-level error category, closed Chapter-17 conceptual cause, and any
+other diagnostic metadata already frozen by its owner. A logical demanded row
+occurrence establishes candidate membership and multiplicity, but is not a
+ranking key, SQL ordering key, or new row identifier. No particular candidate
+structure is required.
+
+Among ordinary non-DML candidates, the public error is the minimum under this
+lexicographic semantic preorder:
+
+1. smallest responsible `SourceSpan.start_byte_offset`;
+2. for equal starts, the shorter represented `SourceSpan`;
+3. for identical represented spans, canonical semantic source-expression
+   occurrence order preserved through parsing, binding, and logical rewriting;
+4. for the same semantic expression occurrence, this closed v1 conceptual-cause
+   order:
+
+```text
+INVALID_CAST
+NUMERIC_OVERFLOW
+DIVISION_BY_ZERO
+INVALID_DATE
+INVALID_TIMESTAMP
+```
+
+The fourth component is D25-S1's semantic ranking over the existing Chapter-17
+cause vocabulary. It does not redefine those causes or their §39 public-category
+mappings, and it is independent of numeric enum values, source declaration
+order, registry/container iteration, or function-table address. The component
+is necessary because one semantic expression occurrence can produce distinct
+Architecture-visible causes on unordered rows: for example, the same integer
+division may produce `DIVISION_BY_ZERO` or `NUMERIC_OVERFLOW`.
+
+Two candidates are observationally equivalent only when their semantic
+diagnostic origin, `SourceSpan`, public category, conceptual cause, and every
+other Architecture-frozen diagnostic field agree. Any representative of the
+minimum equivalent class is conforming. Exact message prose and generic
+offending-value rendering are not generally frozen fields and do not break a
+tie.
+
+This is a total preorder over observable candidate classes, not a total order
+over rows. Unordered bags remain unordered, and even ordered relational input
+does not by itself create D25-S1 row precedence. Logical row sequence, scan
+order, page or RID, physical slot, selection index, and dictionary child index
+never rank candidates. Distinct Project expressions are ranked by their
+canonical source-derived semantic occurrence, not physical Project visitation;
+multiple demanded Filter-row failures use the same provenance/cause rule.
+
+Vector lane, vector capacity, DataChunk boundary, FLAT/CONSTANT/DICTIONARY
+representation, selection storage, scan task, worker, thread, SIMD completion
+order, pointer or allocation address, hash order, filesystem order, and physical
+expression visitation order likewise never select or break a tie. Repeated
+DICTIONARY occurrences remain repeated demanded occurrences; when all frozen
+candidate fields agree, their candidates occupy the same equivalence class.
+Absent a different legitimate resource or cancellation event, legal changes to
+these physical choices cannot change the selected ordinary error class.
+
+An implementation MAY vectorize, use SIMD, evaluate semantically demanded work
+in parallel or speculatively, accumulate local minima, and merge minima in any
+discovery order, provided the selected public error is the same semantic
+minimum. A semantic error produced by speculative undemanded work is discarded
+because it is not a candidate. Full candidate materialization and scalar
+row-at-a-time execution are not required. Execution may stop once it proves
+that no semantically smaller candidate class can still be established; first
+physical discovery alone is not that proof, and the rule requires no work that
+upstream semantics do not demand.
+
+This preorder does not rank DML candidates, including `RETURNING`; §21.16.1
+remains authoritative. Aggregate-finalization ranking remains §29.3-owned, and
+scalar-subquery cardinality and other specialized subquery precedence remain
+§20.14-owned. `OutOfMemory`, `SpillIOError`, `QueryCancelled`, runtime
+representability/resource `ExecutionError`, corruption, and internal invalid-
+plan/runtime states retain their Chapter-24/§39 or other specialized owners and
+do not enter this ordinary-candidate preorder. This section defines no global
+precedence between an ordinary semantic error and those independently owned
+failures.
+
 ## 25.2 Input normalization
 
 A fixed-width/vector kernel:
@@ -20354,6 +20453,9 @@ A simple column reference may produce a borrowed/reference vector when the pipel
 9. VARCHAR/FLOAT64 comparison semantics agree with the type/index contracts.
 10. Computed varlen results own bytes for their required lifetime.
 11. Aggregate argument vectors supply successfully evaluated typed values to §29.3; vector size and representation never select a different aggregate reduction semantic.
+12. Only semantically demanded ordinary non-DML runtime expression failures enter §25.1.1's candidate preorder; Chapter-17/20 child order first determines each occurrence-level failure.
+13. Ordinary non-DML error selection uses source-derived provenance and the closed conceptual-cause order, never row, lane, chunk, representation, worker, address, or physical visitation order.
+14. DML, specialized aggregate/subquery, resource, cancellation, corruption, and internal-invalid-state errors retain their separate canonical owners.
 
 ---
 
@@ -22232,6 +22334,13 @@ Next()
 The cursor/result layer owns or safely retains every value in the returned chunk.
 
 For a simple synchronous client, a returned chunk remains valid until the next cursor `Next()` call or cursor destruction, whichever comes first; callers that need a longer lifetime copy/materialize it.
+
+A result chunk already returned by a completed cursor operation is not
+retroactively retracted when a later cursor operation establishes an ordinary
+non-DML expression error under §25.1.1. The returned prefix does not make the
+failed query a successful complete query. This boundary requires neither
+whole-query buffering nor a different returned-value lifetime or cursor
+protocol.
 
 This lifetime is an API/runtime contract, not a persistent format.
 
