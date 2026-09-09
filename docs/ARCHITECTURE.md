@@ -20231,7 +20231,7 @@ published database write.
 
 Bound/physical expressions are translated into reusable per-execution expression state.
 
-The execution contract is:
+The execution contract is conceptually:
 
 ```text
 Evaluate(
@@ -20241,6 +20241,25 @@ Evaluate(
 )
     -> Vector result
 ```
+
+For each invocation, the caller supplies or semantically determines the
+demanded subset of the input's active logical occurrences under §§20.6–20.7
+and 20.17. Each parent derives each child's demanded subset from that subset
+using Chapter 17's scalar control flow and §20.17.5's executable child order.
+Demand composes recursively: a child cannot regain an occurrence removed by an
+ancestor condition, and vector-layout convenience cannot omit a demanded child
+occurrence. An empty demanded subset creates no per-row semantic evaluation;
+§17.10.2 remains authoritative for binding-time constant folding.
+
+The active selection represents this logical demand, not a second semantic
+rule or a required mask API. A SelectionVector, bitmap, index list, partitioned
+evaluation, or another exact representation MAY realize the same demanded
+occurrences. Every occurrence must already belong to the input's active
+logical domain under §§23.1, 23.6, and 23.8; a demand representation cannot make
+inactive capacity, stale slots, or out-of-domain dictionary positions reachable.
+Physical speculation outside semantic demand cannot contribute observable
+values or ordinary errors, including §25.1.1 candidates. Within the demanded
+domain, Chapter-17/20 value, NULL, child-order, and error rules remain exact.
 
 Operator/type/representation dispatch occurs at expression/vector-batch granularity.
 
@@ -20348,7 +20367,37 @@ do not enter this ordinary-candidate preorder. This section defines no global
 precedence between an ordinary semantic error and those independently owned
 failures.
 
+### 25.1.2 DML expression-error handoff
+
+Expression evaluation in a DML statement, including candidate-row construction
+and RETURNING, preserves the Chapter-18/19/20 diagnostic provenance required by
+§21.16.1: the responsible SourceSpan, semantic expression origin, public
+category and owning cause, and membership in its scalar/subquery/final-row
+expression-evaluation phase. Chapter 21 determines candidate eligibility and
+ranking, including attempt and target-revalidation prerequisites; Chapter 25
+does not rank NOT NULL, UNIQUE, or other constraint phases.
+
+Execution MUST preserve every eligible expression candidate that the DML owner
+needs to select its canonical error. It MUST NOT reduce DML candidates using
+§25.1.1's non-DML preorder or physical visitation order in a way that discards
+such a candidate. Candidate transport and aggregation have no prescribed
+structure. Physical sharing or duplication preserves the upstream semantic
+origin under §20.17; node pointers, kernel-table entries, output ordinals, and
+vector lanes cannot replace it. RETURNING remains within the DML error owner
+and retains §21.15's unordered-bag semantics.
+
 ## 25.2 Input normalization
+
+An executable input reference consumes the resolved mapping from its semantic
+LogicalSlotId under §20.2 to the containing operator's physical input schema
+under §22.3. For schema entry `S[j]`, §23.1 supplies `DataChunk.columns[j]` of
+the matching runtime type. Column ordinal `j` is a runtime locator within that
+schema, not semantic identity. Projection reordering and derived-table remapping
+use the corresponding schema mapping; equal-valued or repeated outputs and
+self-join inputs remain distinct through their upstream slot identities.
+Execution does not rediscover identity from a column name, BindingId, raw
+ordinal alone, vector position, or pointer, and vectors need not duplicate the
+schema's LogicalSlotIds.
 
 A fixed-width/vector kernel:
 
@@ -20362,6 +20411,18 @@ The effective input index for each active logical row comes from the normalized 
 NULL validity is read through the normalized validity view.
 
 Kernels therefore produce representation-independent results for FLAT, CONSTANT, and DICTIONARY inputs.
+
+On successful ordinary scalar evaluation, there is exactly one logical result
+occurrence for each demanded input occurrence, with the corresponding mapping,
+order, and multiplicity, unless an owning specialized expression/operator
+contract says otherwise. CONSTANT's single payload does not collapse its
+logical occurrences; repeated DICTIONARY selections produce repeated results.
+The result may use any legal vector representation that preserves this mapping.
+The scalar executor does not remove rows, deduplicate, or reorder occurrences:
+§§20.6 and 27.7 own Filter row removal, including when a predicate kernel directly
+produces a selection; §§20.7, 22.3, and 27.8 own Project output placement and
+schema identity. Computing an intermediate or result Vector creates no new
+LogicalSlotId; temporary expression vectors need no independent semantic slot.
 
 ## 25.3 Arithmetic kernels
 
@@ -20378,7 +20439,12 @@ Result validity follows Chapter 17's expression semantics.
 
 The kernel uses the resolved physical type directly; it does not switch on SQL type once per row when the batch-level operation is already known.
 
-Detailed arithmetic-error and overflow behavior is defined by §39.3.1 and MUST remain consistent with these kernels.
+Arithmetic kernels execute the scalar semantics owned by §§17.4.3 and
+17.6.1–17.6.2 over demanded logical occurrences; §§39.3.1–39.3.2 own their
+runtime error enforcement. Kernel specialization MUST preserve those semantics.
+Resolved casts and comparisons likewise consume §§17.7–17.8 and §19.6 without
+new type or overload resolution. The closed scalar-function scope remains
+§17.9.3-owned.
 
 ## 25.4 Comparison kernels
 
@@ -20438,7 +20504,79 @@ A computed fixed-width result uses reusable output vector storage owned by the e
 
 A computed VARCHAR result owns/copies its bytes into storage whose lifetime covers the returned result vector, normally the output chunk StringHeap for streaming expressions.
 
-A simple column reference may produce a borrowed/reference vector when the pipeline lifetime rules permit.
+A simple column reference or other exact reference result MAY borrow vector or
+string backing under §§23.10 and 23.12. The borrowed logical view remains
+value-stable for its complete consumer interval, including all reachable
+payload, validity, selection, representation metadata, StringRef metadata, and
+referenced bytes. Under §23.13, an owner cannot reset, reuse, or incompatibly
+mutate that backing until the borrow ends or an exact §23.12 mechanism preserves
+every live view. This also governs input/output aliasing: an in-place write
+cannot change an input still needed by a child or consumer.
+
+Section 26.6 owns the synchronous pipeline-consumption interval, which permits
+zero-copy borrowing. A consumer retaining the result beyond that interval
+obtains stable ownership or materializes it under §§23.10–23.12 and the
+retaining operator's contract. No particular copy, transfer, or copy-on-write
+mechanism is required. Computed VARCHAR bytes that do not borrow stable backing
+have an exact result owner for the full required lifetime under §§23.11 and
+27.8.
+
+### 25.7.1 Valid expression state and result publication
+
+Execution consumes the resolved physical-plan contract in §§22.2–22.3 and 22.8,
+with the final-plan validation handoff in §38.24. A wrong child count,
+unresolved or missing kernel for a validated executable expression, input or
+output TypeId mismatch, or invalid input-slot mapping is an internal invalid-
+plan/runtime state. Out-of-domain selections, invalid validity/representation
+state, expired or unstable borrows, and uninitialized demanded output are
+internal vector/lifetime violations under §§23.6, 23.10, and 23.14. These states
+are not user TypeError, CastError, ArithmeticError, or ordinary error candidates.
+The empty v1 scalar-function registry in §17.9.3 supplies no executable named
+scalar-function state; generic IR capacity does not authorize such a kernel.
+
+Construction invariants, final-plan validation, and appropriate local runtime
+guards MAY establish these preconditions without revalidating every expression
+tree for every vector call. Malformed state MUST be prevented or rejected
+before unsafe pointer/range calculation, out-of-bounds access, dangling
+StringRef dereference, stale-value publication, arbitrary mutation, or
+persistent database effects. Internal failures follow §39.1's invariant-failure
+consequences; assertion failure is not permission to continue with invalid data.
+
+Successful evaluation initializes every demanded result occurrence's validity,
+exact non-NULL payload, and required variable-length ownership. Undemanded or
+inactive output capacity is semantically inaccessible. If evaluation fails,
+the invocation MUST NOT publish its result vector/view as a successful
+expression result or expose incomplete demanded positions as consumable active
+output. This local publication rule does not retract earlier query chunks
+already returned under §31.10. A valid expression's allocation,
+representability, or cancellation failure remains its canonical resource or
+cancellation error under §24.10 and §39.3, not malformed internal state.
+
+### 25.7.2 Runtime representation and resource handoff
+
+Section 23.9 owns exact runtime VARCHAR representability. Compact StringRef's
+UINT32_MAX domain and persistent heap-tuple capacity do not impose SQL VARCHAR
+or expression-result maxima. An exact supported alternate runtime form remains
+applicable when the compact form cannot represent the value; no truncation,
+wrap, or clipping is permitted. A retaining consumer must separately satisfy
+§24.2's exact retained-row applicability, because an exact scalar form does not
+make a narrower retained descriptor capable of storing it.
+
+Expression scratch, temporary vectors, demand-selection storage, and computed
+output bytes use the runtime owners in §22.6 and the continuously accounted
+owner regions in §§24.4–24.5. Aggregate capacity that grows with execution
+cannot bypass accounting through individually small kernel allocations or
+untracked scratch; capacity already covered by a parent region needs no
+duplicate object charge. For v1 kernels that produce variable-length values,
+including scalar-to-VARCHAR casts, output lengths, offsets plus lengths,
+allocation extents, and capacity growth obey §24.1's exact-before-use rule.
+
+Sections 23.9, 24.10, and 39.3 distinguish unsupported exact runtime
+size/address/value representation (controlled representability/resource
+ExecutionError) from catchable allocation denial for a supported exact form
+(OutOfMemory). QueryCancelled retains its cancellation owner. These operational
+limits affect feasibility without redefining Chapter-17 values, and add no
+precedence relative to ordinary expression errors.
 
 ## 25.8 Expression invariants
 
@@ -20456,6 +20594,12 @@ A simple column reference may produce a borrowed/reference vector when the pipel
 12. Only semantically demanded ordinary non-DML runtime expression failures enter §25.1.1's candidate preorder; Chapter-17/20 child order first determines each occurrence-level failure.
 13. Ordinary non-DML error selection uses source-derived provenance and the closed conceptual-cause order, never row, lane, chunk, representation, worker, address, or physical visitation order.
 14. DML, specialized aggregate/subquery, resource, cancellation, corruption, and internal-invalid-state errors retain their separate canonical owners.
+15. Child demand composes within the parent's active logical domain under Chapter-17/20 semantics; physical mask representation cannot add or omit observable evaluations.
+16. DML expression provenance and eligible candidates reach the §21.16.1 owner without non-DML or physical-order preselection.
+17. Resolved input slots use the physical-schema/DataChunk mapping; successful scalar results preserve demanded occurrence mapping and multiplicity without creating slot identity.
+18. Malformed expression/vector state is rejected or prevented, and failed evaluation never publishes an incomplete result as successful.
+19. Borrowed results preserve the full value-stable view through consumption and owner reset/reuse under §§23.10–23.13 and 26.6.
+20. Exact runtime/retained representation, extent arithmetic, and accounted memory remain §§23.9 and 24.1–24.5 responsibilities, with errors classified by §24.10 and §39.3.
 
 ---
 
