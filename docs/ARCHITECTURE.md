@@ -21496,7 +21496,7 @@ PhysicalHashJoin
 PhysicalMergeJoin
 ```
 
-Their initial roles are:
+Their v1 roles are:
 
 ```text
 NestedLoop:
@@ -21509,10 +21509,10 @@ HashJoin:
     main equality-join implementation
 
 MergeJoin:
-    ordered-input algorithm added after the simpler join paths are stable
+    capability-conditional ordered-input algorithm when predicates and physical properties permit
 ```
 
-The physical optimizer chooses the algorithm later.
+Physical planning selects one capability-valid join algorithm before execution.
 
 No join implementation may reinterpret SQL join semantics merely because a different physical algorithm is selected.
 
@@ -21588,7 +21588,7 @@ The materialized right side uses query-owned row storage and deep-copies retaine
 
 A probe row may emit across multiple output chunks; the runtime keeps continuation state rather than requiring one full cross product to fit in memory.
 
-Nested-loop join is not the universal large equi-join fallback once hash join is available.
+Nested-loop join is a costed physical alternative, not a universal large equi-join fallback.
 
 ## 28.4 Index nested-loop join
 
@@ -21629,7 +21629,7 @@ optional residual predicate
 join type
 ```
 
-Initial join types are:
+`PhysicalHashJoin` supports:
 
 ```text
 INNER
@@ -21689,7 +21689,7 @@ same hash but different key:
 
 Thus different SQL keys with the same 64-bit hash remain distinct entries, while many build rows with the same key share one compact duplicate chain.
 
-The initial target maximum directory load factor is approximately:
+The ordinary maximum directory load-factor tuning target is approximately:
 
 ```text
 0.70
@@ -21721,7 +21721,7 @@ For each batch the sink:
 5. creates duplicate chains/directory entries
 ```
 
-For the initial INNER/LEFT shape, non-matchable NULL-key build rows can be discarded from the match structure because the build side is not preserved.
+For the supported INNER/LEFT hash-join shape, non-matchable NULL-key build rows can be discarded from the match structure because the build side is not preserved.
 
 `Finalize` completes/resizes/compacts the directory and publishes immutable probe state.
 
@@ -21827,11 +21827,13 @@ The fallback remains memory-accounted.
 
 ## 28.12 Merge join
 
-Merge join is an architecture-supported later execution algorithm once nested-loop/hash paths are stable.
+`PhysicalMergeJoin` is a capability-conditional physical alternative when compatible input
+ordering and admitted predicate semantics satisfy the physical-planning rules in Chapters
+22, 37, and 38.
 
 It is useful when compatible ordering already exists or when ordered output has downstream value.
 
-The initial implementation may focus on equality merge joins.
+The v1 `PhysicalMergeJoin` contract admits equality merge joins.
 
 Ordinary equality retains ordinary NULL semantics:
 
@@ -21845,7 +21847,9 @@ The operator MUST NOT materialize the complete cross product of two large duplic
 
 For LEFT semantics, unmatched logical-left rows are emitted exactly once.
 
-Range-style merge opportunities may be added only with explicit predicate semantics rather than treating every inequality as the same algorithm.
+Range-style merge joins are outside the v1 Chapter-28 execution contract; every admitted
+merge-join form requires explicit predicate semantics rather than treating inequalities as
+one interchangeable algorithm.
 
 ## 28.13 Join invariants
 
