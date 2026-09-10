@@ -21336,15 +21336,17 @@ The QueryExecutionContext's read-epoch guard protects candidate physical RIDs fr
 
 Index scan collects a small batch of candidate RIDs rather than performing one candidate/one returned row iterator step.
 
-Initial target:
+The ordinary RID-batch tuning target is:
 
 ```text
 up to one DataChunk capacity
 ```
 
-The initial implementation preserves B+ cursor order while fetching those candidates.
+A RID-batching strategy preserves B+ cursor order while fetching candidates when the
+PhysicalIndexScan advertises or must satisfy the original index ordering.
 
-A future implementation may group heap fetches by PageId only if the physical plan no longer promises/needs the original index ordering.
+Alternative batching strategies MAY group heap fetches by PageId only when the physical
+plan neither promises nor needs the original index ordering.
 
 The batch is query-local temporary state and is never a persistent RID list.
 
@@ -21422,7 +21424,9 @@ result bytes live in output-owned StringHeap/other valid result owner
 
 Projection is streaming and is not a pipeline breaker.
 
-Its output order is the projection's LogicalSlotId order.
+Its output columns follow the declared ordered physical output schema. Project preserves
+the input row-occurrence sequence; any advertised `OrderingProperty` remains governed by
+§37.5.
 
 ## 27.9 PhysicalLimit
 
@@ -21470,7 +21474,7 @@ The detailed cursor/client result interface and DML RETURNING spool are defined 
 5. Scan output never points into an unpinned heap page.
 6. Index entries are candidates and never bypass heap MVCC.
 7. Index candidate RID lifetime is covered by the execution read epoch.
-8. Initial index RID batching preserves index order.
+8. Index RID batching preserves every ordering advertised by the PhysicalIndexScan.
 9. Forward baseline index ordering is ASC/NULLS FIRST when compatible.
 10. Filter prefers selection/dictionary output when safe and preserves row order.
 11. Project is streaming and computed varlen results own their bytes.
