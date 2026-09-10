@@ -20669,7 +20669,8 @@ IndexScan
 Values
 ```
 
-Later blocking operators may expose a source after finalization.
+Blocking operators may expose a source after the finalization required by their
+operator contract.
 
 ### Streaming operator
 
@@ -20683,9 +20684,25 @@ Project
 Limit
 ```
 
-### Sink / pipeline breaker
+### Sink
 
-Consumes input into state that must be finalized before dependent output continues.
+Consumes pipeline input according to §26.4.3's acceptance and retention contract.
+A sink is an input-consumption role, not by itself a requirement to accumulate
+the entire input before producing results. The result sink hands data to the
+cursor/result owner under §§27.11 and 31.9–31.10.
+
+### Pipeline breaker / blocking boundary
+
+A pipeline breaker establishes a boundary where blocking state must become
+ready before dependent execution continues. Sink acceptance and this dependency
+trait are distinct: an operator may consume input as a sink in one pipeline and
+expose a source or ready state to another. A breaker is not a synonym for the
+generic sink role, and a sink is not automatically a breaker.
+
+Blocking, streaming, and spillability are execution traits/capabilities under
+§22.7, not additional physical properties in §37.1. Breaker classification
+governs pipeline decomposition and dependencies; the owning operator defines
+its blocking/finalization behavior, including §§29.2–29.3 and 30.1.
 
 Every breaker declares:
 
@@ -20729,6 +20746,140 @@ dependencies
 It does not force every physical operator into a recursive row-at-a-time `Next()` chain.
 
 The builder creates execution graph/state references without mutating the semantic meaning of the immutable physical plan.
+
+### 26.3.1 Execution lifecycle and completion
+
+Execution starts from the validated immutable physical plan under §§22.2–22.3,
+22.8, and 38.24. Mutable source, operator, sink, and pipeline state is created
+and initialized before use for that execution/statement attempt under
+§§22.5–22.6. Shared immutable configuration and any more specifically owned
+state retain their canonical owners; execution cursors do not mutate the plan.
+
+The execution graph runs semantically required source/streaming/sink work under
+§26.4, completes the operator-owned dependencies and semantic finalization that
+work requires, and hands completion to the root/result owner. Successful
+execution completion requires all such work and prerequisites to have succeeded
+with no established terminal error or cancellation. A local source/operator
+`FINISHED`, one completed pipeline, or a successful sink acceptance cannot
+establish that condition for the whole execution.
+
+A dependent stage MUST NOT consume partially initialized, unready, unfinalized,
+failed, or canceled prerequisite state as successful input. It becomes runnable
+only at the owning prerequisite's successful readiness point. Required
+`Combine`/`Finalize` steps are semantic work, not resource destruction: aggregate
+state and numerical validation follow §§29.2 and 29.3.7; sort build/output
+follows §30.1; parallel build/output barriers and task readiness follow §§32.5,
+32.7, and 32.8. These requirements apply where the operator owns those steps,
+not as a requirement that every sink perform both operations. Failure of a
+required finalizer or predecessor prevents successful completion and cannot
+make its partial state a valid fallback input. Cleanup remains required even
+when successful semantic finalization is impossible.
+
+Valid early stop under §26.8 does not require exhaustion of unread upstream
+input. It leaves only the work still demanded under §§20.12, 20.14.5, and 20.17
+as a success prerequisite, together with that work's required finalization and
+the execution's cleanup obligations. The driver cannot fetch unnecessary input
+merely to complete a local protocol.
+
+Root/internal execution completion and external result exposure are separate
+boundaries. Sections 31.9–31.10 own result publication, returned-chunk lifetime,
+and cursor exhaustion/EOS; local `FINISHED` is not cursor EOS. Internal work may
+complete before or during cursor servicing according to the result owner's
+strategy. Successful execution does not by itself mean transaction commit;
+DML statement/publication and transaction consequences remain §§21.15, 31.9,
+and 39.1-owned.
+
+Success cannot be declared while any semantically required execution or
+error-producing finalization task remains outstanding. Under §§32.8 and 39.3,
+terminal failure/cancellation leaves no partially active task graph runnable as
+successful execution. Active users of shared attempt state must quiesce before
+that state is destroyed; no writer, borrower, or continuation may survive the
+backing it requires. This is a lifetime/dependency obligation, not a scheduler
+algorithm or synchronization primitive.
+
+On success, terminal failure, cancellation, or valid early termination,
+execution-owned resources are eventually released unless valid ownership has
+transferred to a longer-lived owner. Sections 23.10–23.13 and 26.6 govern live
+borrows; §§24.4–24.5 and 24.10 govern accounting and temporary-resource cleanup;
+§31.10 governs retained results. Cleanup/destruction is distinct from semantic
+`Finalize` and cannot fabricate its successful result. Transaction-owned locks
+and statement/transaction outcomes remain with §39.1, not executor cleanup.
+
+Once a canonical terminal error or cancellation is established, that runtime
+instance cannot resume successful processing or become a successful execution.
+Error propagation, quiescence, and cleanup continue under §39.3. A retry admitted
+by the statement owner uses a fresh execution instance under §§31.5 and 39.1.4:
+source positions, accepted-input/continuation state, local error candidates,
+sink acceptance/finalization state, temporary output, and query scratch from
+the failed attempt are not inherited. Reuse of immutable/shared data is only
+under its existing owner; this rule neither admits a retry nor changes its
+snapshot, CommandId, or transaction boundary.
+
+Requesting data after local terminal completion, admitting input to a terminal
+operator, consuming an unready/failed dependency, skipping required finalization
+before claiming success, or reviving failed runtime state is internal
+runtime/protocol misuse under §§26.4 and 39.1.3, not a new public SQL error.
+
+### 26.3.2 Error ownership and result handoff
+
+Candidate discovery is not selection of a terminal public error. Pipeline
+execution preserves the candidate/provenance information required by the
+canonical owner until that owner can establish its selected error, or prove
+that no remaining semantically required candidate can beat it. This permits
+owner-correct local reduction and merging without requiring full candidate
+materialization or evaluating undemanded work.
+
+Ordinary non-DML expression candidates follow D25-S1 in §25.1.1. Source, lane,
+chunk, worker, pipeline, or callback discovery/completion order MUST NOT replace
+that semantic minimum. Once the minimum is established, it is the terminal
+ordinary non-DML expression error for that execution path. DML instead follows
+D21-S4 in §21.16.1 through §25.1.2: execution preserves required eligible
+candidates, their responsible `SourceSpan`, semantic expression origin, owning
+cause/category, and expression phase until the DML owner can select the
+statement error. It MUST NOT pre-rank DML through D25-S1 or discard a required
+candidate on first physical discovery. Parallel scheduling under Chapter 32
+does not change either owner's reduction.
+
+Specialized errors retain their owners: aggregate-finalization selection is
+§29.3.7-owned; scalar-subquery cardinality and child/build precedence are
+§§20.14.4 and 20.14.12-owned; persistent-page corruption, including scan fetch
+failures, retains §39.1.3's lower-layer classification. `OutOfMemory`,
+representability/resource `ExecutionError`, `SpillIOError`, and `QueryCancelled`
+retain §§24.10 and 39.3. Resource/cancellation events may prevent further
+candidate establishment under those owners; they do not enter the D25-S1 or
+D21-S4 candidate ranking. Chapter 26 defines no global precedence between these
+independently owned failure classes or between physical components.
+
+Pipeline transport preserves every owner-required diagnostic field, including
+semantic origin, `SourceSpan`, conceptual cause, category, and applicable DML
+phase/eligibility. Pipeline IDs, chunk numbers, worker IDs, operator pointers,
+and callback order cannot replace that provenance. Diagnostic wrappers may add
+context without changing canonical public fields or erasing structured causes
+under §39.3. Backing referenced by an error/report remains valid until reporting
+no longer depends on it, using the ownership rules of §§23.10–23.13 and
+24.4–24.5; a diagnostic cannot point into reset/reused chunk storage unless its
+required data has independently valid ownership.
+
+If a source/operator/expression invocation fails before successfully offering
+its output transition, its partial or uninitialized output is not consumable
+successful output under §§26.4 and 25.7.1. Merely placing rows in an output buffer
+does not offer them. A prior independently completed output transition remains
+a completed internal handoff; it does not by itself imply client visibility.
+An already completed cursor return is an external delivery, not retroactively
+retracted by failure/cancellation of subsequent execution. That returned prefix
+is not evidence of successful complete query execution. External exposure and
+returned-value lifetime remain §§31.9–31.10-owned; this distinction requires
+neither whole-query buffering nor a different cursor protocol.
+
+An owner-established terminal error is an unsuccessful path, not ordinary
+`FINISHED`. It permits error propagation, quiescence, and cleanup, not further
+successful continuation, new-input admission, or generic replay in the failed
+instance. Section 26.3.1's success barrier includes required error-producing
+work across pipelines and finalizers. Failed state and invalid output are
+cleaned without invalidating valid longer-lived ownership transfers; retry
+admission and transaction consequences remain §§39.1.3–39.1.4, and causal-error
+preservation through cleanup remains §39.1.7. Cleanup cannot turn a failed
+accepted-input lifecycle into successful resolution.
 
 ## 26.4 Runtime interfaces
 
@@ -20943,7 +21094,8 @@ The semantic state/lifetime separation is not.
 
 ## 26.5 Global and local state
 
-Even when one worker executes the first production version, every operator separates immutable plan configuration, global per-execution state, and local per-worker/task state.
+Every operator separates immutable plan configuration, global per-execution
+state, and local per-worker/task state, including in single-worker execution.
 
 Local state owns hot mutable items where practical:
 
@@ -20965,7 +21117,8 @@ Global state owns shared/finalized state where the operator requires it.
 
 No operator depends on an implicit process thread-local singleton for query correctness.
 
-This lets later scheduling parallelize pipelines without redesigning every operator state object.
+This separation permits worker-local execution without changing operator-state
+ownership or embedding mutable query state in shared plans.
 
 ## 26.6 Borrowed-data lifetime in a pipeline
 
@@ -21037,16 +21190,16 @@ terminal-control transition MUST NOT request another upstream input. Failure,
 cancellation, or valid early stop requires no otherwise unnecessary source
 terminal probe.
 
-## 26.9 Single-thread first, parallel-ready
+## 26.9 Worker and scheduling boundary
 
-The first production executor may run one query with one worker.
+A query may execute with one worker under Chapter 32's worker model.
 
-The architecture nevertheless requires:
+Independent of worker count, execution requires:
 
 ```text
 global/local state split
 pipeline dependency representation
-source state that can later be partitioned where valid
+source state that can be partitioned where valid
 no mutable query state embedded in immutable plan nodes
 ```
 
@@ -21063,7 +21216,7 @@ Worker-pool scheduling, morsels, local-state combining, and concrete parallel op
 7. Global and local runtime state remain distinct even in single-worker execution.
 8. Query cancellation and safe pipeline early-stop are different mechanisms.
 9. Cancellation releases query resources but transaction locks follow the transaction terminal path.
-10. Later parallel execution must preserve the same transaction/snapshot/read-epoch semantics.
+10. Parallel execution must preserve the same transaction/snapshot/read-epoch semantics.
 
 ---
 
