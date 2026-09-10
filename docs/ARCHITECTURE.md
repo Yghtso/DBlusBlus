@@ -20732,6 +20732,17 @@ The builder creates execution graph/state references without mutating the semant
 
 ## 26.4 Runtime interfaces
 
+The generic handoff defines semantic transitions, not a C++ ABI. Sources and
+streaming operators deliver consumable output before terminal completion.
+Input acceptance, continuation, backing-release acknowledgment, and readiness
+for another input are distinct facts that the driver can determine without
+producer-specific conventions. Pull calls, push/callback execution, state-machine
+returns, and other exact representations MAY encode these facts; no particular
+return structure or enum such as `NEED_INPUT`, `READY_FOR_INPUT`, or `BLOCKED`
+is required.
+
+### 26.4.1 Output availability and terminal completion
+
 Conceptually, a source supports:
 
 ```text
@@ -20746,16 +20757,55 @@ GetData(
 The minimum source statuses distinguish:
 
 ```text
-HAVE_MORE
-FINISHED
+HAVE_MORE -> nonterminal output-available path
+FINISHED  -> local source completion; no consumable output
 ```
 
-and end-of-stream is never encoded as an empty chunk.
+A terminal completion outcome MUST carry no consumable output for that
+invocation. This rule applies equally to sources and streaming operators.
+Reusable output storage may physically exist during a terminal invocation, but
+its contents are not a result of that invocation and MUST NOT be consumed as
+one. Separating output from completion prevents a driver from having to guess
+whether terminal status carries final rows.
+
+Every consumable batch, including the final nonempty batch, is offered through
+an output-available transition. For the final batch, the conceptual sequence is:
+
+```text
+output available
+    -> downstream consumption or valid ownership handoff
+    -> terminal completion with no consumable output
+```
+
+For a pull-style source, the final batch normally precedes a separate terminal
+probe; the ordered transitions do not require two particular C++ method calls.
+If exhaustion is already established, the terminal transition requires no
+additional logical-row evaluation. A source with no output MAY report
+`FINISHED` immediately, without a fake empty nonterminal batch.
+
+`HAVE_MORE` does not promise another nonempty batch. Under §23.1, cardinality
+describes the active data domain, not completion: zero, short, and full batches
+never establish EOS, terminal or pending-terminal state, or final-batch status.
+A short batch may be followed by more output. Completion is explicit control
+information and MUST NOT be encoded as an empty input batch.
 
 When a source returns `HAVE_MORE` with an empty executable chunk, it MUST still
 advance finite source or operator state. An unbounded sequence of empty
 `HAVE_MORE` batches without state progress MUST NOT substitute for `FINISHED`;
 producing one is an invalid pipeline implementation/liveness violation.
+
+Once an execution state reaches terminal completion, no further logical output
+exists from that state. The driver MUST NOT request more data from it. A
+post-terminal data request is outside the valid invocation protocol; it cannot
+restart execution or emit another occurrence. No rewindability or idempotent
+repeated-`FINISHED` API is required.
+
+Local source/operator completion does not by itself establish whole-query or
+statement success, transaction completion, completion of other pipelines or
+required Combine/Finalize work, or result publication. Sections 31.9–31.10
+remain authoritative for DML result publication and external cursor EOS.
+
+### 26.4.2 Accepted-input, continuation, and progress lifecycle
 
 A streaming operator supports conceptually:
 
@@ -20767,6 +20817,106 @@ Execute(
 )
 ```
 
+A streaming operator accepts each submitted logical input-occurrence domain at
+most once within its execution. Acceptance takes responsibility for processing
+that submission; it does not mean that one invocation has completed all work,
+offered all output, or released caller backing. Submission identity is not a
+pointer, DataChunk object, or buffer identity. After the preceding lifecycle and
+borrow requirements permit reuse, the same physical object may carry a distinct
+input submission. No semantic row, chunk, or pipeline ID is introduced.
+
+Within one `LocalOperatorState`, at most one accepted-input lifecycle is
+unresolved at a time. Continuation resumes that acceptance or operator-owned
+state derived from it; it MUST NOT reaccept the input as new work. Passing the
+same input reference during a continuation call is not a second submission.
+This per-local-state admission rule prevents replay/duplication without
+serializing independent local states, workers, or pipelines under Chapter 32.
+
+An accepted-input lifecycle is resolved only when either:
+
+1. all semantically required processing and output obligations attributable to
+   that acceptance have been discharged; or
+2. the owning operator semantics establish valid terminal/early stop under
+   §26.8, making the remaining work safely unnecessary.
+
+Resolution is not inferred from an invocation returning, one batch being
+offered, copying input, or any output cardinality. Required not-yet-offered
+output keeps the lifecycle unresolved. An already-offered output may remain
+subject to downstream consumption and borrowing after lifecycle resolution.
+
+The operator MAY retain a value-stable dependency on caller input across
+continuation steps under §§23.10–23.13, or copy, transfer, materialize, or
+otherwise independently preserve required continuation state. It may
+acknowledge release of the original caller backing only when every operator
+dependency on that backing has completed or been independently preserved.
+This acknowledgment can precede lifecycle resolution: copied input may no
+longer require caller backing while required processing or buffered output
+remains pending. Neither strategy is mandatory. Operator release, lifecycle
+resolution, and physical reset permission remain separate because output or
+downstream borrowers may still depend on that backing; §26.6 composes these
+boundaries with Chapter 23.
+
+Pending continuation means required processing, not-yet-offered required output,
+or a pending terminal-control transition remains before new-input admission.
+The driver may submit another input only when all applicable conditions hold:
+
+```text
+the preceding accepted-input lifecycle is resolved
+no continuation must precede new input
+the outstanding output handoff has completed
+the operator has not reached terminal completion
+valid early stop has not forbidden new input
+```
+
+The handoff MUST make output availability, pending continuation, operator
+backing-release acknowledgment, and new-input readiness independently
+determinable. It supports one accepted input producing multiple output batches,
+including §28.8's probe continuation, without resubmitting input. It also
+permits a successful lifecycle with zero output occurrences, as when Filter
+rejects every row. Resolving that input is progress, not EOS or failure; no
+fake output batch is required to acknowledge resolution.
+
+Every output occurrence required by the owning operator semantics MUST be
+offered exactly once. The generic handoff MUST NOT duplicate, drop, reaccept,
+or replay required occurrences. This does not impose equal input/output
+cardinality on relational operators or establish SQL row order. Chapter 20's
+bag, ordering, demand, and executable scalar-order rules remain authoritative.
+
+Every nonterminal processing step without new output MUST resolve accepted
+input, release an operator dependency on accepted input, or advance finite
+relevant continuation state toward required output, lifecycle resolution, or
+terminal completion. For finite input and finite required output, continuation
+MUST be well-founded: repeated equivalent state with no output, resolution,
+release, or relevant advancement is an internal protocol/liveness violation.
+This prevents continuation from encoding an endless no-progress execution;
+no numeric progress counter, timeout, or sleep is required. A legitimate
+dependency wait is scheduler-owned suspension, not permission to busy-retry
+unchanged processing state.
+
+Resource-pressure progress remains §24.6-owned and is distinct from operator
+continuation progress. Resource activity cannot excuse endless continuation,
+and operator-local mutation cannot excuse a denied resource retry without that
+owner's required relevant progress.
+
+Discovery of a §25.1.1 ordinary candidate or §21.16.1 DML candidate does not
+itself authorize discarding remaining semantically required candidate-
+establishing work: the owning rule determines when terminal error is
+established. No first-physical-error precedence follows from this protocol.
+On terminal failure or observed cancellation, pending continuation is failed
+execution state, cleaned under §§24.10 and 39.3 rather than resumed as
+successful processing or blindly replayed. The failed invocation provides no
+successful consumable output, consistently with §25.7.1; independently completed
+output transitions remain distinct. A Chapter-21-authorized retry uses fresh
+attempt-local execution state, not the failed continuation. Resource categories
+and transaction consequences remain with §§24.10 and 39.1.
+
+Violations of this handoff, including terminal output, reacceptance, premature
+new-input admission or backing reset, skipped required continuation, and
+consumption of failed-invocation output, are internal invalid runtime/protocol
+states under §39.1, not new public SQL errors.
+
+### 26.4.3 Sink acceptance
+
 A sink supports conceptually:
 
 ```text
@@ -20774,6 +20924,18 @@ Sink(input, local_sink_state, global_sink_state)
 Combine(local_sink_state, global_sink_state)
 Finalize(global_sink_state)
 ```
+
+A completed successful generic `Sink` invocation accepts its complete submitted
+logical-occurrence domain exactly once. The generic contract exposes no partial
+successful acceptance. Retaining values requires stable ownership under §26.6
+and Chapters 23–24. A failed or incomplete invocation MUST NOT be represented
+as complete successful acceptance, and the driver MUST NOT blindly replay its
+input. Failure does not imply that no physical work occurred; statement and
+retry consequences remain Chapter-21/§39-owned.
+
+Successful sink acceptance alone establishes neither query/statement success,
+Combine/Finalize success, commit, nor client publication. Those remain separate
+owner obligations, including §§31.9–31.10 for result publication.
 
 Exact C++ virtual/template mechanics are implementation-specific.
 
@@ -20793,6 +20955,12 @@ local buffers
 continuation counters
 ```
 
+The accepted-input and continuation state of §26.4.2 belongs to mutable
+execution/local state, not the immutable plan, under §§22.2 and 22.6. Growing
+retained/copied input, buffered output, and continuation storage remain covered
+by live accounted owners under §§24.4–24.5; buffering creates no accounting
+exception.
+
 Global state owns shared/finalized state where the operator requires it.
 
 No operator depends on an implicit process thread-local singleton for query correctness.
@@ -20806,6 +20974,11 @@ The executor may pass borrowed vectors/chunks synchronously across streaming ope
 Such borrowed data remains a value-stable logical view under §23.10 for the
 entire downstream consumption interval; keeping the owner merely allocated is
 not sufficient.
+
+Under §26.4.2, lifecycle resolution or an operator's backing-release
+acknowledgment alone does not permit physical reset/reuse: both operator and
+downstream borrow dependencies must have ended, or an exact §§23.10–23.13
+ownership mechanism must independently preserve every required view.
 
 Before the upstream owner is reset/reused:
 
@@ -20848,6 +21021,21 @@ Pipeline early stop is distinct from `query cancellation`.
 It stops only the safely unnecessary upstream portion of the execution graph.
 
 It MUST NOT abort the transaction, report QueryCancelled, or prevent required blocking/side-effect work elsewhere in the query from completing.
+
+Under §§20.12 and 20.14.5's owning demand rules, valid early stop may resolve
+§26.4.2's accepted-input lifecycle by safely abandoning unnecessary remainder.
+That remainder need not be processed merely to acknowledge consumption or
+exhaust a source; cleanup is still required. No new input is admitted, and
+subsequently undemanded upstream work cannot become visible merely to complete
+the handoff protocol.
+
+If early stop is established while offering final output, the operator
+withholds new-input readiness immediately. Section 26.4.1 still requires the
+output-available transition and its downstream consumption or valid ownership
+handoff before terminal completion with no consumable output. The pending
+terminal-control transition MUST NOT request another upstream input. Failure,
+cancellation, or valid early stop requires no otherwise unnecessary source
+terminal probe.
 
 ## 26.9 Single-thread first, parallel-ready
 
