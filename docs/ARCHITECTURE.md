@@ -22956,7 +22956,10 @@ Correctness of the write protocol wins over artificial vectorization of lock acq
 
 For each target, the UNIQUE check receives only that target's exact revalidated old RID as `excluded_old_rid` when retaining a key. It does not exclude another target, another version with the same TxnId, or another current-command replacement. Immediate collision/key-swap behavior is §11.10.6.
 
-The v1 mutation/write phase is single-worker unless a later architecture explicitly defines parallel transaction-write coordination.
+In v1, the mutation/write-publication phase of `PhysicalInsert`,
+`PhysicalUpdate`, and `PhysicalDelete` is single-worker. This restriction does
+not independently require their input scans, target materialization, or
+expression evaluation to be single-worker.
 
 ## 31.8 DELETE execution
 
@@ -23054,9 +23057,15 @@ PhysicalVacuum invokes the Chapter-14 VacuumManager/reclamation protocol.
 
 It is a maintenance operator, not a requirement to express vacuum's internal page/index work as ordinary relational Filter/Project/Hash operators.
 
-It may later expose progress/debug result chunks without changing vacuum correctness ownership.
+PhysicalVacuum produces no relational result-row bag; successful execution is
+reported through ordinary command completion. Internal tracing, metrics,
+profiling, or debug instrumentation do not define SQL result rows.
 
-V1 vacuum execution remains conservatively serialized according to its maintenance/storage coordination rules rather than being parallelized implicitly by the general query scheduler.
+One PhysicalVacuum pass is not implicitly parallelized internally by the
+general query scheduler. Chapter 14 is authoritative for maintenance
+concurrency: it serializes same-table passes without serializing
+different-table passes and permits coexistence with ordinary DML and ANALYZE
+under its ownership rules.
 
 ### 31.12.1 Physical ANALYZE
 
@@ -23073,7 +23082,10 @@ query cancellation
 profiling
 ```
 
-The baseline implementation is single-coordinator.
+In v1, one coordinator owns each `PhysicalAnalyze` statement and its
+transactional statistics publication. This control-operator ownership does not
+prohibit vectorized or batched collection work permitted by Chapter 34 and
+introduces no parallel ANALYZE capability.
 
 `LogicalAnalyze` lowers directly to `PhysicalAnalyze`; it does not enter join-order/access-path enumeration merely to rediscover that v1 ANALYZE performs its required full visible heap scan.
 
