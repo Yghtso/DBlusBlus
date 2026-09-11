@@ -22606,11 +22606,9 @@ row/payload handle
 
 Full key values remain reachable for tie-breaking.
 
-The initial normalized prefix target is:
-
-```text
-8–16 bytes
-```
+Normalized-prefix width is an implementation/configuration tuning choice and
+may vary by key shape or implementation. A zero-length or shorter prefix is
+valid when a sound normalized prefix is not useful or available.
 
 The normalized prefix is an **order-preserving prefix of the resolved SQL comparator**, not merely a hash.
 
@@ -22655,11 +22653,15 @@ No raw-byte comparator substitutes for semantic comparison unless the type's nor
 
 ## 30.4 In-memory sort
 
-The initial implementation uses a high-quality comparison sort such as an introsort-style standard/library algorithm over the compact sort records/handles.
+In-memory sorting MAY use a high-quality comparison sort over the compact sort
+records/handles, or another sorting algorithm proven equivalent to the complete
+semantic comparator over its supported key domain.
 
 The expensive payload is not repeatedly moved during comparison sorting.
 
-Custom radix sorting is a future optimization, not a correctness dependency.
+Radix, normalized-key, or hybrid sorting strategies MAY be used only where
+their ordering is proven equivalent to the complete semantic comparator;
+otherwise execution uses the complete comparator/fallback path.
 
 ## 30.5 External merge sort
 
@@ -22773,9 +22775,16 @@ remain governed by their existing resource and runtime owners.
    forbidden.
 9. Top-N sorts retained output before emission.
 10. Equal-key SQL sort need not be stable unless another explicit semantic requirement says otherwise.
-11. An eligible Top-N is semantically equivalent to an exact ordering provider
-    followed by `PhysicalLimit`, including bag, semantic order, comparator,
-    tie, demanded-error, and transaction behavior.
+11. An eligible Top-N belongs to the same Chapter-20 permitted ordered-result
+    family as any exact ordering provider followed by `PhysicalLimit`, including
+    bag cardinality, semantic order, comparator, demanded-error, schema/
+    `LogicalSlotId`, and transaction/result behavior. When LIMIT/OFFSET cuts
+    through a class equal on every resolved ORDER BY key, valid providers or
+    executions MAY choose and order different actual child occurrences within
+    that class; each result still preserves every strict comparator relation,
+    returns only actual child occurrences, and neither deduplicates nor
+    fabricates occurrences. No hidden RID, payload, or stable-input tiebreaker
+    becomes SQL semantics.
 12. When Top-N is ineligible, search retains another legal exact ordering
     provider followed by `PhysicalLimit`; this includes `PhysicalSort` followed
     by `PhysicalLimit` when no existing provider satisfies the required order.
