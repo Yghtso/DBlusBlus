@@ -13441,8 +13441,10 @@ of SQL semantics.
 
 These scalar operator boundaries do not define aggregate reduction order.
 `SUM(FLOAT64)` and `AVG(FLOAT64)` are the separate n-ary operations in §29.3:
-they accumulate finite inputs exactly and round only at aggregate Finalize so
-worker/chunk/spill shape cannot change the result.
+every demanded finite occurrence contributes exactly once to an admitted
+binary64 reduction tree. Each tree edge uses this section's binary64 addition,
+so worker, chunk, Combine, and spill shape may change finite low result bits
+within §29.3's bounded aggregate contract.
 
 Execution, constant folding, hashing/grouping support, and B+ ordering MUST NOT silently use incompatible equality/order rules.
 
@@ -13987,6 +13989,23 @@ non-NULL NaNs match because canonical FLOAT64 equality says TRUE. Hash join must
 reproduce that result. GROUP BY/DISTINCT use the same non-NULL equality but place
 all NULLs into one group/duplicate class; that grouping NULL rule never leaks
 into ordinary `=`.
+
+The canonical scalar representative of a GROUPING-equivalence class is defined
+by `CanonicalGroupingRepresentative(value)`:
+
+```text
+typed NULL                           -> the same typed NULL state
+FLOAT64 -0.0 or +0.0                -> +0.0
+any grouping-equivalent FLOAT64 NaN -> the canonical quiet NaN semantic value
+every other non-NULL v1 scalar      -> its existing semantic value representation
+```
+
+The mapping is componentwise for composite grouping values. VARCHAR class
+members already have identical lengths and bytes, and BOOLEAN, integer, DATE,
+and TIMESTAMP classes require no additional normalization. This mapping owns
+only the relational output representative of a GROUPING-equivalence class; it
+does not rewrite ordinary scalar values, scalar arithmetic, casts, persisted
+FLOAT64 payloads, or persistent key encodings.
 
 B+ uses a deterministic total order including NULL placement and BOOLEAN
 physical order. SQL FLOAT64 and every SQL-orderable non-NULL type use the same
@@ -16705,6 +16724,14 @@ VARCHAR uses binary byte equality
 
 This grouping equivalence is intentionally different from ordinary SQL `=` with NULL, which returns NULL.
 
+Every grouping-key component emitted by `LogicalAggregate` is materialized as
+the §17.10.3 `CanonicalGroupingRepresentative` of its class. Thus a group
+containing `-0.0` and `+0.0` emits `+0.0`, and a group containing multiple
+grouping-equivalent NaN encodings emits the canonical Chapter-17 NaN. Composite
+group keys apply the mapping independently to each component. This selects the
+output value representation without changing grouping equivalence, group or
+aggregate multiplicity, output schema, `LogicalSlotId`, or ordering semantics.
+
 Every hashing or comparison implementation for aggregate/DISTINCT must agree
 with this contract.
 
@@ -16714,7 +16741,14 @@ with this contract.
 
 `LogicalDistinct` preserves the child schema and `LogicalSlotId` values while
 collapsing each class under the grouping-equivalence rule to one row
-occurrence. It is an explicit exception to the bag multiplicity baseline.
+occurrence. The emitted row is the componentwise
+§17.10.3 `CanonicalGroupingRepresentative` of that class. Consequently,
+DISTINCT over `-0.0` and `+0.0` emits one row containing `+0.0`, and DISTINCT
+over grouping-equivalent NaN encodings emits one row containing the canonical
+Chapter-17 NaN. No first input, hash insertion, worker, spill replay, or sorted
+physical class member defines the result representation. This canonicalization
+changes neither the preserved child schema nor its `LogicalSlotId` values.
+`LogicalDistinct` is an explicit exception to the bag multiplicity baseline.
 
 DISTINCT is not hidden as an opaque projection flag.
 
@@ -18966,8 +19000,11 @@ Physical capability affects plan shape, resource use, and performance, not the
 validity or frozen semantics of a logical query for which another conforming
 realization exists. Search MUST retain a conforming alternative when an
 optional physical algorithm is ineligible. Cost may choose only among legal
-alternatives and cannot change result values or ordering, mandatory errors, or
-transaction state.
+alternatives and cannot change the owning semantic result contract, ordering,
+mandatory errors, or transaction state. A result may vary only where that
+contract explicitly defines a bounded family of legal results, such as
+§29.3.4's FLOAT64 aggregate reduction trees; algorithm choice creates no
+additional variability.
 
 In particular:
 
@@ -19989,10 +20026,13 @@ the applicable hard limits, execution terminates with controlled
 failure, including `ENOSPC`, remains `SpillIOError`; cancellation remains
 `QueryCancelled`.
 
-Pressure handling preserves exact values, NULL state, bag multiplicity, required
-ordering, demanded semantic errors, and transaction behavior. It MUST NOT obtain
-progress through approximation, truncation, deduplication, row dropping, or
-required-order violation. This protocol does not introduce general runtime
+Pressure handling preserves exact retained/input values, NULL state, bag
+multiplicity, required ordering, demanded semantic errors, transaction behavior,
+and the owning operator's result contract. It may select a different result
+only where that contract explicitly admits bounded physical-reduction
+variability, as in §29.3.4; this is not permission for approximation,
+truncation, deduplication, row dropping, or required-order violation. This
+protocol does not introduce general runtime
 replanning, optimizer re-entry, or arbitrary physical-plan replacement; an
 operator uses only exact actions already authorized by its execution contract.
 
@@ -20590,7 +20630,7 @@ precedence relative to ordinary expression errors.
 8. Vectorized short-circuiting does not eagerly execute skippable volatile/error-producing branches.
 9. VARCHAR/FLOAT64 comparison semantics agree with the type/index contracts.
 10. Computed varlen results own bytes for their required lifetime.
-11. Aggregate argument vectors supply successfully evaluated typed values to §29.3; vector size and representation never select a different aggregate reduction semantic.
+11. Aggregate argument vectors supply every successfully evaluated demanded typed occurrence to §29.3 exactly once; vector shape may select a legal FLOAT64 reduction tree but cannot change admission, multiplicity, or another aggregate's semantics.
 12. Only semantically demanded ordinary non-DML runtime expression failures enter §25.1.1's candidate preorder; Chapter-17/20 child order first determines each occurrence-level failure.
 13. Ordinary non-DML error selection uses source-derived provenance and the closed conceptual-cause order, never row, lane, chunk, representation, worker, address, or physical visitation order.
 14. DML, specialized aggregate/subquery, resource, cancellation, corruption, and internal-invalid-state errors retain their separate canonical owners.
@@ -21911,11 +21951,11 @@ parallel combine
 spill/repartition processing
 ```
 
-`Update`, `Combine`, and `Finalize` must implement the exact semantic states and
-Merge laws in §29.3. They are not permission to choose host-width integer
-accumulators or physical-order FLOAT64 reduction. A descriptor unable to
-preserve that state cannot be capability-enabled for serial, parallel, or spill
-execution.
+`Update`, `Combine`, and `Finalize` must implement the semantic states and
+reduction laws in §29.3. They are not permission to choose host-width integer
+accumulators or an unbounded, unspecified FLOAT64 variation. A descriptor unable
+to preserve the applicable exact-state or admitted binary64-tree contract cannot
+be capability-enabled for serial, parallel, or spill execution.
 
 The executor does not invoke one virtual aggregate callback per input row.
 
@@ -21923,13 +21963,13 @@ Function/operator dispatch is resolved per aggregate/vector batch.
 
 ## 29.3 V1 aggregate semantics registry
 
-This section is the canonical closed v1 aggregate-value contract. It fixes the
-observable state, Merge, finalization, and numerical errors independently of
-the physical aggregate implementation. The same logical input to one group
-MUST produce the same aggregate value or aggregate numerical error regardless
-of worker count, vector boundaries, input partitioning, hash iteration order,
-spill/repartition decisions, Merge tree, or thread scheduling. “Usual
-floating-point variation” is not a conforming result.
+This section is the canonical closed v1 aggregate-value contract. It fixes
+state, reduction, finalization, and numerical errors independently of physical
+container layout. COUNT, integer SUM/AVG, and MIN/MAX produce the same value or
+aggregate numerical error for the same logical group under every legal
+execution shape. FLOAT64 SUM/AVG instead admit only the precisely bounded
+binary64 reduction-tree result variability in §29.3.4; “usual floating-point
+variation” without such a tree is not a conforming result.
 
 Aggregate argument expressions are evaluated under the closed Chapter-17
 scalar registry. An argument expression error occurs before that row supplies
@@ -21955,12 +21995,13 @@ ExactSignedInteger:
 ExactNonnegativeCount:
     an exact mathematical integer >= 0
 
-ExactFiniteDyadic:
-    an exact signed integer coefficient multiplied by 2^-1074
+Binary64Partial:
+    EMPTY or one binary64 subtotal produced by an admitted finite-input
+    reduction tree
 
 FloatAggregateState:
     saw_nonnull
-    exact sum of every finite input as ExactFiniteDyadic
+    finite_partial as Binary64Partial
     saw_nan
     saw_positive_infinity
     saw_negative_infinity
@@ -21969,19 +22010,26 @@ OrderedCandidate<T>:
     EMPTY or one canonically represented non-NULL scalar T
 ```
 
-Every finite binary64 input is exactly an integer multiple of `2^-1074`, so
-`ExactFiniteDyadic` loses no input bit. Its coefficient and the exact integer
-states are logically variable-range and never wrap. An implementation may use
-multiword integers, exponent bins/superaccumulators, or another exact
-representation; host `long double`, compiler excess precision, optional
-`__int128`, and result-width checked accumulation are not semantic substitutes.
+The exact integer states are logically variable-range and never wrap. An
+implementation may use multiword integers, another exact representation, or an
+owned variable-size backing; host overflow and result-width checked partial
+accumulation are not semantic substitutes.
+
+`Binary64Partial` has binary64 semantics at every reduction edge. Host
+`long double`, hidden x87 excess precision, an exact dyadic/superaccumulator
+result, or another representation is conforming only when its observable result
+is proven equal to one admitted §29.3.4 binary64 reduction tree; none defines a
+separate aggregate semantic result.
+
 State storage is charged to query memory and may use the existing spill
-contract. Failure to preserve an exact state is an ordinary query
-memory/resource error, never permission to return an approximation.
+contract. Failure to preserve required state is an ordinary query
+memory/resource error, never permission to omit contributions or return an
+unadmitted approximation.
+
 The descriptor's fixed `StateSize` may contain an inline state or an owned
 handle to variable backing; any such backing is aggregate-state memory covered
-by `Destroy`, query accounting, spill, and cancellation cleanup. This semantic
-range requirement does not require one heap allocation per input value.
+by `Destroy`, query accounting, spill, and cancellation cleanup. Exact integer
+range does not require one heap allocation per input value.
 
 ### 29.3.2 Closed overload table
 
@@ -21994,10 +22042,10 @@ means §29.3.6 normalization before comparison or retention.
 | `COUNT(expr)` | any concrete v1 scalar TypeId | `INT64 NOT NULL` | count only non-NULL values; empty/all-NULL = `0` | exact nonnegative non-NULL count, with the same permitted overflow marker | same as `COUNT(*)` | same as `COUNT(*)` |
 | `SUM` | `INT32` | nullable `INT64` | IGNORE NULL; no non-NULL = NULL | `saw_nonnull` + `ExactSignedInteger` | exact integer addition | exact final sum in `[-2^63,2^63-1]` -> INT64; otherwise `NUMERIC_OVERFLOW` |
 | `SUM` | `INT64` | nullable `INT64` | IGNORE NULL; no non-NULL = NULL | `saw_nonnull` + `ExactSignedInteger` | exact integer addition | exact final sum in `[-2^63,2^63-1]` -> INT64; otherwise `NUMERIC_OVERFLOW` |
-| `SUM` | `FLOAT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `FloatAggregateState` | exact dyadic addition plus commutative OR of special-value flags | §29.3.5 special-value rule; otherwise one correctly rounded binary64 conversion |
+| `SUM` | `FLOAT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `FloatAggregateState` | one admitted binary64 addition edge for two nonempty finite partials; commutative OR of explicit-input special flags | §29.3.5 special-input rule; otherwise canonicalized root of the selected legal tree |
 | `AVG` | `INT32` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `ExactSignedInteger` sum + `ExactNonnegativeCount` | exact componentwise addition | correctly round exact rational `sum/count` once to binary64, nearest/ties-even |
 | `AVG` | `INT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `ExactSignedInteger` sum + `ExactNonnegativeCount` | exact componentwise addition | correctly round exact rational `sum/count` once to binary64, nearest/ties-even |
-| `AVG` | `FLOAT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `FloatAggregateState` + `ExactNonnegativeCount` | exact componentwise addition plus special flags | §29.3.5 special-value rule; finite case rounds exact rational `dyadic_sum/count` once |
+| `AVG` | `FLOAT64` | nullable `FLOAT64` | IGNORE NULL; no non-NULL = NULL | `FloatAggregateState` + `ExactNonnegativeCount` | admitted binary64 partial addition + exact count addition + special-flag OR | §29.3.5 special-input rule; otherwise one binary64 division of selected subtotal by converted exact count |
 | `MIN` | `INT32`, `INT64`, `FLOAT64`, `VARCHAR`, `DATE`, or `TIMESTAMP` | nullable input TypeId | IGNORE NULL; no non-NULL = NULL | `OrderedCandidate<T>` | retain canonical lesser value under Chapter-17 order | canonical candidate; no arithmetic overflow |
 | `MAX` | `INT32`, `INT64`, `FLOAT64`, `VARCHAR`, `DATE`, or `TIMESTAMP` | nullable input TypeId | IGNORE NULL; no non-NULL = NULL | `OrderedCandidate<T>` | retain canonical greater value under Chapter-17 order | canonical candidate; no arithmetic overflow |
 
@@ -22043,36 +22091,61 @@ failure while preserving the exact state remains separately possible. AVG's
 internal count has no INT64 result-width limit and remains exact even when a
 separate COUNT over the same input would overflow.
 
-### 29.3.4 FLOAT64 exact finite accumulation and rounding
+### 29.3.4 FLOAT64 binary reduction and finalization
 
-For SUM/AVG FLOAT64, every finite input contributes its exact IEEE-754 dyadic
-value to `ExactFiniteDyadic`. Update and Combine perform exact coefficient
-addition; they do not round partial states. For a finite SUM, Finalize rounds
-the complete exact dyadic sum exactly once to IEEE-754 binary64 using
-round-to-nearest, ties-to-even. Overflow produces signed infinity. A nonzero
-exact binary64 sum is an integer multiple of the smallest subnormal and is
-therefore representable at least as a subnormal; an exact zero finalizes as
-`+0.0`.
+For one FLOAT64 SUM/AVG group, every demanded non-NULL finite logical
+occurrence is one leaf and participates exactly once in a finite binary
+reduction tree selected by physical execution. The tree contains no inactive
+vector lane, synthetic duplicate, or value-level deduplication. A CONSTANT
+vector of cardinality N contributes N leaves, and repeated DICTIONARY
+occurrences remain repeated leaves.
 
-For finite AVG, Finalize divides the exact dyadic sum by the exact positive
-count as a mathematical rational and correctly rounds that rational exactly
-once to binary64, nearest/ties-even. It does not first round SUM and then divide,
-and it never averages worker-local averages. Underflow yields the correctly
-rounded subnormal or `+0.0`; every exact-zero AVG also yields `+0.0`.
-The AVG count increments for every non-NULL input, including NaN, infinity, and
-signed zero; the special-value flags determine the result before finite
-rational division where applicable.
+Every internal tree edge is one IEEE-754 binary64 addition in round-to-nearest,
+ties-to-even mode, and its subtotal is binary64. An empty partial state is the
+identity without a synthetic addition; combining two nonempty partials adds
+their binary64 subtotals through one such edge. Update may form any admitted
+tree over its prior nonempty partial and newly admitted leaves. Input encounter
+order where no relational order is required, vector/chunk boundaries, worker
+partitioning and scheduling, local-state partitioning, Combine-tree shape,
+hash-versus-ordered aggregation, and spill partition/replay shape may select
+different legal trees.
 
-These n-ary aggregate semantics are intentionally distinct from repeated
-scalar FLOAT64 `+`. Chapter 17 rounds each operator in the bound scalar
-expression tree, so scalar `(a+b)+c` retains two operator rounding boundaries.
-`SUM(a)` and AVG use the exact aggregate states above specifically so physical
-reduction shape is not observable.
+Different legal trees may produce different binary64 roots. When competing
+roots are finite, this includes finite low-bit differences; edge overflow may
+also make one tree finite and another infinite or NaN. Every result must
+nevertheless be the root of one admitted tree over exactly the demanded finite
+occurrences. Hidden excess precision, a changed rounding mode, an
+arbitrary-precision or exact-dyadic reduction, or another mechanically
+different representation is permitted only when proven observationally
+equivalent to one admitted binary64 tree.
+
+When §29.3.5's explicit-input classification does not determine FLOAT64 SUM,
+Finalize uses the selected tree root. Binary64 overflow at a tree edge produces
+ordinary IEEE infinity, not `NUMERIC_OVERFLOW`; subsequent tree edges retain
+ordinary binary64 behavior. Final result representation maps any zero root to
+`+0.0` and any NaN root to the canonical Chapter-17 quiet NaN without
+reinterpreting the selected reduction history.
+
+FLOAT64 AVG retains the same selected binary64 subtotal plus an exact
+non-NULL count. The count increments for every non-NULL input, including NaN,
+infinity, and signed zero, and has no INT64 result-width limit. In the ordinary
+finite case, Finalize converts that exact nonnegative integer to binary64 using
+round-to-nearest, ties-to-even, then performs one binary64
+`subtotal / converted_count` division in the same rounding mode. The exact
+count does not become approximate merely because this division operand is
+rounded; an internal count beyond finite binary64 conversion range converts to
+`+Infinity` rather than creating a COUNT-width error or practical row limit.
+AVG does not average worker-local averages. Its exposed zero and NaN
+representations are canonicalized exactly as for SUM.
+
+These n-ary aggregate semantics remain distinct from one fixed scalar
+expression tree: Chapter 17 fixes each scalar operator boundary, while physical
+aggregate execution may select any reduction tree admitted above.
 
 ### 29.3.5 FLOAT64 special values
 
-Special-value finalization is closed and order-independent for both SUM and
-AVG after at least one non-NULL input:
+Explicit-input special-value finalization is closed and order-independent for
+both SUM and AVG after at least one non-NULL input:
 
 ```text
 if saw_nan:
@@ -22084,15 +22157,17 @@ else if saw_positive_infinity:
 else if saw_negative_infinity:
     -Infinity
 else:
-    finite exact SUM/AVG finalization from §29.3.4
+    selected finite-input binary64 reduction from §29.3.4
 ```
 
 The canonical NaN is the Chapter-17 semantic NaN and persisted bit pattern
 `0x7ff8000000000000` when materialized by a canonical scalar codec. NaN payload
-or encounter order is never retained. Finite values cannot cancel an infinity.
-All combinations whose exact finite result is zero—including only `-0.0`
-inputs, mixed signed zeros, or exact cancellation—finalize as `+0.0` for SUM
-and AVG.
+or encounter order is never retained. Finite values cannot cancel an explicit
+input infinity. An infinity or NaN created by finite-input tree arithmetic does
+not retroactively set an explicit-input flag and follows §29.3.4's tree-root
+rule. Every zero result, including a zero tree root from only `-0.0` inputs,
+mixed signed zeros, or cancellation in the selected tree, finalizes as `+0.0`
+for SUM and AVG.
 
 ### 29.3.6 MIN/MAX canonical representation
 
@@ -22119,48 +22194,62 @@ Multiple NaN payloads cannot make output bytes depend on encounter order.
 
 ### 29.3.7 Merge, execution shape, spill, and errors
 
-Every aggregate Merge is a semantic monoid operation over partial states with
-the aggregate's initialized empty state as identity: exact
-integer/dyadic/count addition, commutative OR of `saw_nonnull` and every
-special-value flag, or canonical MIN/MAX selection. For any
-states derived from the same logical input multiset, every legal Merge tree has
-the same Finalize value/error. In-memory state bytes need not be identical when
-that difference is not semantically observable.
+COUNT, integer SUM/AVG, and MIN/MAX Merge retain the aggregate's initialized
+empty state as identity and their existing exact associative semantic laws:
+exact integer/count addition or canonical MIN/MAX selection. Every legal Merge
+tree over those states has the same Finalize value/error.
 
-The rule applies independently to the single global state and to every grouped
-state. Vector Update may batch work, parallel workers may own local states, and
-hash/sorted aggregation may visit groups in different orders, but none may use
-rounded FLOAT64 subtotals or result-width integer subtotals in place of the
-semantic state. Hash output group order remains unspecified; group values do
-not. Capability-enabled `PhysicalSortAggregate` has exactly the same aggregate
-semantics as `PhysicalHashAggregate`.
+FLOAT64 SUM/AVG use the different §29.3.4 rule. An empty finite partial is the
+identity; Combine of two nonempty finite partials contributes one binary64
+addition edge, exact counts combine exactly, and explicit-input special flags
+combine by commutative OR. A different legal Combine tree may change its
+binary64 root, including finite low bits or overflow-generated infinity/NaN,
+but cannot change occurrence membership, NULL admission, exact count,
+explicit-input special classification, result type/nullability, or canonical
+exposed zero/NaN representation. In-memory state bytes need not be identical
+when that difference is not otherwise observable.
 
-Spill/repartition must preserve every semantic component. It may serialize an
-explicit query-temporary exact state, spill/replay qualifying argument values,
-or use another exact equivalent. It may not serialize only an already-rounded
-FLOAT64 subtotal. Temporary encoding remains query-local under Chapter 24 and
-changes no database persisted format.
+These rules apply independently to the global state and every grouped state.
+Vector Update may batch work, parallel workers may own local states, and
+hash/sorted aggregation may visit groups in different orders. No path may use
+result-width integer subtotals, average partial averages, or admit a FLOAT64
+result outside the §29.3.4 tree model. Hash output group order remains
+unspecified. Capability-enabled `PhysicalSortAggregate` and
+`PhysicalHashAggregate` have identical semantics except for FLOAT64 SUM/AVG's
+tree-selected binary64 root expressly admitted by different legal trees.
+
+Spill/repartition preserves every semantic component. It may spill/replay
+qualifying argument values or serialize query-temporary partial state. A
+serialized FLOAT64 partial stores the exact binary64 subtotal bits, exact count
+where applicable, explicit-input special flags, and other descriptor-owned F2
+state; it is not converted through decimal text. Restored state continues as a
+node in an admitted tree. Spill partition/replay shape may therefore change the
+FLOAT64 tree root, but cannot omit or duplicate contributions, narrow an exact
+count, lose flags, or change another aggregate result. Temporary encoding
+remains query-local under Chapter 24 and changes no database persisted format.
 
 Aggregate constant evaluation over an exactly known relational input uses this
-same registry; host loops with different reduction behavior are forbidden.
-Exact state memory is ordinary query-accounted memory. If memory/spill needed
-to preserve exactness fails, execution reports the existing `OutOfMemory` or
-`SpillIOError`; it never substitutes an approximate result.
+same registry and selects one admitted FLOAT64 tree; it need not reproduce every
+other legal runtime tree. Exact integer/count state and all other aggregate
+state are ordinary query-accounted memory. If required memory or spill fails,
+execution reports the existing `OutOfMemory` or `SpillIOError`; it never
+uses resource failure to omit work or select an unadmitted approximation.
 
-The value/numerical-error invariance assumes successful demanded argument/child
-evaluation and availability of the execution resources already admitted by the
-query-memory/spill contracts. External OOM, disk-full, cancellation, or spill
-I/O failure remains an operational query failure and may prevent any aggregate
-value from being produced; it cannot legalize a different numeric result or an
-inexact fallback.
+The exact-aggregate invariance and bounded FLOAT64 variability assume successful
+demanded argument/child evaluation and availability of resources admitted by
+the query-memory/spill contracts. External OOM, disk-full, cancellation, or
+spill I/O failure remains an operational query failure and may prevent any
+aggregate value from being produced; it cannot legalize a result outside the
+applicable aggregate contract.
 
 Input-expression/child errors occur before aggregate finalization when their
 relational path is semantically demanded. COUNT overflow is not raised early,
 and integer SUM cannot raise from an intermediate subtotal. After complete
 input consumption, every group's aggregate states are numerically validated
 before the first aggregate result row is externally exposed. All v1 aggregate
-range failures are `NUMERIC_OVERFLOW`; if more than one aggregate descriptor
-would fail, the descriptor with the lowest semantic aggregate ordinal supplies
+range failures—COUNT result width and integer SUM result width—are
+`NUMERIC_OVERFLOW`; if more than one aggregate descriptor would fail, the
+descriptor with the lowest semantic aggregate ordinal supplies
 the diagnostic. The binder assigns that ordinal by first aggregate occurrence
 in ascending source-byte position within the query block and carries it through
 rewrites; repeated shared occurrences retain the first ordinal. Group identity
@@ -22172,40 +22261,46 @@ successful aggregate-row prefix is exposed.
 
 ### 29.3.8 Normative boundary vectors
 
-The following use already-decoded input values; every permutation has the same
-result:
+The following use already-decoded input values. `TREE-INVARIANT` means every
+admitted execution shape has the displayed result. `TREE-DEPENDENT` gives
+results for explicit legal parenthesizations and does not establish one
+universal result for that input bag.
 
-| Inputs | Required result |
-|---|---|
-| `SUM(FLOAT64: 1e16, -1e16, 1)` | exactly `1.0` |
-| `SUM(+0.0)` | `+0.0` |
-| `SUM(-0.0)` | `+0.0` |
-| `SUM(+0.0,-0.0)` | `+0.0` |
-| `SUM(+Infinity, finite...)` | `+Infinity` unless a rule above produces NaN |
-| `SUM(-Infinity, finite...)` | `-Infinity` unless a rule above produces NaN |
-| `SUM(+Infinity,-Infinity)` | canonical NaN |
-| `SUM(any NaN, finite...)` | canonical NaN |
-| `SUM(max_finite,max_finite)` | `+Infinity` |
-| `SUM(smallest_positive_subnormal)` | that exact subnormal (`2^-1074`) |
-| `SUM(1.0,2^-53)` | `1.0` by halfway ties-to-even |
-| `SUM(INT64_MAX)` | `INT64_MAX` |
-| `SUM(INT64_MAX,1)` | `NUMERIC_OVERFLOW` |
-| `SUM(INT64_MAX,1,-1)` | `INT64_MAX` |
-| `SUM(INT64_MIN)` | `INT64_MIN` |
-| `SUM(INT64_MIN,-1)` | `NUMERIC_OVERFLOW` |
-| `SUM(INT64_MIN,-1,1)` | `INT64_MIN` |
-| `SUM(INT32_MAX,1)` | INT64 `2147483648` |
-| `COUNT = INT64_MAX` | `INT64_MAX` |
-| `COUNT = INT64_MAX+1` | `NUMERIC_OVERFLOW` at Finalize |
-| `AVG(empty)` or `AVG(all NULL)` | typed NULL |
-| `AVG(INT: 1,2)` | exactly `1.5` |
-| `AVG(INT64_MAX,INT64_MIN)` | exactly `-0.5` |
-| `AVG(FLOAT64: 1e16,-1e16,1)` | correctly rounded `1/3`, bits `0x3fd5555555555555` |
-| `AVG(+Infinity)` | `+Infinity` |
-| `AVG(+Infinity,-Infinity)` | canonical NaN |
-| `AVG(any NaN,1.0)` | canonical NaN |
-| `AVG(-0.0)` / `AVG(+0.0,-0.0)` | `+0.0` |
-| `AVG(smallest_positive_subnormal,+0.0)` | `+0.0`; exact `2^-1075` is halfway and ties to even zero |
+| Inputs / tree | Classification | Required result |
+|---|---|---|
+| `SUM(FLOAT64: ((1e16 + -1e16) + 1))` | TREE-DEPENDENT | `1.0` |
+| `SUM(FLOAT64: (1e16 + (-1e16 + 1)))` | TREE-DEPENDENT | `+0.0` after result canonicalization |
+| `SUM(+0.0)` | TREE-INVARIANT | `+0.0` |
+| `SUM(-0.0)` | TREE-INVARIANT | `+0.0` |
+| `SUM(+0.0,-0.0)` | TREE-INVARIANT | `+0.0` |
+| `SUM(+Infinity, finite...)` | TREE-INVARIANT | `+Infinity` unless the explicit-input rule produces NaN |
+| `SUM(-Infinity, finite...)` | TREE-INVARIANT | `-Infinity` unless the explicit-input rule produces NaN |
+| `SUM(+Infinity,-Infinity)` | TREE-INVARIANT | canonical NaN |
+| `SUM(any input NaN, finite...)` | TREE-INVARIANT | canonical NaN |
+| `SUM(max_finite,max_finite)` | TREE-INVARIANT | `+Infinity`; no `NUMERIC_OVERFLOW` |
+| `SUM(((max_finite + max_finite) + -max_finite))` | TREE-DEPENDENT | `+Infinity` |
+| `SUM(max_finite + (max_finite + -max_finite))` | TREE-DEPENDENT | `max_finite` |
+| `SUM(smallest_positive_subnormal)` | TREE-INVARIANT | that exact subnormal (`2^-1074`) |
+| `SUM(1.0,2^-53)` | TREE-INVARIANT | `1.0` by edge rounding, ties-to-even |
+| `SUM(INT64_MAX)` | TREE-INVARIANT | `INT64_MAX` |
+| `SUM(INT64_MAX,1)` | TREE-INVARIANT | `NUMERIC_OVERFLOW` |
+| `SUM(INT64_MAX,1,-1)` | TREE-INVARIANT | `INT64_MAX` |
+| `SUM(INT64_MIN)` | TREE-INVARIANT | `INT64_MIN` |
+| `SUM(INT64_MIN,-1)` | TREE-INVARIANT | `NUMERIC_OVERFLOW` |
+| `SUM(INT64_MIN,-1,1)` | TREE-INVARIANT | `INT64_MIN` |
+| `SUM(INT32_MAX,1)` | TREE-INVARIANT | INT64 `2147483648` |
+| `COUNT = INT64_MAX` | TREE-INVARIANT | `INT64_MAX` |
+| `COUNT = INT64_MAX+1` | TREE-INVARIANT | `NUMERIC_OVERFLOW` at Finalize |
+| `AVG(empty)` or `AVG(all NULL)` | TREE-INVARIANT | typed NULL |
+| `AVG(INT: 1,2)` | TREE-INVARIANT | exactly `1.5` |
+| `AVG(INT64_MAX,INT64_MIN)` | TREE-INVARIANT | exactly `-0.5` |
+| `AVG(FLOAT64: ((1e16 + -1e16) + 1))` | TREE-DEPENDENT | binary64 division `1.0 / 3.0`, bits `0x3fd5555555555555` |
+| `AVG(FLOAT64: (1e16 + (-1e16 + 1)))` | TREE-DEPENDENT | `+0.0` |
+| `AVG(+Infinity)` | TREE-INVARIANT | `+Infinity` |
+| `AVG(+Infinity,-Infinity)` | TREE-INVARIANT | canonical NaN |
+| `AVG(any input NaN,1.0)` | TREE-INVARIANT | canonical NaN |
+| `AVG(-0.0)` / `AVG(+0.0,-0.0)` | TREE-INVARIANT | `+0.0` |
+| `AVG(smallest_positive_subnormal,+0.0)` | TREE-INVARIANT | `+0.0`; binary64 division is halfway and ties to even zero |
 
 The empty-input COUNT/SUM/MIN/MAX cases remain exactly those in the registry
 table. Boundary verification may inject synthetic partial states rather than
@@ -22215,22 +22310,23 @@ materialize `INT64_MAX` rows.
 
 V1 explicitly forbids:
 
-1. worker-local repeated binary64 SUM followed by arbitrary binary64 partial merging;
-2. allowing worker scheduling, vector size, or hash iteration to change SUM/AVG;
-3. allowing spill partitioning or replay order to change an aggregate value/error;
-4. treating host `long double` or compiler excess precision as the aggregate semantic state;
-5. using `__int128` only when available and silently using INT64 accumulation elsewhere;
+1. omitting, duplicating, or deduplicating a demanded logical aggregate occurrence;
+2. treating one CONSTANT payload as one contribution regardless of cardinality, collapsing repeated DICTIONARY occurrences, or reading inactive lanes;
+3. using a FLOAT64 rounding mode other than binary64 nearest/ties-even at a reduction edge or final AVG division;
+4. using host `long double`, hidden excess precision, an exact accumulator, or another mechanism to produce a FLOAT64 result that is not equivalent to an admitted §29.3.4 tree;
+5. using `__int128` only when available and silently using INT64 accumulation elsewhere for exact integer state;
 6. reporting integer SUM overflow from an order-specific partial subtotal when the exact final sum fits;
 7. wrapping/saturating COUNT to an INT64 value instead of final `NUMERIC_OVERFLOW`;
-8. averaging worker-local averages, weighted or unweighted, instead of merging exact sum/count states;
-9. computing AVG from an already-rounded SUM result;
-10. retaining an encountered NaN payload or signed-zero sign according to encounter order;
-11. spilling only rounded FLOAT64 or narrowed integer partial results;
-12. making hash and ordered aggregation use different numerical semantics;
-13. returning one group's rows before another group's aggregate overflow is validated;
-14. using physical group order to choose a different aggregate error category/ordinal;
-15. folding a constant aggregate with a host reduction that differs from runtime;
-16. falling back to an approximate accumulator after exact-state memory/spill failure.
+8. averaging worker-local averages, weighted or unweighted, instead of combining FLOAT64 subtotal and exact-count state;
+9. narrowing, rounding, wrapping, or otherwise corrupting AVG's exact count;
+10. losing or deriving explicit-input NaN/infinity flags from physical encounter order;
+11. exposing a noncanonical FLOAT64 NaN payload or negative-zero SUM/AVG result;
+12. spilling FLOAT64 partial state through decimal text, changing its binary64 subtotal bits, losing flags, or narrowing exact integer/count state;
+13. applying FLOAT64 tree variability to COUNT, integer SUM/AVG, MIN/MAX, grouping classes, or canonical GROUP BY/DISTINCT representatives;
+14. returning one group's rows before another group's aggregate overflow is validated;
+15. using physical group order to choose a different aggregate error category/ordinal;
+16. folding a constant FLOAT64 aggregate to a result that corresponds to no admitted reduction tree;
+17. falling back to omitted work, an unadmitted approximation, or incompatible precision after memory/spill failure.
 
 ## 29.4 Group hash table
 
@@ -22262,6 +22358,14 @@ VARCHAR grouping is binary-byte equality
 ```
 
 This does not alter ordinary SQL `=` semantics with NULL.
+
+The group table's internal key representation is implementation-defined subject
+to the equality, ownership, and hash-compatibility rules above. When a grouping
+key becomes relational output, every component is materialized using the
+canonical representative required by §20.9 and defined in §17.10.3. First input
+occurrence, hash seed, bucket layout or growth, worker/Combine order, spill
+partition/replay order, and hash-versus-ordered aggregation therefore cannot
+select different output bits for one group.
 
 All group-table/key/state memory is accounted through the aggregate's memory reservation.
 
@@ -22296,25 +22400,49 @@ then finish one partition at a time and combine equal groups.
 
 It does **not** require opaque in-memory aggregate state bytes to be a stable spill format.
 
-A later aggregate descriptor may opt into serialized partial-state spilling only after that aggregate defines safe temporary serialization plus Combine semantics.
+An aggregate descriptor is eligible for serialized partial-state spilling only
+when it defines safe temporary serialization plus Combine semantics.
 
-For every current v1 aggregate, either path must preserve §29.3's exact
-integer/count/dyadic state and special-value/canonical-candidate components.
-Rounded FLOAT64 partial sums and result-width integer partial sums are not safe
-spill states.
+For every v1 aggregate in §29.3, either path preserves its exact
+integer/count state, canonical-candidate state, or admitted FLOAT64 F2 state as
+applicable. FLOAT64 spill may replay raw qualifying values or serialize the
+exact bits of a binary64 subtotal together with the exact count where
+applicable, explicit-input special flags, and required descriptor state.
+Serialization through decimal text, result-width integer partials, lost flags,
+and narrowed counts are not safe spill states. Spill/replay may select a
+different legal FLOAT64 reduction tree and therefore a different binary64 root.
 
 Recursive repartition is bounded in the same spirit as Grace hash join.
 
-Aggregate spill MUST produce exactly the same groups and finalized values as an unlimited-memory execution.
+Aggregate spill MUST produce exactly the same groups and every invariant result
+component as an unlimited-memory execution. A FLOAT64 SUM/AVG root may differ
+only when each result corresponds to its path's admitted §29.3.4 tree.
 
 ## 29.7 DISTINCT
 
-`PhysicalDistinct` may reuse the group-hash infrastructure with:
+The baseline hash `PhysicalDistinct` is a blocking
+Sink -> successful Finalize -> Source operator and may reuse the group-hash
+infrastructure with:
 
 ```text
 all output columns = grouping key
 zero aggregate states
 ```
+
+Its Sink consumes every semantically demanded input occurrence, evaluates the
+required DISTINCT values, and inserts or locates their duplicate classes under
+GROUPING-equivalence hash semantics, retaining exactly one query-owned state
+entry per duplicate class. Merely observing one previously unseen class does
+not authorize skipping later demanded input, and the hash path emits no row
+during Sink.
+
+Finalize completes the hash DISTINCT build and publishes successful readiness.
+No dependent Source may observe incomplete or failed build state. After
+successful Finalize, Source emits exactly one result row for each duplicate
+class, materialized componentwise using the canonical representative required
+by §20.10 and defined in §17.10.3. Nonexecution and early termination remain
+governed by the semantic-demand and pipeline contracts in Chapters 20 and 26,
+not by physical first encounter of a class.
 
 Its equality is the same SQL grouping/distinct equivalence from Chapter 20:
 
@@ -22326,7 +22454,8 @@ binary VARCHAR equality
 
 Hash DISTINCT advertises no ordering property.
 
-A later physical planner may choose an ordered/streaming distinct when an input ordering makes that implementation beneficial.
+Ordered/streaming DISTINCT is a separate capability-conditional physical
+alternative and does not change the baseline hash path's blocking contract.
 
 ## 29.8 Aggregation output properties
 
@@ -22350,18 +22479,59 @@ The physical optimizer must insert/use Sort when SQL requires an ordering not ot
 8. Group keys/varlen data retained by a group table are deep-copied into group-owned storage.
 9. Global aggregation avoids a hash table.
 10. Spill does not require raw in-memory aggregate-state bytes to become a compatibility format.
-11. Spilled, serial, parallel, hash, and capability-enabled ordered aggregation produce identical §29.3 values/errors.
-12. FLOAT64 SUM/AVG use exact finite accumulation, commutative special flags, and one final correctly rounded conversion rather than arbitrary repeated addition.
+11. Spilled, serial, parallel, hash, and capability-enabled ordered aggregation preserve every §29.3 invariant; only FLOAT64 SUM/AVG's tree-selected binary64 root may differ through admitted reduction trees.
+12. FLOAT64 SUM/AVG use binary64 partial reduction, exact AVG count, order-independent explicit-input special flags, and canonical exposed zero/NaN representations.
 13. MIN/MAX retain canonical representatives for FLOAT64 zero/NaN equality classes.
 14. Hash aggregate/DISTINCT advertise no ordering.
+15. GROUP BY and DISTINCT output materialize the canonical representatives from §§17.10.3 and 20.9–20.10 independently of physical execution order or algorithm.
+16. PhysicalSortAggregate retains finalized rows in accounted, spill-capable, order-preserving query-temporary storage and exposes them only after complete successful readiness.
 
 ## 29.10 Ordered aggregation and streaming DISTINCT
 
-The architecture supports later ordered implementations when the physical capability registry enables them.
+`PhysicalSortAggregate` and ordered/streaming DISTINCT are
+capability-conditional physical alternatives. Sections 22.4.1 and 38.24 admit
+them only when the selected runtime capability is enabled and final physical-
+plan validation succeeds.
 
 `PhysicalSortAggregate` requires input ordered by its grouping keys.
 
-When that requirement is already satisfied, it may aggregate one key group at a time with memory approximately bounded by the current group plus aggregate state.
+The required compatible input `OrderingProperty` must be proven under Chapter
+37. When planning enforces it with `PhysicalSort`, Chapter 30 owns physical
+sorting and the complete comparator. The admitted ordering must make every
+grouping-equivalence class contiguous.
+
+When that requirement is satisfied, mutable aggregate execution state may be
+approximately bounded by one active key group. This is an aggregate-state
+bound, not a bound on total query memory or retained result size.
+
+Once a group's complete partial state has been combined and the group closes,
+`PhysicalSortAggregate` Finalizes and validates its aggregate states and
+materializes the complete result row. A successful row is copied into an
+order-preserving `RowCollection` or implementation-equivalent query-owned
+retained-row collection. That storage owns stable fixed and varlen values,
+uses exact extent arithmetic, is continuously `QueryMemoryManager`-accounted,
+and is eligible for `SpillManager` temporary storage under Chapter 24. It is
+query/attempt-local state with no WAL, persistence, recovery, or retry reuse.
+Its iteration preserves only the output `OrderingProperty` proven for the
+selected physical plan.
+
+Retaining a finalized row is not a dependent-pipeline handoff, client-visible
+output, or successful query publication. The retained rows become this
+operator's Source only after all semantically demanded input is consumed, all
+required local/global Combine work completes, every demanded group Finalizes
+and validates successfully, all retained-output preparation succeeds, and the
+blocking dependency publishes successful readiness under Chapter 26. A later
+group or pre-readiness retained-output failure discards prior retained rows and
+exposes no aggregate prefix.
+
+Materialization, reservation, retained-row representation, varlen ownership,
+spill, cancellation, and cleanup failures retain the categories and transaction
+effects in Chapters 24 and 39; no aggregate-spool error or numerical
+approximation fallback exists. A spill read failure while the ready Source is
+being consumed remains a failed query, and any already returned external
+prefix retains Chapter 31's general cursor semantics rather than becoming a
+successful complete result. The operator does not rewind or re-execute its
+original input to produce output.
 
 Otherwise physical planning may enforce the required grouping order with `PhysicalSort` and compare:
 
@@ -22371,15 +22541,27 @@ Sort + PhysicalSortAggregate
 
 against `PhysicalHashAggregate`.
 
-An ordered/streaming DISTINCT similarly requires input ordered compatibly by every DISTINCT key and can emit one row per adjacent duplicate class.
+An ordered/streaming DISTINCT similarly requires an input `OrderingProperty`
+proven under Chapter 37 and ordered compatibly by every DISTINCT key. The
+Chapter-30 comparator used to establish that order must make every DISTINCT
+equivalence class contiguous, after which the operator can emit one row per
+adjacent duplicate class. That row uses the same componentwise canonical
+representative required by §20.10; the first physical member of the adjacent
+class does not define its output representation.
 
 These implementations use the same grouping equality as §20.9/§29.7.
 
 They also use the same §29.3 aggregate state and Finalize rules. Input ordering
 may reduce memory or change unspecified group-row order; it cannot define a
-different numeric SUM/AVG or MIN/MAX representative.
+different MIN/MAX representative, GROUP BY key representative, or DISTINCT
+class representative. Different admitted FLOAT64 SUM/AVG reduction trees may
+produce different binary64 roots under §29.3.4. `PhysicalSortAggregate`
+materializes each grouping-key component under §20.9 exactly as
+`PhysicalHashAggregate` does.
 
-Until the runtime capability exists, the planner does not enumerate them.
+These operators advertise only the provided properties proven for the selected
+physical plan under Chapter 37. Chapter 38 owns capability eligibility,
+costed enumeration, and final physical-plan validation.
 
 ---
 
@@ -23079,10 +23261,14 @@ For global aggregation, each worker may maintain one local aggregate state block
 
 Aggregate descriptors' `Combine` contract is therefore mandatory for aggregates that participate in parallel execution.
 
-Every local state and Combine implements §29.3's exact semantic state. Worker
-count, partition ownership, final worker order, and Merge-tree shape are not SQL
-semantics. In particular, worker-local rounded FLOAT64 sums/averages and
-result-width integer subtotals are forbidden even when they would be faster.
+Every local state and Combine implements §29.3's applicable semantic state.
+COUNT, integer SUM/AVG, and MIN/MAX remain invariant to worker count, partition
+ownership, final worker order, and Merge-tree shape. FLOAT64 SUM/AVG parallel
+reduction instead corresponds to an admitted §29.3.4 binary64 tree: those
+physical choices may change the tree-selected binary64 root but cannot change occurrence
+membership, exact AVG count, explicit-input special classification, result
+type/nullability, or canonical zero/NaN representation. Result-width integer
+subtotals remain forbidden.
 
 ## 32.7 Parallel sort
 
@@ -26820,17 +27006,23 @@ Enumerate only when `PhysicalSortAggregate` capability is enabled.
 If child order already satisfies grouping keys:
 
 ```text
-child cost + approximately linear streaming aggregate CPU
+child cost
++
+approximately linear ordered-aggregate CPU
++
+retained-output materialization/spill cost
 ```
 
-with low state memory.
+Mutable aggregate-state memory is low, but the finalized-output collection is
+separately costed and assigned a spill-capable memory target under §§29.10,
+38.19, and 38.20.
 
 Otherwise compare:
 
 ```text
 Sort enforcement
 +
-streaming aggregate
+ordered aggregate plus retained-output storage
 ```
 
 against hash aggregation.
@@ -27392,7 +27584,7 @@ AB = semantic ABORT requested/completed through §15.6
 | bind/name/type/catalog error | FA | MA | unsupported feature is the same |
 | planner/optimizer resource failure | FA | MA | final-plan invariant failure is NC, not a user/resource error |
 | expression evaluation, arithmetic, division, or cast error | FA | MA | includes errors in later rows/batches |
-| aggregate COUNT/SUM final `NUMERIC_OVERFLOW` | FA | MA | §29.3 defers numerical range failure to deterministic Finalize after complete demanded input; physical reduction shape cannot change the outcome |
+| aggregate COUNT/integer-SUM final `NUMERIC_OVERFLOW` | FA | MA | §29.3 defers numerical range failure to deterministic Finalize after complete demanded input; physical reduction shape cannot change the outcome |
 | NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | §11.10 decides UNIQUE/PRIMARY KEY conflict membership; this table decides its transaction effect |
 | READ COMMITTED write conflict or stale-target revalidation | retry/FA | MA | transparent retry is permitted only while the flag is false |
 | REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; victim ownership remains protective through ABORTED publication and cannot remain held after canonical A3 cleanup |
@@ -27709,10 +27901,12 @@ MIN_INT / -1
 aggregate integer SUM/COUNT final result conversion
 ```
 
-Scalar overflow and §29.3 final aggregate range failure raise
-`ArithmeticError`/`NUMERIC_OVERFLOW`. Exact aggregate Update/Combine itself
-does not raise merely because a subtotal leaves the result domain; inability to
-allocate/preserve its exact state is instead the existing query resource error.
+Scalar overflow and §29.3 integer/COUNT final aggregate range failure raise
+`ArithmeticError`/`NUMERIC_OVERFLOW`. Exact integer aggregate Update/Combine itself
+does not raise merely because an integer subtotal leaves the result domain;
+inability to allocate/preserve its exact state is instead the existing query
+resource error. FLOAT64 SUM/AVG tree-edge overflow follows §29.3's IEEE
+infinity result and is not `NUMERIC_OVERFLOW`.
 
 Integer division or remainder by zero raises `ArithmeticError`.
 
@@ -27721,9 +27915,11 @@ Integer division or remainder by zero raises `ArithmeticError`.
 FLOAT64 arithmetic follows the exact §17.4.3 binary64 rounding/NaN/signed-zero
 semantics and §17.6.2 overload registry.
 
-FLOAT64 aggregate SUM/AVG are not repeated uses of that scalar operator: their
-exact n-ary accumulation, one final rounding, canonical NaN/infinity flags, and
-`+0.0` exact-zero result are authoritative in §29.3.
+FLOAT64 aggregate SUM/AVG use §17.4.3 binary64 addition at each edge of a
+physical §29.3 reduction tree. Tree shape may change finite low bits within
+that bounded contract. Explicit-input NaN/infinity classification,
+canonical exposed NaN/`+0.0`, and AVG's exact-count conversion and final
+binary64 division are authoritative in §29.3.
 
 In particular, v1 FLOAT64 division by zero follows IEEE results rather than the integer division rule:
 
@@ -28373,14 +28569,19 @@ skew/repartition fallback
 Randomized small join results are compared with the nested-loop reference algorithm.
 
 Aggregate verification covers empty input, global/grouped aggregation, NULL
-grouping keys, all-NULL inputs, composite/VARCHAR/FLOAT64 keys, exact partial
-Combine, canonical MIN/MAX representatives, and every §29.3.8 boundary vector.
+grouping keys, all-NULL inputs, composite/VARCHAR/FLOAT64 keys, exact
+integer/count and canonical MIN/MAX Combine, legal FLOAT64 partial trees,
+canonical FLOAT64 result representation, and every §29.3.8 boundary vector.
 For each one logical input it compares one/two/many workers, one-row and large
 vectors, serial and varied Merge trees, no spill and forced spill, different
 spill partition counts, hash aggregation, and capability-enabled ordered
-aggregation. Values and numerical errors must be identical; tests may inject
-synthetic near-boundary exact states instead of materializing impossible row
-counts.
+aggregation. Exact aggregates, schemas, classes, canonical representatives,
+special-input classification, and numerical errors must be identical.
+FLOAT64 SUM/AVG results instead must each be independently reproducible by an
+admitted §29.3.4 tree over exactly the demanded occurrences; tests do not
+use one physical execution as another's oracle. Tests may inject synthetic
+near-boundary exact integer/count states instead of materializing impossible
+row counts.
 
 Sort tests cover ASC/DESC, NULL order, multi-key ties, VARCHAR/FLOAT64 edges, in-memory/external runs, and multi-pass merge using the semantic comparator as oracle.
 
