@@ -8289,23 +8289,38 @@ UPDATE/DELETE:
     any new key values needed by the row operation
     release every physical latch retained for that derivation
 
-then for each operation:
-    encode complete user keys canonically
-    acquire/wait for required UNIQUE_KEY locks without physical latches
-    after all grants, re-fetch/revalidate the UPDATE/DELETE target again
-    scan/recheck the complete physical candidate range under §11.10
-    only after a NO_CONFLICT result publish the heap/index mutation
+then across the complete staged statement domain:
+    encode every complete user key canonically
+    acquire/wait for the complete required UNIQUE_KEY set without physical
+        latches and in the statement-wide order below
+    after all grants, re-fetch/revalidate every affected UPDATE/DELETE target
+    scan/recheck each complete physical candidate range under §11.10
+    establish exact same-statement pending-owner conflicts
+    only after every ordinary UNIQUE candidate enters §21.16.1 closure may any
+        heap/index mutation publish
 ```
 
 Probing before lock acquisition is only an advisory optimization. It never authorizes publication, and the complete candidate scan MUST be repeated after the lock is granted. This closes the check-then-insert race.
 
-When one operation knows a finite set of unique locks before waiting, it acquires them in the total order:
+For one user-DML statement attempt, §§15.1.3 and 21.16.1 require the complete
+finite set of UNIQUE_KEY locks needed by the staged candidate domain to be
+known and acquired before the statement's first persistent user-DML write.
+The locks are acquired in the total order:
 
 ```text
 (IndexId, lexicographic encoded user-key bytes)
 ```
 
-An UPDATE includes both old and new fully non-NULL keys when they differ; DELETE includes the old key. Streaming multirow execution may discover additional keys incrementally. Any resulting cross-key cycle is handled by §11.13's wait-for graph and deterministic victim policy rather than by releasing an already-held transaction lock.
+An UPDATE includes both old and new fully non-NULL keys when they differ;
+DELETE includes the old key. Candidate evaluation may discover those keys in
+any physical order, but publication waits until the complete lock set has been
+acquired and every required post-wait revalidation/current-state check has
+succeeded. The deadlock detector remains the correctness fallback; a deadlock
+is a dynamic failure and does not enter Chapter 21's ordinary-candidate order.
+This complete prepublication acquisition intentionally may increase lock
+footprint, lock duration, contention, and latency to the first write. Those
+costs do not permit incremental publication, key omission, early lock release,
+or approximate conflict detection.
 
 ## 11.10 Unique-check semantics
 
@@ -8368,6 +8383,23 @@ IndexId and encoded key being checked
 ```
 
 `excluded_old_rid` is present only for the currently processed UPDATE after exact TUPLE_WRITE revalidation, and only when that old version's unique key is semantically equal to `K`. `operation_published_new_rid` is present only while the same in-process row-mutation owner has continuously retained its operation context and logical locks and recorded that exact `(IndexId,K,RID)` as published; it is not reconstructed from TxnId/CommandId after an error return. Neither field is persisted, inferred from TxnId alone, or shared across rows. No persistent logical-row identifier is introduced.
+
+Before the first persistent user-DML statement write, the final statement
+attempt also owns an exact, attempt-local pending-owner relation for every
+staged fully non-NULL unique key. Conceptually it records:
+
+```text
+(IndexId, full canonical encoded user-key bytes)
+    -> prospective candidate occurrence(s) and their diagnostic provenance
+```
+
+It is not a persisted index, deferred-constraint state, or physical owner
+visible to another transaction. Complete-key equality, not a hash collision,
+defines membership. Under the already-acquired UNIQUE_KEY locks, more than one
+distinct staged prospective owner of the same key establishes ordinary UNIQUE
+candidate(s) for §21.16.1 even though none has yet been published. Candidate
+comparison is symmetric: insertion order, worker order, spill order, and an
+implementation-chosen representative do not determine the public diagnostic.
 
 The conceptual outcomes are:
 
@@ -8440,9 +8472,21 @@ Thus:
 INSERT INTO t(k) VALUES (1), (1);
 ```
 
-deterministically reports a duplicate on the second row even though the first has `cmin == C` and is hidden from ordinary current-command snapshot visibility. An INSERT in a later command of the same transaction also conflicts unless the prior owner was deleted/superseded by an earlier command. After `INSERT K; DELETE row;` in earlier commands, a later INSERT of K is permitted because `cmax < C`. A current-command self-delete does not free K for a different row operation in that same command; this prevents target-processing order from changing the constraint result.
+is rejected during prepublication preparation by the exact pending-owner
+relation, even though neither current-statement occurrence has a published
+`cmin == C` version. Chapter 21 chooses the public diagnostic from the
+resulting ordinary candidates; this section does not declare that the first or
+second physically visited occurrence wins. An INSERT in a later command of the
+same transaction still conflicts with the published current owner unless the
+prior owner was deleted/superseded by an earlier command. After `INSERT K;
+DELETE row;` in earlier commands, a later INSERT of K is permitted because
+`cmax < C`. A current-command self-delete does not free K for a different row
+operation in that command.
 
-The baseline may check and publish rows sequentially. If vectorized/batch execution checks more than one row before publishing their heap/index entries, it MUST maintain an attempt-local set under the already-acquired logical locks and classify an earlier pending fully non-NULL K as `UNIQUE_CONFLICT`. It may not probe every row against only the pre-batch index state and then publish duplicate pending owners.
+Every vectorized, batched, spilled, or scalar implementation maintains
+equivalent exact pending-owner semantics for the complete staged domain. It
+MUST NOT probe each candidate only against the pre-statement index state or
+publish one candidate merely to make it visible to another.
 
 ### 11.10.6 UPDATE truth table and immediate behavior
 
@@ -8463,7 +8507,15 @@ For an UPDATE that retains K, the checker acquires K, revalidates the old target
 
 For `old K -> new J`, the operation acquires the fully non-NULL old/new locks in §11.9 order, checks J, then follows §15.3's existing new-version/old-`xmax`/index publication sequence. The old K entry cannot conflict with J unless K and J are semantically equal, in which case this is the retaining-key case. NULL transitions acquire/check only the fully non-NULL participating side, while the old non-NULL lock is still retained when a key is removed.
 
-Multirow UNIQUE enforcement is row-immediate, not an end-of-statement deferred constraint. A new owner published by an earlier row of the same UPDATE conflicts with a later row targeting the same key. An old owner superseded by another row in the current command also remains conflicting for that later row; only the exact currently checked row may self-exclude its old RID. Therefore results do not depend on target processing order. A key swap such as `R1: 1 -> 2, R2: 2 -> 1` fails when the first replacement key encounters the other row's current owner; v1 does not temporarily delete all old owners or accept a final permutation.
+Multirow UNIQUE enforcement remains immediate, not an end-of-statement
+deferred constraint. Two staged prospective owners of the same key conflict
+through the pending-owner relation before either publishes. Every other
+target's authoritative old owner remains a current owner during preparation;
+only the exact currently checked row may self-exclude its old RID. Therefore a
+key swap such as `R1: 1 -> 2, R2: 2 -> 1` fails because each replacement key
+encounters the other row's current old owner. V1 does not temporarily delete
+all old owners, accept a final-state permutation, or let target processing
+order change the result.
 
 ### 11.10.7 Competing transactions, waiting, and recheck
 
@@ -8500,7 +8552,13 @@ The offline §21.8 build uses the same canonical encoded equality, any-NULL non-
 
 ### 11.10.10 §39.1 and autocommit boundary
 
-`UNIQUE_CONFLICT` determines only that the constraint reports `UniqueViolation`; it publishes no mutation for the rejected candidate. Section 39.1 then applies its unchanged publication boundary: before this statement's first published write an explicit transaction may remain `ACTIVE`, while an earlier write from this statement requires `MUST_ABORT` and automatic ABORT. Autocommit uses the same predicate/locks and aborts its implicit transaction on violation. A successful check is not a commit, and every acquired UNIQUE_KEY lock remains held through the implicit or explicit transaction's terminal publication.
+`UNIQUE_CONFLICT` determines only that the constraint contributes an ordinary
+`UniqueViolation` candidate. Sections 15.1.3 and 21.16.1 close and reduce all
+such ordinary candidates before the statement's first persistent user-DML
+write. A winning recoverable violation therefore has §39.1's pre-write
+consequence; autocommit aborts its implicit transaction normally. A successful
+check is not a write or commit, and every acquired UNIQUE_KEY lock remains held
+through the implicit or explicit transaction's terminal publication.
 
 ### 11.10.11 Forbidden UNIQUE implementations
 
@@ -8949,6 +9007,10 @@ page-latch dependency edges.
 28. Request cancellation/removal ends RID retention atomically with loss of grant eligibility; no ended claim can receive a late grant.
 29. Granted TUPLE_WRITE retention remains through C4/A2 and ends only with ordinary C5/A3 lock release.
 30. Chapter 14 cannot rebind a RID while any live TUPLE_WRITE request for its old identity exists.
+31. User DML acquires the complete finite staged UNIQUE_KEY lock set and
+    establishes exact same-statement pending-owner conflicts before its first
+    persistent user-DML write; neither hashing nor candidate visitation selects
+    the ordinary diagnostic.
 ---
 
 # 12. Write-Ahead Logging and Commit Durability
@@ -12125,9 +12187,10 @@ A statement that fails publishes its canonical error and no successful affected-
 result. This applies to `FAILED_TRANSACTION_REMAINS_ACTIVE`,
 `FAILED_TRANSACTION_MUST_ABORT`, deadlock, serialization, constraint/evaluation/type
 failure, and database-noncontinuable outcomes without changing §39.1's classification.
-Published physical effects from a failed multirow statement remain governed by semantic
-ABORT, MVCC, and the no-user-DML-undo rules; they are not partial SQL success and their
-provisional count is not exposed. Internal diagnostic counts such as candidates visited,
+Published physical effects from a failed multirow statement after a dynamic
+post-write failure remain governed by semantic ABORT, MVCC, and the
+no-user-DML-undo rules; they are not partial SQL success and their provisional
+count is not exposed. Internal diagnostic counts such as candidates visited,
 physical mutations, retries, or index entries written are not the SQL affected-row count.
 
 Affected-row count and any `RETURNING` rows belong to the same successful statement-result
@@ -12145,38 +12208,117 @@ The count is not persistent database state. It is not WAL-logged, checkpointed, 
 `database.control`, transaction status, or catalog metadata, and crash recovery does not
 reconstruct or replay it. A client disconnect does not create result-recovery state.
 
+### 15.1.3 Ordinary DML candidate closure before publication
+
+Every INSERT, UPDATE, and DELETE final attempt completes **ordinary DML
+candidate closure** before its first persistent user-DML statement write. The
+closed domain contains every semantically demanded ordinary row-semantic error
+candidate defined by §21.16.1. Execution preserves each candidate's canonical
+diagnostic provenance and reduces the complete domain through Chapter 21's
+ordering. If a candidate wins, the statement fails before any of its heap,
+index, `xmax/cmax`, or other transaction-owned user-DML effect reaches §12.12
+publication.
+
+The conceptual lifecycle is:
+
+```text
+complete demanded input or finalized target domain
+    -> acquire/revalidate authority needed for exact candidate row images
+    -> evaluate and retain all ordinary-candidate-producing values
+    -> prepare authoritative immediate uniqueness checks
+    -> close and reduce the ordinary candidate domain
+    -> if no candidate wins, publish persistent mutations
+    -> complete writes, affected count, and statement-owned RETURNING spool
+```
+
+This requirement changes when ordinary candidates must be established, not
+their §21.16.1 ranking or Chapter 20 demand. It creates no RID, source-row,
+batch, spool, hash, lock-acquisition, or mutation order. An uncorrelated side
+plan keeps its existing evaluation cardinality; if its result is demanded, any
+ordinary failure it produces participates in closure.
+
+Closure excludes deadlock, serialization or revalidation conflict,
+`OutOfMemory`, `SpillIOError`, runtime representability/resource failure,
+cancellation, persistent storage/I/O failure, corruption, and internal
+invariant failure. Those dynamic failures retain their actual runtime owner
+and §39.1 consequence. Closure success is not a persistent write and does not
+make later execution failure-free.
+
+Candidate state is exact, query-temporary, attempt-local, memory-accounted,
+and spill-capable through Chapter 24. It may extend the target or RETURNING
+spools or use an implementation-equivalent retained representation. It
+preserves required occurrence identity, target RID and authoritative old-row
+image where applicable, complete candidate new rows, NULLs, VARCHAR bytes,
+hidden slots/provenance, unique-key material or an exact reconstructable
+equivalent, demanded RETURNING values, and error-reduction metadata. It is not
+WAL-logged, persisted, or reused by a retry. Container, partitioning, vector
+width, and batching remain implementation choices.
+
+A failed or abandoned attempt releases its candidate staging, pending unique-
+owner state, staged RETURNING rows, ordinary candidates, provisional count,
+closure cursors, and attempt-local spill objects through the Chapter 24
+cleanup owners. Query cleanup does not release transaction-owned logical
+locks or writer-gate ownership contrary to their Chapters 11 and 15 owners.
+Completion of closure is not itself a persistent write: a dynamic failure
+after closure but before the first persistent user-DML write retains the
+existing pre-write consequence.
+
+Closure is intentionally blocking with respect to persistent user-DML writes.
+It may increase retained memory, temporary spill I/O, lock footprint, and
+latency to the first write; these costs are the consequence of deterministic
+ordinary-error and transaction-state semantics without physical statement
+undo. Evaluation, encoding, spill, and later publication may still be
+vectorized or batched.
+
 ## 15.2 INSERT
 
-For an INSERT:
+Before persistent publication, an INSERT final attempt:
 
 ```text
 1. determine the statement CommandId
+2. consume the complete semantically demanded logical input and retain one
+   mutation-ready candidate per logical occurrence
+3. evaluate conversions and complete target rows, enforce runtime NOT NULL,
+   derive every affected unique key, and evaluate demanded RETURNING values
+4. acquire the complete finite UNIQUE_KEY lock set in §11.9 order, perform
+   authoritative §11.10 current-state checks, and establish exact
+   same-statement pending-owner conflicts
+5. close and reduce every ordinary candidate through §21.16.1
+```
 
-2. encode the new tuple version:
+No target heap/index row may publish while a later demanded input occurrence
+can still establish an ordinary candidate. In particular, INSERT SELECT may
+pipeline/vectorize source computation into spill-capable temporary staging,
+but it cannot stream persistent target publication before closure. Chapter 20
+still owns demand, occurrence multiplicity, source semantics, and the
+statement snapshot; source encounter order is not semantic and newly inserted
+rows cannot feed the prepublication source scan.
+
+Only after closure succeeds, persistent publication processes the staged
+candidates, possibly in batches and a nonsemantic physical order:
+
+```text
+1. encode the new tuple version:
        xmin = current TxnId
        xmax = INVALID_TXN_ID
        cmin = current CommandId
        cmax = 0
        prev = no previous version under §5.7.4
 
-3. encode every unique/primary user key and acquire required fully non-NULL
-   UNIQUE_KEY locks in §11.9 order
-4. perform §11.10 current-state checks; current-command versions from earlier
-   input rows are owners and are not ordinary-snapshot-hidden for this purpose
-5. choose/validate a heap page using the advisory FSM
-6. construct/append the required heap PAGE_INIT/PAGE_IMAGE/PAGE_DELTA redo
-7. publish the heap tuple version and corresponding page_lsn under the heap
+2. choose/validate a heap page using the advisory FSM
+3. construct/append the required heap PAGE_INIT/PAGE_IMAGE/PAGE_DELTA redo
+4. publish the heap tuple version and corresponding page_lsn under the heap
    write guard, then release that guard latch-before-pin under §§5.14, 7.7,
    7.10.1, and 12.12
 
-8. for every index:
+5. for every index:
        perform the B+ MTR inserting
        (encoded_user_key, RID)
        using that MTR's own B+ page guards and §8.19 latch ordering
        release those guards under §§7.7 and 8.25 after successful MTR
        publication
 
-9. retain UNIQUE_KEY locks through terminal COMMITTED/ABORTED publication
+6. retain UNIQUE_KEY locks through terminal COMMITTED/ABORTED publication
 ```
 
 Heap redo describing the referenced RID is established before any B+ MTR that references that RID.
@@ -12204,38 +12346,58 @@ vacuum removes the garbage later
 
 ## 15.3 UPDATE
 
-For each target row:
+Before the first persistent UPDATE mutation, the final attempt performs this
+statement-wide authoritative closure over the finalized, deduplicated target
+domain:
 
 ```text
-1. obtain candidate visible old RID from the scan under read-epoch protection
-2. release short-lived page/index latches while retaining that read epoch
-3. register TUPLE_WRITE(TableId, old RID) as a live RID-retention claim
-4. release the read epoch before any blocking wait; after grant, re-fetch and
-   revalidate the old version
-5. apply isolation-specific write-conflict rules
-6. evaluate/type-check and canonically encode affected old/new unique keys
-7. acquire affected old/new fully non-NULL UNIQUE_KEY locks in §11.9's
-   deterministic total order
-8. re-fetch/revalidate the old version after unique-lock acquisition/wait
-9. validate new unique key(s) through §11.10, passing only this exact
-   revalidated old RID as excluded_old_rid when the old/new key is equal
+1. for every target, retain its discovery read epoch while releasing short
+   physical latches, register TUPLE_WRITE(TableId, old RID), release the epoch
+   before a blocking wait, and after grant re-fetch/revalidate the old version
+2. apply the isolation-specific conflict and qualification rules; only the
+   resulting authoritative target/old-row image enters candidate staging
+3. evaluate all SET right-hand sides simultaneously against that complete
+   immutable old-row image, apply assignment coercions, construct the complete
+   candidate new row, enforce descriptor-wide NOT NULL, derive old/new unique
+   keys, and evaluate demanded RETURNING values
+4. acquire the complete affected fully non-NULL UNIQUE_KEY set in §11.9 order
+5. after every unique-lock wait, re-fetch/revalidate each affected target;
+   if any authoritative image changed, discard the stale assignment, row, key,
+   RETURNING, and pending-owner state and take the existing retry/conflict
+   outcome; an authorized fresh attempt derives its complete lock set again
+6. perform §11.10 current-state and exact pending-owner checks, passing only
+   the exact authoritative old RID as excluded_old_rid where permitted
+7. close and reduce every ordinary candidate through §21.16.1
+```
 
-10. create new tuple version:
+No target mutation publishes until this closure succeeds. TUPLE_WRITE and
+UNIQUE_KEY claims are transaction-owned for their existing Chapter-11
+lifetime; retry/cleanup does not release them merely because candidate staging
+is attempt-local. No physical latch or read epoch is retained across a blocking
+logical-lock wait. Establishing authoritative images for the complete target
+domain before publication may therefore increase the number and duration of
+retained TUPLE_WRITE claims; the deadlock/conflict owners remain Chapter 11's.
+
+Persistent publication then uses only the successfully closed,
+mutation-ready candidates:
+
+```text
+1. create new tuple version:
        xmin = current TxnId
        xmax = INVALID_TXN_ID
        cmin = current CommandId
        cmax = 0
        prev = old RID
 
-11. WAL-log/install the new tuple version
+2. WAL-log/install the new tuple version
 
-12. WAL-log/install old-version header:
+3. WAL-log/install old-version header:
        xmax = current TxnId
        cmax = current CommandId
 
-13. install new physical B+ entries through MTRs
-14. retain old physical B+ entries
-15. hold logical tuple/unique locks through terminal transaction publication
+4. install new physical B+ entries through MTRs
+5. retain old physical B+ entries
+6. hold logical tuple/unique locks through terminal transaction publication
 ```
 
 If the transaction aborts:
@@ -12256,25 +12418,40 @@ not one each. A qualifying target contributes one even when every assigned value
 to its existing value. Any otherwise legal physical no-op optimization MUST preserve that
 count; this rule does not independently authorize such an optimization.
 
-UNIQUE is immediate per target. A same-key UPDATE excludes only its exact old RID; another row updated earlier in this command remains an owner. A changed-key UPDATE checks the new key against all other current owners. Multirow key collisions and swaps therefore follow §11.10.6 rather than a deferred final-state permutation rule.
+UNIQUE remains immediate for every staged target. A same-key UPDATE excludes
+only its exact authoritative old RID; every other target's old owner remains
+current, and another staged prospective owner is represented by §11.10.3's
+pending-owner relation. A changed-key UPDATE checks the new key against all
+other current and staged prospective owners. Multirow key collisions and swaps
+therefore follow §11.10.6 rather than a deferred final-state permutation rule.
 
 ## 15.4 DELETE
 
-For each target row:
+Before the first persistent DELETE mutation, the final attempt performs this
+statement-wide closure over the finalized, deduplicated target domain:
 
 ```text
-1. obtain visible RID under read-epoch protection
-2. release page/index latches while retaining that read epoch
-3. register TUPLE_WRITE(TableId, RID) as a live RID-retention claim
-4. release the read epoch before any blocking wait; after grant, re-fetch and revalidate
-5. apply write-conflict rules
-6. acquire affected fully non-NULL UNIQUE_KEY locks before publishing xmax
-7. re-fetch/revalidate the target after unique-lock acquisition/wait
-8. WAL-log/install:
+1. acquire/register every required exact TUPLE_WRITE claim through the
+   §11.3 read-epoch handoff, then re-fetch/revalidate authoritative old rows
+   after grants and apply existing conflict/qualification rules
+2. evaluate and retain every demanded DELETE RETURNING row and ordinary
+   candidate; no replacement/new-row state is constructed
+3. derive the complete affected fully non-NULL unique-key set, acquire it in
+   §11.9 order, and re-fetch/revalidate after waits; any changed authoritative
+   old image invalidates retained old-row/RETURNING state and takes the
+   existing retry/conflict outcome
+4. close and reduce every ordinary candidate through §21.16.1
+```
+
+Only after successful closure does persistent publication process each
+authoritative target:
+
+```text
+1. WAL-log/install:
        xmax = current TxnId
        cmax = current CommandId
-9. retain existing physical index entries
-10. hold logical locks through terminal transaction publication
+2. retain existing physical index entries
+3. hold logical locks through terminal transaction publication
 ```
 
 Commit makes the version dead to sufficiently new snapshots.
@@ -12389,8 +12566,10 @@ then the engine may:
 release attempt-local resources
 unregister the old statement snapshot
 discard the attempt-local provisional affected-row count
+discard target/candidate/RETURNING spools, pending-owner state, ordinary error
+    candidates, closure cursors, and attempt-local spill state
 capture a fresh statement snapshot
-restart candidate search/evaluation
+rebuild the complete target/input and ordinary-candidate closure domain
 ```
 
 No database state from the abandoned attempt needs rollback.
@@ -12484,6 +12663,12 @@ This chapter is the boundary between the persistent transactional storage core a
 25. A failed statement publishes no successful or partial affected-row count, regardless of already-published physical effects.
 26. An explicit transaction may publish the count at statement success, while autocommit retains it through implicit COMMIT C4–C5 under §31.9's result envelope.
 27. Affected-row count is runtime result metadata and is never WAL-logged, checkpointed, or reconstructed by recovery.
+28. Every semantically demanded ordinary user-DML candidate is closed and
+    canonically reduced before that statement's first persistent user-DML
+    write; no physical visitation or batching choice can move its winner across
+    the §39.1 failure boundary.
+29. Closure and its spill files are exact attempt-local state, not persistent
+    writes; dynamic failures still follow their actual §39.1 boundary side.
 
 ---
 
@@ -18452,9 +18637,10 @@ expressions from §§19.4.3 and 19.20. Each assignment supplies a resolved
 names, reject duplicate SET targets again, or choose a new conversion.
 
 UPDATE WHERE, assignment, and RETURNING expressions may use §20.14's supported
-uncorrelated forms. WHERE evaluation remains in target materialization; a later
-assignment/RETURNING subquery error follows the ordinary first-published-write
-boundary rather than receiving special rollback semantics.
+uncorrelated forms. WHERE evaluation remains in target materialization.
+Demanded assignment and RETURNING expression/subquery failures participate in
+the complete ordinary DML candidate closure required by §21.16.1 before the
+statement's first persistent user-DML write.
 
 Each assignment becomes:
 
@@ -18476,7 +18662,8 @@ apply the bound §17.8.5 assignment coercions
 construct the complete candidate replacement row, copying every unmentioned
     column from the old row
 validate every column whose bound target descriptor declares NOT NULL
-only then admit the target to immediate UNIQUE validation and publication
+only then admit the target to immediate UNIQUE preparation and ordinary
+    candidate reduction
 ```
 
 The NOT NULL check is descriptor-wide, not limited to PRIMARY KEY columns,
@@ -18495,11 +18682,13 @@ architecture-valid old row, a copied unmentioned nonnullable column cannot be
 NULL; structural detection of the contrary remains an existing descriptor/
 tuple corruption condition and does not invent a synthetic SQL offset.
 
-If an earlier target of the same statement already crossed §39.1's first-
-published-write boundary, the violation has the existing mandatory-abort
-consequence; this rule adds no physical statement undo. A value-preserving
-assignment such as `SET x=x` still acts on and counts the finalized target
-under §15.3 after its complete row passes the same validation.
+All finalized targets complete this ordinary candidate-producing work before
+any target mutation publishes. For example, if target A has a valid candidate
+but target B produces a SET or NOT NULL candidate, Chapter 21 reduces that
+closed domain and no mutation for A publishes. This rule adds no physical
+statement undo. A value-preserving assignment such as `SET x=x` still acts on
+and counts the finalized target under §15.3 after its complete row passes the
+same validation.
 
 The resulting `LogicalUpdate` feeds §15.3's physical UPDATE version protocol.
 
@@ -18565,9 +18754,17 @@ The §15.7 statement-attempt retry rule still applies: before persistent stateme
 
 No externally visible RETURNING row is emitted from an attempt that may still restart.
 
-The physical execution layer additionally buffers through successful statement completion as specified in §31.9, preventing a later row-level execution error from exposing a partial RETURNING prefix.
+Every semantically demanded RETURNING expression is evaluated, and its exact
+row value retained in statement-owned storage, as part of §21.16.1 ordinary
+candidate closure before the first persistent user-DML write. Thus a demanded
+RETURNING expression error can neither follow an earlier mutation from that
+statement nor expose a partial result. The physical layer continues to buffer
+the retained rows through successful statement completion as specified in
+§31.9.
 
-If RETURNING evaluation or its memory/spill spool fails before any DML publication, §39.1 may leave an explicit transaction active. If any current-statement write already published, the statement fails and the transaction automatically aborts. A returned row is never a COMMIT acknowledgement.
+Dynamic memory/spill failure while constructing or finalizing the unpublished
+spool follows §39.1's actual statement-write boundary; it is not an ordinary
+RETURNING candidate. A returned row is never a COMMIT acknowledgement.
 
 ## 21.16 Error contract for semantic planning
 
@@ -18596,9 +18793,13 @@ An **ordinary row-semantic error candidate** is a correctness error from a DML
 row occurrence whose source/target occurrence belongs to the finalized
 statement attempt and whose binding, logical, target-revalidation, and other
 semantic prerequisites have succeeded far enough to establish that error.
-This domain includes demanded scalar or subquery errors, descriptor-wide final-
-row NOT NULL violations, immediate UNIQUE violations, and any other supported
-row constraint with an existing owner.
+This domain includes demanded scalar arithmetic, cast, and conversion errors;
+INSERT input and `INSERT ... SELECT` source-expression or supported-subquery
+errors; UPDATE assignment and coercion errors; demanded target-qualification
+ordinary errors not already closed while producing the target domain;
+demanded RETURNING expression errors; descriptor-wide final-row NOT NULL
+violations; immediate UNIQUE/PRIMARY KEY violations; and any other supported
+deterministic row constraint with an existing owner.
 
 Errors from abandoned retry attempts, target occurrences removed by canonical
 deduplication, stale targets not retained as finalized targets, and skipped or
@@ -18637,16 +18838,45 @@ unordered bag. Within one executable scalar occurrence, Chapter 17 and Chapter
 arbitrates already-defined ordinary candidates across DML occurrences.
 
 Physical visitation MUST NOT let work associated with a lower-precedence
-ordinary candidate cross the first-published-write boundary in a way that
-makes an already-determinable higher-precedence candidate unreachable or
-changes that candidate's §39.1 statement/transaction consequence. Before such
-publication, execution must establish that no higher-precedence ordinary
-candidate exists. This is an observable semantic requirement, not a prescribed
-prevalidation, staging, spooling, sorting, or multi-pass algorithm.
+ordinary candidate cross the first-persistent-user-DML-write boundary. Before
+that boundary, the final attempt MUST establish every semantically demanded
+ordinary candidate in its complete input/finalized-target domain and reduce
+the closed set by the ordering above. If any candidate wins, the statement
+fails before that boundary. Only a closure with no winning ordinary candidate
+authorizes persistent user-DML publication. This is an observable semantic
+requirement; §§15.1.3 and 31.4–31.9 own its memory-bounded physical staging
+without prescribing one container, vector width, or spill organization.
 
-The rule does not require prediction of a later deadlock, I/O failure,
-concurrency invalidation, resource exhaustion, or other condition whose
-occurrence is not yet established. One CommandId per admitted statement,
+Consequently, physical RID/input visitation, batching, worker scheduling,
+target order, source encounter order for an unordered relation, spill order,
+hash iteration, lock acquisition detail, and mutation order cannot change
+either the selected ordinary error or whether it receives §39.1's pre-write
+versus post-write consequence. Chapter 20 demand remains authoritative: closure
+does not evaluate an occurrence or side plan proven semantically undemanded.
+
+Normative examples are:
+
+```text
+INSERT VALUES: first candidate valid, later candidate divides by zero
+    -> division candidate closes before publication; no inserted row publishes
+
+INSERT SELECT: source yields valid candidates, then a demanded conversion error
+    -> no target row publishes before the complete demanded source closes
+
+UPDATE: target A valid, target B produces SET/NOT NULL/RETURNING error
+    -> the winner is reduced before either target mutation publishes
+```
+
+Immediate UNIQUE remains lock-protected current-state validation, not a
+deferred final-state constraint. Chapter 11's exact pending-owner relation
+establishes same-statement staged collisions before publication, while current
+old owners and earlier-command owners remain authoritative.
+
+The rule does not require prediction or source-span ranking of a later
+deadlock, I/O failure, concurrency invalidation, resource exhaustion,
+cancellation, corruption, or other dynamic condition whose occurrence is not
+yet established. Such failures remain owned at their actual runtime stage and
+may occur before or after publication. One CommandId per admitted statement,
 CommandId reuse across internal retry, discarded abandoned-attempt errors and
 results, the pre-write retry boundary, and the post-write mandatory-abort rule
 remain unchanged.
@@ -18836,7 +19066,10 @@ These features are not implicit requirements of the v1 SQL/front-end contract.
 26. DML accepts only §20.14's uncorrelated expression subqueries; defaults/DDL expressions reject every subquery, and §39.1 alone owns any runtime error consequence.
 27. Every finalized UPDATE candidate satisfies every descriptor NOT NULL constraint before its replacement, old-version delete metadata, or referring index entries publish.
 28. A live PRIMARY KEY/UNIQUE constraint's backing index cannot be removed by standalone DROP INDEX.
-29. Physical DML row visitation cannot select among competing ordinary row-semantic errors or change their §39.1 consequence.
+29. Every semantically demanded ordinary DML candidate in the final attempt is
+    established and canonically reduced before the first persistent user-DML
+    write; physical visitation cannot select the winner or change its §39.1
+    consequence.
 30. DML RETURNING is an unordered bag with operation-specific row-image and occurrence multiplicity semantics.
 31. A canonical name dropped by a live transaction remains reserved against recreation by that transaction through terminal outcome.
 32. Committed DROP name reuse, predecessor descriptor lifetime, and predecessor physical-file retirement are independent; replacement objects always have fresh persistent identities.
@@ -20425,6 +20658,14 @@ structure. Physical sharing or duplication preserves the upstream semantic
 origin under §20.17; node pointers, kernel-table entries, output ordinals, and
 vector lanes cannot replace it. RETURNING remains within the DML error owner
 and retains §21.15's unordered-bag semantics.
+
+For a write-DML attempt that reaches persistent publication, all semantically
+demanded candidate-producing expression work, including INSERT source/target
+conversion, UPDATE assignments, and RETURNING, has completed before the first
+persistent user-DML write under §§15.1.3 and 21.16.1. Vectorization, sharing,
+or lazy side-plan initialization cannot defer a demanded ordinary DML
+expression candidate into the mutation/write-publication phase. This rule does
+not demand speculative or Chapter-20-undemanded evaluation.
 
 ## 25.2 Input normalization
 
@@ -22809,16 +23050,35 @@ materialize target RID
 required old values
 ```
 
-Write phase begins only after successful spool Finalize:
+Every semantically demanded ordinary candidate produced while evaluating the
+target scan, WHERE predicate, or another supported target-producing child is
+retained for the statement's §21.16.1 closure. Target-domain finalization and
+later authoritative candidate-row closure are distinct requirements, and no
+target mutation may publish if either fails.
+
+After successful spool Finalize, UPDATE/DELETE first complete authoritative
+ordinary DML candidate closure:
 
 ```text
 iterate finalized target rows
     ↓
-acquire logical write locks
+acquire exact logical write claims
     ↓
 re-fetch/revalidate
     ↓
-perform Chapter-15 MVCC mutation
+retain authoritative old-row images
+    ↓
+evaluate all demanded ordinary-candidate-producing work
+    ↓
+prepare immediate uniqueness and reduce ordinary candidates
+```
+
+The persistent write phase begins only after that closure succeeds:
+
+```text
+consume mutation-ready staged targets
+    ↓
+perform Chapter-15 MVCC mutations
 ```
 
 This is a deliberate pipeline breaker and the primary Halloween-protection boundary.
@@ -22873,6 +23133,25 @@ Columns not required by these semantics are not materialized merely because they
 
 Spill/reload preserves RID identity and old value bytes exactly for this statement attempt.
 
+### 31.4.1 Ordinary-candidate staging storage
+
+The §15.1.3 closure phase may extend the target spool, use the RETURNING
+spool, or use another implementation-equivalent query-temporary retained
+representation. Its memory and spill ownership remains Chapter 24's. Across
+chunk reuse, lock waits, spill/reload, and Finalize it preserves exactly the
+required logical occurrence, target RID, authoritative old-row values,
+complete candidate new row, NULLs, VARCHAR bytes, hidden slots/provenance,
+unique-key material or an exact reconstructable equivalent, demanded
+RETURNING values, pending-owner state, and ordinary-error metadata.
+
+The retained representation is attempt-local, non-WAL, and nonpersistent. A
+hash may accelerate exact lookup but cannot establish target/key identity by
+collision alone. No candidate value may be truncated, canonicalized, dropped,
+or persistently published to reduce memory pressure; the operator instead
+uses exact spill/progress or reports the existing controlled dynamic
+`OutOfMemory`, `SpillIOError`, representability, or cancellation failure on
+the actual pre-write side of §39.1.
+
 ## 31.5 Revalidation and READ COMMITTED retry boundary
 
 Materialization does not eliminate write races.
@@ -22892,9 +23171,13 @@ If READ COMMITTED discovers a retry-requiring conflict **before this statement a
 
 ```text
 discard target spool
+discard mutation-ready candidate staging
+discard pending unique-owner state
 discard buffered RETURNING
+discard ordinary error candidates and provisional affected count
+discard attempt-local spill files/cursors
 capture a fresh statement snapshot
-rebuild/retry the statement attempt
+rebuild the complete target/input and closure domain
 ```
 
 If any persistent statement write has already occurred:
@@ -22908,22 +23191,34 @@ This follows the Chapter-15 retry boundary and the no-physical-user-DML-undo arc
 
 ## 31.6 INSERT execution
 
-`PhysicalInsert` is a sink consuming typed input chunks.
-
-For each input batch it:
+`PhysicalInsert` is a blocking sink with respect to persistent user-DML
+publication. Its staging/closure phase consumes the complete semantically
+demanded typed logical input:
 
 ```text
-1. evaluates/converts target-column vectors
-2. enforces runtime NOT NULL constraints
-3. acquires required unique-key locks in §11.9's deterministic order
-4. performs §11.10 current-state uniqueness checks, including current-command
-   owners from earlier input rows
-5. encodes/installs heap tuple versions through Chapter 15
-6. installs required B+ entries through their MTR path
-7. appends requested RETURNING values to statement-owned result storage
+1. evaluate/convert target-column vectors and construct complete candidate rows
+2. enforce runtime NOT NULL and preserve every ordinary candidate/provenance
+3. derive every affected canonical unique key
+4. evaluate and retain every demanded RETURNING row
+5. retain exact mutation-ready candidates in memory-accounted, spill-capable
+   statement storage
+6. acquire the complete finite UNIQUE_KEY set in §11.9 order
+7. perform authoritative §11.10 current-state checks, including owners from
+   earlier commands, and exact same-statement pending-owner checks
+8. close and reduce the complete ordinary candidate domain through §21.16.1
 ```
 
-Bulk insertion should amortize:
+No heap or index mutation for the statement publishes before successful
+closure. For INSERT SELECT, source evaluation may remain vectorized and may
+pipeline into the temporary candidate spool, but source-to-target persistent
+publication cannot stream while a later demanded source occurrence may still
+establish an ordinary candidate. Source occurrence multiplicity, semantic
+demand, snapshot/current-command self-read behavior, and unordered encounter
+order remain Chapter 20-owned.
+
+After successful closure, the single-worker mutation/write-publication phase
+installs only the retained mutation-ready candidates through Chapter 15 and
+the required B+ MTR paths. It may amortize:
 
 ```text
 tuple encoding
@@ -22932,29 +23227,45 @@ heap-page latching
 index-key encoding
 ```
 
-across chunks when doing so does not weaken lock/WAL ordering.
+across batches when doing so does not weaken lock/WAL ordering. Physical
+publication order remains nonsemantic and cannot create a new ordinary
+candidate.
 
 ## 31.7 UPDATE execution
 
-After target-spool finalization:
+After target-spool finalization, `PhysicalUpdate` completes this authoritative
+closure phase over every distinct final target before any mutation publishes:
 
 ```text
-1. consume targets in batches where practical
-2. acquire/revalidate one target's logical write semantics
-3. vector-evaluate assignment expressions over safely grouped targets
-4. derive affected unique keys, acquire §11.9 locks, revalidate, and run
-   §11.10 with only this exact old target RID excluded when applicable
-5. construct one complete new tuple version per target
-6. install the new version and old xmax/cmax through Chapter 15
-7. install new physical index entries
-8. buffer RETURNING new-row values
+1. acquire/register each exact TUPLE_WRITE claim through §11.3 and re-fetch/
+   revalidate after grant to establish the authoritative target and old image
+2. vector-evaluate every SET RHS against that target's one complete immutable
+   old-row image, apply bound coercions, and construct the complete new row
+3. enforce descriptor-wide NOT NULL, derive all old/new unique keys, and
+   evaluate/retain demanded RETURNING new-row values
+4. acquire the complete finite affected UNIQUE_KEY set in §11.9 order
+5. after every wait, re-fetch/revalidate; if an authoritative version changed,
+   discard stale SET, row, key, RETURNING, and pending-owner state and take the
+   existing retry/conflict outcome; an authorized fresh attempt derives its
+   complete lock set again
+6. perform §11.10 current-state and pending-owner checks, excluding only the
+   exact authoritative old target RID where applicable
+7. close and reduce the complete ordinary candidate domain through §21.16.1
 ```
 
-Lock waits/conflicts may force the implementation to break otherwise-vectorized work around individual targets.
+Lock waits/conflicts may force the implementation to break otherwise-vectorized
+work around individual targets. Dynamic conflict/retry outcomes remain
+Chapter-11/15-owned and do not enter ordinary-candidate ranking.
 
 Correctness of the write protocol wins over artificial vectorization of lock acquisition.
 
 For each target, the UNIQUE check receives only that target's exact revalidated old RID as `excluded_old_rid` when retaining a key. It does not exclude another target, another version with the same TxnId, or another current-command replacement. Immediate collision/key-swap behavior is §11.10.6.
+
+After successful closure, the mutation/write-publication phase consumes only
+the retained mutation-ready candidates: it installs one complete new version,
+the old version's `xmax/cmax`, and the required new physical index entries
+through Chapter 15. No new ordinary row-semantic candidate may first be
+discovered in this phase; dynamic failures may still occur and follow §39.1.
 
 In v1, the mutation/write-publication phase of `PhysicalInsert`,
 `PhysicalUpdate`, and `PhysicalDelete` is single-worker. This restriction does
@@ -22963,14 +23274,25 @@ expression evaluation to be single-worker.
 
 ## 31.8 DELETE execution
 
-After target-spool finalization:
+After target-spool finalization, `PhysicalDelete` completes the following
+closure before persistent mutation:
 
 ```text
-for each target:
-    acquire/revalidate TUPLE_WRITE semantics
-    install xmax/cmax transactionally
-    buffer RETURNING old-row values when requested
+for every distinct final target:
+    acquire/register exact TUPLE_WRITE semantics
+    re-fetch/revalidate the authoritative target and old-row image after grant
+    evaluate and retain demanded RETURNING old-row values/errors
+derive/acquire the complete affected UNIQUE_KEY set
+after every wait, re-fetch/revalidate target authority; if it changed, discard
+    retained old-row/RETURNING state and take the existing retry/conflict
+    outcome
+close and reduce every ordinary candidate through §21.16.1
 ```
+
+DELETE constructs no unused replacement/new-row state. After successful
+closure its single-worker mutation/write-publication phase installs each
+authoritative target's `xmax/cmax` through Chapter 15. Dynamic conflicts and
+resource/storage failures retain their existing owner.
 
 Secondary-index entries are not physically erased here.
 
@@ -22985,6 +23307,13 @@ DML `RETURNING` is statement-owned output.
 For small output it uses an in-memory RowCollection.
 
 For large output it uses a spill-capable result spool.
+
+Every semantically demanded RETURNING expression is evaluated during
+§15.1.3 ordinary DML candidate closure before the statement's first persistent
+user-DML write. The exact INSERT/UPDATE final-new-row or DELETE authoritative-
+old-row result is retained in this statement-owned spool. A winning ordinary
+RETURNING candidate therefore fails before mutation; a later target's
+RETURNING expression cannot follow an earlier target mutation.
 
 No RETURNING row becomes externally visible while the statement attempt may still restart or fail after producing only a prefix of its result.
 
@@ -23003,7 +23332,10 @@ For **autocommit** DML, successful statement execution is followed immediately b
 
 If the statement aborts/fails, the unpublished RETURNING spool is discarded.
 
-Failure while constructing/finalizing that spool follows §39.1's statement-write boundary. No implementation may mark the DML statement successful merely because some result rows were already computed internally.
+Dynamic failure while constructing/finalizing the unpublished spool follows
+§39.1's actual statement-write boundary and is not source-ranked as an
+ordinary candidate. No implementation may mark the DML statement successful
+merely because some result rows were already computed internally.
 
 ## 31.10 Query result interface
 
@@ -23140,7 +23472,21 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
 13. ANALYZE never globally publishes an uncommitted or partial StatsDescriptor.
 14. Any failed DML statement with a published transaction-owned write automatically aborts; a pre-write recoverable failure may leave an explicit transaction active.
 15. Autocommit DML does not expose RETURNING rows before implicit COMMIT C4–C5 complete; later transport failure cannot undo that commit.
-16. UNIQUE enforcement uses current-state ownership rather than ordinary snapshot visibility, detects earlier current-command owners, and self-excludes only the exact current UPDATE target/replacement RID.
+16. UNIQUE enforcement uses current-state ownership rather than ordinary
+    snapshot visibility, detects earlier-command published owners and exact
+    current-statement pending owners, and self-excludes only the exact current
+    UPDATE target/replacement RID.
+17. Every semantically demanded ordinary DML candidate closes and is
+    canonically reduced before the first persistent user-DML statement write;
+    no persistent mutation may precede complete closure.
+18. INSERT SELECT stages its complete demanded candidate domain before target
+    publication; UPDATE/DELETE establish authoritative post-wait row images
+    before accepting candidate state.
+19. Exact attempt-local pending owners detect same-statement unique collisions
+    before publication without introducing deferred uniqueness or DML row
+    order.
+20. Closure staging is query-memory accounted and spill-capable; retry rebuilds
+    it fresh and never reuses abandoned-attempt rows, errors, or spill state.
 
 ---
 
@@ -27598,15 +27944,20 @@ AB = semantic ABORT requested/completed through §15.6
 ```
 
 “Before” and “after” refer to the current statement's first persistent-write boundary.
+For user DML, §§15.1.3 and 21.16.1 make the after-boundary state unreachable
+for ordinary row-semantic candidates: those candidates close and reduce before
+the boundary. The ordinary rows below say `unreachable` for that reason, not
+because the boundary or the dynamic-failure rule changed.
 
 | Failure class | Before boundary | After boundary | Required qualification |
 |---|---:|---:|---|
 | parse/lex error | FA | MA | normally cannot arise after execution, but delayed discovery cannot evade the universal rule |
 | bind/name/type/catalog error | FA | MA | unsupported feature is the same |
 | planner/optimizer resource failure | FA | MA | final-plan invariant failure is NC, not a user/resource error |
-| expression evaluation, arithmetic, division, or cast error | FA | MA | includes errors in later rows/batches |
+| ordinary user-DML scalar/subquery/final-row expression, arithmetic, division, conversion, cast, or assignment candidate | FA | unreachable | complete demanded candidate domain closes before user-DML publication under §21.16.1 |
+| non-DML expression evaluation, arithmetic, division, or cast error | FA | MA | applies only where the owning statement can reach the boundary before that evaluation; §25.1.1 remains authoritative |
 | aggregate COUNT/integer-SUM final `NUMERIC_OVERFLOW` | FA | MA | §29.3 defers numerical range failure to deterministic Finalize after complete demanded input; physical reduction shape cannot change the outcome |
-| NOT NULL, UNIQUE, or PRIMARY KEY violation | FA | MA | §11.10 decides UNIQUE/PRIMARY KEY conflict membership; this table decides its transaction effect |
+| ordinary user-DML NOT NULL, UNIQUE, or PRIMARY KEY candidate | FA | unreachable | §11.10 decides conflict membership; §§15.1.3/21.16.1 close and reduce it before publication |
 | READ COMMITTED write conflict or stale-target revalidation | retry/FA | MA | transparent retry is permitted only while the flag is false |
 | REPEATABLE READ serialization failure or deadlock victim | MA | MA | independently transaction-fatal; victim ownership remains protective through ABORTED publication and cannot remain held after canonical A3 cleanup |
 | cancellation/lock cancellation | FA | MA | unless deadlock/other transaction-fatal cause applies |
@@ -27638,20 +27989,54 @@ CommandId and snapshots obey §§9.6 and 9.9:
 
 Automatic statement retry is allowed only while `current_statement_has_published_write == false` and all attempt-local output/state is discardable. A retry gets a fresh READ COMMITTED snapshot but retains the logical statement's CommandId. Once the flag is true, transparent same-TxnId retry is forbidden. V1 does not automatically rerun an aborted autocommit transaction; any later client/future opt-in whole-request retry uses a new transaction and TxnId.
 
-For a five-row INSERT where rows 1–4 published heap/index effects and row 5 fails conversion/arithmetic/constraint evaluation:
+For INSERT VALUES with a valid first occurrence and a later demanded
+division/conversion/constraint candidate, ordinary DML candidate closure
+establishes and reduces that candidate before publication:
+
+```text
+current_statement_has_published_write = false
+statement result = FAILED_TRANSACTION_REMAINS_ACTIVE
+explicit transaction = ACTIVE and COMMIT-eligible
+inserted rows from this statement = none
+```
+
+The same pre-write rule covers a later demanded INSERT SELECT source error,
+UPDATE SET/NOT NULL/RETURNING candidate, DELETE RETURNING candidate, or
+immediate UNIQUE candidate. Discovering a new semantically demanded ordinary
+user-DML candidate after publication is an execution invariant defect, not a
+legal path to reclassify that candidate as `MA`.
+
+Post-write `MA` remains reachable for dynamic failure. For example, after
+ordinary closure succeeds, rows 1–4 of a five-row INSERT may publish and a
+cancellation, `OutOfMemory`, known storage/WAL I/O failure, or other applicable
+dynamic execution failure may terminate publication of row 5. The result is:
 
 ```text
 statement result = FAILED_TRANSACTION_MUST_ABORT
 transaction      = MUST_ABORT -> ABORTING -> ABORTED
 COMMIT            = forbidden
-rows 1..4         = physically retained, logically aborted garbage
+published rows    = physically retained, logically aborted garbage
 ```
 
-Vacuum/recovery handles those versions under the existing no-physical-undo rules. The same result applies to UPDATE after any new version/old `xmax`/index effect publishes and to DELETE after any `xmax/cmax` publishes. UPDATE/DELETE target-spool, assignment, or spill failure before the first mutation is FA.
+Vacuum/recovery handles those versions under the existing no-physical-undo
+rules. The same dynamic post-write result applies to UPDATE after any new
+version/old `xmax`/index effect publishes and to DELETE after any `xmax/cmax`
+publishes. Dynamic target-spool, candidate-staging, assignment-vector, or spill
+failure before the first mutation remains on the pre-write side. Exact
+UNIQUE/PRIMARY KEY conflict membership is §11.10; ordinary diagnostic ranking
+and closure are §21.16.1.
 
-Constraint checking may be ordered early for efficiency, but the transaction result depends only on where the reported violation falls relative to the boundary. Exact UNIQUE/PRIMARY KEY conflict membership is §11.10 and does not alter this §39.1 error policy.
-
-DML `RETURNING` remains buffered through successful statement completion. If any row/write/result-spool step fails, no prefix is emitted; after a crossed write boundary the transaction aborts. Returned rows are not durability or commit acknowledgements. After a successful statement in an explicit transaction, consuming its RETURNING spool remains legal even though a later explicit ROLLBACK may abort the transaction. In autocommit, the request-owned spool remains unexposed through implicit COMMIT C5 and is released only as part of the successful post-commit response; a pre-C3 commit failure therefore exposes no rows, while transport failure during/after post-C5 delivery means the transaction is COMMITTED and client observation may be incomplete/uncertain.
+DML `RETURNING` remains buffered through successful statement completion. If a
+dynamic write/result-spool step fails before that completion, no prefix is
+emitted; after a crossed write boundary the transaction aborts. Returned rows
+are not durability or commit acknowledgements. After a successful statement in
+an explicit transaction, consuming its RETURNING spool remains legal even
+though a later explicit ROLLBACK may abort the transaction. In autocommit, the
+request-owned spool remains unexposed through implicit COMMIT C5 and is
+released only as part of the successful post-commit response; a pre-C3 commit
+failure therefore exposes no rows, while transport failure during/after
+post-C5 delivery means the transaction is COMMITTED and client observation may
+be incomplete/uncertain.
 
 OOM and spill failures follow the same boundary rather than a uniform “disk full aborts everything” rule. Query-temporary files are cleaned independently; cleanup does not erase a prior database write.
 
@@ -27790,7 +28175,8 @@ database/storage noncontinuable
 
 The following implementations are forbidden:
 
-1. committing rows 1–4 after row 5 made their multirow DML statement fail,
+1. committing partial user-DML effects after a post-write dynamic failure made
+   their statement fail,
 2. transparently retrying a statement after any transaction-owned write published,
 3. reusing a failed statement's CommandId or READ COMMITTED snapshot,
 4. treating an exactly restored §12.12 provisional mutation as published garbage,
@@ -28463,7 +28849,20 @@ retired-token collision handling and exact retired-name recognition
 no ordinary open of a retired root and no deletion of external-parent siblings
 ```
 
-Statement/transaction error verification MUST cover every §39.1.3 matrix row on both sides of the first-published-write boundary where reachable. Required scenarios include multirow INSERT row-5 failure after four published rows, partial UPDATE/DELETE, pre-write read-only/cast/constraint/OOM/spill failure, §12.12 exact local rollback with and without an earlier statement write, empty-page/structural publication without a transaction-owned logical row effect, CommandId nonreuse, fresh READ COMMITTED snapshot after FA, rejection of same-TxnId retry after publication, explicit-transaction RETURNING failure before exposure, and autocommit RETURNING held through implicit COMMIT.
+Statement/transaction error verification MUST cover every §39.1.3 matrix row
+on both sides of the first persistent statement-write boundary where
+reachable. Required scenarios include ordinary user-DML
+scalar/assignment/NOT NULL/UNIQUE/RETURNING
+candidate closure before any write; INSERT SELECT complete demanded-source
+staging; physical-order-independent ordinary winner and FA outcome; dynamic
+row-5 failure after four published INSERT rows; dynamic partial UPDATE/DELETE;
+pre-write read-only/OOM/spill failure; §12.12 exact local rollback with and
+without an earlier statement write; empty-page/structural publication without
+a transaction-owned logical row effect; CommandId nonreuse; fresh READ
+COMMITTED snapshot and completely fresh closure state after FA/retry;
+rejection of same-TxnId retry after publication; explicit-transaction
+RETURNING failure before exposure; and autocommit RETURNING held through
+implicit COMMIT.
 
 COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
 
@@ -28482,7 +28881,7 @@ release, wakeup revalidation, and safe waiter cleanup. It includes every
 §11.13.7 adversarial timeline and synthetic cycles spanning three or more
 resource families.
 
-Table-driven §11.10 verification covers ordinary UNIQUE and PRIMARY KEY across NULL/composite/FLOAT64 canonical keys; committed/frozen/aborted/nonterminal creators; absent/committed/aborted/nonterminal deleters; same-transaction earlier/current-command creators; earlier-command self-delete reuse versus current-command other-row conflict; same-statement INSERT duplicates; exact same-key UPDATE exclusion; order-independent another-row current-command UPDATE collision; immediate key-swap rejection; post-wait full recheck; stale physical entries; protected RID identity; §39.1 before/after-write violation outcomes; and COMMIT/ABORT lock release only after terminal publication.
+Table-driven §11.10 verification covers ordinary UNIQUE and PRIMARY KEY across NULL/composite/FLOAT64 canonical keys; committed/frozen/aborted/nonterminal creators; absent/committed/aborted/nonterminal deleters; same-transaction earlier/current-command creators; earlier-command self-delete reuse versus current-command other-row conflict; same-statement INSERT duplicates; exact same-key UPDATE exclusion; order-independent another-row current-command UPDATE collision; immediate key-swap rejection; post-wait full recheck; stale physical entries; protected RID identity; the §39.1 pre-write violation outcome and rejection of post-write ordinary-violation discovery; and COMMIT/ABORT lock release only after terminal publication.
 
 Vacuum/reclamation verification includes exact index cleanup before retirement, persistent DEAD restart behavior, grace-delayed RID reuse, version-chain splicing, and long-running snapshot interaction.
 
@@ -28497,7 +28896,8 @@ and includes local-only name lookup; derived aliases/names; scalar 0/1/2-row
 behavior and second-row error precedence; EXISTS projection irrelevance and
 early stop; IN/NOT IN empty/NULL/duplicate/NaN cases; lazy skipped branches;
 same snapshot/CommandId; global/grouped aggregate, DISTINCT, LIMIT/OFFSET;
-DML before/after-write errors; exact-empty rewrites; and rejection of every
+DML ordinary-error closure before write and independently owned dynamic
+boundary cases; exact-empty rewrites; and rejection of every
 correlated/row/quantified/LATERAL/set/data-modifying form.
 
 Type property tests MUST compare binder semantics with constant evaluation, future vectorized execution, and index-key comparison where the same type participates.
@@ -28560,6 +28960,20 @@ derived-table slot/name boundaries and any removal preserve the exact mapping
 Validation occurs before data-changing side effects.
 
 Execution verification includes synthetic operator/chunk tests, manual physical-pipeline tests, SQL end-to-end tests, differential tests where semantics align, forced-spill tests under tiny query budgets, cancellation tests, and single-worker/parallel equivalence tests.
+
+Write-DML execution verification MUST establish that the complete semantically
+demanded ordinary candidate domain closes before the first persistent
+user-DML write. It covers INSERT VALUES and spill-staged INSERT SELECT;
+authoritative post-wait UPDATE/DELETE old images; simultaneous assignment and
+complete new-row construction; demanded pre-write RETURNING; statement-wide
+canonical UNIQUE_KEY acquisition; exact collision-safe pending owners for
+same-statement duplicates; exact old-RID UPDATE exclusion; immediate key-swap
+rejection; and no new ordinary candidate after publication. Varying input,
+target, vector, worker, hash, spill, lock, and mutation order MUST preserve the
+ordinary winner and pre-write FA consequence. Dynamic conflict, deadlock,
+resource, cancellation, storage, corruption, and invariant failures remain
+tested at their actually reachable boundary side rather than being inserted
+into the ordinary candidate ranking.
 
 Vector kernels are exercised over:
 
