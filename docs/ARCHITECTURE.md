@@ -24376,25 +24376,20 @@ Statistics therefore remain outside WAL-critical data-correctness paths except f
 
 ## 34.2 ANALYZE
 
-The SQL maintenance interface includes:
+The v1 SQL maintenance interface includes:
 
 ```sql
 ANALYZE table_name;
 ```
 
-and may later include:
+A targetless `ANALYZE` over all tables is outside the v1 baseline.
 
-```sql
-ANALYZE;
-```
+The v1 baseline requires an explicit/manual ANALYZE path. Automatic ANALYZE
+scheduling is not required; optional maintenance-trigger scheduling may request
+ANALYZE under §14.16 without assuming statistics-publication ownership.
 
-for all tables.
-
-Version 1 uses explicit/manual ANALYZE.
-
-Automatic analyze is deferred until optimizer/executor behavior is well measured.
-
-VACUUM and ANALYZE remain distinct operations even if a later maintenance command schedules both.
+VACUUM and ANALYZE remain distinct operations even when one maintenance
+scheduler or combined invocation requests both.
 
 ## 34.3 ANALYZE visibility and publication
 
@@ -24652,7 +24647,7 @@ invisible_entry_count_estimate:
 
 For the v1 non-partial index model, one visible live tuple contributes one logical entry to each ordinary index, including rows whose key contains NULL.
 
-A practical initial estimate is:
+A baseline fallback estimate is:
 
 ```text
 invisible_entry_count_estimate
@@ -24719,9 +24714,9 @@ These index-physical observations are performance metadata and need not be from 
 
 The descriptor records their approximate nature rather than treating them as visibility facts.
 
-A full heap scan is intentionally preferred to a complex initial page sampler.
-
-Large-table heap sampling is a future performance optimization.
+The v1 baseline deliberately uses the full heap scan rather than a page/block
+sampler. Page/block sampling as a replacement for that scan is outside the
+baseline collection contract.
 
 The ANALYZE writer applies the canonical numerical construction and validation
 rules in §34.14.6 before encoding any scope payload. Approximation affects the
@@ -24751,7 +24746,7 @@ The threshold is configurable and is not a persistent-format value.
 
 For larger inputs use a HyperLogLog-style sketch.
 
-Initial precision:
+Baseline precision:
 
 ```text
 p = 14
@@ -24762,9 +24757,8 @@ Hash the same canonical non-NULL SQL value representation used by query hash sem
 
 NULL is excluded.
 
-Version 1 persists the resulting NDV estimate, not necessarily the complete HLL sketch.
-
-Persisting sketches for incremental statistics is deferred.
+The v1 payload persists the resulting NDV estimate, not the HLL sketch.
+Persisted incremental statistics sketches are outside the v1 payload contract.
 
 The process-local register domain, canonical output bounds, and persisted-NDV
 reader checks are §34.14.6.5. Because no v1 HLL sketch bytes are persisted,
@@ -24778,7 +24772,7 @@ For large inputs use a bounded heavy-hitter method such as:
 SpaceSaving
 ```
 
-Initial target:
+Baseline target:
 
 ```text
 64 MCV entries per analyzed column
@@ -24803,7 +24797,7 @@ An unbounded exact value->count map is forbidden for large relations.
 
 Maintain a bounded reservoir sample of non-NULL values.
 
-Initial target:
+Baseline target:
 
 ```text
 100,000 sampled values per analyzed column
@@ -25501,7 +25495,7 @@ A transaction-local or later-aborted ANALYZE does not reset globally visible mod
 3. A StatsVersion is exactly `(TxnId, CommandId)` and all of its catalog rows are owned by one transaction.
 4. The TABLE payload is the completeness manifest for one statistics version.
 5. Global statistics publication occurs only after the owning transaction reaches terminal COMMITTED.
-6. One optimizer invocation does not mix statistics descriptor versions.
+6. For each table statistics object used by one optimizer invocation, the invocation retains one complete compatible TABLE-manifest generation under §§33.4, 34.3.1, and 34.15; all required TABLE/COLUMN/INDEX members have that generation's StatsVersion, and later publication cannot mutate or mix it. Different tables may retain different valid StatsVersions; when no complete compatible generation is available, valid-old or missing-statistics fallback applies.
 7. NDV excludes NULL.
 8. MCV and histogram mass are not double counted.
 9. Histogram/hash semantics agree with SQL value semantics.
