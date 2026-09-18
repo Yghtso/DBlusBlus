@@ -22579,8 +22579,51 @@ required physical allocation
 resource registration and cleanup-owner preparation
 ```
 
-Every failure must show: C0 not entered, no terminal COMMIT append, no `R`, no successful
-count or rows, and safe temporary cleanup under the actual W/Chapter-39 owner.
+Every row below is an independent preparation boundary. The test harness must report entry
+into the named boundary before arming its fault; if the boundary is never entered, setup
+fails rather than passing vacuously.
+
+| Preparation category | Semantic boundary and injected fault | Reusable owner or required hook | Expected event trace and outcome | Cleanup/accounting oracle |
+|---|---|---|---|---|
+| DML semantic finalization | Final execution/Finalize has produced the complete provisional count and result inputs; inject the finalization failure | V26-H semantic finalization and V26-I error-owner transport | Finalization entered -> injected failure -> `W` is whatever the execution ledger records -> C0 not entered -> no `R`; use the Chapter-39 owner for that W state | V26-M reset/teardown; provisional count and result state are discarded |
+| Affected-count representation | Final count is known and its required command metadata representation is requested; inject representation failure | V31 event hook at count-finalization boundary; V24-D ownership lifecycle for charged storage | Count established but not published -> targeted failure -> no C0, COMMIT append, `R`, or public count | Count backing and charge released exactly once |
+| RETURNING row construction/append | Operation-specific final/old image is converted into one retained RETURNING occurrence; inject construction or spool append failure | V31-H plus V21-14 RETURNING bag oracle; V24-F/M retained-row and teardown owners | Construction/append entered -> failure -> no public prefix and no `R` | Retained values and partial spool are discarded; no borrowed backing survives |
+| Required spill write | A required unpublished result block is written to temporary spill; inject short write/I/O failure | V24-J framing/access validation and V24-L resource-error taxonomy | Spill write entered -> `SpillIOError` -> C0 not entered -> no COMMIT append or `R` | Spill handle, partial block, and accounting are reclaimed by one owner |
+| Spool finalization | Required result-spool directory/end marker/index is finalized; inject finalization failure | V24-J/K spill framing and reclamation; V31 hook identifies the finalization boundary | Finalization entered -> failure -> no C0, `R`, count, or RETURNING delivery | Temporary spill namespace and charges are reclaimed; no failed-attempt reuse |
+| Schema/descriptor validation | Prepared result schema/descriptor is checked against the bound statement; inject validation failure | V21-1 bound-result handoff and V22-B output-schema mapping | Validation entered -> failure -> no C0 or `R`; classify as the existing validation/statement owner | Prepared descriptors are released without invalidating transaction-owned catalog state |
+| Framing/extent/representability | Required value/result extent is checked before publication; inject malformed/unsupported extent or representability failure | V24-G/I exact retained-form and arithmetic procedures | Extent check entered -> failure -> no C0 or `R`; preserve the V24 error class | No truncation or narrowed value; provisional storage and charges are released |
+| Command/result-envelope construction | The complete unpublished no-RETURNING or RETURNING envelope is assembled; inject construction failure | V31 event hook at envelope-construction boundary; V26-J external-publication handoff as the result-envelope oracle | Construction entered -> failure -> no successful envelope, C0, `R`, or delivery | Envelope-owned resources are destroyed exactly once |
+| Result-owner storage acquisition | Required request/result owner storage is acquired before C0; inject acquisition failure | V24-D grant/allocation distinction plus required V31 owner-acquisition hook | Allocation attempt entered -> failure -> no C0; a reservation alone is not success | Allocation and reservation state are released without a charge gap |
+| Cursor construction, where required | Required cursor state is constructed before C0; inject construction failure | V31 result-interface hook; V26-J handoff and V26-M backing-release procedures | Cursor construction entered -> failure -> no C0 or `R`; this is not a post-R delivery error | Cursor/backing ownership is discarded exactly once |
+| Spill-handle acquisition/duplication | A handle needed to make the prepared result publishable is acquired or duplicated; inject failure | V24-K spill namespace/reclamation plus required V31 handle hook | Handle operation entered -> failure -> no C0 or `R` | No leaked file/handle; existing spill owner reclaims the temporary object |
+| Resource registration | Required result resource is registered with its request/result owner; inject registration failure | V24-D ownership transfer and V24-M teardown plus required V31 registration hook | Registration entered -> failure -> no C0 or `R` | Pre-registration resources remain private and are released once |
+| Publication destination/slot preparation | Destination used by `R` is made available; inject preparation failure | Required V31 publication-destination hook; V26-J publication handoff is the ownership oracle | Destination preparation entered -> failure -> no C0 or `R` | Destination and backing remain unexposed and fully cleaned |
+| Required physical allocation after budget approval | Budget grant succeeds, then the required physical allocation fails | V24-D grant-versus-allocation procedure and V31-J negative control | Grant -> allocation attempt -> failure -> C0 refused; C1 must not perform the first required allocation | Grant is released; no live allocation remains uncharged |
+| Retained-value/backing lifetime preparation | Required fixed/VARCHAR/dictionary backing is made independent of transaction teardown; inject lifetime-preparation failure | V23-G/H borrowing/backing owners and V24-F/M retained-row cleanup | Lifetime preparation entered -> failure -> no C0 or `R` | No dangling producer/transaction-arena pointer; backing is released once |
+| Memory-accounting preparation | Required charge/coverage transfer is prepared; inject accounting/coverage failure | V24-B/C/D complete ledger and transfer-interval procedures | Accounting preparation entered -> failure -> no C0 or `R` | No unaccounted interval or double charge; unused reservation is released |
+| Cleanup-owner preparation | Exactly one cleanup owner is established for prepared result state; inject owner-registration failure | V24-D/M ownership lifecycle and required V31 cleanup-owner hook | Cleanup-owner preparation entered -> failure -> no C0 or `R` | Every partial resource has a known owner; no leak, dangling pointer, or duplicate release |
+
+For every injected required-preparation failure, the common event oracle is:
+
+```text
+ordinary closure completed
+targeted preparation boundary entered
+injected failure observed
+C0 NOT entered
+no COMMIT-authorizing append
+R NOT occurred
+no successful result/count publication
+no RETURNING prefix delivered
+safe cleanup and accounting closure
+```
+
+The actual `W` event remains authoritative: `W = false` uses the canonical pre-W
+consequence, while `W = true` uses the canonical post-W execution consequence unless a
+stronger owner applies. A successful control for every row must show the operation before
+C0, successful C0 admission, and subsequent C0–C5/`R` ordering. Preparation is not
+delivery: a required owner allocation, spool write/finalization, or envelope construction
+is tested before C0; a delivery-chunk allocation, future spill read, or transport operation
+is tested separately after `R` by V31-M.
 
 ### V31-J — Reservation/allocation, C0–C6, and C5 lifetime
 
@@ -22600,9 +22643,49 @@ dependencies release normally and are not retained merely for result lifetime.
 
 ### V31-K — Non-failing C-to-R transition
 
-Pause after successful C4–C5 and before `R`. Observe all operations required to establish
-`R`. No required ordinary allocation, grant, validation, result construction, spill I/O,
-handle duplication, registration, external callback, or cursor construction may occur.
+Pause after successful C4–C5 and before `R`, then resume through `R` while recording a
+structured operation trace. Each trace record contains:
+
+```text
+phase boundary: C4-complete, C5-complete, C-to-R, R-entry, R-published, or post-R-delivery
+operation category
+required-to-establish-R: yes/no
+attempted: yes/no
+ordering sequence
+success, injected failure, or non-failing completion
+owner and cleanup consequence
+```
+
+The required hook is semantic rather than a prescribed tracing implementation. It must
+expose or reconstruct suboperations hidden behind ownership transfer; a generic
+"ownership transfer" event cannot conceal an allocation, validation, I/O, registration,
+or cursor-construction attempt.
+
+The zero-operation oracle requires zero attempted operations marked
+`required-to-establish-R` in the interval from successful C4–C5 through successful `R`:
+
+```text
+physical allocation
+memory-budget grant
+result validation or construction
+spill read/write required for R
+handle acquisition/duplication
+resource registration
+fallible cursor construction
+external callback required for R
+publication-destination preparation
+```
+
+An attempted operation is a conformance failure even if it succeeds. Existing COMMIT
+internals through C5, non-failing semantic activation at `R`, instrumentation itself, and
+post-`R` delivery operations are not forbidden. The classifier marks an operation as
+required publication work when successful `R` depends on its completion; relabeling that
+operation as delivery does not change its classification.
+
+The positive control must observe at least one allowed fallible preparation operation
+before C0 and at least one permitted delivery allocation or spill read after `R`. If the
+required trace events are unavailable, the result is `NOT VERIFIED / TEST INFRASTRUCTURE
+INCOMPLETE`, never a pass.
 
 The conforming outcome is atomic publication of statement success, affected-count authority,
 complete logical RETURNING ownership, and result/request ownership from already-prepared
@@ -22715,16 +22798,16 @@ coverage and their stale expectations are repaired above.
 | §31.2 exact target identity | V31-E | existing duplicate-target/RID oracle |
 | §31.3 Halloween protection | V31-E | indexed UPDATE and target-finalize procedures |
 | §31.4 memory/spill | V31-D, V31-E, V31-M | V24 memory/spill procedures |
-| §31.4.1 candidate staging | V31-B, V31-D, V31-I | V24-M and pipeline cleanup |
-| §31.5 revalidation/retry | V31-E, V31-G | V9/V11/V15 isolation and retry procedures |
+| §31.4.1 candidate staging | V31-B, V31-D, V31-I | `V24-M — Retry, cancellation, teardown, and retained ownership`; `Pipeline Finalization and Resource Tests` |
+| §31.5 revalidation/retry | V31-E, V31-G | `Transaction identity, snapshot, and status verification`; `Isolation Tests`; `Locking and Gate Tests`; `V21-2 — Statement attempts, CommandId, and retry` |
 | §31.6 INSERT | V31-C, V31-D | existing INSERT protocol matrix |
 | §31.7 UPDATE | V31-E, V31-F, V31-G | existing UPDATE protocol matrix |
 | §31.8 DELETE | V31-E, V31-F | existing DELETE protocol matrix |
 | §31.9 RETURNING/W/C/R | V31-A, V31-H–V31-M | COMMIT and result-envelope procedures |
-| §31.10 cursor interface | V31-A, V31-M | V26 handoff and V30 Source procedures |
-| §31.11 DDL | V31-N | Control-Operator and catalog procedures |
-| §31.12 VACUUM | V31-N | V14 Vacuum and Reclamation procedures |
-| §31.12.1 ANALYZE | V31-N | Statistics Publication procedures |
+| §31.10 cursor interface | V31-A, V31-M | `V26-J — Internal output and external publication`; `V26-M — Backing release, borrowing, and reset`; `V30-G — Temporary format, error categories, and Source failure` |
+| §31.11 DDL | V31-N | `Control-Operator Tests`; `Catalog Tests` |
+| §31.12 VACUUM | V31-N | `Vacuum and Reclamation Tests` |
+| §31.12.1 ANALYZE | V31-N | `Statistics Publication and Versioning Tests` |
 | §31.13 invariants | V31 atomic ledger | §§41.3 and 41.5 obligation maps |
 
 ### Chapter 41 obligation coverage map
