@@ -25807,15 +25807,30 @@ A.x = B.y
 the baseline non-MCV formula is:
 
 ```text
-rows_A
-* rows_B
-* nonnull_fraction_A
-* nonnull_fraction_B
-/
-max(NDV_A, NDV_B)
+if nonnull_fraction_A == 0
+   or nonnull_fraction_B == 0
+   or NDV_A == 0
+   or NDV_B == 0:
+    join_rows = 0
+else:
+    join_rows =
+        rows_A
+        * rows_B
+        * nonnull_fraction_A
+        * nonnull_fraction_B
+        /
+        max(NDV_A, NDV_B)
 ```
 
 subject to bounds and stronger metadata refinements.
+
+The zero-domain branch is required for valid empty/all-NULL statistics and for
+any one-sided zero non-NULL domain. It performs no division and estimates no
+TRUE equality matches. It does not convert NULL-driven UNKNOWN mass to FALSE,
+and its numerical zero does not establish semantic emptiness. For validated
+statistics, a positive non-NULL observation implies `NDV >= 1` under
+§34.14.6.7; Chapter-35 arithmetic does not use this guard to accept an invalid
+statistics payload.
 
 For the comparison expression's truth-state estimate, if the input NULL fractions are `nA` and `nB`:
 
@@ -25832,7 +25847,7 @@ If compatible statistical min/max ranges are disjoint:
 join_rows = 0
 ```
 
-is an allowed cardinality estimate. It does not prove an INNER or range join semantically empty and does not authorize join removal. The same prohibition applies to any future semi/anti join implementation. Later committed changes may create overlap. A LEFT JOIN remains required to preserve its left side regardless of estimated match absence.
+is an allowed cardinality estimate. It does not prove an INNER or range join semantically empty and does not authorize join removal. The same prohibition applies to semi/anti join extensions, which are outside the v1 baseline. Later committed changes may create overlap. A LEFT JOIN remains required to preserve its left side regardless of estimated match absence.
 
 ## 35.8 MCV-aware equijoin
 
@@ -25848,6 +25863,11 @@ When both sides have MCV lists:
 
 This protects hot join keys from severe underestimation.
 
+The residual path applies §35.7's zero-domain rule to the residual population:
+if either residual non-NULL mass or residual NDV is zero, that path contributes
+zero TRUE matches without division. MCV contribution remains separate and is
+added exactly once.
+
 No common MCV value, MCV absence on either side, or zero residual estimated mass proves that the join has no matching key.
 
 ## 35.9 Unique-key refinement
@@ -25860,7 +25880,9 @@ each opposite-side row matches at most one U row
 
 The estimated pair count is therefore bounded by the non-NULL opposite-side rows, subject to domain overlap.
 
-Trusted foreign-key refinements remain future-compatible because foreign keys are deferred in SQL v1.
+Foreign-key refinements are outside the v1 baseline because foreign keys are not
+part of the v1 trusted-constraint surface. An extension that adds them must
+preserve the same key, multiplicity, NULL, and proof boundaries.
 
 ## 35.10 Range predicates
 
@@ -25880,7 +25902,7 @@ residual histogram mass
 
 For a boundary inside a histogram bin, interpolate when the type supports meaningful order interpolation.
 
-For binary VARCHAR, initial within-bin interpolation may be rank/uniform-mass based rather than numeric-distance based.
+For binary VARCHAR, the baseline within-bin interpolation may be rank/uniform-mass based rather than numeric-distance based.
 
 Out-of-range statistical min/max may estimate zero or full non-NULL coverage.
 
@@ -26109,13 +26131,30 @@ may be substantially misestimated under independence.
 
 The optimizer exposes this as a known limitation rather than inventing false precision.
 
-Future extended statistics may include:
+Optional extended-statistics capabilities outside the v1 baseline include:
 
 ```text
 multi-column NDV
 functional dependencies
 multi-column MCVs
 ```
+
+### 35.17.1 Core structural and join cardinality transfers
+
+The following transfers complete the baseline operator-estimation surface. All
+multiplication uses §35.1's finite saturating arithmetic, and every numerical
+result remains separate from §35.2 semantic-proof provenance.
+
+| Logical form | Cardinality estimate | Estimate provenance and proof boundary |
+|---|---|---|
+| `LogicalValues` | Exact structural count of its declared row occurrences. Duplicate value rows remain distinct occurrences. | Logical-structure provenance. Zero rows carry the approved `EXACT_EMPTY_INPUT` proof; a positive count does not suppress evaluation of any demanded row expression or its error. |
+| no-FROM source | Exactly one zero-column source occurrence. | Logical-structure provenance, not table statistics or missing-statistics fallback. Demanded expressions above the source still execute. |
+| `LogicalSort` | Preserve the child cardinality estimate. | Preserve the child's estimate/proof provenance; Sort changes order, not bag cardinality. |
+| `LogicalJoin CROSS` | Saturating product `rows_left * rows_right`. | Derived child-estimate provenance. Numerical zero does not prove either child empty; exact proof propagates only under §20.17.10. |
+| generic `LogicalJoin INNER` | Saturating product `rows_left * rows_right * predicate.true_fraction`; FALSE and UNKNOWN pairs do not match. | Retain child and predicate provenance. Use an eligible specialized model such as §§35.7–35.9 instead of this generic transfer; if no specialized predicate model applies, use §35.25's complete 3VL fallback. Numerical zero is not proof unless the semantic layer independently proves a child empty or the complete ON predicate never TRUE. |
+
+These are cardinality transfers, not permissions to change Chapter-20 bag,
+demand, error, or occurrence semantics.
 
 ## 35.18 Projection cardinality
 
@@ -26137,27 +26176,42 @@ followed by exact-empty/minimum-nonempty handling.
 
 ## 35.20 LIMIT/OFFSET cardinality
 
-When limit/offset are known at planning time:
+When the applicable LIMIT/OFFSET values are known at planning time, apply the
+exact estimate transfer in semantic order:
 
 ```text
 rows_after_offset = max(0, rows_in - offset)
+rows_out =
+    min(rows_after_offset, limit)  if LIMIT exists
+    rows_after_offset              otherwise
 ```
 
-and if LIMIT exists:
+For a Chapter-19-admitted execution-start LIMIT or OFFSET whose value is not
+available during planning, estimate the unknown step with the corresponding
+named §35.25 configured assumption. An unknown OFFSET produces a finite value
+bounded by `[0, rows_in]`; a known OFFSET is applied exactly. An unknown LIMIT
+then produces a finite value bounded by `[0, rows_after_offset]`; a known LIMIT
+is applied exactly. When both are unknown, apply those two configured steps in
+OFFSET-then-LIMIT order. These assumptions are LOW-confidence approximate
+costing metadata and diagnostics identify the unknown count expression; they
+are not evaluated SQL count values. For a positive non-proven input, the
+unknown-count assumptions themselves retain a positive working output estimate:
+they neither assume that an unknown LIMIT is zero nor that an unknown OFFSET
+exhausts the input. Numerical zero may still propagate from the child estimate
+without becoming proof.
 
-```text
-rows_out = min(rows_after_offset, limit)
-```
-
-Otherwise:
-
-```text
-rows_out = rows_after_offset
-```
-
-`LIMIT 0` is provably empty.
+An actual bound SQL `LIMIT 0` known during planning is provably empty. An
+unknown count estimate that happens to be zero is not. An independently
+approved child proof still propagates under §20.17.10.
 
 This refers only to the query's actual bound SQL LIMIT. A `required_rows` objective of zero or any other optimizer costing target is not a logical LIMIT and cannot create semantic emptiness; §38.16 remains authoritative.
+
+Planning does not evaluate a residual execution-start count merely to improve
+this estimate. Chapter 19 retains one execution-start acquisition and its
+NULL/negative/error behavior. Unless the exact mathematical `K` is available
+and representable under Chapters 30 and 38, an approximate unknown-count
+estimate cannot authorize `PhysicalTopN`, an executor row cap, or semantic
+early termination; physical search retains the canonical exact alternative.
 
 ## 35.21 DISTINCT cardinality
 
@@ -26261,13 +26315,41 @@ Missing statistics are explicit optimizer inputs, not fabricated precision.
 One centralized `EstimatorFallbackConfig` supplies named fallback assumptions for at least:
 
 ```text
+unknown base-relation row count
+unknown logical/value width in bytes
+unknown stored-tuple width in bytes
+unknown operator-appropriate temporary row width in bytes
 unknown equality selectivity
 unknown ordered-range selectivity
 unknown NULL fraction
 generic NDV
+generic predicate TRUE/FALSE/UNKNOWN distribution
+unknown execution-start OFFSET cardinality effect
+unknown execution-start LIMIT cardinality effect
 ```
 
 The values are optimizer configuration/tuning parameters rather than persistent-format constants.
+
+The base-row fallback is a finite nonnegative row estimate used when no
+qualifying `TableStatistics` descriptor supplies `analyzed_live_row_count`.
+Width fallbacks are finite nonnegative byte estimates in the specific
+Chapter-34 logical/stored or Chapters-24/35 operator representation being
+costed; known fixed-type or derivable layout widths take precedence, and widths
+from different representations are not interchangeable. A width estimate is
+neither a memory reservation nor evidence of physical allocation.
+
+For a predicate without an applicable specialized estimator, exact Chapter-17
+operator/NULL semantics, resolved nullability, and trusted constraints are
+applied first. The generic fallback supplies only the statistically unresolved
+complete `PredicateTruthEstimate`; its components satisfy §35.4 and preserve
+any known UNKNOWN mass. It is not a two-valued shortcut. Eligible specialized
+equality, range, NULL, IN, same-column, or join models take precedence.
+
+The unknown execution-start LIMIT/OFFSET assumptions are deterministic
+configuration functions or parameters with the bounds in §35.20. They carry
+LOW confidence and explicit configured-fallback diagnostic provenance, not a
+claim that the count was evaluated and not `MISSING_STATISTICS` when statistics
+are present.
 
 Every fallback result is:
 
@@ -26275,8 +26357,19 @@ Every fallback result is:
 finite
 clamped to its legal domain
 marked LOW confidence
-tagged with MISSING_STATISTICS provenance
+tagged with the applicable fallback provenance
 ```
+
+The `MISSING_STATISTICS` tag applies when absent, rejected, or incompatible
+advisory statistics require that fallback. A stale but valid selected
+generation remains statistical input and carries `STALE_STATISTICS` rather
+than being relabeled missing. Malformed outer catalog page/tuple framing keeps
+Chapter 16/34's stronger corruption owner. Non-statistical configured
+fallbacks, including unknown execution-start counts, are identified by their
+actual fallback assumption and are not falsely tagged as missing statistics.
+A generic predicate fallback retains any material input-statistics provenance
+and identifies the configured generic-model assumption diagnostically; this
+does not require a new persisted or public provenance enum.
 
 Fallback assumptions are shown in optimizer trace/verbose EXPLAIN diagnostics.
 
@@ -26360,6 +26453,9 @@ A composite estimate carries the least-confident material assumption that substa
 18. Statistical min/max disjointness, MCV/histogram/HLL absence, `null_fraction` extremes, and zero row/index counts are cost evidence only.
 19. Composed NOT/AND/OR and join estimates do not convert numerical zero/one into logical impossibility.
 20. Operator proof propagation follows §20.17.10, including LEFT JOIN preservation and the one-row global aggregate over empty input.
+21. Equijoin estimation handles a zero non-NULL domain without division; the resulting zero TRUE estimate preserves NULL-driven UNKNOWN mass and carries no statistical emptiness proof.
+22. Missing base rows, unavailable applicable widths, unsupported predicate models, and planning-time-unknown LIMIT/OFFSET effects use the centralized finite configured fallbacks with their required bounds, confidence, and provenance.
+23. VALUES, no-FROM, Sort, CROSS JOIN, and generic INNER JOIN cardinalities follow §35.17.1 without changing Chapter-20 multiplicity, demand, error, or proof semantics.
 
 ---
 
