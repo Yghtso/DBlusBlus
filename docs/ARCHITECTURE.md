@@ -24157,8 +24157,21 @@ physical operator alternatives
     ↓
 physical-property enforcement
     ↓
-lowest-cost valid PhysicalPlan
+canonical costed selection under the applicable search limits
+    ↓
+final PhysicalPlan validation
+    ↓
+immutable PhysicalPlan
 ```
+
+Selection considers only legal, capability-enabled alternatives admitted,
+explored, and retained by the applicable Chapters 37–38 exhaustive or bounded
+search path. Among those alternatives, it follows Chapter 38's active cost
+objective, dominance, and deterministic tie rules. It does not require
+enumerating every legal physical plan or finding the global minimum outside the
+explored search space. Chapter 38's planning-resource fallback and
+`OptimizerResourceLimit` outcome remain authoritative, and every selected plan
+must pass §38.24 final validation before handoff.
 
 Version 1 uses:
 
@@ -24172,9 +24185,9 @@ rule-based logical normalization
 cost-based physical selection
 ```
 
-A full Cascades/Volcano framework is deliberately deferred.
-
-The architecture exposes the fundamental relational optimization mechanisms directly before introducing a more general optimizer framework.
+The baseline does not require a full Cascades/Volcano framework. It exposes the
+fundamental relational optimization mechanisms directly without mandating a
+more general optimizer framework.
 
 ## 33.2 Layering
 
@@ -24203,7 +24216,11 @@ Physical Operator Selection
         ↓
 Physical Property Enforcement
         ↓
-Final Physical Plan
+Canonical Costed Selection Under Applicable Search Limits
+        ↓
+Final Physical-Plan Validation
+        ↓
+Immutable PhysicalPlan
         ↓
 Pipeline Builder
 ```
@@ -24211,8 +24228,8 @@ Pipeline Builder
 The optimizer does not execute queries.
 
 The executor does not make ordinary runtime cost-based plan choices in v1.
-
-Adaptive/runtime reoptimization remains deferred.
+Adaptive/runtime reoptimization is outside the baseline optimizer/executor
+contract.
 
 ## 33.3 Planning inputs
 
@@ -24222,10 +24239,20 @@ One optimizer invocation consumes immutable or stable views of:
 logical plan
 catalog/schema/index descriptors
 statistics descriptor snapshot
+optimizer planning/search configuration and resource limits
 query execution-memory budget
 optimizer/execution cost configuration
 required final physical properties
 ```
+
+Optimizer planning/search limits bound optimization work and the dedicated
+planning arena under §38.21. They are distinct from the Chapter-24 query
+execution-memory budget, which constrains runtime execution. Estimated peak
+runtime memory and spill behavior are planning predictions, not evidence that a
+budget grant or physical allocation has succeeded; actual runtime allocation,
+reservation, spill, and cleanup remain owned by Chapter 24. If canonical
+bounded planning cannot fit within the configured planning resource limit,
+§39.4's `OptimizerResourceLimit` outcome applies.
 
 Required final properties include at least:
 
@@ -24234,7 +24261,10 @@ required output LogicalSlotIds
 ORDER BY ordering when present
 ```
 
-Future properties such as rewindability/partitioning may be added later.
+The tracked v1 property set is limited to `OrderingProperty` and
+`RequiredSlotSet`. Rewindability, partitioning, and other extension categories
+are not tracked baseline physical properties and are not required by this
+contract.
 
 Ordinary planning MUST NOT inspect mutable heap/B+ page contents or exact momentary BufferPool residency.
 
@@ -24312,9 +24342,9 @@ The same principle applies to later join/aggregate/sort alternatives.
 3. Statistics influence performance decisions, never query correctness.
 4. Ordinary optimization does not inspect exact mutable page contents or live buffer residency.
 5. The executor receives one finalized immutable PhysicalPlan.
-6. Physical choice is cost-driven; fixed selectivity thresholds are not the primary selector.
+6. Physical choice follows the active objective and canonical tie rules among legal, capability-enabled alternatives admitted and retained by the applicable canonical search path and resource bounds; fixed selectivity thresholds are not the primary selector, and a global exhaustive optimum is not required.
 7. Logical normalization and physical algorithm selection remain distinct stages.
-8. Full Cascades/adaptive optimization remains future work rather than hidden v1 complexity.
+8. Full Cascades/Volcano optimization and adaptive runtime reoptimization are outside the baseline contract rather than hidden baseline complexity.
 9. Only approved exact semantic proof may eliminate execution; numerical estimates, including zero, affect cost and physical choice only.
 
 ---
