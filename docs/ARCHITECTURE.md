@@ -12203,10 +12203,12 @@ envelope in §§15.7.3 and 31.9:
   `ACTIVE`; a later COMMIT or ROLLBACK is separate and does not retroactively rewrite that
   statement result, which never implied transaction durability;
 - in autocommit, the count remains request-owned and externally unexposed through the
-  implicit §15.5 COMMIT's C4–C5 completion. A commit failure before successful response
-  publication exposes the canonical commit/error outcome, not a successful affected-row
-  count; after C4–C5 and `R`, delivery failure cannot revoke the authoritative count or
-  the COMMITTED transaction even when the client did not receive that metadata.
+  implicit §15.5 COMMIT's C4–C5 completion. Its exact value and successful-envelope
+  representation are fully prepared but remain unpublished before admission to that
+  COMMIT. A commit failure before successful response publication exposes the canonical
+  commit/error outcome, not a successful affected-row count; after C4–C5 and `R`, delivery
+  failure cannot revoke the authoritative count or the COMMITTED transaction even when the
+  client did not receive that metadata.
 
 The count is not persistent database state. It is not WAL-logged, checkpointed, stored in
 `database.control`, transaction status, or catalog metadata, and crash recovery does not
@@ -12480,9 +12482,14 @@ For a transaction with persistent writes:
 A transaction that created DDL physical resources MUST first satisfy the §21.5 durable final-name prerequisite for every file referenced by its prospective committed catalog state.
 
 ```text
-C0. accept COMMIT only from ACTIVE; no ordinary statement may still be running
+C0. accept COMMIT only from ACTIVE; no ordinary statement may still be running;
+    for implicit autocommit DML, require the complete but unpublished §31.9
+    statement-result envelope and every fallible resource needed to publish it at R
+    to have been prepared successfully
 C1. validate every commit prerequisite, including DDL final-name durability,
-    and reserve every fallible resource needed through runtime publication;
+    and, for implicit autocommit DML, validate that its already-prepared result,
+    accounting, cleanup owner, and backing remain valid through C5 and R;
+    reserve every fallible resource needed for COMMIT's own runtime publication;
     a persistent transaction already owns its §4.3.2.4 terminal-WAL credit
 C2. state ACTIVE -> COMMITTING; while still nonterminal in the registry,
     execute the §12.10.5 status-page protocol under its write latch:
@@ -12498,7 +12505,9 @@ C5. put catalog/statistics caches in a coherent installed-or-invalidated state,
     release TUPLE_WRITE/UNIQUE_KEY locks and
     TableWriterGate/SchemaLock/STATS_PUBLISH/MANIFEST_CHANGE holdings,
     unregister snapshots, release any registered write-status dependency, and finish
-    required transaction cleanup
+    required transaction cleanup without releasing or invalidating independently
+    retained prepared-result backing, accounting, spill handles, or cleanup
+    responsibility needed through R and delivery
 C6. only now return/send successful COMMIT acknowledgement
 ```
 
@@ -12507,6 +12516,20 @@ Commit does **not** force dirty heap/index pages.
 The C2 status-page installation intentionally precedes C3 durability under §§12.10.5 and 13.13.2; the status page remains NO-FORCE and cannot itself reach disk before WAL-before-data. C3 is the irreversible durable-commit point: once `TXN_COMMIT` is durable, recovery necessarily establishes COMMITTED and no later runtime, cache, cleanup, or client failure may change that outcome to ABORTED.
 
 After the publication-authorizing `TXN_COMMIT` append within C2, commit is uncancellable. A connection loss or cancellation request cannot redirect it to ABORT. Exact failure outcomes for every C0–C6 boundary are canonical in §39.1.5.
+
+For implicit autocommit DML, C0's result prerequisite is stronger than an
+accounting reservation. Every required result allocation, cursor or owner
+construction, spill-handle preparation, validation, registration, and other
+fallible operation needed to make §31.9 `R` possible has already succeeded.
+Section 24.5's accounting grant does not prove physical allocation success, so
+C1 cannot validate readiness from a grant alone and COMMIT does not finish
+statement-result construction. Delivery-only reads, chunk materialization, and
+transport remain outside this prerequisite.
+
+For implicit autocommit DML, successful C4–C5 is followed by §31.9 `R` before
+C6 sends the successful statement/COMMIT response. C6 performs delivery, not
+result preparation or result-authority construction; its transport failure
+retains §§31.9 and 39.1.5 ownership and cannot undo COMMITTED.
 
 A read-only transaction elides C2–C3 because it has no persistent references or terminal WAL requirement. Its runtime terminal publication at C4 ends the transaction; C5 still precedes acknowledgement.
 
@@ -12619,7 +12642,12 @@ Physical DML applies the stronger §31.9 publication rule: no partial RETURNING 
 
 For DML, successful completion becomes externally authoritative only through
 §31.9's atomic result-publication boundary `R`. Before `R`, result state remains
-statement/attempt-owned and a failure uses §39.1's actual first-write state.
+unpublished. An explicit transaction prepares it before `R`. Autocommit prepares
+every fallible publication prerequisite before admission to implicit COMMIT,
+retains that prepared state through C0–C5, and performs the non-failing semantic
+`R` transition after successful C4–C5. A preparation failure before COMMIT
+admission uses §39.1's actual first-write state; a failure within COMMIT retains
+§39.1.5's COMMIT owner.
 After `R`, cursor delivery does not re-enter DML execution and cannot authorize
 same-`TxnId` statement retry or retroactively change the published statement
 outcome. Connection/session loss retains its independent §39.1.7 owner.
@@ -12662,7 +12690,10 @@ This chapter is the boundary between the persistent transactional storage core a
 13. Transaction-lifetime tuple/unique locks are released only after terminal outcome publication.
 14. Vacuum performs delayed exact index garbage removal and RID reuse.
 15. External output from a potentially retryable statement does not escape before its retry-safe boundary.
-16. A non-success statement that has published a transaction-owned persistent write cannot leave the transaction commit-eligible.
+16. A statement-execution non-success established before implicit COMMIT
+    admission that has published a transaction-owned persistent write cannot
+    leave the transaction commit-eligible; once C0 is admitted, the COMMIT
+    protocol and its uncertainty rules are authoritative.
 17. `MUST_ABORT` is followed automatically by semantic ABORT; no partial user-DML statement effects can later commit.
 18. CommandIds are consumed by failed as well as successful statements and are never reused.
 19. COMMIT is uncancellable after its publication-authorizing record append and irreversible after durable commit.
@@ -12683,6 +12714,16 @@ This chapter is the boundary between the persistent transactional storage core a
 30. DML result publication is the atomic §31.9 `R` transition: before it,
     result state is execution-owned; after it, affected count and statement
     success are authoritative and result delivery cannot reopen execution.
+31. Before implicit autocommit DML enters C0, its complete successful result
+    envelope and every fallible resource required for `R` are prepared but
+    unpublished; an accounting reservation alone is insufficient when physical
+    allocation is required.
+32. C5 transaction cleanup preserves the independently owned prepared result,
+    accounting, value backing, spill handles, and cleanup responsibility needed
+    through `R` and delivery without retaining transaction locks for that purpose.
+33. After successful autocommit C4–C5, `R` uses only already-prepared state and
+    introduces no ordinary required allocation, validation, spill I/O, handle
+    duplication, registration, callback, or other fallible semantic work.
 
 ---
 
@@ -21092,6 +21133,16 @@ successful-envelope publication and any result-spool ownership transfer. Once
 instance or reopen the completed DML statement. This DML-specific handoff does
 not change SELECT completion or Chapter-30 external-sort Source semantics.
 
+Successful autocommit DML execution also completes every fallible operation
+required to prepare its unpublished result envelope and make `R` possible
+before the command layer admits implicit COMMIT at §15.5 C0. Pipeline readiness,
+spool finalization, an accounting grant, and an unbacked cursor descriptor are
+insufficient if required physical allocation, validation, spill-handle
+preparation, resource registration, or cleanup-owner preparation remains. The
+prepared state survives C5 under its independent request/result-preparation
+owner. After successful C4–C5, the result owner performs `R` from that state
+without another ordinary fallible publication prerequisite.
+
 Success cannot be declared while any semantically required execution or
 error-producing finalization task remains outstanding. Under §§32.8 and 39.3,
 terminal failure/cancellation leaves no partially active task graph runnable as
@@ -21182,6 +21233,13 @@ to the result owner rather than this statement-execution error path. A terminal
 delivery error remains distinct from successful client `FINISHED`; it does not
 retroactively create a DML execution failure. Internal source/operator
 `FINISHED` remains distinct from both public outcomes.
+
+For autocommit DML whose publication-authorizing COMMIT record has appended,
+pending cancellation cannot reopen execution or redirect COMMIT to ABORT. Once
+C4–C5 complete, the already-prepared non-failing `R` transition completes before
+that cancellation is applied to remaining delivery. Process crash or actual
+session loss may prevent observation or execution of `R`; those events retain
+§§15.5 and 39.1.7 ownership and do not create a fallible pipeline handoff.
 
 An owner-established terminal error is an unsuccessful path, not ordinary
 `FINISHED`. It permits error propagation, quiescence, and cleanup, not further
@@ -23372,21 +23430,69 @@ W = §39.1.2 first persistent transaction-owned statement write
 C = completion of the existing autocommit C4-C5 result-withholding requirement
 R = successful statement-result publication and result ownership transfer
 
-explicit:  ordinary closure -> [W if rows are written] -> execution success -> R -> delivery
-autocommit: ordinary closure -> [W if rows are written] -> execution success -> C -> R -> delivery
+explicit:  ordinary closure -> [W if rows are written] -> result preparation -> execution success -> R -> delivery
+autocommit: ordinary closure -> [W if rows are written] -> result preparation -> C0..C5 -> R -> delivery
 ```
 
 `C` is not a new COMMIT stage. Zero-row DML need not cross `W`, while successful
-publication still crosses `R`.
+publication still crosses `R` and an autocommit statement still satisfies its
+canonical COMMIT prerequisites; absence of `W` alone does not classify the
+transaction as read-only or authorize skipping those prerequisites.
+No-RETURNING and zero-row DML prepare command completion and the exact affected-
+count metadata without fabricating a row or row cursor.
+
+Before an autocommit DML command is admitted to §15.5 C0, every fallible
+operation required to make its eventual successful `R` transition possible
+has completed. As applicable, the complete but unpublished prepared state
+contains:
+
+```text
+final DML semantic execution and affected count
+complete RETURNING row construction, spool append/spill writes, and finalization
+publication-readiness schema, descriptor, framing, and extent validation
+command/count metadata and successful-envelope representation
+required result owner, cursor, spill handle, resource registration, and
+    publication destination/slot preparation
+value backing and lifetime preparation
+memory accounting plus every required physical allocation
+one valid cleanup owner that survives C5
+```
+
+An accounting or budget grant is not physical allocation under §24.5. If `R`
+requires allocated storage, the allocation has already succeeded before C0;
+an implementation cannot reserve capacity at C1 and perform the first required
+allocation after COMMIT. Allocation or I/O needed only for a subsequent delivery
+chunk or subsequent result-spool read remains post-`R` delivery work and need not be
+performed before COMMIT.
 
 Before `R`, RETURNING storage and the provisional affected count remain
-statement/attempt-owned and unpublished. Failure during expression evaluation,
-mutation, result-row materialization, spool append or required spill write,
-spool finalization, schema/framing/extent validation, or preparation for the
-ownership transfer is statement execution failure. Section 39.1 applies using
-the real `W` state: after `W` but before `R`, such failure retains the existing
-post-write consequence. The unpublished spool and count are discarded, no
-RETURNING prefix escapes, and cursor allocation alone changes nothing.
+unpublished. A result/request-lifetime owner, cursor, handle, publication slot,
+or destination may be prepared before `R`, but preparation grants no successful-
+result authority. Failure during expression evaluation, mutation, result-row
+materialization, spool append or required spill write, spool finalization,
+schema/framing/extent validation, physical allocation, registration, or
+ownership-transfer preparation is statement execution failure when it occurs
+before explicit-transaction `R` or before autocommit C0. Section 39.1 applies
+using the real `W` state. The unpublished spool and count are discarded, no
+RETURNING prefix escapes, and cursor allocation alone changes nothing. Once
+implicit COMMIT is admitted, failures within C0–C5 instead retain §39.1.5's
+existing COMMIT owner.
+
+The prepared autocommit state remains valid and continuously accounted through
+C0–C5. C5 may release transaction-owned locks, gates, snapshots, status
+dependencies, and transaction arenas under their existing owners, but it does
+not release or invalidate the prepared envelope, result schema, affected count,
+retained value backing, cursor, spill files/handles, reservations, accounting
+context, or cleanup responsibility needed through `R` and delivery. Such state
+cannot depend exclusively on an arena or owner destroyed by C5, and preserving
+it does not retain transaction locks.
+
+After successful C4–C5, autocommit `R` is a non-failing in-process semantic
+publication and ownership transition using only that prepared state. No new
+required allocation, budget grant, validation, result construction, spill I/O,
+handle duplication, resource registration, external callback, or fallible
+cursor construction remains between `C` and `R`. Attempting one is an internal
+protocol violation, not a supported ordinary postcommit failure path.
 
 At `R`, statement success and affected count become final and authoritative,
 the complete logical RETURNING bag is established, and any spool becomes
@@ -23424,9 +23530,25 @@ historical fact that the successful statement result or returned prefix was
 observed.
 
 For **autocommit**, `R` cannot precede `C`. A failure before C4–C5 exposes no
-successful count or RETURNING prefix. After `C` and `R`, the transaction remains
-`COMMITTED` despite spool-read, cancellation, transport, or session-delivery
-failure. No rollback or same-statement retry is authorized.
+successful count or RETURNING prefix: result-preparation failure occurs before
+C0 and COMMIT failure retains §§15.5 and 39.1.5 ownership. After the
+publication-authorizing COMMIT append, cancellation cannot redirect COMMIT to
+ABORT. If cancellation is pending after successful `C` while the session remains
+usable, the prepared `R` transition completes and cancellation applies only to
+remaining delivery. After `C` and `R`, the transaction remains `COMMITTED`
+despite spool-read, cancellation, transport, or session-delivery failure. No
+rollback or same-statement retry is authorized.
+
+A process crash or actual session loss after durable COMMIT but before `R` may
+prevent result publication or observation. Recovery still establishes
+`COMMITTED`; no successful result envelope or affected-count authority need
+have been published, missing output does not prove nonexecution, and the request
+must not be blindly replayed. No durable response log, result-spool recovery, or
+reconnect/resume protocol exists. Unpublished temporary result state is cleaned
+when a known-safe owner can do so. An invariant or noncontinuable defect that
+unexpectedly prevents the prepared C-to-`R` transition retains its stronger
+owner, never changes COMMITTED to ABORTED, never fabricates `R`, and never
+authorizes automatic replay.
 
 The affected count's authority and its delivery are different facts. At `R`
 the count is authoritative even if a later cursor or transport error prevents
@@ -23436,10 +23558,13 @@ column or `LogicalSlotId`.
 Voluntary abandonment of a post-`R` cursor may discard unread rows and cleans
 its result-owned memory and spill resources. It does not revoke statement
 success, count authority, or transaction state, and the client need not drain
-every row to preserve those facts. Cancellation before `R` remains statement
-execution cancellation under §39.1 and the real `W` state; cancellation after
-`R` abandons result delivery unless an independently fatal session condition
-also applies.
+every row to preserve those facts. Cancellation before explicit-transaction
+`R`, or before autocommit admission at C0, remains statement-execution
+cancellation under §39.1 and the real `W` state. Cancellation during implicit
+COMMIT follows §§15.5 and 39.1.5; after its publication-authorizing append it
+cannot cause ABORT, and after successful C it cannot prevent the prepared `R`
+transition in a usable session. Cancellation after `R` abandons result delivery
+unless an independently fatal session condition also applies.
 
 ## 31.10 Query result interface
 
@@ -23593,7 +23718,10 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
 11. Client-visible result chunks never depend on an expired internal borrowed chunk.
 12. DDL/VACUUM/ANALYZE control operators preserve their owning catalog/storage/statistics transaction protocols.
 13. ANALYZE never globally publishes an uncommitted or partial StatsDescriptor.
-14. Any failed DML statement with a published transaction-owned write automatically aborts; a pre-write recoverable failure may leave an explicit transaction active.
+14. A DML statement-execution failure established before explicit `R` or
+    autocommit C0 automatically aborts after a published transaction-owned
+    write; a pre-write recoverable failure may leave an explicit transaction
+    active, while admitted autocommit follows the COMMIT owner.
 15. Autocommit DML does not expose RETURNING rows before implicit COMMIT C4–C5 complete; later transport failure cannot undo that commit.
 16. UNIQUE enforcement uses current-state ownership rather than ordinary
     snapshot visibility, detects earlier-command published owners and exact
@@ -23613,9 +23741,10 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
 21. `R` atomically publishes successful DML result authority and transfers any
     finalized RETURNING spool to the result/request owner; readiness, cursor
     allocation, first delivery, and exhaustion are not `R`.
-22. Before `R`, result-spool failure is statement execution failure governed by
-    the real first-write state; after `R`, ordinary delivery failure cannot
-    retroactively fail DML, revoke its count, or authorize retry.
+22. Result-spool/preparation failure before explicit `R` or autocommit C0 is
+    statement execution failure governed by the real first-write state;
+    autocommit C0–C5 failure is COMMIT-owned, and after `R` ordinary delivery
+    failure cannot retroactively fail DML, revoke its count, or authorize retry.
 23. A usable explicit transaction remains `ACTIVE` after ordinary post-`R`
     result failure; autocommit is already `COMMITTED` before `R`.
 24. Cursor terminal error is not successful `FINISHED`, and no already returned
@@ -23623,6 +23752,15 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
 25. Result ownership transfer preserves memory accounting, value lifetimes, and
     temporary-spill cleanup; cursor abandonment alone changes no statement or
     transaction outcome.
+26. Autocommit DML completes every fallible result-publication prerequisite,
+    including required physical allocation rather than only reservation, before
+    C0 while keeping the prepared envelope unpublished.
+27. C1 validates already-prepared result readiness, C5 preserves its independent
+    backing/accounting/cleanup owner, and successful C-to-`R` publication needs
+    no ordinary fallible required operation.
+28. Process crash or actual session loss after durable COMMIT but before `R`
+    leaves the transaction COMMITTED without inventing result recovery, count
+    reconstruction, automatic replay, or a false successful publication.
 
 ---
 
@@ -28064,12 +28202,16 @@ database/storage-fatal error:
     DATABASE_NONCONTINUABLE regardless of flag
 ```
 
-For DML this rule classifies statement execution non-success before §31.9's
-successful statement-result publication boundary `R`. After `R`, ordinary
-result-spool reading, cursor advancement, cancellation of remaining delivery,
-or transport failure is not a new non-success of the completed statement and
-does not reapply this first-write matrix. Independently transaction-fatal,
-session-loss, corruption, and database-noncontinuable owners remain effective.
+For DML this rule classifies statement execution non-success before explicit-
+transaction §31.9 `R` and, for autocommit, result-preparation non-success before
+implicit COMMIT admission. Once autocommit enters C0, §§39.1.5–39.1.7 rather
+than the first-write matrix own COMMIT failure, cancellation, crash, and session
+loss. Successful C4–C5 is followed by a non-failing prepared `R` transition;
+after `R`, ordinary result-spool reading, cursor advancement, cancellation of
+remaining delivery, or transport failure is not a new non-success of the
+completed statement and does not reapply this first-write matrix. Independently
+transaction-fatal, session-loss, corruption, and database-noncontinuable owners
+remain effective.
 
 Earlier **successful statements** in the same explicit transaction do not make an otherwise effect-free later statement error transaction-fatal. The boundary is per current statement. Conversely, physical invisibility or complete-generation filtering of partial current-statement rows does not permit that transaction to commit them.
 
@@ -28119,8 +28261,10 @@ because the boundary or the dynamic-failure rule changed.
 
 For every `MA` result the command layer first records the original structured error, atomically changes `ACTIVE -> MUST_ABORT`, and invokes ABORT. The error response is not successful statement completion and indicates that the explicit transaction ended ABORTED. If ABORT itself encounters a stronger failure, §39.1.7 precedence applies.
 
-The matrix applies when the failure terminates current statement execution
-before authoritative successful result publication. Section 31.9 owns ordinary
+The matrix applies when the failure terminates current statement execution:
+before explicit-transaction `R`, or before autocommit C0. Once autocommit C0 is
+admitted, §§39.1.5–39.1.7 own COMMIT and its uncertainty; no ordinary fallible
+required result work remains after successful C4–C5. Section 31.9 owns ordinary
 post-`R` DML result-delivery failures; they terminate the cursor, not the
 already completed statement. An unrelated background copied-writeback/WAL
 flush error that merely leaves another page dirty does not retroactively fail
@@ -28176,13 +28320,17 @@ failure before the first mutation remains on the pre-write side. Exact
 UNIQUE/PRIMARY KEY conflict membership is §11.10; ordinary diagnostic ranking
 and closure are §21.16.1.
 
-DML `RETURNING` remains statement-owned and buffered until §31.9's `R`. If a
-dynamic write, spool append, spill write, validation, finalization, or ownership-
-transfer preparation step fails before `R`, no prefix or successful count is
-published; after a crossed write boundary the execution failure requires the
-existing `MA` outcome. A successfully published `R` is final: later ordinary
-spool-read, cursor, cancellation, or transport failure is result delivery
-failure, cannot reopen DML execution, and never authorizes same-`TxnId` retry.
+DML `RETURNING` remains unpublished until §31.9's `R`. If a dynamic write,
+spool append, spill write, validation, finalization, physical allocation, or
+ownership-transfer preparation step fails before explicit `R` or before
+autocommit C0, no prefix or successful count is published; after a crossed
+write boundary the execution failure requires the existing `MA` outcome. An
+autocommit result is fully prepared before C0, survives C5, and needs no
+ordinary fallible required operation between successful C and `R`; failures
+during C0–C5 retain the COMMIT owner below. A successfully published `R` is
+final: later ordinary spool-read, cursor, cancellation, or transport failure is
+result delivery failure, cannot reopen DML execution, and never authorizes
+same-`TxnId` retry.
 For a usable explicit session the transaction remains `ACTIVE`; an actual
 session loss may abort it under §39.1.7 for that independent reason. In
 autocommit, `R` follows C4–C5 and the transaction remains `COMMITTED` despite
@@ -28200,6 +28348,14 @@ V1 supports autocommit. A one-statement implicit transaction applies the same cl
 ### 39.1.5 COMMIT failure, durability, and client acknowledgement
 
 The exact successful stages are §15.5 C0–C6. For persistent transactions, C3 (`durable_lsn >= commit_lsn`) is the irreversible durable semantic point. The resident status-page update in C2 is required runtime state under §§12.10.5 and 13.13.2 but remains NO-FORCE; the globally observable runtime terminal cache is published only at C4.
+
+Implicit autocommit DML reaches C0 only after §31.9 has prepared every fallible
+resource required for later result publication. C1 validates that already-
+allocated, already-validated state and its lifetime; it does not construct the
+result or treat an accounting reservation as allocation success. C5 preserves
+the prepared result's independent backing and cleanup owner. Once C4–C5 finish,
+`R` performs no ordinary fallible required work, so this table has no supported
+post-C/pre-`R` allocation, validation, registration, or spill-I/O failure row.
 
 | Failure point | Transaction/storage outcome | Client/API outcome |
 |---|---|---|
@@ -28229,6 +28385,14 @@ A group-commit flush failure applies this same rule to every waiting transaction
 Under §§12.10.5 and 13.13.2, resident status-page installation is a C2 prerequisite and may not be intentionally deferred until after durability. If C3 has nevertheless completed and a latent failure proves that required installation/runtime state was not completed, the transaction remains COMMITTED and the database is noncontinuable. Ordinary post-C3 runtime cache publication, logical-lock release bookkeeping, catalog/statistics cache publication, or client transport failure likewise cannot change the outcome. No error path may append/publish ABORTED for that TxnId. A nonrequired background status-page flush scheduling failure may leave the page dirty/retryable under §7.10 and does not by itself fail an otherwise complete COMMIT.
 
 Successful COMMIT is sent only after C4 terminal publication and C5's required coherent installed-or-invalidated cache/ownership state. V1 does not acknowledge at WAL durability and finish runtime publication asynchronously.
+
+A process crash after durable COMMIT but before autocommit `R` leaves recovery
+authority unchanged: the transaction is COMMITTED, while the successful result
+envelope may never have been published or observed. The affected count is not
+reconstructed and absence of a response does not authorize blind request
+replay. A conforming in-process implementation cannot reach the same interval
+through an ordinary required result-preparation failure; such work completed
+before C0.
 
 ### 39.1.6 ABORT failure and automatic MUST_ABORT cleanup
 
@@ -28265,6 +28429,14 @@ Connection/session loss has these outcomes:
 | COMMITTING after publication-authorizing append, before durable commit | commit is uncancellable; continue it or enter noncontinuable/recovery; client outcome is uncertain |
 | after durable commit, before acknowledgement | transaction remains COMMITTED; finish safe runtime cleanup where possible; client outcome is uncertain |
 | ABORTING | continue abort cleanup; never revive transaction |
+
+For implicit autocommit DML, the “after durable commit, before
+acknowledgement” row includes loss before §31.9 `R`. The prepared temporary
+result is cleaned when safe, but no `R`, successful count authority, durable
+response record, result reconstruction, or automatic DML replay is fabricated.
+If the session remains usable and only cancellation is pending after successful
+C4–C5, that is not session loss: the prepared `R` transition completes and the
+cancellation applies to remaining delivery.
 
 Crash recovery maps runtime states using only persisted WAL/status evidence:
 
@@ -28355,6 +28527,14 @@ The following implementations are forbidden:
 16. reporting `FINISHED` for a cursor whose remaining result delivery failed,
 17. requiring a client to drain a published RETURNING cursor to preserve the
     statement's already successful outcome.
+18. admitting autocommit DML to C0 while any required result allocation,
+    validation, spill I/O, handle preparation, resource registration, or
+    cleanup-owner preparation remains incomplete;
+19. treating a Chapter-24 accounting grant as proof that a required result
+    allocation succeeded;
+20. performing ordinary fallible required result-publication work between
+    successful C4–C5 and `R`, or redirecting COMMITTED to ABORT when such an
+    internal protocol defect is detected.
 
 ## 39.2 SQL front-end and logical-planning errors
 
@@ -28436,13 +28616,17 @@ construction-invariant violations remain internal defects rather than being
 reclassified as spill I/O failures.
 
 For DML RETURNING, controlled temporary spill, allocation, and runtime
-representability categories may occur in two ownership stages. Before §31.9's
-`R`, they are statement execution failures and §39.1 uses the actual first-
-write state. After `R`, an ordinary result-spool read/framing or delivery-chunk
-materialization failure is terminal result-delivery error: it is not successful
-cursor exhaustion and does not retroactively change statement or transaction
-outcome. This stage distinction does not downgrade an independently established
-persistent-corruption, invariant, session-loss, or noncontinuable condition.
+representability categories occur in owner-specific stages. Before explicit
+`R`, or before autocommit C0, required result preparation failures are statement
+execution failures and §39.1 uses the actual first-write state. During
+autocommit C0–C5, the existing COMMIT owner applies; all ordinary fallible
+result-publication preparation has already completed. Successful C4–C5 is
+followed by a non-failing prepared `R` transition. After `R`, an ordinary
+result-spool read/framing or delivery-chunk materialization failure is terminal
+result-delivery error: it is not successful cursor exhaustion and does not
+retroactively change statement or transaction outcome. This stage distinction
+does not downgrade an independently established persistent-corruption,
+invariant, session-loss, or noncontinuable condition.
 
 Lower-layer structured causes are preserved rather than erased. Examples include:
 
@@ -29040,12 +29224,21 @@ implicit COMMIT.
 
 DML result-publication verification MUST distinguish pre-`R` execution failure
 from post-`R` delivery failure. It establishes that `R` waits for successful
-statement execution and, for autocommit, C4–C5; explicit post-`R` spill-read
-failure leaves a usable transaction `ACTIVE`; autocommit remains `COMMITTED`;
-affected-count authority and any delivered prefix survive; cursor error is not
-`FINISHED`; delivery cancellation and session loss retain separate owners; no
-published DML is retried; and result-spool accounting and cleanup transfer
-exactly to the result owner.
+statement execution and, for autocommit, C4–C5. Autocommit cases prove that
+every required fallible result-publication operation completes before C0;
+physical allocation cannot be replaced by a budget reservation; C1 validates
+already-prepared readiness; C5 preserves result backing, accounting, spill
+handles, and cleanup ownership; and no required allocation, validation,
+registration, handle duplication, spill I/O, callback, or cursor construction
+remains between successful C and `R`. Coverage includes DML with and without
+RETURNING, zero-row DML, every existing COMMIT failure/uncertainty branch,
+cancellation after the authorizing append, process crash and session loss after
+durable COMMIT but before `R`, and rejection of abort or replay after COMMITTED.
+Explicit post-`R` spill-read failure leaves a usable transaction `ACTIVE`;
+autocommit remains `COMMITTED`; affected-count authority and any delivered
+prefix survive; cursor error is not `FINISHED`; delivery cancellation and
+session loss retain separate owners; no published DML is retried; and result-
+spool accounting and cleanup transfer exactly to the result owner.
 
 COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
 
@@ -29159,13 +29352,15 @@ tested at their actually reachable boundary side rather than being inserted
 into the ordinary candidate ranking.
 
 Result-interface verification covers atomic §31.9 `R` publication for DML with
-and without RETURNING; spool append/finalization failure before `R`; first-read
-and later-read failures after `R`; non-retraction and returned-chunk lifetime;
-authoritative count even when delivery fails; terminal cursor error distinct
-from successful exhaustion; voluntary cursor abandonment; pre-/post-`R`
-cancellation; independently owned session loss; continuous memory accounting;
-and cleanup of result-owned buffers and spill resources without statement
-reexecution or transaction-lock release.
+and without RETURNING; zero-row DML; spool append/finalization and required
+allocation failure before autocommit C0; C1 prepared-state validation; C5
+lifetime survival; the absence of ordinary fallible required work between C
+and `R`; first-read and later-read failures after `R`; non-retraction and
+returned-chunk lifetime; authoritative count even when delivery fails; terminal
+cursor error distinct from successful exhaustion; voluntary cursor abandonment;
+pre-C0, COMMIT-owned, and post-`R` cancellation; independently owned crash and
+session loss; continuous memory accounting; and cleanup of result-owned buffers
+and spill resources without statement reexecution or transaction-lock release.
 
 Vector kernels are exercised over:
 
