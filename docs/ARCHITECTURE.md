@@ -23774,7 +23774,7 @@ The database does not create an arbitrary OS thread per query or per pipeline.
 
 Worker count is configuration.
 
-The first production executor may run one query using one worker, while the same state/task model remains capable of multiple workers.
+The worker/task model supports one-worker and multi-worker execution without changing its ownership or completion semantics.
 
 ## 32.2 Morsels
 
@@ -23793,13 +23793,67 @@ spill work:
     partition/run ranges
 ```
 
-The initial heap-scan target is approximately:
+For each parallel-ready source/operator instance, execution attempt, and
+required algorithmic pass, the owning source defines the source domain that
+the current plan must consume. When that domain requires complete
+consumption, its morsels form a complete, pairwise disjoint partition of the
+domain: their union is the required work, no required unit belongs to two
+morsels, and no required unit is left unassigned. The domain is the source's
+established demanded work after the Chapter-20 demand and any canonical
+early-stop/pruning rule; this contract does not force work that the plan is
+legally allowed to omit.
+
+Morsel ownership is about required source work, not output cardinality or SQL
+row order. One physical source unit may contain multiple logical occurrences,
+and the owning source accounts for each required occurrence under
+§26.4.2. A filter may therefore produce no output, a join may produce zero or
+many output occurrences, and an aggregate may combine many inputs without
+weakening the source-ownership rule. Within the defined source instance,
+attempt, and pass, each required source occurrence is accepted exactly once;
+a separate valid algorithmic pass has its own source domain and ownership.
+
+A morsel claim is a linearized ownership transition. Conceptually, a morsel
+is one of:
+
+```text
+available and unclaimed
+exclusively claimed by one current execution owner
+successfully completed by that owner
+canceled or failed under the owning execution protocol
+```
+
+Concurrent claim attempts cannot both succeed for one available morsel. A
+successful claim cannot disappear without the owner's completion, cancellation,
+or failure outcome, and one morsel cannot be reported successfully completed
+twice. Splitting preserves the parent's complete domain as disjoint child
+domains; coalescing covers every child domain exactly once. A claimed or
+accepted domain is not silently reassigned in a way that duplicates work.
+These are ownership semantics, not requirements for a particular queue,
+counter, lock, compare-exchange, or work-stealing structure.
+
+An empty source domain has an empty morsel partition and may complete
+successfully with no output. A zero-length morsel may be represented and
+claimed, but owns no source occurrence and cannot create a duplicate or hide
+another required unit. A nonempty claimed morsel may legitimately produce no
+output after visibility or filtering. Coverage is established from the
+assigned source domains and their claim/completion state, not from output
+chunk cardinality alone.
+
+Cancellation or failure of a claimed morsel does not count as successful
+completion. It follows §§26.7 and 39.3: required missing work cannot yield a
+successful complete result, other workers quiesce under the existing runtime
+owner, and cleanup releases query-owned state without inventing a general
+mid-attempt replay protocol. An implementation may reassign failed work only
+where an existing canonical owner provides an attempt-isolated, exact retry
+protocol; no generic automatic requeue is implied here.
+
+A heap-scan morsel target may be configured around:
 
 ```text
 64–256 heap pages per morsel
 ```
 
-and is tunable.
+and is tunable performance guidance, not a semantic partition size.
 
 B+ ordered range scans are not freely partitioned in the baseline and may remain a single source until explicit range partitioning exists.
 
@@ -23827,7 +23881,14 @@ Global execution state contains only the coordination/shared structures that gen
 
 ## 32.4 Parallel sequential scan
 
-Workers claim heap page-range morsels.
+Workers claim heap page-range morsels under §32.2's complete, disjoint, and
+exclusive-claim contract. For a scan pass requiring complete consumption, the
+assigned page ranges cover the required page domain without gaps or overlap,
+and a range cannot be counted complete until its required source occurrences
+have been accepted once under §26.4.2. A missing or failed required range
+therefore cannot produce successful scan completion. The same physical page
+may be visited by a different statement or a separate valid algorithmic pass;
+the ownership rule applies to the current scan instance and pass.
 
 Every worker:
 
@@ -23850,7 +23911,7 @@ Parallel SeqScan itself still advertises no SQL ordering.
 
 ### Build
 
-The preferred build architecture avoids one contended resizable global table:
+A parallel hash-join build may avoid one contended resizable global table:
 
 ```text
 workers append to local RowCollections
@@ -23884,7 +23945,7 @@ LEFT JOIN preserved-side semantics remain unchanged by parallelism.
 
 ## 32.6 Parallel hash aggregate
 
-The preferred first parallel design is:
+A parallel hash aggregate may use:
 
 ```text
 worker-local group hash tables
@@ -23933,7 +23994,7 @@ When an ordering property is required, final emission occurs through the merge/o
 
 ## 32.8 Task scheduler and dependencies
 
-The first parallel scheduler may use:
+A conforming parallel scheduler may use:
 
 ```text
 fixed worker pool
@@ -23944,11 +24005,21 @@ morsel tasks
 
 A task becomes ready only after its dependency counter reaches zero through successful predecessor Finalize transitions.
 
+For a source or blocking stage whose current demand requires complete
+consumption, successful completion also requires that every required morsel be
+claimed and resolved successfully; an unclaimed, active, failed, or canceled
+required morsel cannot be hidden by partial completion. A canonical early stop
+or pruning rule may make the remaining domain unnecessary under §26.8 and
+Chapter 20. This is a morsel-coverage precondition, not a second Finalize
+authority: Chapter 26 continues to own dependency transitions, readiness, and
+quiescence.
+
 Query cancellation prevents new unnecessary tasks from being scheduled and causes running tasks to stop at normal cancellation points.
 
 The baseline intentionally does not require lock-free work stealing.
 
-If profiling later shows ready-queue contention, per-worker work-stealing deques are a compatible future optimization.
+Per-worker work-stealing deques are a compatible optional optimization when
+ready-queue contention warrants them.
 
 ## 32.9 Fairness
 
@@ -23956,7 +24027,7 @@ A long query should not monopolize a worker indefinitely without yield/cancellat
 
 Morsel/task granularity provides those boundaries.
 
-A future multi-query scheduler may cap:
+A multi-query scheduler may cap:
 
 ```text
 active tasks per query
@@ -23968,9 +24039,11 @@ The baseline scheduler can remain simple as long as its task model preserves the
 
 ## 32.10 NUMA policy
 
-NUMA-specific buffer pools, worker affinity, hash placement, and memory placement are deferred until ordinary multi-core parallel execution is measured.
+NUMA-specific buffer pools, worker affinity, hash placement, and memory
+placement are optional policies for multi-core execution.
 
-Large allocation interfaces remain centralized so a future NUMA policy can be inserted without changing operator semantics.
+Large allocation interfaces remain centralized so a NUMA policy can be
+inserted without changing operator semantics.
 
 ## 32.11 SIMD and hot-loop policy
 
@@ -23986,7 +24059,9 @@ batch-level type/representation dispatch
 
 Portable C++ is the baseline.
 
-Explicit AVX2/AVX-512/NEON kernels are profiling-driven later work for operations such as comparison, arithmetic, validity, and hashing.
+Explicit AVX2/AVX-512/NEON kernels are optional architecture-specific
+optimizations for operations such as comparison, arithmetic, validity, and
+hashing.
 
 Hot loops prefer:
 
@@ -24015,14 +24090,20 @@ hash-table probe buckets
 spill-merge blocks
 ```
 
-Initial execution relies on BufferPool/OS/cache behavior.
+BufferPool/OS/cache behavior is a valid default for these access patterns.
 
-Explicit prefetch is added only when profiles show benefit and it does not extend unsafe page/data lifetimes.
+Explicit prefetch is optional and may be used when profiles show benefit,
+provided it does not extend unsafe page/data lifetimes.
 
 ## 32.13 Parallel-runtime invariants
 
 1. The worker pool is fixed/configured rather than unbounded thread creation.
-2. Morsels are independent work units with cancellation/fairness boundaries.
+2. For each source instance, execution attempt, and required algorithmic pass,
+   morsel domains completely and disjointly cover the required source work;
+   each morsel has one exclusive claim owner, each required source occurrence
+   is accepted exactly once within that scope, and only complete successful
+   coverage or a canonical early stop may establish successful completion.
+   Cancellation or failure never counts as successful coverage.
 3. Worker-local hot state avoids per-chunk global synchronization when possible.
 4. Parallel workers use the same transaction/snapshot/read-epoch semantics as single-worker execution.
 5. Parallel SeqScan advertises no ordering.
