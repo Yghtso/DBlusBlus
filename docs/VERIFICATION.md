@@ -21529,9 +21529,12 @@ WAL record or MTR privately encoded / publication-authorizing append completes
 heap bytes and page_lsn publish / heap guard latch releases / heap pin releases
 index MTR begins / index entry and page_lsn publish / index guards release
 clean retry requested / attempt abandoned / replacement snapshot registered
-statement success reached / provisional count finalized / result envelope publishes
+W reached / persistent statement mutation published
+ordinary execution and result preparation complete / provisional count finalized
+R publishes the successful result envelope and transfers result ownership
+autocommit C0..C5 complete before R / C6 response delivery
 MUST_ABORT publishes / automatic ABORT reaches A2 and A3
-implicit COMMIT reaches C3, C4, C5, and response publication
+implicit COMMIT reaches C0, C1, C2, C3, C4, C5, R, and C6 response delivery
 ```
 
 Fault points exist immediately before and after every publication-authorizing append and
@@ -21790,19 +21793,21 @@ once contributes one. A stale/nonqualifying target contributes zero unless a rep
 attempt later acts on it.
 
 For RC retry, force provisional `5 -> 3` and `4 -> 0` attempts and assert final results `3`
-and `0`, never `5`, `8`, or `4`. Force provisional `2` followed by transaction-fatal
-failure, and seven published rows followed by row-eight MA; both publish an error and no
-successful partial count. Locks may remain transaction-owned across a clean retry, but the
-counter, candidate set, and output spool reset.
+and `0`, never `5`, `8`, or `4`. Force provisional `2` followed by a permitted dynamic
+failure after `W`, such as cancellation, OOM, or an owner-valid storage failure; publish an
+error and no successful partial count. For an ordinary row-semantic error in a later logical
+occurrence, place the failure during pre-W closure and assert that no earlier row publishes.
+Locks may remain transaction-owned across a clean retry, but the counter, candidate set, and
+output spool reset.
 
-In an explicit transaction, pause after statement success and assert the complete count and
-RETURNING spool may publish while state remains ACTIVE; later ROLLBACK does not rewrite the
-already returned statement result and the result never claimed durability. In autocommit,
-pause at statement success and C3/C4/C5. No count, RETURNING row, or success escapes before
-C4–C5 completion. A pre-success COMMIT failure withholds the result; after successful C5,
-count and RETURNING share one response envelope. A transport failure during delivery cannot
-change the COMMITTED outcome. Assert no row-count WAL, checkpoint/control/status/catalog
-state, or recovery reconstruction exists.
+In an explicit transaction, pause after `R` and assert the complete count and RETURNING
+spool may publish while state remains ACTIVE; later ROLLBACK does not rewrite the already
+returned statement result and the result never claimed durability. In autocommit, pause at
+C0, C1, C2, C3, C4, C5, `R`, and C6. No count, RETURNING row, or successful result escapes
+before `R`; no required preparation remains after C5. A pre-C0 or COMMIT failure withholds
+the result; after successful C4–C5, `R` uses prepared state and C6 performs delivery. A
+transport failure during delivery cannot change the COMMITTED outcome. Assert no row-count
+WAL, checkpoint/control/status/catalog state, or recovery reconstruction exists.
 
 #### Cross-owner concurrency, resources, and lifecycle
 
@@ -21869,9 +21874,9 @@ writes, and while target/RETURNING state is retained. Assert:
 
 Produce several RETURNING rows, then fail a later row/write/spool operation. No successful
 prefix may escape that failed statement attempt. For an explicit transaction, expose the
-complete result only after the statement's safe execution boundary. For autocommit, retain
-the request-owned spool through implicit COMMIT C4–C5 before exposing rows or successful
-completion.
+complete result only after the statement's safe execution boundary. For autocommit, complete
+all required result preparation before C0, retain the prepared request-owned state through
+implicit COMMIT C4–C5, perform `R`, and expose rows only through the resulting delivery path.
 
 Inject known pre-durable COMMIT failure and transport failure during/after post-C5 delivery.
 Compare with the §41.3 RETURNING and COMMIT Fault-Injection Tests: the first exposes no
@@ -22052,7 +22057,7 @@ transaction-owned logical mutation, not reservation, durability, page flush, or 
 | RC retry 5 -> 3 | Second only | 3 / 5 | 3 | First count discarded |
 | RC retry 4 -> 0 | Second only | 0 / 4 | 0 | First count discarded |
 | Provisional 2 -> fatal | No | none / 2 | Error, no success count | Failure envelope |
-| Seven rows -> row-eight MA | No | none / 7 | Error, no partial 7 | Automatic ABORT |
+| Seven rows -> later dynamic failure after W | No | none / 7 | Error, no partial 7 | Automatic ABORT |
 | Explicit success, later rollback | Yes | N / 0 | N remains prior response | No COMMIT claim |
 | Autocommit count 7, COMMIT fails | Statement only, request fails | 7 / 0 | Commit error, no count | Withheld through C4–C5 |
 | Autocommit success | Yes + COMMIT success | N / 0 | N | Shared RETURNING envelope |
@@ -22087,9 +22092,9 @@ transaction-owned logical mutation, not reservation, durability, page flush, or 
 
 | Error | Boundary relevance | State / retry | Count / undo | Exact owner |
 |---|---|---|---|---|
-| UniqueViolation | FA before first write; MA after | No transparent post-write retry | No success / no physical undo | §§11.10, 39.1.3 |
-| NOT NULL / supported CHECK | FA before; universal MA after | No unless clean conflict policy applies | No success / no undo | §§15.2, 39.1.3 |
-| Expression/type/encoding | FA before; MA after | No | No success / no undo | §§5.6, 39.1.3 |
+| Ordinary UNIQUE violation | FA before first write; unreachable after W | No transparent post-write retry | No success / no physical undo | §§11.10, 15.1.3, 39.1.3 |
+| Ordinary NOT NULL / supported row constraint | FA before first write; unreachable after W | No | No success / no undo | §§15.2, 15.1.3, 39.1.3 |
+| Ordinary expression/type/conversion | FA before first write; unreachable after W | No | No success / no undo | §§5.6, 15.1.3, 39.1.3 |
 | Deadlock | Independently fatal | MA | No success / no undo | §§11.13.4, 39.1.3 |
 | RR serialization | Independently fatal | MA | No success / no undo | §§11.6, 39.1.3 |
 | No replaceable frame | Before/after | FA/MA by boundary | No success / no undo | §§7.12.3, 39.1.3 |
@@ -22320,7 +22325,7 @@ DML procedures and matrices above.
 | 165 | Z | Stale target contributes zero unless final attempt acts | §15.1.2 | Changed-predicate fixture | COMPLETE |
 | 166 | Z | Duplicate candidate cannot double count | §§15.1.2, 31.2 | Duplicate-target fixture | COMPLETE |
 | 167 | Z | RC retry discards old provisional count | §§15.1.2, 15.7.1 | 5->3 and 4->0 fixtures | COMPLETE |
-| 168 | Z | Failed/MA multirow DML publishes no partial count | §§15.1.2, 39.1.4 | Seven-then-row-eight fault | COMPLETE |
+| 168 | Z | Failed/MA multirow DML publishes no partial count | §§15.1.2, 39.1.4 | Seven-then-dynamic-failure fault | COMPLETE |
 | 169 | Z | Count is independent of versions/indexes/WAL/pages | §15.1.2 | Physical-shape metamorphic fixture | COMPLETE |
 | 170 | AA | Failed statement publishes error, not count/RETURNING prefix | §§15.1.2, 15.7.3 | Late-row/result-spool faults | COMPLETE |
 | 171 | AA | Explicit transaction may publish at statement success | §§15.1.2, 31.9 | Pause before later COMMIT | COMPLETE |
@@ -22391,6 +22396,364 @@ CONTRADICTORY:    0
 ```
 
 ---
+
+## Chapter 31 — DML, DDL, VACUUM, and Result Interface Verification
+
+This section is the dedicated verification family for §§31.1–31.13. It composes the
+existing transaction, locking, WAL, reclamation, memory, pipeline, expression, statistics,
+and COMMIT procedures; it does not redefine their semantic owners. Every fixture records
+the statement attempt, CommandId, snapshot, exact `W` event, `C0`–`C6` events where
+applicable, `R`, result delivery, transaction state, and cleanup ownership.
+
+The procedures use `W`, `C`, and `R` only as verification event labels:
+
+```text
+W = first transaction-owned WAL-backed persistent statement mutation
+C = completion of the existing autocommit C4–C5 requirement
+R = atomic successful statement-result publication and result ownership transfer
+```
+
+`W` is not statement success. `C` is not `R`. Pipeline `Finalize`, readiness, cursor
+construction, first `Next()`, first row, and cursor `FINISHED` are not `R`. Explicit DML
+uses ordinary closure -> optional `W` -> execution/result preparation -> `R` -> delivery.
+Autocommit DML uses ordinary closure -> optional `W` -> complete fallible preparation ->
+C0–C5 -> `R` -> C6 delivery. Zero-row DML may omit `W`, but still prepares its command
+result and crosses `R`.
+
+### V31-A — W/C/R event model and independent result oracle
+
+Create an explicit-event harness over the existing DML and COMMIT harness. Pause at target
+finalization, ordinary-candidate reduction, `W`, result preparation, C0, C1, C2, C3, C4,
+C5, `R`, C6, first delivery, later delivery, and `FINISHED`.
+
+The independent oracle must distinguish:
+
+```text
+candidate established       != candidate published
+W                           != statement success
+C                           != R
+R                           != first Next()/first row
+R                           != successful FINISHED
+count established           != count authoritative
+count authoritative         != count delivered
+```
+
+Expected results are stable under legal batching, worker scheduling, target order, spill
+order, and cursor chunking. A failed cursor operation is terminal error, never successful
+`FINISHED`.
+
+### V31-B — Ordinary DML candidate closure and provenance
+
+For INSERT, UPDATE, and DELETE, construct competing semantically demanded ordinary
+candidates with different source spans, phases, and logical occurrences. Vary vector width,
+batch boundaries, target/source order, permitted worker schedule, hash order, and
+in-memory versus spilled staging. The independent Chapter-21 oracle must select the same
+winner and the same pre-W recoverable consequence in every execution shape.
+
+Cover arithmetic, conversion, assignment/coercion, runtime NOT NULL, immediate UNIQUE,
+demanded RETURNING expressions, demanded INSERT SELECT source expressions, and applicable
+qualification/subquery candidates. Do not add unsupported constraint features.
+
+Assert that no persistent user-DML mutation occurs while a demanded ordinary candidate can
+still be established. A first discovery of an ordinary candidate after `W` is an invariant
+failure, not an expected post-W MA case. Dynamic failures remain outside this ranking.
+
+### V31-C — INSERT VALUES closure and publication
+
+Use valid and invalid logical input occurrences, including:
+
+```text
+valid row followed by divide-by-zero
+valid row followed by conversion/cast failure
+valid rows followed by runtime NOT NULL failure
+valid multirow INSERT with RETURNING
+INSERT (1), (1) under a unique key
+```
+
+For ordinary failures, assert complete pre-W closure, no earlier heap/index publication,
+the canonical diagnostic, existing FA behavior, no successful count, and no RETURNING
+prefix. For success, assert exact logical multiplicity, final count, unordered RETURNING
+bag, `R`, and post-`R` delivery behavior.
+
+### V31-D — INSERT SELECT staging, demand, and spill
+
+Use a source that yields valid rows followed by a demanded ordinary source expression or
+conversion error. Assert that source computation may vectorize or pipeline into accounted
+temporary staging, but target publication cannot begin while a later demanded ordinary
+candidate remains possible.
+
+Force tiny query budgets and verify exact spill/reload preservation of occurrence identity,
+NULLs, VARCHAR bytes, provenance, and candidate values. Inject OOM and SpillIO during
+staging and classify them as dynamic failures at their actual pre-W boundary. Source
+encounter order is not SQL semantics. A same-table INSERT SELECT uses the frozen snapshot
+and current-command rules and cannot self-feed newly inserted rows.
+
+### V31-E — UPDATE/DELETE target domain, RID lifetime, and revalidation
+
+Verify for UPDATE and DELETE:
+
+```text
+complete target spool before mutation
+exact RID deduplication and one-target-once behavior
+Halloween protection through index-key, heap-version, and predicate changes
+read-epoch to TUPLE_WRITE handoff
+VACUUM/RID-retention protection through queued and granted claims
+post-wait re-fetch, identity validation, and predicate revalidation
+authoritative old-row image before candidate acceptance
+```
+
+The concurrent writer/VACUUM interleaving must prove the actual snapshot, read-epoch, and
+live-claim chain. The target spool alone is not a RID-retention claim. A stale pre-wait
+image cannot supply SET, unique-key, or RETURNING state.
+
+UPDATE tests additionally verify simultaneous SET evaluation, complete new-row staging,
+NOT NULL and UNIQUE closure, exact old-RID exclusion, and demanded RETURNING closure.
+DELETE tests verify authoritative old-row RETURNING, no unnecessary new-row construction,
+one logical target once, and retention of physical secondary-index entries for VACUUM.
+
+### V31-F — Immediate UNIQUE and pending-owner preparation
+
+Verify the complete finite statement-wide UNIQUE_KEY set, canonical lock order, current-state
+checks after waits, and terminal lock lifetime. Cover committed owners, earlier-command
+owners, current-command owners, exact same-statement pending owners, full-key collisions,
+and spilled/reloaded key state.
+
+Required assertions:
+
+```text
+INSERT (1), (1) fails before W through exact pending-owner state
+UPDATE self-exclusion applies only to the exact authoritative old RID
+another target's old key is not excluded
+A: 1 -> 2 and B: 2 -> 1 remains an immediate conflict
+hash collisions cannot merge distinct canonical keys
+```
+
+The procedure must not verify deferred final-state uniqueness or rely on prior physical
+publication of one staged candidate to discover another.
+
+### V31-G — READ COMMITTED retry and failure-class separation
+
+Force an authorized pre-W revalidation conflict. Assert same logical statement and
+CommandId, fresh READ COMMITTED snapshot, discarded target/candidate/RETURNING state,
+discarded pending owners, ordinary candidates, provisional count, cursors, and attempt-local
+spill, followed by complete rebuild. Only the final attempt may supply the error, count, or
+result.
+
+Repeat after `W` and after `R`; no same-TxnId retry is permitted. Transaction-owned locks
+and gates retain their Chapter-11/15 lifetime.
+
+The failure matrix must classify ordinary expression/conversion/assignment/NOT NULL/UNIQUE/
+RETURNING errors as pre-W closure candidates. Deadlock, serialization conflict, READ
+COMMITTED conflict, OOM, SpillIOError, cancellation, storage/WAL failure, corruption, and
+invariant failure retain their owner-specific runtime consequences and are never source-span
+ranked against ordinary candidates. A dynamic cancellation/OOM/storage failure after some
+mutations may produce the existing MA outcome; N31-1 does not make mutation failure-free.
+
+### V31-H — RETURNING pre-R construction and publication barrier
+
+Verify INSERT RETURNING final new rows, UPDATE RETURNING authoritative final new rows, and
+DELETE RETURNING authoritative old rows. Verify exact bag multiplicity, unordered semantics,
+stable value ownership, and no borrowed producer backing escape.
+
+Inject failure during expression evaluation, spool append, spill write, finalization,
+structural validation, physical allocation, and ownership preparation. Before `R`, no count
+or RETURNING prefix is client-visible; pre-W ordinary failures use closure, post-W dynamic
+failures use the existing execution consequence, and autocommit preparation failures before
+C0 prevent COMMIT admission.
+
+### V31-I — Autocommit pre-C0 result preparation
+
+For autocommit INSERT, UPDATE, and DELETE, with and without RETURNING and with zero rows,
+pause before C0 and independently fault:
+
+```text
+execution/semantic finalization
+affected-count finalization
+RETURNING construction, append, spill, and finalization
+schema/descriptor/framing/extent validation
+envelope representation
+result owner/cursor preparation
+spill-handle preparation
+publication-destination preparation
+required physical allocation
+resource registration and cleanup-owner preparation
+```
+
+Every failure must show: C0 not entered, no terminal COMMIT append, no `R`, no successful
+count or rows, and safe temporary cleanup under the actual W/Chapter-39 owner.
+
+### V31-J — Reservation/allocation, C0–C6, and C5 lifetime
+
+Run the negative reservation test: budget grant succeeds, required physical allocation
+fails, and C0 admission is refused. Assert C1 validates already-prepared state and performs
+no first required result allocation.
+
+Reuse COMMIT fault injection for known C2 no-append, uncertain C2 append, incomplete
+post-append publication, retryable C3 durability, irrecoverable uncertainty, durable COMMIT
+with C4/C5 failure, and C6 transport failure. Preserve exact `CommitOutcomeUncertain`,
+noncontinuable, and recovery-owned outcomes.
+
+Place barriers around C5 and verify result envelope, count, schema, fixed/variable backing,
+dictionary/constant vectors, cursor, spill files/handles, reservations, accounting, and
+cleanup ownership survive C5. Verify transaction locks, gates, snapshots, and status
+dependencies release normally and are not retained merely for result lifetime.
+
+### V31-K — Non-failing C-to-R transition
+
+Pause after successful C4–C5 and before `R`. Observe all operations required to establish
+`R`. No required ordinary allocation, grant, validation, result construction, spill I/O,
+handle duplication, registration, external callback, or cursor construction may occur.
+
+The conforming outcome is atomic publication of statement success, affected-count authority,
+complete logical RETURNING ownership, and result/request ownership from already-prepared
+state. An implementation attempting forbidden required work is nonconforming, not an
+ordinary postcommit failure path.
+
+If an invariant defect prevents `R`, assert the existing invariant/noncontinuable owner:
+COMMITTED remains COMMITTED; no fabricated `R` or count; no ABORT; no automatic replay;
+cleanup only through a known-safe owner.
+
+### V31-L — Cancellation, crash, and session loss
+
+Inject cancellation before W, after W during preparation, during pre-C0 preparation, before
+the authorizing append, after the append, after C but before `R` with a usable session, and
+after `R` during delivery. Assert uncancellable COMMIT after the valid authorizing append,
+completion of prepared `R` after C, and delivery-only cancellation after `R`.
+
+Crash and disconnect at pre-COMMIT, post-append/pre-durability, post-durable/pre-C4/C5,
+post-C/pre-R, post-R, and delivery boundaries. Recovery follows WAL evidence. Durable
+COMMIT remains COMMITTED; `R`, count reconstruction, result replay, and blind request replay
+are not invented. A usable-session spill-read error is not session loss.
+
+### V31-M — Post-R delivery, cursor, count, and cleanup
+
+After `R`, separately fail the first spilled-result read, a later read after a delivered
+prefix, delivery-chunk allocation, and transport. Also abandon cursors before and after a
+prefix and complete successful exhaustion.
+
+Assert statement success, authoritative count, explicit `ACTIVE` or autocommit `COMMITTED`
+state, retained prefix, terminal cursor error distinct from `FINISHED`, no DML retry, and
+exact result-owned cleanup. Verify chunk lifetime through the next `Next()` or destruction.
+
+Run all DML forms with and without RETURNING. Count is independently checked as established,
+published at `R`, and delivered. No-RETURNING uses metadata, not a fake row; zero-row DML
+uses count zero and still crosses `R`.
+
+### V31-N — DDL, VACUUM, ANALYZE, and cross-owner role checks
+
+Reuse existing control-operator, catalog, VACUUM, and statistics procedures to verify only
+Chapter-31 dispatch and role boundaries:
+
+```text
+DDL: single coordinator, private CREATE INDEX, correct metadata/completion ownership
+VACUUM: nontransactional maintenance, no relational/progress SQL rows, same-table
+         serialization, different-table concurrency, permitted DML/ANALYZE coexistence
+ANALYZE: one publication coordinator, stable snapshot/manifest, transactional statistics
+         rows, no incomplete global StatsVersion, no invented parallel ANALYZE
+```
+
+Do not duplicate the underlying Chapter-14, Chapter-21, or Chapter-34 procedures.
+
+### V31 atomic architecture-obligation ledger
+
+The following atomic checks are owned by the procedures above; existing component
+procedures remain reusable owners for their lower-level details.
+
+| ID | Obligation | Procedure | Owner/cross-reference |
+|---|---|---|---|
+| V31-001 | W/C/R events are distinct | V31-A | §§15.5, 31.9, 39.1.2 |
+| V31-002 | `R` is not first `Next()` or `FINISHED` | V31-A | §§26.3, 31.10 |
+| V31-003 | Ordinary winner is physical-order independent | V31-B | §§21.16.1, 25.1.2 |
+| V31-004 | Ordinary candidate closure precedes W | V31-B | §§15.1.3, 31.13 |
+| V31-005 | INSERT later ordinary error has no earlier write | V31-C | §§15.2, 39.1.3 |
+| V31-006 | INSERT success count/multiplicity is exact | V31-C | §§15.1.2, 31.9 |
+| V31-007 | INSERT SELECT cannot stream before closure | V31-D | §§20.13, 31.6 |
+| V31-008 | INSERT SELECT staging preserves demand/occurrences | V31-D | §§20.14, 24.7 |
+| V31-009 | Target spool finalizes before mutation | V31-E | §§31.1, 31.3 |
+| V31-010 | Exact RID dedup is collision-safe | V31-E | §31.2 |
+| V31-011 | RID retention protects revalidation | V31-E | §§14.6, 14.18 |
+| V31-012 | UPDATE old image is post-wait authoritative | V31-E | §§11.3, 15.3 |
+| V31-013 | DELETE uses authoritative old image | V31-E | §15.4 |
+| V31-014 | UNIQUE lock set is complete and ordered | V31-F | §§11.8–11.9 |
+| V31-015 | Pending duplicate owners are exact | V31-F | §11.10 |
+| V31-016 | Key swaps remain immediate conflicts | V31-F | §11.10.6 |
+| V31-017 | RC retry discards all attempt-local state | V31-G | §§15.7.1, 31.5 |
+| V31-018 | Retry after W/R is forbidden | V31-G | §§15.7.2, 39.1.4 |
+| V31-019 | Dynamic failures are not ordinary candidates | V31-G | §§26.3.2, 39.1.3 |
+| V31-020 | RETURNING uses correct final/old image | V31-H | §21.15, §31.9 |
+| V31-021 | Pre-R result rows are unpublished | V31-H | §§15.7.3, 31.9 |
+| V31-022 | All required preparation precedes C0 | V31-I | §§15.5, 31.9 |
+| V31-023 | No-RETURNING is still an envelope result | V31-I | §§15.1.2, 31.9 |
+| V31-024 | Zero-row DML still prepares and crosses R | V31-I | §31.9 |
+| V31-025 | Reservation does not prove allocation | V31-J | §§24.5, 31.9 |
+| V31-026 | C1 validates; it does not construct | V31-J | §15.5 |
+| V31-027 | C5 preserves independent result ownership | V31-J | §§15.5, 24.10 |
+| V31-028 | C2/C3 uncertainty retains existing owner | V31-J | §§12.10.5, 15.5, 39.1.5 |
+| V31-029 | C-to-R has no required fallible work | V31-K | §§31.9, 39.1.5 |
+| V31-030 | Protocol defect cannot ABORT COMMITTED | V31-K | §§9.14, 39.1.5 |
+| V31-031 | Cancellation after append cannot abort COMMIT | V31-L | §§15.5, 39.1.5 |
+| V31-032 | Crash before R preserves committed effects | V31-L | §§12, 39.1.5–39.1.7 |
+| V31-033 | Session loss is distinct from spill-read error | V31-L | §39.1.7 |
+| V31-034 | Post-R spill error is delivery-only | V31-M | §§31.9–31.10, 39.3 |
+| V31-035 | Prefix is not retracted | V31-M | §31.10 |
+| V31-036 | Cursor error is not FINISHED | V31-M | §31.10 |
+| V31-037 | Count authority begins at R | V31-M | §§15.1.2, 31.9 |
+| V31-038 | Result cleanup is exactly once | V31-M | §§23.10, 24.10, 31.10 |
+| V31-039 | DDL result/control role is correct | V31-N | §§21, 31.11 |
+| V31-040 | VACUUM role/concurrency/result surface is correct | V31-N | §§14, 31.12 |
+| V31-041 | ANALYZE publication role is correct | V31-N | §§34, 31.12.1 |
+
+This ledger adds 14 V31 procedure families and 41 atomic V31 obligations. It does not
+replace the existing Chapter-15 atomic inventory; those procedures remain reusable component
+coverage and their stale expectations are repaired above.
+
+### Chapter 31 subsection coverage map
+
+| Architecture subsection | V31 owner | Reused component owner |
+|---|---|---|
+| §31.1 target materialization | V31-E | DML target-spool and D14-M3 procedures |
+| §31.2 exact target identity | V31-E | existing duplicate-target/RID oracle |
+| §31.3 Halloween protection | V31-E | indexed UPDATE and target-finalize procedures |
+| §31.4 memory/spill | V31-D, V31-E, V31-M | V24 memory/spill procedures |
+| §31.4.1 candidate staging | V31-B, V31-D, V31-I | V24-M and pipeline cleanup |
+| §31.5 revalidation/retry | V31-E, V31-G | V9/V11/V15 isolation and retry procedures |
+| §31.6 INSERT | V31-C, V31-D | existing INSERT protocol matrix |
+| §31.7 UPDATE | V31-E, V31-F, V31-G | existing UPDATE protocol matrix |
+| §31.8 DELETE | V31-E, V31-F | existing DELETE protocol matrix |
+| §31.9 RETURNING/W/C/R | V31-A, V31-H–V31-M | COMMIT and result-envelope procedures |
+| §31.10 cursor interface | V31-A, V31-M | V26 handoff and V30 Source procedures |
+| §31.11 DDL | V31-N | Control-Operator and catalog procedures |
+| §31.12 VACUUM | V31-N | V14 Vacuum and Reclamation procedures |
+| §31.12.1 ANALYZE | V31-N | Statistics Publication procedures |
+| §31.13 invariants | V31 atomic ledger | §§41.3 and 41.5 obligation maps |
+
+### Chapter 41 obligation coverage map
+
+| Chapter-41 obligation | V31 coverage |
+|---|---|
+| Ordinary closure before W and order independence | V31-B–V31-G |
+| INSERT SELECT staging and spill | V31-D |
+| Authoritative UPDATE image and immediate UNIQUE | V31-E–V31-F |
+| Retry freshness and no retry after W | V31-G |
+| Pre-C0 preparation and physical allocation | V31-I–V31-J |
+| C1 readiness and C5 lifetime | V31-J |
+| Non-failing C-to-R | V31-K |
+| COMMIT uncertainty and cancellation | V31-J, V31-L |
+| Crash/session loss before R | V31-L |
+| Post-R spill failures and cursor state | V31-M |
+| No-RETURNING, zero-row, count authority | V31-I, V31-M |
+| Memory accounting and cleanup | V31-D, V31-J, V31-M |
+| DDL/VACUUM/ANALYZE roles | V31-N |
+
+### V31 stale-rule and document-quality audit
+
+The live procedures must contain no expected ordinary DML error after `W`, no physical
+visitation-dependent FA/MA outcome, no direct streaming INSERT SELECT publication while a
+demanded ordinary candidate remains possible, no uniqueness check that depends on prior
+physical insertion, no result allocation first attempted after COMMIT, no C5 destruction of
+prepared result backing, no required fallible C-to-R operation, no post-R abort/replay, no
+cursor-error-as-`FINISHED`, and no missing-response-as-failure assertion. Any such case is
+classified by V31-B, V31-G, V31-K, or V31-M and must be repaired before verification closure.
 
 ### Control-Operator Tests
 
