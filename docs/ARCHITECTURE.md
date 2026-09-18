@@ -12196,13 +12196,17 @@ physical mutations, retries, or index entries written are not the SQL affected-r
 Affected-row count and any `RETURNING` rows belong to the same successful statement-result
 envelope in §§15.7.3 and 31.9:
 
-- in an explicit transaction, successful statement completion may publish the count while
-  the transaction remains `ACTIVE`; a later COMMIT or ROLLBACK is separate and does not
-  retroactively rewrite that statement result, which never implied transaction durability;
+- the count becomes authoritative at §31.9's atomic successful statement-result
+  publication boundary `R`, whether or not later result delivery successfully conveys it
+  to the client;
+- in an explicit transaction, `R` may publish the count while the transaction remains
+  `ACTIVE`; a later COMMIT or ROLLBACK is separate and does not retroactively rewrite that
+  statement result, which never implied transaction durability;
 - in autocommit, the count remains request-owned and externally unexposed through the
   implicit §15.5 COMMIT's C4–C5 completion. A commit failure before successful response
   publication exposes the canonical commit/error outcome, not a successful affected-row
-  count.
+  count; after C4–C5 and `R`, delivery failure cannot revoke the authoritative count or
+  the COMMITTED transaction even when the client did not receive that metadata.
 
 The count is not persistent database state. It is not WAL-logged, checkpointed, stored in
 `database.control`, transaction status, or catalog metadata, and crash recovery does not
@@ -12613,6 +12617,13 @@ Even a pre-write-retryable statement MUST NOT expose irreversible external rows/
 
 Physical DML applies the stronger §31.9 publication rule: no partial RETURNING prefix is exposed from a statement that later fails, so external emission begins only after successful statement completion.
 
+For DML, successful completion becomes externally authoritative only through
+§31.9's atomic result-publication boundary `R`. Before `R`, result state remains
+statement/attempt-owned and a failure uses §39.1's actual first-write state.
+After `R`, cursor delivery does not re-enter DML execution and cannot authorize
+same-`TxnId` statement retry or retroactively change the published statement
+outcome. Connection/session loss retains its independent §39.1.7 owner.
+
 Statement savepoints, subtransactions, and statement-local physical undo are outside the
 v1 architecture baseline; they do not relax this publication or retry boundary.
 
@@ -12669,6 +12680,9 @@ This chapter is the boundary between the persistent transactional storage core a
     the §39.1 failure boundary.
 29. Closure and its spill files are exact attempt-local state, not persistent
     writes; dynamic failures still follow their actual §39.1 boundary side.
+30. DML result publication is the atomic §31.9 `R` transition: before it,
+    result state is execution-owned; after it, affected count and statement
+    success are authoritative and result delivery cannot reopen execution.
 
 ---
 
@@ -21070,6 +21084,14 @@ strategy. Successful execution does not by itself mean transaction commit;
 DML statement/publication and transaction consequences remain §§21.15, 31.9,
 and 39.1-owned.
 
+For DML, internal graph completion, operator readiness, spool finalization, or
+allocation of an unpublished cursor is not §31.9's successful statement-result
+publication boundary `R`. The Chapter-31 result owner alone performs the atomic
+successful-envelope publication and any result-spool ownership transfer. Once
+`R` succeeds, a later cursor delivery error does not revive this execution
+instance or reopen the completed DML statement. This DML-specific handoff does
+not change SELECT completion or Chapter-30 external-sort Source semantics.
+
 Success cannot be declared while any semantically required execution or
 error-producing finalization task remains outstanding. Under §§32.8 and 39.3,
 terminal failure/cancellation leaves no partially active task graph runnable as
@@ -21148,9 +21170,18 @@ does not offer them. A prior independently completed output transition remains
 a completed internal handoff; it does not by itself imply client visibility.
 An already completed cursor return is an external delivery, not retroactively
 retracted by failure/cancellation of subsequent execution. That returned prefix
-is not evidence of successful complete query execution. External exposure and
-returned-value lifetime remain §§31.9–31.10-owned; this distinction requires
-neither whole-query buffering nor a different cursor protocol.
+is not by itself evidence of successful complete query execution unless a more
+specific owner has already published that result, as §31.9 `R` does for DML.
+External exposure and returned-value lifetime remain §§31.9–31.10-owned; this
+distinction requires neither whole-query buffering nor a different cursor
+protocol.
+
+For a DML result whose §31.9 boundary `R` has succeeded, later result-spool
+reading, delivery-chunk construction, cursor advancement, or transport belongs
+to the result owner rather than this statement-execution error path. A terminal
+delivery error remains distinct from successful client `FINISHED`; it does not
+retroactively create a DML execution failure. Internal source/operator
+`FINISHED` remains distinct from both public outcomes.
 
 An owner-established terminal error is an unsuccessful path, not ordinary
 `FINISHED`. It permits error propagation, quiescence, and cleanup, not further
@@ -23302,40 +23333,113 @@ The v1 mutation/write phase is single-worker.
 
 ## 31.9 RETURNING spool
 
-DML `RETURNING` is statement-owned output.
-
-For small output it uses an in-memory RowCollection.
-
-For large output it uses a spill-capable result spool.
-
-Every semantically demanded RETURNING expression is evaluated during
+DML `RETURNING` is retained first as statement-owned output. Small output may
+use an in-memory `RowCollection`; large output uses an exact spill-capable
+result spool. Every semantically demanded expression is evaluated during
 §15.1.3 ordinary DML candidate closure before the statement's first persistent
 user-DML write. The exact INSERT/UPDATE final-new-row or DELETE authoritative-
-old-row result is retained in this statement-owned spool. A winning ordinary
-RETURNING candidate therefore fails before mutation; a later target's
-RETURNING expression cannot follow an earlier target mutation.
+old-row result is retained. A winning ordinary RETURNING candidate therefore
+fails before mutation; a later target's expression cannot follow an earlier
+target mutation.
 
-No RETURNING row becomes externally visible while the statement attempt may still restart or fail after producing only a prefix of its result.
-
-The safe publication boundary is:
+This chapter defines one atomic semantic transition:
 
 ```text
-DML target/input processing completed successfully
-all required writes for the statement completed
-no internal retry remains possible
-statement execution outcome is successful
+R = successful statement-result publication
 ```
 
-At that point, inside an **explicit** transaction, the result spool may be consumed by the client/result cursor before the later transaction COMMIT; a later explicit ROLLBACK does not retroactively invalidate the fact that the client observed a successful statement's RETURNING result.
+`R` succeeds only when:
 
-For **autocommit** DML, successful statement execution is followed immediately by the implicit §15.5 COMMIT inside the same client request. The RETURNING spool remains request-owned and unexposed until COMMIT C4–C5 complete. Only then may result chunks and the final successful command completion be delivered. A known pre-durable commit failure therefore discards the spool and exposes no RETURNING prefix. If transport fails while delivering the already committed result, the transaction remains COMMITTED and the client may have observed only a prefix; that is connection/commit-observation uncertainty, not a failed DML statement or transaction rollback.
+1. DML execution, every required mutation, and RETURNING construction and
+   finalization have completed successfully, and the successful statement-
+   result envelope is authoritatively published; and
+2. the finalized result spool/cursor, when present, transfers from statement/
+   attempt ownership to the result/request owner.
 
-If the statement aborts/fails, the unpublished RETURNING spool is discarded.
+The envelope includes command completion and the authoritative affected-row
+count plus the complete logical RETURNING bag when present. DML without
+RETURNING still crosses `R`; it needs no fake row cursor. The transition is
+atomic semantically, without requiring one C++ atomic primitive or object.
+Input exhaustion, ordinary-candidate closure, the first persistent write,
+internal operator `Finalize` or readiness, spool construction alone, cursor
+allocation, first `Next()`, first delivered row, and cursor exhaustion are not
+`R`.
 
-Dynamic failure while constructing/finalizing the unpublished spool follows
-§39.1's actual statement-write boundary and is not source-ranked as an
-ordinary candidate. No implementation may mark the DML statement successful
-merely because some result rows were already computed internally.
+The three relevant boundaries remain distinct:
+
+```text
+W = §39.1.2 first persistent transaction-owned statement write
+C = completion of the existing autocommit C4-C5 result-withholding requirement
+R = successful statement-result publication and result ownership transfer
+
+explicit:  ordinary closure -> [W if rows are written] -> execution success -> R -> delivery
+autocommit: ordinary closure -> [W if rows are written] -> execution success -> C -> R -> delivery
+```
+
+`C` is not a new COMMIT stage. Zero-row DML need not cross `W`, while successful
+publication still crosses `R`.
+
+Before `R`, RETURNING storage and the provisional affected count remain
+statement/attempt-owned and unpublished. Failure during expression evaluation,
+mutation, result-row materialization, spool append or required spill write,
+spool finalization, schema/framing/extent validation, or preparation for the
+ownership transfer is statement execution failure. Section 39.1 applies using
+the real `W` state: after `W` but before `R`, such failure retains the existing
+post-write consequence. The unpublished spool and count are discarded, no
+RETURNING prefix escapes, and cursor allocation alone changes nothing.
+
+At `R`, statement success and affected count become final and authoritative,
+the complete logical RETURNING bag is established, and any spool becomes
+result/request-cursor-owned. The spool remains query/request-temporary,
+memory-accounted, spill-managed, nonpersistent, non-WAL, not crash-recovered,
+and unusable by another attempt. After its owning result is destroyed it is no
+longer a source of SQL rows. Ownership transfer preserves continuous accounting
+and every Chapter-23 value lifetime without dangling producer buffers or
+requiring a particular class, allocator, reference count, file handle, or
+duplicate materialization.
+
+After `R`, spool reads, delivery-chunk materialization, cursor advancement,
+cursor cancellation, and transport are result-delivery work and do not re-enter
+DML execution. An ordinary result-spool `SpillIOError` or malformed temporary-
+spill failure, or controlled allocation/representability failure while
+materializing a delivery chunk, terminates the cursor with a controlled
+delivery error, not successful `FINISHED`; it does not retroactively fail the
+DML statement, invalidate the affected count, retract an already returned
+prefix, authorize DML retry, or independently set `MUST_ABORT`. The same public
+error category may be retained; ownership stage determines the transaction
+consequence.
+Persistent-database corruption, invariant failure, session loss, or another
+independently fatal condition keeps its existing owner and is not downgraded by
+`R`.
+
+For an **explicit** transaction, `R` may occur while the transaction remains
+`ACTIVE`. A post-`R` ordinary cursor/read/transport failure leaves it `ACTIVE`
+when the session remains usable; later statements and COMMIT or ROLLBACK remain
+available under ordinary command sequencing. A concrete API may require the
+failed cursor to be closed first, but that is not automatic transaction abort.
+Actual connection/session loss invokes §39.1.7 and may abort the still-active
+transaction independently; the completed DML statement does not become failed.
+A later explicit ROLLBACK changes the transaction outcome but cannot erase the
+historical fact that the successful statement result or returned prefix was
+observed.
+
+For **autocommit**, `R` cannot precede `C`. A failure before C4–C5 exposes no
+successful count or RETURNING prefix. After `C` and `R`, the transaction remains
+`COMMITTED` despite spool-read, cancellation, transport, or session-delivery
+failure. No rollback or same-statement retry is authorized.
+
+The affected count's authority and its delivery are different facts. At `R`
+the count is authoritative even if a later cursor or transport error prevents
+the client from receiving it. It is result-envelope metadata, not a relational
+column or `LogicalSlotId`.
+
+Voluntary abandonment of a post-`R` cursor may discard unread rows and cleans
+its result-owned memory and spill resources. It does not revoke statement
+success, count authority, or transaction state, and the client need not drain
+every row to preserve those facts. Cancellation before `R` remains statement
+execution cancellation under §39.1 and the real `W` state; cancellation after
+`R` abandons result delivery unless an independently fatal session condition
+also applies.
 
 ## 31.10 Query result interface
 
@@ -23343,16 +23447,35 @@ Execution exposes results through a result sink/cursor abstraction.
 
 An internal borrowed producer DataChunk is never exposed beyond its owner lifetime.
 
-The baseline cursor contract is:
+The baseline synchronous cursor contract distinguishes:
 
 ```text
 Next()
-    -> client-visible result chunk or FINISHED
+    -> client-visible result chunk
+    -> FINISHED                  // successful exhaustion only
+    -> terminal result error
 ```
+
+No particular C++ return type, exception/status representation, coroutine, or
+wire protocol is required. A failed cursor never reports successful
+`FINISHED`, and after terminal error it produces no further successful rows.
+Internal operator/pipeline `FINISHED` is not client `FINISHED`.
 
 The cursor/result layer owns or safely retains every value in the returned chunk.
 
 For a simple synchronous client, a returned chunk remains valid until the next cursor `Next()` call or cursor destruction, whichever comes first; callers that need a longer lifetime copy/materialize it.
+
+A subsequent read or delivery failure does not retrospectively invalidate the
+previous chunk during that guaranteed lifetime. Cursor destruction, voluntary
+abandonment, terminal delivery error, or successful exhaustion releases result-
+owned reservations, buffers, and spill objects under Chapters 23–24 without
+affecting transaction-owned locks or reopening the statement.
+
+For DML, affected count and command completion are metadata in the successful
+§31.9 result envelope. After `R`, failure to deliver some or all metadata or
+RETURNING rows is delivery uncertainty, not revocation of the authoritative
+statement result. The cursor does not claim that the complete RETURNING bag was
+delivered unless it reaches successful `FINISHED`.
 
 A result chunk already returned by a completed cursor operation is not
 retroactively retracted when a later cursor operation establishes an ordinary
@@ -23487,6 +23610,19 @@ ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinar
     order.
 20. Closure staging is query-memory accounted and spill-capable; retry rebuilds
     it fresh and never reuses abandoned-attempt rows, errors, or spill state.
+21. `R` atomically publishes successful DML result authority and transfers any
+    finalized RETURNING spool to the result/request owner; readiness, cursor
+    allocation, first delivery, and exhaustion are not `R`.
+22. Before `R`, result-spool failure is statement execution failure governed by
+    the real first-write state; after `R`, ordinary delivery failure cannot
+    retroactively fail DML, revoke its count, or authorize retry.
+23. A usable explicit transaction remains `ACTIVE` after ordinary post-`R`
+    result failure; autocommit is already `COMMITTED` before `R`.
+24. Cursor terminal error is not successful `FINISHED`, and no already returned
+    row is retracted or invalidated during its guaranteed lifetime.
+25. Result ownership transfer preserves memory accounting, value lifetimes, and
+    temporary-spill cleanup; cursor abandonment alone changes no statement or
+    transaction outcome.
 
 ---
 
@@ -27928,6 +28064,13 @@ database/storage-fatal error:
     DATABASE_NONCONTINUABLE regardless of flag
 ```
 
+For DML this rule classifies statement execution non-success before §31.9's
+successful statement-result publication boundary `R`. After `R`, ordinary
+result-spool reading, cursor advancement, cancellation of remaining delivery,
+or transport failure is not a new non-success of the completed statement and
+does not reapply this first-write matrix. Independently transaction-fatal,
+session-loss, corruption, and database-noncontinuable owners remain effective.
+
 Earlier **successful statements** in the same explicit transaction do not make an otherwise effect-free later statement error transaction-fatal. The boundary is per current statement. Conversely, physical invisibility or complete-generation filtering of partial current-statement rows does not permit that transaction to commit them.
 
 A failed SELECT or other read-only statement therefore normally leaves an explicit transaction `ACTIVE`. Persistent corruption, a lower-layer noncontinuable state, or an internal invariant failure overrides this statement-only rule.
@@ -27976,7 +28119,14 @@ because the boundary or the dynamic-failure rule changed.
 
 For every `MA` result the command layer first records the original structured error, atomically changes `ACTIVE -> MUST_ABORT`, and invokes ABORT. The error response is not successful statement completion and indicates that the explicit transaction ended ABORTED. If ABORT itself encounters a stronger failure, §39.1.7 precedence applies.
 
-The matrix applies when the failure terminates the current statement. An unrelated background copied-writeback/WAL flush error that merely leaves another page dirty does not retroactively fail an already completed or concurrently running statement; it is recorded and affects a transaction only when a required operation observes/returns that error or the lower layer raises the database-noncontinuable gate.
+The matrix applies when the failure terminates current statement execution
+before authoritative successful result publication. Section 31.9 owns ordinary
+post-`R` DML result-delivery failures; they terminate the cursor, not the
+already completed statement. An unrelated background copied-writeback/WAL
+flush error that merely leaves another page dirty does not retroactively fail
+an already completed or concurrently running statement; it is recorded and
+affects a transaction only when a required operation observes/returns that
+error or the lower layer raises the database-noncontinuable gate.
 
 ### 39.1.4 Statement completion, retry, and subsystem consequences
 
@@ -28026,17 +28176,18 @@ failure before the first mutation remains on the pre-write side. Exact
 UNIQUE/PRIMARY KEY conflict membership is §11.10; ordinary diagnostic ranking
 and closure are §21.16.1.
 
-DML `RETURNING` remains buffered through successful statement completion. If a
-dynamic write/result-spool step fails before that completion, no prefix is
-emitted; after a crossed write boundary the transaction aborts. Returned rows
-are not durability or commit acknowledgements. After a successful statement in
-an explicit transaction, consuming its RETURNING spool remains legal even
-though a later explicit ROLLBACK may abort the transaction. In autocommit, the
-request-owned spool remains unexposed through implicit COMMIT C5 and is
-released only as part of the successful post-commit response; a pre-C3 commit
-failure therefore exposes no rows, while transport failure during/after
-post-C5 delivery means the transaction is COMMITTED and client observation may
-be incomplete/uncertain.
+DML `RETURNING` remains statement-owned and buffered until §31.9's `R`. If a
+dynamic write, spool append, spill write, validation, finalization, or ownership-
+transfer preparation step fails before `R`, no prefix or successful count is
+published; after a crossed write boundary the execution failure requires the
+existing `MA` outcome. A successfully published `R` is final: later ordinary
+spool-read, cursor, cancellation, or transport failure is result delivery
+failure, cannot reopen DML execution, and never authorizes same-`TxnId` retry.
+For a usable explicit session the transaction remains `ACTIVE`; an actual
+session loss may abort it under §39.1.7 for that independent reason. In
+autocommit, `R` follows C4–C5 and the transaction remains `COMMITTED` despite
+incomplete delivery. Returned rows are not durability acknowledgements and an
+already returned prefix is not retracted.
 
 OOM and spill failures follow the same boundary rather than a uniform “disk full aborts everything” rule. Query-temporary files are cleaned independently; cleanup does not erase a prior database write.
 
@@ -28096,6 +28247,13 @@ The exact successful stages are §15.6 A0–A4. ABORT performs semantic outcome 
 Ordinary ABORT need not synchronously make `TXN_ABORT` durable. If it is lost, crash recovery classifies the noncommitted transaction as a loser and establishes ABORTED. An uncertain/failed abort can therefore never become COMMITTED, but ordinary execution still cannot release locks or claim clean completion without the required runtime terminal publication.
 
 ### 39.1.7 Connection loss, recovery classification, and error precedence
+
+An ordinary post-`R` cursor read or transport error that leaves the session
+usable is not connection/session loss. It leaves an explicit transaction in
+its actual `ACTIVE` state under §31.9. If the session is actually lost, the
+table below applies independently; aborting an active explicit transaction for
+session loss does not retroactively make its published DML statement a failed
+statement. A committed autocommit transaction cannot be reversed.
 
 Connection/session loss has these outcomes:
 
@@ -28168,6 +28326,7 @@ Diagnostics/API metadata must distinguish at least:
 ```text
 statement failed; transaction remains ACTIVE
 statement failed; transaction entered mandatory ABORT and is ABORTED/ABORTING
+statement succeeded; result delivery failed and a usable explicit transaction remains ACTIVE
 COMMIT not acknowledged; client outcome uncertain
 transaction durably COMMITTED despite later completion/transport failure
 database/storage noncontinuable
@@ -28186,10 +28345,16 @@ The following implementations are forbidden:
 8. executing ordinary statements or COMMIT in `MUST_ABORT`,
 9. making an ordinary effect-free SELECT user error transaction-fatal without an independent fatal cause,
 10. treating every OOM/spill/disk-full failure identically without checking the statement boundary,
-11. exposing a successful partial RETURNING prefix from a statement that later fails, or exposing autocommit RETURNING before implicit COMMIT C4–C5,
+11. exposing any RETURNING prefix before `R` from statement execution that
+    later fails, or exposing autocommit RETURNING before implicit COMMIT C4–C5,
 12. allowing cache publication failure to redefine durable transaction outcome,
 13. excluding SchemaLock/TableWriterGate/object-publication dependencies from the tuple/unique wait-for graph,
-14. releasing a deadlock victim's transaction-owned gates before ABORTED terminal publication.
+14. releasing a deadlock victim's transaction-owned gates before ABORTED terminal publication,
+15. treating an ordinary post-`R` DML cursor error as retroactive statement
+    failure, affected-count revocation, or permission for automatic DML retry,
+16. reporting `FINISHED` for a cursor whose remaining result delivery failed,
+17. requiring a client to drain a published RETURNING cursor to preserve the
+    statement's already successful outcome.
 
 ## 39.2 SQL front-end and logical-planning errors
 
@@ -28269,6 +28434,15 @@ range, extent, or owner-defined structure. These are temporary spill failures,
 not persistent-database corruption. Chapter-24 self-generated in-memory
 construction-invariant violations remain internal defects rather than being
 reclassified as spill I/O failures.
+
+For DML RETURNING, controlled temporary spill, allocation, and runtime
+representability categories may occur in two ownership stages. Before §31.9's
+`R`, they are statement execution failures and §39.1 uses the actual first-
+write state. After `R`, an ordinary result-spool read/framing or delivery-chunk
+materialization failure is terminal result-delivery error: it is not successful
+cursor exhaustion and does not retroactively change statement or transaction
+outcome. This stage distinction does not downgrade an independently established
+persistent-corruption, invariant, session-loss, or noncontinuable condition.
 
 Lower-layer structured causes are preserved rather than erased. Examples include:
 
@@ -28864,6 +29038,15 @@ rejection of same-TxnId retry after publication; explicit-transaction
 RETURNING failure before exposure; and autocommit RETURNING held through
 implicit COMMIT.
 
+DML result-publication verification MUST distinguish pre-`R` execution failure
+from post-`R` delivery failure. It establishes that `R` waits for successful
+statement execution and, for autocommit, C4–C5; explicit post-`R` spill-read
+failure leaves a usable transaction `ACTIVE`; autocommit remains `COMMITTED`;
+affected-count authority and any delivered prefix survive; cursor error is not
+`FINISHED`; delivery cancellation and session loss retain separate owners; no
+published DML is retried; and result-spool accounting and cleanup transfer
+exactly to the result owner.
+
 COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
 
 Recovery property tests compare reopened **logical committed contents** against a model containing only transactions whose commit became durable. Physical aborted garbage is allowed.
@@ -28974,6 +29157,15 @@ ordinary winner and pre-write FA consequence. Dynamic conflict, deadlock,
 resource, cancellation, storage, corruption, and invariant failures remain
 tested at their actually reachable boundary side rather than being inserted
 into the ordinary candidate ranking.
+
+Result-interface verification covers atomic §31.9 `R` publication for DML with
+and without RETURNING; spool append/finalization failure before `R`; first-read
+and later-read failures after `R`; non-retraction and returned-chunk lifetime;
+authoritative count even when delivery fails; terminal cursor error distinct
+from successful exhaustion; voluntary cursor abandonment; pre-/post-`R`
+cancellation; independently owned session loss; continuous memory accounting;
+and cleanup of result-owned buffers and spill resources without statement
+reexecution or transaction-lock release.
 
 Vector kernels are exercised over:
 
