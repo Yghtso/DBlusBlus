@@ -24051,6 +24051,52 @@ objective, tie decision, and structural tie key.
 | V36-075 | Exercise representation-specific widths, logical fallbacks, unknown counts, saturation, provenance, and proof separation under V35-001–005, V35-013–021, V35-028–033, V35-040–041, V35-047–061, and V35-064–069. | Cost consumes the exact identified Chapter-35 outputs and never recomputes semantics, substitutes width representations, creates proof, or derives exact K. |
 | V36-076 | Validate all V36 IDs, coverage entries, reusable references, optionality boundaries, and mandatory evidence categories against the live documents. | No duplicate/missing/orphan ID, broken reference, circular evidence claim, mandatory optional capability, or unavailable essential observation may PASS. |
 
+#### V36-077 — Calibration-tool primitive completeness and configuration ownership
+
+Run one identified calibration invocation in a controlled target-deployment context. Record
+the tool or equivalent calibration identity, invocation/context identity, each primitive
+measurement event, workload, measured quantity and declared natural unit, and the attributable
+derivation or aggregation path into the proposed relative weights. The eight required
+primitive oracles are:
+
+| §36.4 primitive | Controlled workload | Required independent observation and natural unit | Proposal evidence |
+|---|---|---|---|
+| cached sequential scan throughput | Repeated sequential scan over a controlled page/data volume after establishing the fixture's cached state | The cached sequential path actually executes and reports data volume per time, such as pages/time or bytes/time with page size recorded. | Identify the proposed-weight input or declared derivation/aggregation that consumes this cached-scan measurement. |
+| cold-ish sequential page reads | Sequentially read a controlled page range after establishing and observing the fixture's cold-ish condition | The persistent sequential-read path actually executes and reports pages/time, bytes/time, or time/page with every conversion identified. | Identify its contribution or declared derivation into the sequential persistent-I/O relative weight. |
+| random page reads | Read a controlled nonsequential page sequence distinct from the sequential fixture | The random persistent-read path actually executes and reports pages/time, bytes/time, or time/page with sequence identity retained. | Identify its contribution or declared derivation into the random persistent-I/O relative weight. |
+| integer predicate throughput | Evaluate a controlled integer predicate over a known occurrence count | Executed predicate evaluations and elapsed/throughput quantity are observed as evaluations/time or time/evaluation. | Identify the proposed CPU/expression weight input or declared aggregation that consumes this measurement. |
+| VARCHAR comparison throughput | Compare controlled VARCHAR operands with recorded lengths/content classes | Executed comparisons and elapsed/throughput quantity are observed as comparisons/time or time/comparison; any byte normalization is explicit. | Identify the proposed comparison-weight input or declared aggregation that consumes this measurement. |
+| hash throughput | Hash controlled values with recorded operation count and payload size | Executed hash operations and elapsed/throughput quantity are observed as operations/time or time/operation; any byte normalization is explicit. | Identify its contribution or declared derivation into the hash-operation relative weight. |
+| sort comparison throughput | Sort controlled keys while independently counting comparator invocations | Executed sort comparisons and elapsed/throughput quantity are observed as comparisons/time or time/comparison. | Identify its contribution or declared aggregation into the comparison relative weight without counting the same measurement twice. |
+| temporary spill read/write throughput | Write and read controlled temporary-page volumes through the temporary-spill path | Both executed write and read quantities are observed in pages/time, bytes/time, or time/page with page size and direction retained. | Identify its contribution or declared derivation into the temporary-page-I/O relative weight. |
+
+The positive control requires all eight distinguishable observations in that invocation and
+an attributable relative-weight proposal. For every measurement, the proposal identifies
+the proposed weight or its declared derivation/aggregation path; Architecture does not
+require a one-to-one eight-measurement-to-seven-coefficient formula. Any proposed CostConfig
+conversion values consumed by planning pass §§36.2.1/36.3 validation, while cache and
+physical-fallback assumptions remain separately configured unless the proposal explicitly
+and validly supplies them. The controlled measurements, rather than untraceable hard-coded
+machine defaults, must account for the proposal. No universal coefficient values,
+latency-accuracy threshold, or claim of SQL truth/cardinality follows from calibration.
+
+The same invocation proves that its result is deployment/configuration data: applying a
+valid proposal may create a later retained configuration identity, but does not add or alter
+database-file, catalog/schema, TABLE/COLUMN/INDEX statistics, ANALYZE-payload, semantic-proof,
+or PhysicalPlan-property fields. External storage of deployment configuration remains
+permitted and is not treated as database persistent format.
+
+For the negative control, suppress each of the eight measurement paths independently after
+proving its controlled workload was selected; a syntactically valid finite proposal still
+fails calibration completeness when any required measurement is proven omitted. Also reject
+as nonconforming a completed measurement set with no relative-weight proposal, a proposal
+whose contributions cannot be attributed to the measured invocation, or a contract that
+makes calibration output a database-format requirement. If the invocation, selected path,
+measurement event/unit, proposal attribution, or ownership boundary cannot be observed, the
+result is `NOT VERIFIED / TEST INFRASTRUCTURE INCOMPLETE`, not PASS. These controls inherit
+V36-003; an invalid proposed CostConfig remains distinct and follows the existing
+OptimizerError/configuration-validation owner when consumption is attempted.
+
 ### V36 atomic architecture-obligation ledger
 
 | Atomic range | Contract under test | Required reusable oracle |
@@ -24065,6 +24111,7 @@ objective, tie decision, and structural tie key.
 | V36-059–V36-064 | Startup/partial objectives, exact K, specialized precedence, eligibility and search handoff | V22-J/K; V28-E/F/K/L/O; V29-N/O; V30-E/F/I/J/K; V33-C/D/H; `Memory/Spill Plan Tests` |
 | V36-065–V36-070 | Proof/error/resource boundaries, diagnostics, determinism and differential handoff | V20-19; V22-I/K; V24-A/L/N; V33-E/F; V35-056–061/066–068; `Final Optimizer Validation Tests`; `Optimizer Differential Correctness Tests` |
 | V36-071–V36-076 | Frozen Chapters 31–35 and integration/reference integrity | V31-A/B/G/N; V32-B/C/H/I; V33-A/C/D/E/F/G/H/I/K/N; V34-B/C/F/G/J/K; V35-A/C/E/F/G/H/I/J |
+| V36-077 | §36.4/§42.5 calibration primitive completeness, relative-weight proposal, and deployment/configuration ownership | V36-002–V36-003; `Cost Model Benchmarks` supplies only supplementary operator-ranking methodology |
 
 ### Chapter 36 invariant coverage map
 
@@ -24102,7 +24149,7 @@ objective, tie decision, and structural tie key.
 | §36.2.1 finite arithmetic | V36-024–029 | V24-I/L; V35-040–041 | COMPLETE |
 | §36.2.2 local/child composition | V36-050–064 | V22-G; V27-I/J/K/L; V28-E/F/K/L/O; V29-N/O; V30-E/F/I/J/K | COMPLETE |
 | §36.3 CostConfig and units | V36-006–023 | V33-G; V35-013–021; `Cost Model Tests` | COMPLETE |
-| §36.4 calibration | V36-029/V36-069 | `Cost Model Benchmarks` methodology; no executed-result claim | COMPLETE |
+| §36.4 calibration | V36-077; V36-029/V36-069 cover only fixed-input determinism and legal calibration variation | §42.5 cross-owner; `Cost Model Benchmarks` supplies only supplementary operator-ranking methodology | COMPLETE |
 | §36.5 cache model | V36-013/V36-035/V36-040 | `Access Path Tests` | COMPLETE |
 | §36.5.1 input precedence/fallback | V36-030–043 | V34-B/C/J/K; V35-050–055 | COMPLETE |
 | §36.6 SeqScan cost | V36-031–032/V36-046 | V27-B/D/N; `Access Path Tests` | COMPLETE |
