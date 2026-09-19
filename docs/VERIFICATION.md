@@ -23866,9 +23866,11 @@ representation is not the oracle.
 
 ### V35 reuse inventory and stale-rule audit
 
-Exact reusable procedures are V20-4, V20-5, V20-6, V20-10, V20-11, V20-15,
-V20-16, and V20-19; V22-I, V22-J, and V22-K; V29-B; V30-J; V33-G; and
-V34-B, V34-C, V34-J, and V34-K. Reused exact headings are `Selectivity Estimation
+Exact reusable procedures are V20-4, V20-5, V20-6, V20-8, V20-10, V20-11,
+V20-15, V20-16, and V20-19; V22-I, V22-J, and V22-K; V29-B; V30-J; V31-A,
+V31-B, V31-G, and V31-N; V32-B, V32-C, V32-H, and V32-I; V33-E, V33-F,
+V33-G, and V33-H; and V34-B, V34-C, V34-F, V34-G, V34-J, and V34-K. Reused
+exact headings are `Selectivity Estimation
 Tests`, `Semantic Emptiness Tests`, `Join Estimation Tests`, `Cost Model Tests`,
 `Final Optimizer Validation Tests`, `Optimizer Differential Correctness Tests`, and
 `Optimizer Diagnostics Tests`. V35 adds cross-stage identities, configured-input and
