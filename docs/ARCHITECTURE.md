@@ -27271,6 +27271,20 @@ If SQL ordering refers to a computed expression, logical/physical planning retai
 
 V1 collation is the binary VARCHAR collation from Chapter 17.
 
+Before an ordering participates in property identity, memo lookup, satisfaction,
+interesting-order retention, or enforcement, it is normalized by scanning its
+keys from left to right and removing every later **exact duplicate** `OrderKey`.
+Exact duplicate means identical `LogicalSlotId`, direction, NULL order, and
+collation. The first occurrence is retained. Keys that differ in any of those
+four fields remain distinct; matching display text, lineage, a derived equality,
+or statistics is not sufficient for removal.
+
+This normalization changes only the property vector. It does not remove the
+retained slot, suppress evaluation of a demanded ordering expression, or merge
+distinct computed-expression occurrences. Two separately bound computed
+expressions with different hidden `LogicalSlotId` values therefore remain
+different keys even when their source text is identical.
+
 An empty key vector means:
 
 ```text
@@ -27387,7 +27401,7 @@ usable index access order
 DISTINCT / ordered-distinct opportunity
 ```
 
-Only normalized orderings that can satisfy a known current/downstream requirement are retained as interesting.
+Only orderings normalized by §37.2 that can satisfy a known current/downstream requirement are retained as interesting.
 
 Arbitrary orderings are not generated merely to enlarge the memo.
 
@@ -27418,7 +27432,22 @@ cardinality
 deterministic iteration
 ```
 
-The concrete bitset representation is implementation-specific and MUST support the configured large-join planning limit rather than silently truncating relation identities.
+The concrete representation is implementation-specific, but it MUST represent
+every `BindingId` occurrence in the complete reorderable region exactly. Chapter
+37 defines no separate relation-count or native-word-sized planning limit. A
+fixed-width representation may be used only when the region fits; otherwise the
+planner uses a wider/growable representation or reports the existing
+`OptimizerResourceLimit` outcome if exact search state cannot be represented
+within the configured planning arena even for §37.13's bounded fallback. It
+MUST NOT truncate, wrap, merge bits, or reject supported SQL merely because a
+native integer word is too small.
+
+Before search-state construction, the planner determines the exact region
+occurrence count and verifies that its chosen representation can preserve every
+bit. A representation-capacity defect, truncation, or arithmetic failure not
+caused by the configured planning-resource bound is `OptimizerError`/internal
+invariant failure; genuine exhaustion of the dedicated planning arena retains
+the §38.21/§39.4 bounded-fallback and `OptimizerResourceLimit` contract.
 
 ## 37.8 Join graph
 
@@ -27438,6 +27467,43 @@ vertex predicates:
 Safe equality-equivalence predicates derived by §20.17.7 may add connectivity or access opportunities.
 
 Each edge/predicate retains the exact referenced `RelationSet` so a DP partition can determine whether that predicate crosses its two sides.
+
+For one predicate occurrence with referenced relation set `R`, a candidate node
+with available relation set `S` may evaluate or discharge that occurrence only
+when:
+
+```text
+R is a subset of S
+```
+
+For a binary partition `S = L union U`, where `L` and `U` are nonempty and
+disjoint, that occurrence is a crossing predicate exactly when:
+
+```text
+R is a subset of S
+R intersects L
+R intersects U
+```
+
+and placement at that node is legal under Chapter 20's demand, error, and
+join-rewrite rules. Partial intersection never makes a predicate available.
+
+Each movable predicate occurrence is assigned to the lowest legal join node in
+the candidate tree where all of its referenced bindings are available and it
+crosses the two children. This gives that tree one owning placement: the
+predicate is not evaluated prematurely, omitted, or attached again at an
+ancestor. A one-relation predicate remains vertex/local work. A predicate that
+cannot be moved safely remains at its canonical semantic boundary rather than
+becoming an unrestricted graph edge. Separately bound occurrences with the same
+text remain separate; a derived equality is separate metadata and does not
+discharge or duplicate the original demanded expression.
+
+The owning placement is also the one logical selectivity and expression-work
+stage for that occurrence in that candidate tree. Chapter 35 remains the
+selectivity owner, Chapters 36 and 38 remain the work/cost owners, and the rule
+does not mean that a predicate is evaluated only once for the whole statement:
+it is evaluated over every candidate occurrence required by its owning physical
+operator.
 
 LEFT JOIN and other non-reorderable semantic boundaries are represented as constrained/atomic inputs rather than silently flattened into this unrestricted graph.
 
@@ -27477,7 +27543,11 @@ for each subset S:
 
 Symmetric partitions are skipped by one deterministic rule, for example requiring the least BindingId bit in `S` to belong to `A`.
 
-Partitions connected by join predicates are enumerated before Cartesian alternatives.
+For each target subset, §37.12's admission rule determines whether a partition
+with no newly activated crossing predicate is a necessary Cartesian assembly.
+Predicate-crossing partitions are considered first. A Cartesian partition is
+enumerated only when §37.12 admits it; “connected first” is not permission to
+enumerate every other Cartesian partition afterward.
 
 The search considers bushy trees such as:
 
@@ -27489,27 +27559,75 @@ rather than restricting the optimizer to left-deep plans.
 
 ## 37.11 Exhaustive threshold
 
-The initial configurable default is:
+`exhaustive_join_limit` is a mandatory nonnegative integer optimizer-search
+configuration value. Its initial default is:
 
 ```text
 exhaustive_join_limit = 10 relation bindings
 ```
 
-within one reorderable region.
+within one reorderable region. Zero is valid and selects bounded heuristic mode
+for every nonempty reorderable region. A configured value must preserve its
+exact mathematical nonnegative value in the implementation's validated
+configuration representation; a missing, negative, or unrepresentable value is
+invalid optimizer configuration and is rejected as `OptimizerError` before any
+join-search state is constructed. It is never wrapped or clamped.
 
-Below/equal to the threshold, exhaustive bushy DP is the baseline unless the optimizer planning-memory budget forces an earlier bounded fallback.
+The threshold counts distinct `BindingId` occurrences in one maximal legal
+reorderable region, not distinct tables, workers, morsels, output rows, or the
+whole statement across separate regions. For a region of size `N`:
 
-The threshold is a planning-tuning parameter, not a SQL semantic limit.
+```text
+N <= exhaustive_join_limit:
+    exhaustive bushy DP, unless the planning-resource guard triggers fallback
+
+N > exhaustive_join_limit:
+    bounded §37.13 heuristic
+```
+
+Equality is therefore on the exhaustive side of the boundary.
+
+The threshold is a planning-tuning parameter, not a SQL semantic or relation-count limit.
 
 Raising it requires planning-time/memory evidence.
 
+Chapter 33's retained optimizer-configuration identity fixes this value for one
+optimizer invocation. An external configuration change may affect a later
+invocation but cannot change the active invocation's mode boundary.
+
 ## 37.12 Cartesian products
 
-A partition with no crossing join predicate is a Cartesian alternative.
+A partition with no newly activated crossing predicate under §37.8 is a
+Cartesian alternative. Cartesian products remain legal, but the search admits
+such a partition only in either of these cases:
 
-While a connected predicate-join alternative is available for the same unresolved components, the optimizer prefers connected partitions and does not introduce an unnecessary Cartesian product.
+1. **multi-relation-predicate prerequisite** — the target subset is a proper
+   subset of the exact referenced set of an as-yet unavailable predicate that
+   references at least three relations, and assembling the subset can make that
+   predicate available at a later binary node; or
+2. **component assembly** — both children are unions of complete connected
+   components of the region's predicate hypergraph and no predicate can connect
+   those component groups. Singleton vertices are components. Explicit CROSS
+   JOINs therefore remain representable through component assembly.
 
-Cartesian products remain legal where required by the logical query graph.
+Hypergraph connectivity treats each exact multi-relation predicate set as one
+hyperedge; it is not silently decomposed into pairwise predicates. Safe derived
+predicates may contribute edges only under §20.17.7.
+
+For a target subset with one or more legal predicate-crossing partitions, every
+such partition is enumerated and Cartesian partitions for that target are
+excluded. If there is no predicate-crossing partition, only the two necessary
+classes above are admitted. Thus in a pairwise chain `A--B--C`, subset `{A,C}`
+is not constructed, while a sole predicate over `{A,B,C}` permits a
+predicate-free two-relation prerequisite and activates the predicate only at
+the complete three-relation node. For disconnected `{A,B}` and `{C,D}`
+components, each component is optimized normally and their complete retained
+alternatives may be combined by a Cartesian partition.
+
+This rule is a search-space restriction, not semantic proof. No predicate is
+dropped, no Cartesian cardinality is treated as exact emptiness, and a required
+Cartesian assembly remains subject to applicable physical capability, cost,
+properties, and final validation.
 
 Their logical cardinality begins from:
 
@@ -27538,17 +27656,44 @@ Baseline:
    ```
 5. stop early when a complete pass finds no improving legal tree.
 
-Initial default:
+`large_join_max_local_passes` is a mandatory nonnegative integer optimizer-search
+configuration value. Its initial default is:
 
 ```text
 large_join_max_local_passes = 4
 ```
 
-This is optimizer configuration, not persistent format.
+Zero is valid: the deterministic greedy tree is still constructed, but no local
+improvement pass runs. A missing, negative, or unrepresentable value is invalid
+optimizer configuration and is rejected as `OptimizerError` before search-state
+construction; it is never converted to an unsigned value, clamped, or allowed
+to overflow a pass counter.
 
-A small deterministic beam may be added later, but v1 does not require one for correctness.
+One complete pass examines every candidate in the implementation's enabled
+legal local-move neighborhood once in a stable structural order from the
+current tree, compares the resulting legal candidates under Chapter 38's active
+objective and canonical tie rules, and adopts the preferred candidate only when
+it is better under those rules. The next pass starts from the adopted tree. The
+search stops after the first complete pass with no improvement or after exactly
+`large_join_max_local_passes` completed passes, whichever occurs first. The
+initial greedy construction is independent of and does not consume this pass
+budget. The enabled move kinds remain implementation choices from the bounded
+set of semantics-preserving moves; no particular optional move or beam is a
+correctness requirement.
 
-Disconnected query regions introduce Cartesian edges only when logically necessary.
+This is optimizer configuration, not persistent format. Chapter 33's retained
+configuration identity fixes it for one invocation; a later invocation may use
+a newly validated value.
+
+Deterministic beam search is an optional extension and is not required by the
+v1 baseline.
+
+Greedy extension and every local move apply §37.12's same Cartesian-admission
+rule. They choose predicate-connected extensions when available, introduce a
+Cartesian extension only for an admitted multi-relation-predicate prerequisite
+or complete-component assembly, and never cross a constrained outer-join
+boundary. Cost and the active objective select among admitted legal extensions;
+they do not change Cartesian legality.
 
 ## 37.14 Join algorithm alternatives
 
@@ -27663,17 +27808,18 @@ Without prepared-statement parameters, v1 optimization sees literal constants di
 1. V1 physical properties track ordering and required output slots without a premature full property lattice.
 2. Ordering satisfaction is exact prefix matching on slot, direction, NULL order, and collation.
 3. Only runtime-guaranteed ordering is advertised.
-4. Interesting orders retain useful non-cheapest alternatives but do not create unbounded arbitrary order classes.
+4. Interesting orders use §37.2's exact-duplicate normalization, retain useful non-cheapest alternatives, and do not create unbounded arbitrary order classes.
 5. Join relation identity uses BindingId, not TableId.
 6. Exhaustive search enumerates bushy trees for small reorderable regions.
-7. The initial exhaustive threshold is configurable and defaults to 10 relation bindings.
-8. Large-join search is bounded and deterministic.
-9. Unnecessary Cartesian joins are avoided while connected alternatives exist.
+7. The validated nonnegative exhaustive threshold counts BindingId occurrences per reorderable region, defaults to 10, and is stable for one optimizer invocation.
+8. Large-join search always constructs its deterministic greedy tree; its validated nonnegative local-pass budget defaults to 4, with zero meaning no local passes.
+9. Predicate-connected partitions are preferred and unnecessary Cartesian subsets are excluded, while hyperedge prerequisites and disconnected complete components retain the necessary Cartesian alternatives defined by §37.12.
 10. INNER join order and physical algorithm/orientation are optimized together.
 11. LEFT JOIN semantic boundaries and supported hash orientation are preserved.
 12. Logical join cardinality is independent of the physical join algorithm.
 13. Only capability-enabled physical algorithms enter the plan search.
 14. Correlated subqueries are rejected before physical search; every accepted expression subquery has the once-per-attempt fallback/costing contract in §37.17.
+15. A predicate occurrence activates only when all referenced BindingIds are available and has exactly one lowest legal owning placement in each candidate join tree, without weakening demand, error, selectivity, or cost ownership.
 
 ---
 
