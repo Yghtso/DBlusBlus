@@ -27240,7 +27240,7 @@ OrderingProperty
 RequiredSlotSet
 ```
 
-and reserves future extension points for:
+The following remain optional property-extension categories:
 
 ```text
 partitioning
@@ -27248,7 +27248,7 @@ rewindability
 materialization
 ```
 
-without constructing a full property lattice before those properties are needed.
+The baseline does not track them or construct a full property lattice.
 
 `required_rows` for LIMIT-sensitive optimization is an optimization objective/requirement, not a physical data property; §38.16 defines how it participates in search identity when propagated.
 
@@ -27383,7 +27383,7 @@ hash PhysicalDistinct:
     no ordering
 ```
 
-Nested-loop/index-nested-loop and later merge/ordered-aggregate implementations may advertise additional order only when their execution contract explicitly guarantees it.
+Nested-loop/index-nested-loop and capability-enabled merge/ordered-aggregate implementations may advertise additional order only when their execution contract explicitly guarantees it.
 
 The capability registry from §22.4.1 gates such alternatives.
 
@@ -27523,7 +27523,7 @@ physical join algorithm
 
 The optimizer does not reorder across the outer-join boundary unless an earlier, independently proven logical rewrite converts it to semantics where that reorder is valid.
 
-Advanced outer-join reordering is deferred.
+Advanced outer-join reordering is outside the v1 baseline. Only an independently proven Chapter-20 logical rewrite and an applicable supported physical capability may produce a plan that crosses the original boundary.
 
 ## 37.10 Bushy dynamic programming
 
@@ -28571,14 +28571,12 @@ peak planning-arena bytes
 
 The optimizer uses a dedicated planning arena with a configurable upper budget separate from execution memory.
 
-If exhaustive join DP approaches either:
-
-```text
-exhaustive_join_limit
-planning arena budget
-```
-
-the remaining join-region search switches to §37.13's bounded heuristic.
+For each maximal legal reorderable region, §37.11 selects exhaustive DP when
+`N <= exhaustive_join_limit` and the bounded §37.13 heuristic from the outset
+when `N > exhaustive_join_limit`. Once exhaustive DP is selected, proximity to
+or equality with the relation-count threshold does not interrupt it. The
+remaining join-region search switches to §37.13's bounded heuristic only when
+the canonical planning-resource guard triggers.
 
 If even bounded planning cannot fit within the configured planning resource limit, planning fails with a controlled `OptimizerResourceLimit` error rather than arbitrary process OOM.
 
