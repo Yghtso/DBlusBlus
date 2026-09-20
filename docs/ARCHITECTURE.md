@@ -29009,13 +29009,13 @@ One statement/transaction-control request has exactly one of these command-layer
 
 | Outcome | Meaning |
 |---|---|
-| `SUCCESS` | the statement completed; an explicit transaction remains `ACTIVE`, while autocommit proceeds to COMMIT |
+| `SUCCESS` | the requested operation completed semantically on the server: an ordinary statement in an explicit transaction remains `ACTIVE`; an autocommit statement has completed its implicit COMMIT through C4–C5; an explicit COMMIT is `COMMITTED`; and an explicit ROLLBACK is `ABORTED` |
 | `FAILED_TRANSACTION_REMAINS_ACTIVE` | the statement failed without a transaction-fatal/database-fatal condition and without a published write from this statement; cleanup completed and another statement or COMMIT is legal |
 | `FAILED_TRANSACTION_MUST_ABORT` | this statement cannot be allowed to commit its TxnId; transition to `MUST_ABORT` and automatically execute §15.6 |
-| `COMMIT_OUTCOME_UNCERTAIN` | no successful acknowledgement was delivered after commit became uncancellable; the connection cannot continue and recovery/server state determines or already knows the durable outcome |
+| `COMMIT_OUTCOME_UNCERTAIN` | no successful acknowledgement was delivered after commit became uncancellable; the connection cannot continue and canonical server/recovery evidence determines or already knows the semantic outcome |
 | `DATABASE_NONCONTINUABLE` | storage/runtime invariants do not permit ordinary continuation; close affected connections and perform non-clean controlled stop/recovery |
 
-Client-visible request status and transaction semantic outcome are distinct. In particular, `COMMIT_OUTCOME_UNCERTAIN` after the durable commit point means the actual transaction is COMMITTED even though the client did not receive a successful acknowledgement.
+The command outcome, transaction semantic state, database-continuation state, and response-delivery state are distinct dimensions. `SUCCESS` describes completed server-side command semantics; it does not claim that a success response reached the client. An explicit COMMIT whose C6 response is lost uses `COMMIT_OUTCOME_UNCERTAIN` even when the server already knows that the actual state is `COMMITTED`. An explicit ROLLBACK whose A4 response is lost has completed with server-side `SUCCESS` and actual state `ABORTED`, but the connection reports/chains `ConnectionFailure` and does not claim that the client received `SUCCESS`; `COMMIT_OUTCOME_UNCERTAIN` is not a generic rollback-transport outcome. Automatic ABORT retains the originating statement's `FAILED_TRANSACTION_MUST_ABORT` outcome rather than becoming a successful user-requested ROLLBACK. Database noncontinuability and structured primary/chained causes are reported independently where the tables below require them.
 
 `MUST_ABORT` is transaction-fatal only: other transactions and the database remain usable while this transaction is automatically terminated. `DATABASE_NONCONTINUABLE` is a database/storage-owner gate: ordinary mutation/transaction continuation for that database stops because WAL, page, terminal-publication, or ownership coherence is not established. Ordinary user/constraint/resource errors are not promoted to database-fatal merely because they fail a statement.
 
@@ -29228,12 +29228,17 @@ post-C/pre-`R` allocation, validation, registration, or spill-I/O failure row.
 | C3 WAL write/`fdatasync` failure with exact append bytes retained | remain COMMITTING and retry durability under retained ownership; do not abort or acknowledge | request remains pending; no ordinary failure result authorizes retry/cancellation |
 | C3 durability cannot be established while safe continuation/retry is impossible | storage noncontinuable; recovery decides from the surviving complete WAL prefix | `CommitOutcomeUncertain`/connection-fatal |
 | after C3, before/during C4 runtime terminal publication | durable outcome is irrevocably COMMITTED; publication failure makes runtime/database noncontinuable | never ABORTED; without C6 acknowledgement report/observe commit outcome uncertainty |
+| read-only COMMIT before C4, or a C4 attempt known to have left the exact coherent prepublication state | no C2/C3 or commit WAL exists; retain ownership and retry C4, or, if COMMIT cannot continue while nonpublication is exact, transition to mandatory ABORT; no terminal COMMIT has occurred | never acknowledge COMMIT success; the failed request is `FAILED_TRANSACTION_MUST_ABORT` if it is terminated through ABORT |
+| read-only C4 attempt whose atomic publication/nonpublication result or registry/cache coherence cannot be established | database noncontinuable; retain locks/registry ownership and permit recovery/controlled stop to classify the transaction from canonical evidence | `COMMIT_OUTCOME_UNCERTAIN`/connection-fatal; do not invent C3 durability or publish ABORTED |
+| read-only C4 has atomically published `COMMITTED`, including a failure observed immediately afterward | outcome is irrevocably COMMITTED; continue with the shared C5 cleanup rules | never ABORTED; C6 acknowledgement and transport rules remain shared with persistent COMMIT |
 | C5 catalog/statistics cache side effect fails but safe invalidate/bypass/fallback succeeds | COMMITTED; continue cleanup using authoritative MVCC catalog/statistics fallback | success may still be acknowledged after C5 completes safely |
 | C5 registry/lock/visibility cleanup cannot be made coherent | COMMITTED plus database noncontinuable; retain unsafe ownership rather than expose contradiction | commit outcome uncertain unless success was already delivered (v1 delivers only at C6) |
-| C6 success acknowledgement delivered | COMMITTED, runtime publication and required cleanup complete | successful COMMIT |
-| C6 socket/write failure before delivery | COMMITTED; database may remain healthy and closes that connection | client-observed outcome uncertain; retrying the transaction is unsafe without application reconciliation |
+| C6 success acknowledgement delivered | COMMITTED, runtime publication and required cleanup complete | `SUCCESS`; successful COMMIT response delivered |
+| C6 socket/write failure before delivery | COMMITTED; database may remain healthy and closes that connection | `COMMIT_OUTCOME_UNCERTAIN` plus `ConnectionFailure`; no success response was delivered and retrying the transaction is unsafe without application reconciliation |
 
 Once the publication-authorizing commit record validly appends, COMMIT is uncancellable: client disconnect, timeout, or cancellation does not initiate ABORT. The server continues C2–C5 or enters the noncontinuable gate. A known commit append failure is not exposed as a retryable COMMIT on the same transaction; v1 aborts that transaction, and an application retry begins a new transaction.
+
+A read-only transaction elides C2–C3 exactly as §15.5 requires: it has no `commit_lsn`, no `durable_lsn` event, and no fabricated terminal WAL record. For that path, the §9.14 C4 atomic terminal-publication linearization is the publication-authorizing and irreversible COMMIT boundary. Before that linearization, an exact coherent nonpublication result remains eligible for retained-owner retry or mandatory ABORT; once C4 has begun, its owner may not abandon a possibly publishing operation merely because cancellation or connection loss arrives. If the owner cannot establish either authoritative `COMMITTED` publication or exact coherent nonpublication, the database is noncontinuable. After C4 linearizes, every later failure is a C5/C6 failure and cannot authorize ABORT.
 
 `WAL_POSITION_EXHAUSTED` cannot be the expected cause of a persistent
 transaction's C2/A1 terminal-record no-append because §4.3.2.4 retained its
@@ -29268,7 +29273,8 @@ The exact successful stages are §15.6 A0–A4. ABORT performs semantic outcome 
 | inability to complete a known-failure retry/abort publication | storage noncontinuable; preserve original error and require recovery loser handling |
 | A2 runtime ABORTED publication failure | storage noncontinuable; no false lock release or terminal-cache claim |
 | A3 cleanup failure after terminal ABORTED publication | outcome remains ABORTED; lock/registry ownership uncertainty makes the database noncontinuable |
-| A4 acknowledgement transport failure | outcome remains ABORTED; close connection; database may remain healthy |
+| A4 acknowledgement delivered | outcome is ABORTED and required cleanup is complete; explicit ROLLBACK has command outcome `SUCCESS`, while automatic ABORT returns the originating failed-command outcome with transaction state ABORTED |
+| A4 acknowledgement transport failure | outcome remains ABORTED; required A3 cleanup remains complete; close the connection and report/chain `ConnectionFailure`; an explicit ROLLBACK completed server-side with `SUCCESS` but no success response was delivered, while automatic ABORT retains its originating failed-command outcome; never use `COMMIT_OUTCOME_UNCERTAIN` |
 
 Ordinary ABORT need not synchronously make `TXN_ABORT` durable. If it is lost, crash recovery classifies the noncommitted transaction as a loser and establishes ABORTED. An uncertain/failed abort can therefore never become COMMITTED, but ordinary execution still cannot release locks or claim clean completion without the required runtime terminal publication.
 
@@ -29287,13 +29293,21 @@ Connection/session loss has these outcomes:
 |---|---|
 | ACTIVE, no COMMIT in progress | automatically ABORT and clean up |
 | MUST_ABORT | continue/join mandatory ABORT cleanup |
-| COMMITTING before publication-authorizing commit append | cancel commit and ABORT |
-| COMMITTING after publication-authorizing append, before durable commit | commit is uncancellable; continue it or enter noncontinuable/recovery; client outcome is uncertain |
-| after durable commit, before acknowledgement | transaction remains COMMITTED; finish safe runtime cleanup where possible; client outcome is uncertain |
-| ABORTING | continue abort cleanup; never revive transaction |
+| persistent COMMITTING before publication-authorizing commit append | cancel commit and ABORT; no response is delivered on the lost connection, and the actual noncommit outcome is not `COMMIT_OUTCOME_UNCERTAIN` |
+| persistent COMMITTING after publication-authorizing append, before durable commit | commit is uncancellable; continue it or enter noncontinuable/recovery; client outcome is uncertain |
+| persistent COMMITTING after durable C3, before C4 publication | transaction is semantically COMMITTED; finish C4–C5 or enter the noncontinuable gate; never ABORT; client outcome is uncertain |
+| read-only COMMITTING before C4 begins | cancel commit and ABORT; no WAL COMMIT or durable point is fabricated; no response is delivered on the lost connection, and the actual noncommit outcome is not `COMMIT_OUTCOME_UNCERTAIN` |
+| read-only COMMITTING during C4 | do not abandon the atomic publication attempt: complete/retry it; if exact coherent nonpublication is established, ABORT remains legal, if `COMMITTED` publication linearizes, continue C5, and if neither result can be established, enter the noncontinuable gate; without a delivered response use `COMMIT_OUTCOME_UNCERTAIN` because the client cannot know which canonical result occurred |
+| COMMITTED after C4, before C5 cleanup completes | continue required C5 cleanup despite disconnect; retain locks/registry ownership until their canonical cleanup point; never ABORT or reverse terminal publication; client outcome is uncertain |
+| COMMITTED after C5, before C6 acknowledgement | required transaction cleanup is complete; close the connection without changing `COMMITTED`; the client outcome is uncertain |
+| COMMITTED after delivered C6 response | close the connection; terminal state and completed cleanup are unchanged |
+| ABORTING before A2 terminal publication | continue abort publication and cleanup; never revive transaction or permit COMMIT |
+| ABORTED after A2, before A3 cleanup completes | continue required A3 cleanup despite disconnect; never reactivate the transaction; retain locks until the canonical A3 release point |
+| ABORTED after A3, before A4 acknowledgement | required transaction cleanup is complete; close the connection without changing `ABORTED`; an explicit ROLLBACK has no delivered success and reports `ConnectionFailure`, not `COMMIT_OUTCOME_UNCERTAIN` |
+| ABORTED after delivered A4 response | close the connection; terminal state and completed cleanup are unchanged |
 
-For implicit autocommit DML, the “after durable commit, before
-acknowledgement” row includes loss before §31.9 `R`. The prepared temporary
+For implicit autocommit DML, the applicable persistent or read-only
+`COMMITTED`-before-C6 row includes loss before §31.9 `R`. The prepared temporary
 result is cleaned when safe, but no `R`, successful count authority, durable
 response record, result reconstruction, or automatic DML replay is fabricated.
 If the session remains usable and only cancellation is pending after successful
@@ -29320,14 +29334,23 @@ When multiple errors occur, semantic precedence is:
 durable COMMIT outcome
     dominates every later error and can never be rewritten
 
+authoritative read-only C4 COMMITTED publication
+    is equally terminal and can never be rewritten
+
 required noncommit/MUST_ABORT outcome
     remains noncommit even if abort cleanup later fails
+
+authoritative ABORTED publication
+    remains ABORTED even if cleanup or acknowledgement later fails
 
 database/storage noncontinuable condition
     is additionally reported and governs server continuation
 
 original statement/commit/rollback error
     remains the primary causal diagnostic, with cleanup/fatal errors chained
+
+response delivery status
+    reports acknowledgement or transport separately and never changes semantic state
 ```
 
 For example, a UNIQUE violation followed by fatal abort I/O remains “UNIQUE violation; transaction must not commit” plus “database noncontinuable”; the cleanup error does not erase the original cause or make COMMIT legal.
