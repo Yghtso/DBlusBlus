@@ -28794,11 +28794,16 @@ memo counters above are diagnostics only; they do not independently trigger
 fallback. High estimated execution cost, execution-memory pressure, and the
 relation-count threshold are not planning-arena guard conditions.
 
-A catchable backing-allocation denial for a valid representable arena growth is
-normalized as inability to satisfy the planning-resource bound: exhaustive
-search follows the same clean bounded fallback, and inability to satisfy
-bounded search produces `OptimizerResourceLimit`. It does not authorize a
-different plan comparator or an uncontrolled allocation failure.
+A catchable backing-allocation denial for a supported, representable arena
+growth that the configured byte guard permits remains Chapter 39's
+`OutOfMemory` operational cause. The optimizer may attempt the same clean
+bounded fallback when that is an already permitted safe mitigation. If the
+fallback successfully constructs and validates a legal plan, planning succeeds.
+If a below-budget backing denial remains the cause preventing completion, the
+terminal outcome is `OutOfMemory`, not `OptimizerResourceLimit`; attempting
+fallback does not reclassify that cause. A distinct later configured-byte-guard
+event retains the configured-bound outcome below. This distinction does not
+authorize a different plan comparator or an uncontrolled allocation failure.
 
 For each maximal legal reorderable region, §37.11 selects exhaustive DP when
 `N <= exhaustive_join_limit` and the bounded §37.13 heuristic from the outset
