@@ -29625,6 +29625,48 @@ The initial metric families include:
 
 Exact metric ownership and naming MAY evolve by subsystem.
 
+A reported metric identifies its owner, unit, and scope/lifetime. An **event total**
+counts occurrences at the named owner's defined boundary; attempted work,
+completed work, and successful publication are distinct events and MUST NOT be
+silently combined under one metric. A **gauge** samples a current owner state;
+concurrent gauges need not form one globally atomic database snapshot. A
+**duration/latency** measures an identified stage interval, not a sum that must
+equal independently measured intervals. An **estimate** retains its upstream
+approximate meaning. Cumulative totals identify their process/database-instance,
+query, operator, pipeline, optimizer-invocation, or explicitly reset diagnostic
+interval as applicable; no counter persistence or public reset operation is
+required.
+
+For the normal §7.6.3 BufferPool fetch, one **logical page read** is one
+successful caller fetch claim converted to a public pin. A successful resident
+pin is one **buffer hit**; a successful claim served by a `LOADING -> RESIDENT`
+publication is one **buffer miss**, including each waiter sharing that load.
+Thus successful logical reads equal hits plus misses within the same scope.
+Internal eviction-race retries do not create another logical read: classify the
+eventual successful pin by its actual resident-hit or load-publication path.
+A failed/cancelled claim that never becomes a public pin, or an invalid or
+unpublished PageId rejected before normal fetch admission, increments none of
+these completed-fetch totals; attempted/failed fetches may be separate metrics.
+One **physical page read** is one completed full-page storage transfer, even if
+subsequent validation rejects the page; a partial/failed transfer is not a
+completed physical read. One **page write** here is one completed full-page
+physical write transfer, not a logical mutation or a stable/durable writeback;
+later file synchronization and dirty-state reconciliation retain §7.10 ownership.
+Short-I/O syscall retries do not multiply one completed transfer. Coalesced
+fetch claims never multiply the one physical read, and new-page construction
+does not invent a physical read.
+
+Diagnostic arithmetic MUST NOT silently wrap or use signed-overflow undefined
+behavior. A representation limit may saturate with an explicit saturation
+indication or report overflow/unavailability; it does not produce a SQL
+arithmetic error, change a transaction outcome, or make the database
+noncontinuable solely because a diagnostic lost precision. Optional,
+platform-dependent, or upstream-unavailable diagnostics identify absence
+rather than substituting semantic zero. This is not permission to omit a
+mandatory core event metric. Metrics observe canonical subsystem state; they
+never determine page residency, WAL durability, transaction visibility or
+outcome, recovery classification, query results, or semantic-empty proof.
+
 ## 40.2 EXPLAIN
 
 The SQL interface eventually exposes `EXPLAIN` information including:
@@ -29681,6 +29723,44 @@ frozen versions
 ```
 
 Exact counter names may evolve, but these observability dimensions are architectural.
+
+Live-transaction outcome totals cover this process's transaction protocol;
+recovery-discovered winners and losers are separately identified recovery
+events rather than retroactive live completions. Begin totals count successful
+§9 registration/admission, not rejected requests. Committed totals count each
+canonical semantic COMMITTED outcome once:
+persistent COMMIT at durable C3, read-only COMMIT at authoritative C4, independent
+of C5/C6 completion or client acknowledgement. Aborted totals count each
+authoritative A2 ABORTED publication once. Statement-failure totals count failed
+admitted statements rather than their cleanup steps. Commit-outcome-uncertain
+responses/connection losses, post-durable failures, and noncontinuable
+transitions are separate diagnostic events; they do not recategorize a semantic
+COMMITTED transaction as ABORTED.
+`MUST_ABORT`/`ABORTING` observations, active snapshot count, oldest snapshot
+`xmin`, snapshot active-set size, dirty-page-table size, and RID retire-queue
+size are sampled gauges; separately identified state-entry totals may also be
+exposed. An absent oldest snapshot is unavailable, not a fabricated `xmin`.
+
+WAL bytes appended count each new byte in §12.12's valid logical append prefix
+once, including its published padding, not reservations or incomplete records.
+WAL bytes synced count each newly established durable byte of that valid prefix
+once under §12.13; this is not a raw subtraction of record-start `durable_lsn`
+values and is never multiplied by commit waiters or repeated sync attempts.
+WAL flush count is the number of WAL-flusher durability attempts, successful
+or failed, not the number of waiters or constituent syscalls/segments; success
+or failure may be distinguished separately. A group-commit batch counts one
+successful shared durability advancement serving commit waiters, and its group
+size is the number of distinct waiters it satisfies. Append, physical writing,
+durability advancement, waiter completion, and C6 delivery remain distinct.
+
+Lifecycle transitions and checkpoint completions are event totals; time in a
+lifecycle state measures entry-to-exit intervals, checkpoint duration measures
+the checkpoint's own start-to-completion/failure interval, and persistent
+commit wait latency measures C3 waiter enrollment to durability satisfaction
+or failure. Their elapsed values are diagnostic, need not be reproducible or
+additive across independently measured stages, and may be explicitly
+unavailable when timing cannot be obtained. Upstream approximate vacuum or
+statistics pressure remains approximate when displayed here.
 
 ## 40.4 Transaction/recovery debug introspection
 
