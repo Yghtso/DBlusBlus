@@ -29678,6 +29678,24 @@ The SQL interface eventually exposes `EXPLAIN` information including:
 
 `EXPLAIN ANALYZE` additionally exposes actual execution information such as row counts and timing so estimates can be compared with observed behavior.
 
+For the §18.10.4 SELECT-only forms, ordinary `EXPLAIN` MUST NOT execute the
+inner SELECT's physical plan or return its result rows. It performs the
+canonical parsing, binding, logical planning and validation, and, where
+physical plan information is requested, optimization and final physical-plan
+validation. Logical EXPLAIN is likewise nonexecuting. Those stages retain
+their existing error and resource owners; an error independently required
+there is still reported. Ordinary EXPLAIN MUST NOT start physical operators
+or pipelines, perform execution-only memory or spill work, or evaluate an
+expression solely to obtain runtime observations. It reports plan estimates
+and properties, not fabricated actual rows, execution time, runtime memory,
+spill behavior, or operator counters. An error arising only from executing
+the inner SELECT is not induced by ordinary EXPLAIN. `EXPLAIN ANALYZE` uses
+the same canonical planning and final-validation rules, then executes the
+selected physical plan under ordinary SELECT transaction, snapshot, lock,
+operator, cancellation, resource/error, and cleanup ownership; Chapter 40
+observes that execution without changing its semantics. EXPLAIN presentation
+does not select a different plan or define a separate transaction model.
+
 These facilities are architectural observability requirements, not merely debugging conveniences.
 
 ## 40.3 Transaction, WAL, recovery, and vacuum metrics
