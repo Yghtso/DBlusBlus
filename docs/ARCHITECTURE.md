@@ -29876,6 +29876,23 @@ Sort:
 
 Parallel operators accumulate hot counters in worker-local state and combine them at synchronization/finalization boundaries rather than requiring one atomic increment per row.
 
+Profile applicability is diagnostic and per physical node and measured output
+boundary, not a new operator lifecycle or transaction state. A node that never
+starts retains its plan estimate but has no observed actual rows; nonexecution
+MUST NOT be represented as a completed zero. A started node records only work
+actually observed. Its row count is **cardinality-comparable** only when the
+same output population described by its optimizer estimate has been observed
+through that node's cardinality-complete boundary. Opening, clean teardown,
+or local `FINISHED` alone does not establish that boundary. Failure,
+cancellation, or lawful upstream early stop may leave a started node partial
+or demand-censored even when the query succeeds. A parent may be comparable
+while its child is not. Fully consumed input to a blocking operator remains
+complete input-work evidence; its output is comparable only if the matching
+estimated output boundary was also completely observed. Actual work
+counters, including rows, chunks, time, attributed memory, and spill, are not
+extrapolated into work that did not occur. Applicability and any unavailable
+measurement remain distinguishable from a genuine completed zero.
+
 ### 40.6.1 EXPLAIN ANALYZE
 
 `EXPLAIN ANALYZE` executes the selected physical plan and reports both estimates and actual execution information, including:
@@ -29891,6 +29908,17 @@ important operator-specific counters
 
 Actual counters come from the physical operators that really executed, not from logical estimates copied into an output template.
 
+For each selected node, the diagnostic distinguishes not started, started with
+incomplete cardinality observation, and cardinality-comparable completion;
+exact display names are not prescribed. Successful query completion does not
+make every descendant comparable. If a failed or cancelled execution's
+partial profile is exposed through a diagnostic, debug, or test interface,
+it identifies that execution did not complete successfully and includes only
+safely observed work. The original execution error or cancellation remains
+primary under Chapters 26 and 39; profiling neither fabricates finalization
+nor changes query or transaction outcome. No particular SQL error-plus-profile
+wire format or crash-surviving profile is required.
+
 ### 40.6.2 Pipeline profiling
 
 Pipeline-level profiling records at least:
@@ -29905,6 +29933,17 @@ morsels/tasks
 ```
 
 This distinguishes CPU work from blocker/dependency waiting and scheduler imbalance.
+
+Successful profiles combine applicable worker-local operator and pipeline
+measurements without double counting. On failure or cancellation, after the
+required worker quiescence and before local state is discarded, safely
+available measurements MUST be retained if a partial profile is exposed;
+missing or unrecoverable measurements are marked incomplete/unavailable,
+not fabricated. Pipeline counters and elapsed intervals describe only
+observed work and do not imply successful pipeline finalization. Diagnostic
+collection or merge failure may make affected fields unavailable, but cannot
+keep tasks runnable, impede required cleanup indefinitely, replace the
+original error, or change the canonical query/transaction outcome.
 
 ## 40.7 Statistics, estimation, and base-access diagnostics
 
@@ -29957,12 +29996,16 @@ provided/required ordering where useful
 
 Verbose/debug optimizer trace additionally exposes the search/estimate information from §38.23.
 
-`EXPLAIN ANALYZE` reports for every physical node:
+`EXPLAIN ANALYZE` retains the estimate for every selected physical node and
+distinguishes observed actual rows and q-error according to §40.6's per-node
+applicability. Numeric q-error applies only when estimate `E` and actual `A`
+refer to the same physical-node output boundary and `A` is a completed,
+cardinality-comparable observation. The diagnostic fields are:
 
 ```text
 estimated rows
-actual rows
-q-error
+observed actual rows, when available, with completeness/applicability
+q-error, when comparable; otherwise explicit unavailability
 ```
 
 For positive estimate `E` and actual `A`:
@@ -29980,6 +30023,15 @@ E = 0 and A = 0:
 exactly one of E/A is 0:
     q_error = infinity / explicit infinite marker
 ```
+
+For a not-started node, or a partial, demand-censored, failed, or cancelled
+node without a complete comparable cardinality, q-error is explicitly
+unavailable/not comparable. Neither an absent actual nor an observed prefix
+is substituted as zero, infinity, or an extrapolated full cardinality; even
+an observed prefix numerically equal to the estimate does not establish
+completion. A genuine completed zero retains the zero rules above. Planning
+estimate provenance, semantic-empty proof provenance, and actual observation
+remain separate; q-error availability is not semantic-empty proof.
 
 Estimate-attribution output should make the earliest material divergence visible together with confidence/provenance, because an upper join-order failure may originate in one lower predicate estimate.
 
