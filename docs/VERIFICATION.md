@@ -2898,6 +2898,31 @@ Use deliberately tiny buffer pools in some tests.
 Add watchdogs/timeouts as secondary deadlock detectors, while acquisition traces and barriers
 remain the primary latch-order oracle.
 
+Compose the existing §8.28 `L3 full-tree topology verification` procedure with §41.2's
+frequent-verifier SHOULD at safe post-quiescence checkpoints. For each barrier-controlled
+case above, first prove from the scheduled event trace that the intended overlap and any
+named split, merge, root change, detach, or reuse actually occurred. Preserve the case's
+direct latch-order, restart, cursor/result, exact physical-key/RID, and progress oracles;
+L3 cannot substitute for them. Then release the barriers, let every participating worker
+complete or reach its owned terminal/restart result, finish required transaction or
+deadlock-victim resolution, and confirm through the test scheduler that no worker remains
+in a tree mutation step or holds a B+ write latch. Release worker page guards/pins required
+by the case before verification, including in tiny-BufferPool cases. Only after that
+quiescent barrier, invoke a **new** L3 traversal of the final stable tree and require PASS.
+An absent intended schedule/event, skipped L3 run, stale earlier L3 result, or any L3
+invariant failure makes that case non-PASS; retain the first owning failure evidence.
+
+Apply the same post-quiescence composition to the existing reader/writer, disjoint/hot-range
+writer, duplicate-heavy, simultaneous-split, split/merge-churn, forward-scan/write, and
+tiny-BufferPool families. Range-scan visibility/results and BufferPool eviction/pin/latch
+checks remain their separate direct oracles. For any B+-participating deadlock/restart case,
+resolve the cycle, victim outcome, surviving operation, required retry/abort boundary, and
+latch/lock cleanup before the stable L3 run; never traverse an unresolved cycle. Reproducible
+stress remains supplementary: use the same L3 procedure at safe quiescent checkpoints when
+the stress harness provides them and at final quiescence, not while mutators race. These
+are verification checkpoints, not an L3 call on each ordinary operation, an online global
+verifier, a production pause API, or a new numerical cadence requirement.
+
 ---
 
 ### Chapter 8 architecture-obligation coverage map
@@ -23404,7 +23429,7 @@ repeatable; independent approximate samples need not be bitwise equal.
 | V34-040 | Replay fixed bounded reservoirs with skew, duplicates, equal boundaries, and MCV overlap. | Target remains 100,000 subject to memory, bin count at most 100, boundaries/masses validate, and MCV residual mass is not double counted. |
 | V34-041 | Exercise VARCHAR bytes, FLOAT64 specials, BOOLEAN, integer, DATE, and TIMESTAMP values. | Hash/equality/order use Chapter 17 and §34.14.6 semantics; locale, pointer identity, raw NaN comparison, and host iteration are not oracles. |
 | V34-042 | Collect required physical index pressure through full walk or bounded sampling while concurrent DML changes physical state. | Logical live count follows the snapshot; physical/garbage/page/correlation values remain approximate advisory metadata and valid within their domains. |
-| V34-043 | Repeat accepted bounded collection with varied chunk/merge/worker order where a capability exists. | Every candidate passes identical deterministic validation/normalization; approximation may differ and optional merge/parallel capability is not mandated. |
+| V34-043 | Repeat accepted bounded collection with varied chunk/merge/worker order where a capability exists. | Every candidate passes identical deterministic validation/normalization; the HLL pre-bound estimate is exactly chunk-invariant for the same distinct set under §34.9, while other approximation may differ and optional merge/parallel capability is not mandated. |
 
 ### V34-G — Degenerate descriptors and persisted v1 validation
 
@@ -25662,12 +25687,139 @@ the bounded writer result lies between observed lower bounds and the exact non-N
 nonfinite, negative, or malformed candidate state fails before persistence
 ```
 
-Measure relative-error distributions over reproducible seeds and several cardinality
-scales rather than requiring one sketch instance to equal one fragile estimate. Compare the
-observed distribution with the HLL behavior implied by the architecture's fixed precision;
-do not introduce a separate universal tolerance. When merge is supported, partitioned
-collection must obey the same statistical and deterministic output bounds as direct
-collection.
+Keep those structural/persisted checks (including V34-038 and V34-050) distinct from the
+following §34.9 pre-bound set-invariance and post-bound distributional-quality oracles.
+Together they discharge §41.6's `HLL error distribution` obligation. V1 fixes `p = 14`,
+`m = 2^p = 16,384`; precision is not a runtime quality setting. An internal test seam may
+observe the completed process-local pre-bound estimate, the actual §34.14.6.5 bounded
+candidate, and proof that HLL collection ran; no public SQL option or persisted field is
+required. When merge is supported, partitioned collection is subject to the same applicable
+§34.9 output rules; merge/parallel collection is not required by v1.
+
+**Exact pre-bound set-invariance.** Reuse V34-041's applicable HLL scalar families
+(integer, BOOLEAN, DATE, TIMESTAMP, VARCHAR, FLOAT64) and their Chapter-17 canonical
+equality/hash fixtures, including FLOAT64 canonical NaNs and equivalent signed zeros;
+do not assume unsupported types use HLL. Independently form one non-NULL canonical
+distinct-value set per fixture without reading HLL state, estimated NDV, or statistics
+descriptors. Present the same set as all singletons, all pairs, mixed singleton/repeated,
+and strongly skewed duplicates; use ascending, descending, a fixed nontrivial permutation,
+clustered and interleaved duplicates, and at least two chunk partitions. Exercise the
+HLL component even where configured §34.8 exact mode would otherwise run. For every
+successful pair of collections of the same set, compare the finite canonical binary64
+pre-bound estimates for exact numerical equality (zero is `+0`), without a tolerance.
+Register bytes, temporary state, and traces are not equality oracles. Include canonical
+hash-collision fixtures where available; distinct SQL values need not have distinct hashes.
+The singleton/pair pre-bound estimates MUST agree, but their bounded candidates need not:
+if their shared pre-bound estimate exceeds exact `N`, the singleton writer cap is `N`
+and the paired cap is `2N`. Exercise the construction bounds with a synthetic valid
+pre-bound `N+1` and an INT64 set with `N > 64`: the singleton candidate is `N`
+and the paired candidate is `N+1`. Do not assert post-bound equality. Use feasible fixtures and
+adequate resources to require successful output under presentation-only changes; an
+invented singleton/order/duplicate/chunk error is not permitted. For a separately
+injected genuine resource, cancellation, or lower-layer failure, preserve its existing
+cause and compare estimates only when both exist; failure is not an HLL quality PASS.
+
+**Post-bound distributional quality.** For each `N` in the fixed grid
+`{4m, 16m, 64m} = {65,536, 262,144, 1,048,576}`, use 128 independently indexed
+distinct-set trials `i = 0..127`. For each `(N,i)`, sample one `N`-element subset `S`
+of the complete signed INT64 domain; reuse that `S` across all five policies below.
+This produces 128 trials for each of 15 `(N,P)` cells. All policies are fixed
+deterministic mappings of `S`, not chosen after seeing an estimate:
+
+```text
+P1  ascending signed values, two adjacent copies per value; R = 2N
+P2  descending signed values, two adjacent copies per value; R = 2N
+P3  Fisher-Yates permutation of the 2N paired occurrences; R = 2N
+P4  ascending clustered values, min(S) 32 times and each other value twice; R = 2N+30
+P5  one ascending and one descending pass, then 30 extra min(S) copies
+    inserted after base positions floor(k*2N/31), k=1..30; R = 2N+30
+```
+
+Use a test-only SHAKE256 byte stream for replay: the `S` stream input is the exact
+byte concatenation `UTF8("DBlusBlus-HLL-quality-v1/S") || U64BE(N) || U64BE(i)`;
+the P3 stream input is `UTF8("DBlusBlus-HLL-quality-v1/P3") || U64BE(N)`
+followed by the ascending signed `S` values encoded individually as canonical
+64-bit two's-complement big-endian words. P3's stream depends on `S`, not on
+the trial index, so it defines one complete admissible policy. Consume
+successive stream bytes as big-endian uint64 words.
+Fisher-Yates swaps slot `k` with a bounded draw in `0..k` for
+`k = 2N-1 .. 1`. For `S`,
+use Floyd's without-replacement selection over unsigned words: for integer
+`j = 2^64-N .. 2^64-1`, draw `t` uniformly in `0..j`; insert `j` if `t` is
+already selected, otherwise insert `t`. Map each selected unsigned word `u`
+to signed INT64 value `u` when `u < 2^63`, else `u-2^64`. For a draw in
+`0..j`, reject 64-bit words below `2^64 mod (j+1)` and reduce an accepted
+word modulo `j+1`; when `j=2^64-1`, use the word directly. This makes the
+subset algorithm uniform under independent uniform source words; the fixed
+pseudorandom stream is reproducible sampling evidence, not a claim that one
+fixed run proves the full Architecture population. Record stream inputs and
+the selected-set digest for replay; no production RNG or hash seed is added.
+
+For every scheduled trial, independently confirm `|S|=N`, the generated
+presentation's exact canonical distinct set is `S`, its exact non-NULL row
+count is the stated `R`, and the ordinary HLL collection path actually ran.
+Exact mode or another NDV shortcut is not HLL evidence. Take `N_hat` from the
+real finite binary64 post-construction-bounds candidate, not the pre-bound
+estimate, registers, persisted/stale descriptor, or planner estimate. A
+structurally invalid candidate is a separate §34.14.6.5 failure, not a finite
+quality sample. Using the mathematical value of `N_hat`, compute
+`e = (N_hat-N)/N` and `X = e^2`; `N`, not `R`, is exact NDV.
+
+For these nonempty fixtures §34.14.6.5 gives `1 <= N_hat <= R` (the observed
+MCV lower bound may be stronger). Hence `a = 1/N-1 <= e <= b = R/N-1`,
+`0 <= X <= M^2` with `M = max(abs(a), abs(b))`. Thus P1–P3 have `b=1`,
+`M=1`, while P4–P5 have `b=1+30/N`, `M=1+30/N`; in every cell the error
+width is `w = b-a = (R-1)/N`. No normal/HLL error-shape assumption is used.
+Architecture's population limits are `Q = 4/m` for `E_S[X]` and
+`B = 1/sqrt(m)` for `abs(E_S[e])`. They are ceilings, not per-sketch bands;
+one `abs(e) > 2/sqrt(m)` does not by itself fail quality.
+
+Predeclare family-wise false-rejection budget `alpha = 0.01` across the 15
+cells and three one-sided checks per cell (`E[X]`, positive signed bias,
+negative signed bias). Set `delta = alpha/45`, `n = 128`, and
+`z = ln(1/delta)`. For each cell calculate sample means `xbar = sum(X_i)/n`
+and `ebar = sum(e_i)/n`, plus fixed Bernstein margins. Evaluate the real-number
+threshold comparisons with validated precision, refining interval bounds until
+each `<=` decision is resolved; host floating-rounding tolerance is not an oracle.
+
+```text
+tX = sqrt(2*M^2*Q*z/n) + 2*M^2*z/(3*n)
+te = sqrt(2*Q*z/n)     + 2*w*z/(3*n)
+PASS cell iff xbar <= Q+tX AND -B-te <= ebar <= B+te
+PASS campaign iff every one of the 15 cells passes and every scheduled trial completes
+```
+
+Under the conforming null, `Var(e) <= E[e^2] <= Q` and
+`Var(X) <= M^2 E[X] <= M^2 Q`. The bounded-variable one-sided Bernstein
+inequality with range `M^2` for `X` and `w` for `e` gives false-rejection
+probability at most `delta` for each check under independent uniform `S`
+draws; a union bound gives at most `alpha` for all 45 checks, even though
+the same `S` is reused across policies. This is an acceptance margin above
+the population ceiling, not a new Architecture tolerance. The confidence
+calibration refers to the uniform-set sampling design; SHAKE256 fixes one
+replayable pseudorandom realization and does not turn finite evidence into
+an exhaustive proof of every `S` or admissible `P`. The fixed five policies
+are evidence for §34.9's universal-policy rule, not its replacement. For the
+fixed v1 grid all `Q+tX < 0.05` and all `B+te < 0.102`; zero, constant
+`+25%`/`-25%` bias, and alternating `+25%`/`-25%` error therefore cannot
+pass the respective moment checks.
+
+Do not drop, resample, or count as zero-error any missing trial, invalid
+candidate, path-not-exercised trial, or genuine resource failure. Classify
+such a campaign as non-PASS with its structural/setup/resource cause; do not
+reinterpret a real `OutOfMemory` or cancellation as HLL error. Record on
+non-PASS: v1 `p/m`, `N`, `P`, `i`, exact `S` and P3 stream inputs and set
+digest, exact `N/R`, HLL-path evidence, pre-bound estimate when available,
+`N_hat`, `e`, `X`, cell sums/means, `a/b/M/w`, `Q/B/tX/te`, the failed check,
+and any owner failure. Self-test the oracle with synthetic pre-bound
+singleton/order/profile/chunk mismatches; zero, constant `+25%`/`-25%`
+bias, and alternating `+25%`/`-25%` high-RMS candidate streams; an isolated
+tail value; exact-mode substitution; missing
+trials; changed/unrecorded seeds or post-hoc thresholds; nonfinite candidate;
+and circular HLL-derived truth. The former must fail in their appropriate
+invariance, quality, structural, or setup category; an isolated tail is not
+an automatic failure and a row-count-cap-only singleton/pair candidate
+difference is permitted.
 
 #### Heavy hitters and MCVs
 

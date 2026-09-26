@@ -24764,6 +24764,54 @@ The process-local register domain, canonical output bounds, and persisted-NDV
 reader checks are §34.14.6.5. Because no v1 HLL sketch bytes are persisted,
 payload validation never invents a register grammar.
 
+For a fixed v1 HLL configuration, the pre-bound HLL estimate is the finite
+binary64 numeric result delivered by completed process-local HLL collection
+before the generic §34.14.6.5 observed-value, MCV, and exact non-NULL row-count
+construction bounds; zero has its canonical `+0` value. For any two
+successfully completed finite HLL collections with the same set of distinct
+canonical non-NULL SQL values, this pre-bound estimate MUST be identical,
+regardless of row order, duplicate multiplicity (including singleton values),
+or chunk boundaries. This distinct-set rule applies to every logical type
+using HLL; it requires neither identical internal sketch state nor identical
+post-bound NDV candidates, whose construction bounds may differ.
+
+HLL distributional quality is an end-to-end conformance property of canonical
+SQL-value hashing, HLL collection, and the bounded NDV candidate produced by
+the ordinary §34.14.6.5 ANALYZE construction path. Let `m = 2^p`; v1 fixes
+`p = 14` and `m = 16,384`. For each exact distinct cardinality `N` with
+`4m <= N <= 64m`, let `S` be uniformly distributed over all `N`-element
+subsets of the complete signed INT64 SQL-value domain. An admissible
+presentation policy `P` is any deterministic mapping that, for every such
+`S`, produces a finite input sequence `P(S)` consisting only of values in
+`S`, with every value occurring at least twice, in any order and with any
+further duplicate multiplicities. Its exact analyzed-row count `R` must be
+representable by the ordinary ANALYZE row-count owner. For every admissible
+`P`, feed `P(S)` through the ordinary HLL collection path and let `N_hat_P(S)`
+be its resulting §34.14.6.5 post-construction-bounds NDV candidate,
+interpreted as the mathematical value of its finite binary64 representation.
+Define `e_P(S) = (N_hat_P(S) - N) / N`. Holding `P` fixed and taking expectation
+`E_S` only over the uniform distinct-set ensemble, a conforming v1 collector
+MUST satisfy both `sqrt(E_S[e_P(S)^2]) <= 2 / sqrt(m)` and
+`abs(E_S[e_P(S)]) <= 1 / sqrt(m)` for every admissible `P` and each such `N`.
+These are population ceilings, not per-sketch limits or target errors; exact
+state or candidate equality across presentations is not required. Every
+presentation has `R >= 2N`, so the non-NULL row-count writer cap is above the
+true distinct count and does not clip ordinary positive NDV error at `N`.
+The ensemble imposes no production RNG or configurable hash seed and does not
+prescribe an estimator, bias correction, or a separate statistical guarantee
+for every SQL type.
+Empty/smaller inputs retain §34.8 and §34.14.6.5 behavior; relative error is
+not defined at `N = 0`. An individual structurally valid tail estimate is not
+corruption or a runtime SQL, transaction, or database-health failure merely
+because of its statistical error. Even a collector satisfying these quality
+bounds produces approximate planning metadata, never semantic proof.
+
+The HLL invariance and quality requirements concern successfully produced
+estimates/candidates under the ordinary resource and failure rules; they do
+not require ANALYZE success despite an independently permitted resource,
+cancellation, or lower-layer failure. Row order or duplicate multiplicity
+alone is not a new failure cause.
+
 ## 34.10 Most-common values
 
 For large inputs use a bounded heavy-hitter method such as:
