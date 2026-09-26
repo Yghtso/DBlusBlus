@@ -30731,13 +30731,7 @@ These are measurement dimensions, not requirements to prefer one optimization be
 
 ## 42.2 Transaction, durability, recovery, and vacuum measurements
 
-Group-commit measurement SHOULD include representative committing-thread counts:
-
-```text
-1, 2, 4, 8, 16, 32+
-```
-
-and record transactions/sec, commit latency percentiles, `fdatasync` calls/sec, commits per sync, and WAL bytes/sec.
+Group-commit measurement SHOULD include a single-committer baseline and representative multi-committer levels spanning batching and contention. It records transactions/sec, commit latency percentiles, `fdatasync` calls/sec, commits per sync, and WAL bytes/sec.
 
 Checkpoint/recovery measurement includes checkpoint duration, checkpoint WAL/FPI bytes, DPT size, retained WAL, analysis time, redo time, pages redone, and total recovery time under both mostly-clean and heavily-dirty buffer states.
 
@@ -30767,7 +30761,7 @@ rewrite-phase time
 AST/plan arena allocations and bytes
 ```
 
-Representative parser/AST memory cases include a 100-column SELECT, large VALUES insert, deep Boolean expression, and multi-join query.
+Representative parser/AST memory cases include a wide SELECT, large VALUES insert, deep Boolean expression, and multi-join query.
 
 Arena-based ownership should avoid obvious per-node allocation churn, but benchmark evidence—not guesswork—drives further optimization.
 
@@ -30788,17 +30782,7 @@ allocator calls/chunk allocations/temporary bytes per query
 
 Benchmarks include NULL-free and NULL-heavy data.
 
-The vector-size study includes at least:
-
-```text
-256
-512
-1024
-2048
-4096
-```
-
-rows/chunk on representative workloads.
+The vector-size study includes representative chunk sizes below, at, and above the v1 default on representative workloads.
 
 The architecture default remains 1024 until measurements justify changing it.
 
@@ -30889,13 +30873,7 @@ spill paths
 
 The architecture does not require predicted abstract cost to equal milliseconds.
 
-Join-planning benchmarks include relation counts such as:
-
-```text
-2, 4, 6, 8, 10, 12, 16, 20, 30
-```
-
-and record:
+Join-planning benchmarks use a configured `exhaustive_join_limit` that permits both search regimes, with relation counts near either side of that boundary and larger cases that expose bounded-heuristic scaling. They record:
 
 ```text
 planning wall time
