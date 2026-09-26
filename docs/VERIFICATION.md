@@ -25720,10 +25720,10 @@ injected genuine resource, cancellation, or lower-layer failure, preserve its ex
 cause and compare estimates only when both exist; failure is not an HLL quality PASS.
 
 **Post-bound distributional quality.** For each `N` in the fixed grid
-`{4m, 16m, 64m} = {65,536, 262,144, 1,048,576}`, use 128 independently indexed
-distinct-set trials `i = 0..127`. For each `(N,i)`, sample one `N`-element subset `S`
+`{4m, 16m, 64m} = {65,536, 262,144, 1,048,576}`, use 1,600 independently indexed
+distinct-set trials `i = 0..1599`. For each `(N,i)`, sample one `N`-element subset `S`
 of the complete signed INT64 domain; reuse that `S` across all five policies below.
-This produces 128 trials for each of 15 `(N,P)` cells. All policies are fixed
+This produces 1,600 trials for each of 15 `(N,P)` cells. All policies are fixed
 deterministic mappings of `S`, not chosen after seeing an estimate:
 
 ```text
@@ -25770,39 +25770,84 @@ MCV lower bound may be stronger). Hence `a = 1/N-1 <= e <= b = R/N-1`,
 `0 <= X <= M^2` with `M = max(abs(a), abs(b))`. Thus P1–P3 have `b=1`,
 `M=1`, while P4–P5 have `b=1+30/N`, `M=1+30/N`; in every cell the error
 width is `w = b-a = (R-1)/N`. No normal/HLL error-shape assumption is used.
-Architecture's population limits are `Q = 4/m` for `E_S[X]` and
-`B = 1/sqrt(m)` for `abs(E_S[e])`. They are ceilings, not per-sketch bands;
+Architecture's population limits are `Q = 4/m = 0.000244140625` for `E_S[X]`
+and `L = 1/sqrt(m) = 0.0078125` for `abs(E_S[e])`. They are ceilings, not per-sketch bands;
 one `abs(e) > 2/sqrt(m)` does not by itself fail quality.
 
-Predeclare family-wise false-rejection budget `alpha = 0.01` across the 15
-cells and three one-sided checks per cell (`E[X]`, positive signed bias,
-negative signed bias). Set `delta = alpha/45`, `n = 128`, and
-`z = ln(1/delta)`. For each cell calculate sample means `xbar = sum(X_i)/n`
-and `ebar = sum(e_i)/n`, plus fixed Bernstein margins. Evaluate the real-number
-threshold comparisons with validated precision, refining interval bounds until
-each `<=` decision is resolved; host floating-rounding tolerance is not an oracle.
+Use a predeclared indifference-zone conformance test. The Architecture GOOD
+region is `E_S[X] <= Q` and `abs(E_S[e]) <= L`; the gross alternatives are
+`E_S[X] >= G2 = 0.04` (RMS at least `0.20`), `E_S[e] >= G1 = 0.10`, and
+`E_S[e] <= -G1`. `G1/G2` are Verification power targets, **not** replacement
+Architecture limits. Predeclare family-wise false-rejection budget
+`alpha = 0.01` across the 15 cells and three one-sided checks per cell
+(`X`, positive bias, negative bias): `delta = alpha/45 = 1/4500` per check.
+Predeclare false acceptance `beta = 0.01` per cell for each gross alternative,
+under independent uniform-`S` sampling. Set `n = 1600` for every cell,
+`z = ln(4500)`, `B_* = (1+30/65536)^2`, `W_* = 2+29/65536`, and the fixed
+thresholds below. `B_*` and `W_*` dominate every selected policy's `M^2`
+and `w`, respectively.
+
+| Policies | Exact error support `[a_P,b_P]` | `X` support | Trials | M2 threshold | Signed-bias thresholds |
+|---|---|---|---:|---:|---:|
+| P1–P3 | `[1/N-1, 1]` | `[0,1]` | 1600 | `T2=0.0033` | `-T1`, `+T1` |
+| P4–P5 | `[1/N-1, 1+30/N]` | `[0,(1+30/N)^2]` | 1600 | `T2=0.0033` | `-T1`, `+T1` |
+
+For both rows, `T1 = L + sqrt(2*Q*z/n) + 2*W_*z/(3*n)`
+(`approximately 0.01642612485866581`). The shared calibration is
+`delta=1/4500`, `beta=0.01`; bounded-mean Chernoff/KL bounds calibrate M2
+and the gross-bias tails, while one-sided Bernstein with the Architecture
+second-moment bound calibrates the GOOD-side signed-bias checks. Define
+`d(u||v) = u*ln(u/v) + (1-u)*ln((1-u)/(1-v))` for `0<u,v<1`.
+For each cell calculate `xbar = sum(X_i)/n` and `ebar = sum(e_i)/n`.
+Evaluate these real-number comparisons with validated precision, refining
+interval bounds until each `<=` decision is resolved; host floating-rounding
+tolerance is not an oracle.
 
 ```text
-tX = sqrt(2*M^2*Q*z/n) + 2*M^2*z/(3*n)
-te = sqrt(2*Q*z/n)     + 2*w*z/(3*n)
-PASS cell iff xbar <= Q+tX AND -B-te <= ebar <= B+te
-PASS campaign iff every one of the 15 cells passes and every scheduled trial completes
+PASS cell iff xbar <= T2 AND -T1 <= ebar <= T1
+PASS campaign iff all 15 cells pass, all scheduled trials and pre-bound
+    invariance checks complete, and all structural/path/nonvacuity checks pass
 ```
 
-Under the conforming null, `Var(e) <= E[e^2] <= Q` and
-`Var(X) <= M^2 E[X] <= M^2 Q`. The bounded-variable one-sided Bernstein
-inequality with range `M^2` for `X` and `w` for `e` gives false-rejection
-probability at most `delta` for each check under independent uniform `S`
-draws; a union bound gives at most `alpha` for all 45 checks, even though
-the same `S` is reused across policies. This is an acceptance margin above
-the population ceiling, not a new Architecture tolerance. The confidence
-calibration refers to the uniform-set sampling design; SHAKE256 fixes one
-replayable pseudorandom realization and does not turn finite evidence into
-an exhaustive proof of every `S` or admissible `P`. The fixed five policies
-are evidence for §34.9's universal-policy rule, not its replacement. For the
-fixed v1 grid all `Q+tX < 0.05` and all `B+te < 0.102`; zero, constant
-`+25%`/`-25%` bias, and alternating `+25%`/`-25%` error therefore cannot
-pass the respective moment checks.
+For `0 <= X <= M^2 <= B_*`, bounded-mean Chernoff domination by a Bernoulli
+variable gives the GOOD-side upper-tail bound
+`Pr(xbar > T2) <= exp(-n*d(T2/B_* || Q/B_*)) < 0.000143 < delta` when
+`E_S[X] <= Q`: the exponent is greater than `8.8587`, exceeding
+`ln(4500)`. Under `E_S[X] >= G2`, its lower-tail counterpart gives
+`Pr(xbar <= T2) <= exp(-n*d(T2/B_* || G2/B_*)) < 6e-21 < beta`:
+the exponent exceeds `46.61`. These bounds hold for each selected policy;
+using its smaller exact `M^2` can only tighten them.
+
+For the signed-bias GOOD side, the *complete* Architecture contract supplies
+`Var(e) <= E_S[e^2] <= Q`; the range is at most `W_*`. One-sided Bernstein
+therefore gives `Pr(ebar > T1) <= exp(-z) = delta` whenever
+`E_S[e] <= L`, and `Pr(-ebar > T1) <= delta` whenever `E_S[e] >= -L`.
+The 45-check union bound gives family-wise false rejection at most `alpha`,
+without requiring independent results across policies. The bias checks do
+not assume the Architecture RMS bound on the GROSS-BAD side: for each policy
+set `w_P=b_P-a_P`. Bounded-mean lower-tail Chernoff applied to
+`(e-a_P)/w_P` gives, when `E_S[e] >= G1`,
+`Pr(ebar <= T1) <= exp(-n*d((T1-a_P)/w_P || (G1-a_P)/w_P))`.
+Applied to `(b_P-e)/w_P`, it gives, when `E_S[e] <= -G1`,
+`Pr(ebar >= -T1) <= exp(-n*d((T1+b_P)/w_P || (G1+b_P)/w_P))`.
+Across all six `(N,policy-support)` classes, the positive and negative
+exponents exceed `5.6164` and `5.6168`, respectively, so their false
+acceptance probabilities are below `0.00364 < beta` per cell. Independently,
+`abs(E_S[e]) >= 0.10` implies `E_S[X] >= 0.01`; the M2 check then has a
+lower-tail exponent exceeding `4.8979`, giving false acceptance below
+`0.00747 < beta`. This is additional composite power, not a substitute for
+the signed-bias checks.
+
+Under the ideal independent uniform-set model, the procedure thus protects
+Architecture-conforming populations at family-wise `alpha` and has at least
+`1-beta` per-cell power against each stated gross alternative. A fixed
+SHAKE256 run is replayable evidence, not literally independent random draws.
+PASS does **not** prove the exact population inequalities, all admissible
+presentation policies, individual-estimate correctness, semantic proof, or a
+production performance target. The fixed policies provide finite evidence
+for §34.9's universal rule, not its replacement. Populations between an
+Architecture limit and the corresponding gross alternative may pass or fail;
+the Architecture alone defines conformance in that indifference zone.
 
 Do not drop, resample, or count as zero-error any missing trial, invalid
 candidate, path-not-exercised trial, or genuine resource failure. Classify
@@ -25810,16 +25855,23 @@ such a campaign as non-PASS with its structural/setup/resource cause; do not
 reinterpret a real `OutOfMemory` or cancellation as HLL error. Record on
 non-PASS: v1 `p/m`, `N`, `P`, `i`, exact `S` and P3 stream inputs and set
 digest, exact `N/R`, HLL-path evidence, pre-bound estimate when available,
-`N_hat`, `e`, `X`, cell sums/means, `a/b/M/w`, `Q/B/tX/te`, the failed check,
-and any owner failure. Self-test the oracle with synthetic pre-bound
-singleton/order/profile/chunk mismatches; zero, constant `+25%`/`-25%`
-bias, and alternating `+25%`/`-25%` high-RMS candidate streams; an isolated
-tail value; exact-mode substitution; missing
+`N_hat`, `e`, `X`, cell sums/means, `a/b/M/w`, `Q/L/G1/G2`, `n/delta/beta`,
+`T2/T1`, the applicable concentration bound and violated decision, and any
+owner failure. Self-test the decision logic, separately from HLL collection,
+with synthetic trial vectors: constant `e=+0.10`, constant `e=-0.10`,
+alternating `e=+0.20,-0.20`, constant `e=+0.25`, and alternating
+`e=+0.25,-0.25` must all be non-PASS; all-zero errors must be on the
+quality-statistic acceptance side, subject to the normal nonvacuity gates.
+Feed exact-arithmetic sample statistics at `T2` and `+T1/-T1` and
+immediately on each side: equality is accepted when the other checks pass,
+and crossing a threshold is non-PASS. Also exercise synthetic pre-bound
+singleton/order/profile/chunk mismatches; an isolated tail value; exact-mode
+substitution; missing
 trials; changed/unrecorded seeds or post-hoc thresholds; nonfinite candidate;
-and circular HLL-derived truth. The former must fail in their appropriate
-invariance, quality, structural, or setup category; an isolated tail is not
-an automatic failure and a row-count-cap-only singleton/pair candidate
-difference is permitted.
+and circular HLL-derived truth. Invariance mismatches, gross synthetic
+errors, and invalid setup must be non-PASS in their respective category;
+an isolated tail is not an automatic failure, and a row-count-cap-only
+singleton/pair candidate difference is permitted.
 
 #### Heavy hitters and MCVs
 
