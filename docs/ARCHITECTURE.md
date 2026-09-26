@@ -30758,12 +30758,13 @@ large expression-tree binding
 multi-join binding
 logical-plan construction time
 rewrite-phase time
-AST/plan arena allocations and bytes
+front-end allocation calls and bytes
+optimizer planning-arena allocations and bytes
 ```
 
 Representative parser/AST memory cases include a wide SELECT, large VALUES insert, deep Boolean expression, and multi-join query.
 
-Arena-based ownership should avoid obvious per-node allocation churn, but benchmark evidence—not guesswork—drives further optimization.
+Front-end allocation should limit avoidable per-node general-purpose heap-allocation churn without prescribing the AST representation; benchmark evidence—not guesswork—drives further optimization.
 
 ## 42.4 Execution measurements and hot-path constraints
 
@@ -30810,8 +30811,8 @@ and used to identify scheduler, synchronization, cache, and memory-bandwidth lim
 
 Strong implementation constraints are:
 
-1. no one heap allocation per execution row or cell,
-2. no virtual dispatch/type switch per hot-loop row when batch specialization is available,
+1. steady-state hot execution MUST NOT inherently require one general-purpose heap allocation per processed row or cell,
+2. when operation, type, or representation is resolved at batch/kernel selection, the hot row loop MUST NOT re-dispatch that same choice through a virtual call or type switch per row,
 3. no generic `Value` construction per hot cell,
 4. do not pin heap pages merely to retain VARCHAR execution references,
 5. blocking operators own retained varlen data,
