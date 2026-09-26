@@ -30801,13 +30801,7 @@ WAL bytes
 spill bytes
 ```
 
-Parallel scaling is measured at representative worker counts such as:
-
-```text
-1, 2, 4, 8, ...
-```
-
-and used to identify scheduler, synchronization, cache, and memory-bandwidth limits.
+For a physical path that supports multi-worker execution, parallel scaling is measured against a single-worker baseline at representative supported multi-worker levels to identify scheduler, synchronization, cache, and memory-bandwidth limits.
 
 Strong implementation constraints are:
 
@@ -30823,7 +30817,7 @@ Strong implementation constraints are:
 10. hash/directory storage is compact/contiguous where practical,
 11. correctness is preserved under tiny budgets/forced spill,
 12. aggressive optimization remains measurable with applicable Chapter-40 instrumentation/profiling,
-13. profiles—not intuition alone—justify SIMD/radix/JIT/prefetch complexity.
+13. within the supported Architecture capability scope, profiles—not intuition alone—justify optional explicit SIMD, permitted radix strategies, or explicit prefetch complexity; deferred capabilities such as JIT remain outside v1 absent an explicit Architecture revision.
 
 ## 42.5 Statistics and optimizer calibration measurements
 
