@@ -30655,7 +30655,7 @@ without asserting arbitrary exact floating cost numbers unless the cost formula 
 
 Performance claims require measurement.
 
-The benchmark program must eventually cover at least:
+V1 performance evaluation MUST cover at least:
 
 - sequential page-read throughput,
 - sequential page-write throughput,
@@ -30837,7 +30837,7 @@ Strong implementation constraints are:
 9. scans decode only required columns,
 10. hash/directory storage is compact/contiguous where practical,
 11. correctness is preserved under tiny budgets/forced spill,
-12. instrumentation exists before aggressive optimization,
+12. aggressive optimization remains measurable with applicable Chapter-40 instrumentation/profiling,
 13. profiles—not intuition alone—justify SIMD/radix/JIT/prefetch complexity.
 
 ## 42.5 Statistics and optimizer calibration measurements
