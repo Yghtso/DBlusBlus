@@ -85,6 +85,90 @@ cache hit rate
 
 Microbenchmarks and end-to-end benchmarks should both exist.
 
+### Shared Chapter-42 benchmark evidence policy
+
+This policy applies to the subsystem benchmark procedures below. Architecture owns the
+required performance dimensions and capability scope; each benchmark procedure owns its
+fixture, measured interval, applicable metrics, and sampling method. A recorded single
+diagnostic run is useful, but by itself cannot support a performance comparison, regression
+claim, optimization justification, or proposal to change an Architecture default.
+
+Count a measured sample as performance evidence only when its setup reached the declared
+workload and target regime, the operation completed as that workload requires, and its
+result satisfies the applicable independent correctness owner. Reuse the owner procedure;
+do not substitute timing, throughput, a selected plan, or a benchmark summary for SQL,
+storage, transaction, recovery, or resource correctness. An intentional cancellation,
+startup-failure, or partial-progress benchmark may measure that declared behavior, but
+cannot report its incomplete work as a successful full-operation sample. Preserve any
+actual owner failure and its cause. Incorrect output, failed setup/execution, or an
+unintended partial run is invalid performance evidence, not zero throughput, infinite
+latency, an ordinary regression, or a new database error.
+
+Each benchmark family defines its workload and measured work/elapsed interval, including
+whether generation, setup, reopen, recovery, and teardown are inside that interval. Use a
+suitable monotonic elapsed-time source for duration and state units and denominators for
+throughput. Define warmup or other preconditioning and keep its observations separate
+from steady-state measured samples unless startup is the declared subject. A deliberate
+less-warm, miss, or recovery case instead defines and evidences its intended initial state;
+it need not be warmed into a different regime. Concurrent cases define start coordination
+and observe overlapping activity when concurrency is the subject.
+
+Before interpreting results, establish the intended mechanism from its owner or a direct
+controlled state: input size or thread count alone does not prove a BufferPool miss,
+batching/contention, B+ split, spill, heuristic search, or multi-worker execution. Where a
+benchmark consumes Chapter-40 or other owner metrics (for example BufferPool hits/misses,
+page I/O, WAL or spill bytes, peak query memory, worker counts, or optimizer search
+counters), retain their canonical unit, event boundary, scope, and availability. Compare
+them with owner observations; a benchmark wrapper's printed value is not an independent
+metric oracle. The harness may directly measure its own elapsed wall time. An owner-metric
+conflict makes the claimed evidence invalid; unavailable is never fabricated as zero.
+
+For a performance claim, use repeated measured samples under a predeclared family-specific
+sampling, summary, and variability/noise method; retain per-sample results or raw aggregates
+sufficient to audit the summary. Predeclare exclusions where feasible and report every
+excluded, failed, or noisy sample with its reason. Do not silently discard slow samples,
+select favorable runs, or revise exclusion rules after seeing results. If variability or
+incomparability prevents the requested conclusion, report **INCONCLUSIVE / INSUFFICIENT
+EVIDENCE**, not a speedup, regression, or PASS. No universal repetition count, warmup count,
+percentile algorithm, confidence method, speed threshold, or regression percentage is set
+here. A reported p50/p95/p99 needs an appropriate sample population under its declared
+method; an unsupported percentile is unavailable, not invented.
+
+Before/after and alternative comparisons identify the intended changed variables and keep
+workload, data, correctness result, material configuration, environment, and measurement
+method comparable otherwise. Coupled changes are permitted when declared, but conclusions
+must be limited to what that comparison can attribute. A valid run on a different machine
+may stand alone; it does not silently become a paired before/after result. Benchmark
+evidence is specific to its measured workload, configuration, and environment, not a
+machine-independent Architecture constant or a presumption that newer, larger, or more
+complex is faster.
+
+The run record identifies the benchmark/workload and target regime; generator and seed
+where synthetic, data scale and relevant key/query shape; implementation revision and
+binary/build mode; materially relevant configuration (for example BufferPool/query-memory
+budget, workers, vector size, cost/search settings, or diagnostic mode); and relevant
+machine/CPU, OS/platform, compiler/build, and storage/filesystem context. It also retains
+the initial-state/activation evidence, warmup policy, measured window and units, applicable
+owner metrics, measured and excluded/failed samples, summary/variability method,
+correctness disposition, and final evidence disposition. This is a conceptual report, not
+a database persisted format, catalog object, production telemetry protocol, or prescribed
+file format. Run-specific values belong in devlogs, CI/benchmark artifacts, or task reports
+under Document Maintenance, not in Architecture or a rolling Verification results table.
+
+For each metric and capability distinguish **APPLICABLE AND MEASURED**, **NOT APPLICABLE**
+(only under the owning optional/conditional scope), and **APPLICABLE BUT UNAVAILABLE**.
+Missing required procedure, instrumentation, sample, correctness oracle, or regime proof is
+**NOT VERIFIED / TEST INFRASTRUCTURE INCOMPLETE**, never PASS, zero, or convenient N/A.
+Genuinely unavailable optional latch-wait data or an absent optional SIMD/radix/prefetch
+path does not require a fabricated measurement; a single-worker-only physical path has no
+multi-worker scaling sample. An Architecture-required capability absent from the current
+implementation remains an implementation-state limitation, not a false benchmark PASS.
+Successful controlled fallback under a small resource budget may be valid evidence;
+actual OutOfMemory, WAL, transaction, corruption, or optimizer-resource failure retains its
+owner classification and is not a successful sample. Evidence may motivate an explicit
+Architecture revision (including the 1024 vector default or a deferred-feature proposal),
+but neither a benchmark nor a profile authorizes that revision or promotes JIT into v1.
+
 ---
 
 ## Foundational Architecture Verification — Chapters 1–5
@@ -2342,6 +2426,47 @@ tiny buffer pool
 large buffer pool
 ```
 
+Apply the shared Chapter-42 benchmark evidence policy. For each fixture, predeclare a
+replayable page/file population (or generator and seed), page count and access order,
+measured operation count and bytes, target regime, and actual configured BufferPool frame
+capacity. Record the working-set extent in pages and its relation to that capacity;
+distinguish BufferPool residency from OS/file-cache warmth and CPU-cache behavior. Use
+owner observations for BufferPool hits/misses and completed physical page reads/writes
+(§40.1), separately from harness-counted logical work. A successful API call or wrapper
+summary alone does not prove a physical transfer or the intended hit/miss path.
+
+- Sequential page reads use a fixed valid page extent in sequential order, a known content
+  oracle, an exact logical page/byte denominator, and a declared BufferPool/file-cache
+  precondition. Report completed physical reads separately from logical fetches.
+- Sequential page writes use a fixed extent and deterministic valid page contents, an
+  exact page/byte denominator, and completed-write owner observations. Validate resulting
+  contents through the storage owner outside the timed interval, or declare and apply a
+  consistent validation window. This fixture does not redefine WAL, synchronization, or
+  durability semantics.
+- A resident-hit fixture uses a working set that fits its BufferPool, preconditions the
+  target pages into resident state, and confirms measured hit-path fetches with canonical
+  BufferPool hit observations (and absence of a corresponding physical read where that
+  inference is valid). Prior access alone is not residency proof. A miss-plus-read fixture
+  instead establishes target nonresidency at lookup, for example with fresh BufferPool
+  state or controlled page selection, and confirms both a completed miss claim and a
+  completed physical read. Do not rely on probabilistic eviction or a cold-sounding label.
+- The tiny-BufferPool fixture uses an owner-valid capacity below its accessed working set
+  and confirms meaningful miss/replacement pressure with owner observations. The large
+  fixture provides capacity for its intended resident working set and confirms residency
+  and hits. For deliberately less-warm file-cache cases, record the deconditioning method
+  and observed initial state; where the method is unavailable, report that limitation
+  under the shared applicability policy rather than claiming a perfectly cold OS cache.
+- Heap insertion replays a known tuple stream with declared row count, fixed/variable
+  width shape, payload generator/seed, and BufferPool configuration; count successful
+  inserted rows in the declared interval. Heap sequential scan starts from a known
+  page/row population, declares width and residency regime, and checks returned rows or
+  cardinality against an independent expected result. Reuse heap/tuple correctness owners;
+  failed or skipped rows do not contribute valid throughput.
+- Tuple encode/decode replays nontrivial deterministic fixed-width, nullable, and
+  variable-width values under the physical tuple/type owners. Declare tuple count,
+  encoded byte count, measured interval, and throughput unit (tuples/sec, bytes/sec, or
+  both), retaining row shape so unlike widths are not silently compared as equal work.
+
 Do not optimize based only on intuition.
 
 ---
@@ -3162,11 +3287,60 @@ long VARCHAR
 composite keys
 ```
 
+Apply the shared Chapter-42 evidence policy and reuse the independent logical ordered
+model and §8.28/L3 structural verifier for correctness. For each key class, predeclare
+the key cardinality, generator/seed, encoded-width range, insertion and lookup order,
+duplicate distribution, and valid RID construction. A replayable base fixture uses
+nonnegative INT64 ranks `0..N-1`; short binary-collated VARCHAR keys encode each rank
+as 16 fixed-width ASCII hexadecimal bytes; long VARCHAR keys use the same prefix plus
+240 deterministic ASCII padding bytes; a composite fixture pairs the INT64 rank with
+the short VARCHAR. Choose and record `N` per intended regime, respecting the owner's
+encoded-key limit. These concrete lengths are Verification fixtures, not Architecture
+constants. Generate physical `(user key, RID)` entries under the canonical comparator.
+
+- Random point lookups replay a recorded seeded sequence, declaring existing-key and
+  missing-key counts separately. Sorted insertion uses canonical increasing key order;
+  random insertion uses a recorded fixed-seed permutation of the comparable key set.
+  Record successful insert counts. Exact deletion starts from a reproducible tree and
+  deletes a declared existing-key/RID set in recorded order, with expected post-delete
+  contents checked against the logical model.
+- Short and long range scans use predeclared bounds chosen from the sorted reference
+  set, with known expected cardinalities and the same key shape. The long range must
+  cover materially more rows than the short range; neither may be classified by its
+  name alone. A separate duplicate-heavy fixture uses a declared set of logical keys
+  with 32 distinct RIDs each; verify the expected equality result count and physical
+  `(user key, RID)` uniqueness. Record the key/RID distribution rather than assuming
+  duplicates from the requested operation.
+- For split frequency, use a dedicated insertion fixture that actually publishes at
+  least one split according to the B+ owner event/counter. Report split count against
+  successful insertion count (for example splits per insert), with both counts scoped
+  to the same interval. Zero observed splits leaves this split-frequency regime
+  unverified; it is not a characterization of splitting behavior.
+- At safe quiescence, obtain the actual reachable tree pages, page kinds, and height
+  from canonical tree state, with L3 validation where applicable; never infer them from
+  key count or theoretical fanout alone. Compute leaf and internal average byte
+  occupancy separately from valid slot-directory plus packed-entry bytes divided by
+  the owner-defined usable node bytes (§8.16), over the corresponding validated reachable
+  pages. Structural inspection and L3 time stay outside operation-throughput windows
+  unless their cost is explicitly the benchmark subject. A wrapper's reported height,
+  split count, or occupancy is not an independent oracle for the underlying owner state.
+- Report BufferPool hit rate from same-interval owner hit/(hit + miss) fetch claims,
+  identifying the benchmark's page-access scope; keep logical operations distinct from
+  completed physical reads/writes. If canonical page-latch wait instrumentation is
+  supported, report its interval, unit, and aggregation. Genuine lack of optional
+  instrumentation is N/A; expected-but-missing evidence is TEST INFRASTRUCTURE
+  INCOMPLETE, never zero or a latency-derived estimate.
+
 Benchmark both:
 
 #### Hot tree
 
 Mostly resident in buffer pool.
+
+Choose a tree-page working set reached by the measured operations that fits the actual
+configured BufferPool capacity. Precondition and confirm ordinary residency, then use
+same-interval canonical hit/miss and physical-read observations to show that the intended
+hot path ran. Key count or a prior traversal alone does not establish residency.
 
 Focus:
 
@@ -3178,6 +3352,13 @@ Focus:
 #### Larger-than-buffer tree
 
 Working set exceeds buffer pool.
+
+Record the actual tree-page working set reached by the operation sequence and actual
+configured BufferPool frame capacity; require working-set pages to exceed capacity.
+Confirm measured misses, replacements, and completed physical reads from their owners.
+Keep key shape and operation mix comparable with the hot-tree case where possible,
+recording deliberate setup differences. OS/file-cache warmth is a separate declared
+condition; no direct-I/O device or perfectly cold cache is required.
 
 Focus:
 
@@ -7276,6 +7457,43 @@ WAL bytes/sec
 
 Compare against a diagnostic mode that forces one fsync per commit to quantify group-commit benefit.
 
+Apply the shared Chapter-42 benchmark evidence policy. Replay a fixed-seed, disjoint-key
+persistent-write transaction stream with declared operation/row shape, transactions per
+participant, expected commit count, worker count, start coordination, and measured window.
+Exclude read-only commits, which elide the durable terminal-WAL path (§15.5). The
+one-committer baseline admits exactly one committing participant and verifies ordinary
+synchronous C3 durability and C6 success acknowledgement. For multi-committer fixtures,
+release participants through a controlled barrier and observe overlapping commit requests;
+configured thread count or elapsed time alone does not prove concurrent demand.
+
+Retain the thread-count grid above as Verification fixture choices, not Architecture
+constants. At least one multi-committer sample must show an actual shared durability
+advancement covering multiple distinct commit waiters; the contention regime must show
+concurrent queue/overlap or a CommitCoordinator contention observation. If every commit
+has its own synchronization, batching was not activated; if attempts serialize, the
+contention regime was not proved. Record owner group-size/coverage and wait observations
+rather than inferring them from
+throughput. When available, record queue, WAL-write, and synchronization time separately
+as diagnostic attribution, not substitutes for commit latency.
+
+Count transactions/sec from successfully C6-acknowledged benchmark commits over the
+declared interval; preserve the distinct §40.3 semantic COMMITTED count at durable C3.
+Measure each commit latency from the declared commit request to its successful C6
+acknowledgement, and derive percentiles only from valid completed samples. Count actual
+`fdatasync` calls/sec from WAL durability owner observations, distinguishing calls from
+§40.3 WAL-flush attempts and from multi-segment synchronization. Derive commits per sync
+from distinct commit targets covered by successful durability advancements and the actual
+successful `fdatasync`-call denominator, including multi-segment calls. Source WAL bytes/sec
+from canonical valid-prefix append bytes, not payload size. Scope numerator and elapsed
+interval together. Abort, WAL/storage failure, C4–C6 failure, uncertain client
+outcome, or group-flush failure retains its owner classification and is not a successful
+latency/throughput sample.
+
+The forced-one-fsync comparison is a test-only diagnostic batching control, not a
+production durability mode or correctness oracle. It retains synchronous C3–C6 semantics;
+record the intentional mode change while holding workload, data, and material environment
+comparable. No fixed speedup is required.
+
 ---
 
 ### Checkpoint/Recovery Benchmarks
@@ -7298,6 +7516,39 @@ Test both:
 
 - mostly clean buffer pool,
 - heavily dirty buffer pool.
+
+Apply the shared Chapter-42 benchmark evidence policy. Build replayable page/database
+populations with declared BufferPool capacity, seed, durable WAL/control state, and an
+independently known page set before checkpoint. For the mostly-clean fixture dirty a
+predeclared small subset of the resident population; for the heavily-dirty fixture dirty
+a materially larger declared subset under otherwise comparable population and settings.
+Observe canonical dirty-frame/DPT state immediately before checkpoint and the captured
+DPT at §13.5's synchronized capture boundary. Workload labels or update counts alone do
+not prove either regime. Confirm CHECKPOINT_BEGIN/DATA/END and control publication actually
+complete; measure checkpoint duration from its start through §13.5 step 8, not an earlier
+API return.
+
+Source checkpoint WAL bytes from valid-prefix WAL append records attributable to the
+declared checkpoint interval; classify FPI count/bytes from actual canonical WAL record
+types in the declared interval rather than multiplying dirty pages by page size. Record
+captured DPT entry count from the checkpoint owner, not an arbitrary BufferPool dirty-frame
+snapshot. Report retained WAL bytes from the installed retention floor and valid durable
+end with segment/LSN accounting (§13.10), not file count alone; distinguish logical
+retained bytes from physically allocated segment bytes when both are reported.
+
+For recovery, construct a deterministic crash/reopen state with recorded selected control
+generation/checkpoint, exact valid persisted WAL prefix and acknowledged durability
+frontier, data and status-page images, transaction outcomes, and expected redo target/work.
+Reuse the recovery correctness
+oracles; a timing sample is valid only after the canonical §13.19 `RECOVERING -> READY`
+gate and expected committed/aborted contents pass. Time analysis and redo from their
+respective §13.12/§13.13 owner phase-entry and completion events; time total restart
+recovery from declared recovery processing entry through READY, excluding fixture
+construction. Count pages actually redone from recovery-owner application events, not
+DPT size or record count. Include a positive-control crash state with nonzero redo work
+and owner-observed pages redone; an already-clean restart is only a separate baseline.
+For both clean/dirty classes record actual DPT, WAL, and redo observations rather than
+assuming every dirty page must be redone.
 
 ---
 
@@ -7323,6 +7574,60 @@ Use workloads with:
 - aborted transactions,
 - duplicate secondary keys,
 - long-running snapshots.
+
+Apply the shared Chapter-42 benchmark evidence policy. Replay a declared row/version and
+index population with fixed generator/seed, known transaction outcomes and physical RIDs,
+registered SQL snapshots and read epochs, baseline heap free space/FSM state, B+ state,
+and freeze-eligible status references. Reuse the existing Vacuum and Reclamation Tests,
+exact B+ cleanup model, and §14 owner predicates for correctness; this benchmark adds
+measured work, activation, and metric provenance rather than a second garbage oracle.
+
+- In the update-heavy fixture, repeatedly update a known hot-row set and record created
+  old versions, separating globally garbage-eligible versions from those still visible
+  at vacuum start. The delete-heavy fixture uses known committed deletions and expected
+  stale secondary-index entries. The aborted fixture identifies aborted-created versions
+  separately from aborted deleter normalization, proving the actual abort outcome and
+  applicable cleanup eligibility. The duplicate-key fixture gives distinct RIDs to a
+  declared multiplicity of equal secondary user keys and checks exact `(key,RID)` removal
+  while live duplicates remain. The long-running-snapshot fixture holds a registered SQL
+  snapshot across a vacuum run, proves its horizon blocks the intended versions, then
+  releases it for a follow-up run. No sleep or statement label is an eligibility oracle.
+- Report dead-version scan rate with declared versions/pages examined and elapsed vacuum
+  interval from canonical vacuum scan events; do not substitute reclaimed count for scan
+  work. Report exact index-cleanup rate from owner-confirmed *new* physical
+  `(index,user_key,RID)` removals over that interval, checked against independent fixture
+  truth. Idempotent `EraseIfPresent` on an already-absent entry counts no new removal.
+  Include a positive control with expected exact cleanup > 0. Wrong broad deletion or
+  retained stale entries invalidates the sample.
+- Report heap bytes made reusable from canonical heap-page before/after free-space and
+  payload state, with a positive-control fixture that reclaims > 0 bytes. File length
+  need not shrink. Keep byte reclamation separate from `DEAD -> UNUSED` slot/RID reuse:
+  compaction can free payload space while grace or another reuse barrier still holds.
+- Attribute B+ redistribution, merge, root contraction, or applicable split to canonical
+  structural events during vacuum's exact cleanup, not to entry-removal count. Include a
+  positive-control fixture whose legal cleanup triggers a measured structural event;
+  ordinary valid cleanup with owner-observed zero events may still report zero. Do not
+  change the B+ algorithm to manufacture the control.
+- Measure RID grace from the §14.6 RID-retirement event following persisted `DEAD` to
+  satisfaction of the read-epoch predicate; record both boundary events. Hold a
+  registered pre-retirement read-epoch guard; prove it blocks reuse, then release it and
+  observe the canonical grace transition and any later `DEAD -> UNUSED` publication
+  separately. State the measured delay/work unit and identify any additional predecessor
+  or live `TUPLE_WRITE` holder/waiter barrier; an
+  epoch-only fixture does not measure lock-claim delay. Wall-clock waiting alone proves
+  neither registration nor blocked reuse.
+- Report FSM improvement from canonical before/after advisory FSM estimates alongside
+  actual heap free-space truth, without requiring exact equality. Count completed
+  §14.13 freezing rewrites from owner events against a declared examined/eligible work
+  denominator; include a fixture with eligible versions and observed freeze count > 0.
+  Do not equate freezing with status-cutoff advancement or sparse status-page reclamation.
+- Compare foreground latency with and without vacuum using the same declared operation,
+  data, correctness result, and material settings. In the with-vacuum case coordinate and
+  observe actual overlap of foreground work and vacuum activity in the measured window;
+  starting two threads is insufficient. Record impact without a fixed slowdown target.
+
+Preserve owner WAL, corruption, resource, and unresolved-blocker outcomes as failures or
+incomplete evidence under the shared policy, not zero rates or successful samples.
 
 ---
 
@@ -14752,12 +15057,80 @@ lexer MB/s
 parser statements/sec
 binder latency
 catalog name lookup latency
+catalog ID lookup latency
+historical schema lookup latency
+catalog cache hit rate
 large SELECT-list binding
+large VALUES binding
 large expression-tree binding
+multi-join binding
 logical plan construction time
+rewrite-phase time
+front-end allocation calls and bytes
+optimizer planning-arena allocations and bytes
 ```
 
-Optimizer planning benchmarks cover complex-query planning work separately.
+Apply the shared Chapter-42 benchmark evidence policy. Identify each workload by stable
+SQL/input text or generator and seed, catalog/schema snapshot, expected valid result,
+semantic scale, and measured work denominator. Reuse Chapter-18 token/raw-AST,
+Chapter-16 descriptor/visibility, Chapter-19 binding, Chapter-20 plan/rewrite, and
+Chapter-38 planning-resource correctness oracles; an invalid result or owner resource
+failure is not an ordinary successful throughput/latency sample. Time each stage from
+its own entry through its completed owner output, rather than labeling end-to-end SQL
+latency as several stage times or subtracting overlapping intervals.
+
+- Lexer MB/s uses a deterministic valid byte corpus with an exact input-byte denominator
+  and independently expected token sequence/outcome. Time source consumption through
+  tokenization only. Parser statements/sec uses a replayable statement corpus with
+  declared statement count, bytes, shape mix, and expected raw-AST results; time parser
+  consumption through complete raw-AST production. Declare whether tokenization is
+  inside that parser interval, and retain its separate observation when reporting both
+  stages. Do not mix malformed/error workloads into successful throughput.
+- Binder latency uses a replayable valid raw AST and a fixed visible catalog snapshot,
+  timed from binder entry to completed typed/bound representation. Record the expected
+  bound identities, types, and output shape; control or explicitly vary descriptor-cache
+  state. Count successful bindings as work. Standalone catalog lookup latency is not
+  inferred from binder duration merely because binding performs catalog access.
+- Build a deterministic catalog population with known names, stable TableIds/ColumnIds
+  and applicable IndexIds, current SchemaVer, at least one legally retained older
+  SchemaVer, and declared snapshot visibility. Measure current-object lookup by visible
+  name and lookup by stable semantic ID as separate owner paths and latency series,
+  checking each returned immutable descriptor's identity/version. An ID-path sample
+  cannot first resolve the name and merely read the returned ID. Measure
+  `ResolveSchema(TableId, old SchemaVer)` with `old != current`, a retained historical
+  descriptor, and exact returned-version identity; declare whether historical lookup
+  is cache-hit or underlying-resolution work. Invisible, dropped, or otherwise invalid
+  requests retain their canonical outcome and are not ordinary successful lookup samples.
+- Catalog cache hit rate uses owner-observed, same-interval hits divided by applicable
+  cache lookup attempts, with misses/bypasses separately identified. For a positive hit
+  case, legally precondition the snapshot-visible descriptor in cache and observe an
+  actual hit; repeated calls, pointer equality, or low latency are not proof. A controlled
+  miss/bypass case observes snapshot-aware catalog fallback returning the same semantic
+  descriptor. Reuse Chapter-16 cache/MVCC oracles: uncommitted or snapshot-invisible
+  descriptors invalidate the sample, and missing cache-event evidence is not zero hits.
+- Bind a valid wide SELECT fixture (the 100-column case below is one Verification-owned
+  choice), a declared large VALUES row-by-column/type/NULL matrix, a deep expression
+  with known node count/depth/type/cast shape, and a multi-join query with declared
+  relation occurrences, distinct BindingIds, aliases, predicates, and expected bound
+  relation graph. Record exact fixture scales and successful binder intervals for each;
+  VALUES allocation tracking alone does not measure binding, and multi-join binding is
+  distinct from optimizer join-order search.
+- Logical-plan construction starts with a validated, fully bound fixture and ends with
+  its validated canonical pre-rewrite logical plan. Include representative join,
+  aggregate, and sort/limit or DML forms, retaining expected structure, slots, and
+  output schema. Rewrite timing starts from a validated pre-rewrite logical plan and
+  ends after the owned rewrite phase and required post-phase validation (§20.18).
+  Include a fixture with an applicable rule/phase whose owner activity and before/after
+  logical structure prove nontrivial rewrite work; an unmatched plan is only a baseline.
+  Reuse V20 semantics/demand oracles. Neither interval includes physical optimization
+  or execution, and rewrite timing does not include parsing or binding.
+
+Measure optimizer planning-arena reservation/allocation or growth events and charged
+bytes from the dedicated §38.21 arena owner on successful legal planning invocations;
+record peak live arena bytes separately under that owner's budget semantics. Do not infer
+arena bytes from plan-node count, process RSS, or execution QueryMemoryManager memory.
+Reuse Chapter-38 budget/fallback/error procedures rather than redefining them here.
+Full optimizer search/cost benchmark methodology remains in its own sections.
 
 ---
 
@@ -14776,6 +15149,25 @@ Record total/front-end-attributed bytes, peak live bytes, allocation count, reta
 and payload materialization. Compare representations only after proving the §18.14 lifetime
 contract and §18.17 resource behavior; the benchmark does not prefer an arena, per-object
 ownership, interning, source slices, or another allocation technique.
+
+For each case, record the exact source/generator and seed, valid expected raw-AST/bound
+structure, semantic node/list-element count, front-end-attributed allocation calls and
+allocated bytes, peak live bytes, and retained/materialized backing. The 100-column SELECT
+is a Verification fixture for Architecture's qualitative wide SELECT case, not a SQL or
+Architecture width constant. Attribute general-purpose heap allocation separately from
+any implementation-specific arena reservation/growth, source backing, unrelated runtime
+allocation, and the optimizer's mandatory planning arena. RSS alone is not an allocation
+oracle; use scoped allocation events or equivalent owner/test-harness attribution.
+
+For at least one scalable SELECT-list, VALUES, expression-tree, or join fixture, predeclare
+multiple materially increasing semantic node/element counts and measure allocation calls
+and bytes at each size under comparable stage and ownership boundaries. Compare the
+growth in general-purpose allocations with independently known semantic counts to detect
+a one-for-one per-node/list-element churn pattern versus coarser or amortized storage.
+Changing only SQL whitespace/byte length without changing semantic structure is not this
+test. Report the pattern as evidence, not a universal allocations-per-node threshold or
+an AST-arena requirement; concrete AST allocation/container/reference representation
+remains implementation-owned under §18.14.
 
 ---
 
@@ -25575,6 +25967,57 @@ temporary bytes/query
 
 Benchmark with NULL-free and NULL-heavy data.
 
+Apply the shared Chapter-42 benchmark evidence policy. Use fixed-seed or explicit
+tables/chunks with recorded schema, row count and width, selected columns, key/value and
+NULL distributions, predicate selectivity, order, join relationship, vector capacity,
+BufferPool and query-memory settings where material, and independent expected results.
+Declare input rows/bytes, output rows, setup and timed windows, and the selected physical
+operator. Count actual nonzero operator work with §40.6 owner events; a plan node that
+never runs, or an empty-input control alone, does not activate its named throughput path.
+Keep fixture preparation outside a kernel interval unless preparation is its subject.
+
+- Scan throughput uses a deterministic heap population and an observed `PhysicalSeqScan`.
+  Rows/sec divides owner-reported visited/processed scan rows by the measured interval,
+  not downstream filtered output. Bytes/sec uses encoded tuple-body bytes of those
+  visited rows, derived from validated slot lengths over the same work interval; report
+  selected columns and BufferPool state separately. Do not silently change the byte
+  definition across comparisons or treat this as the required-column-decode oracle.
+- Filter rows/sec uses a declared predicate, input count, selectivity, NULL behavior,
+  expected result count, and observed nonzero `PhysicalFilter` work; a folded-away
+  predicate is not filter evidence. Projection arithmetic rows/sec uses resolved physical
+  types, a deterministic expression and result checksum, and observed `PhysicalProject`
+  kernel work without binder/type-resolution time. VARCHAR comparison rows/sec declares
+  lengths, shared-prefix distribution, comparison operator, canonical binary/type
+  semantics, NULL pattern, and expected Boolean/NULL results; it observes comparison
+  kernel activity rather than inferring it from SQL syntax.
+- Hash build rows/sec starts with a declared build relation, key types/widths,
+  distinctness/duplicates, NULLs, and memory budget; §40.6 build activity and finalized
+  hash state prove actual build work. Probe rows/sec uses a valid prepared build state
+  outside the probe timing window and a fixed probe hit/miss/multiplicity sequence;
+  owner probe-row events and independent matches give its denominator. Hash-join output
+  rows/sec uses deterministic build/probe relations and expected joined-row count,
+  requiring observed `PhysicalHashJoin` build, probe, and output activity. NestedLoop
+  output does not activate this named hash-join metric.
+- Aggregate fixtures declare input rows, group keys/count, skew, functions, NULLs, and
+  independently expected groups/values. Owner aggregate input-row and completed-group
+  events supply separate input rows/sec and groups/sec, not estimated statistics.
+- In-memory sort uses deliberately disordered input within a declared valid memory
+  regime, observed `PhysicalSort` row work, correct ordered output, and canonical zero
+  spill bytes. External sort uses a deterministic input and valid lower memory budget
+  that produce owner-observed runs/merge work and positive spill bytes; report decimal
+  MB/sec from declared encoded input sort-row bytes over its measured interval. Size
+  alone does not prove spill, and a non-spilling run cannot stand in for external sort.
+- Report chunk allocations/query, general allocator calls/query, and temporary
+  bytes/query from scoped execution owner/test instrumentation, separating unrelated
+  process activity and identifying the query interval. These resource totals do not by
+  themselves prove no per-row allocation or any other §42.4 structural hot-path rule;
+  direct structural evidence belongs to its owning procedures.
+
+For every applicable family, predeclare a NULL-free input and a reproducible NULL-heavy
+pattern with a materially nonzero effective NULL count in the measured operator input.
+Observe validity/active-row participation rather than relying solely on a schema label
+or one isolated NULL. Keep other material factors comparable when studying NULL effects.
+
 ---
 
 ### Vector Size Benchmark
@@ -25591,9 +26034,21 @@ Benchmark at least:
 
 rows/chunk on representative workloads.
 
-The architecture default remains 1024 until measurements justify changing it.
+The v1 Architecture default is 1024. This Verification-owned candidate grid includes
+sizes below, at, and above that default; it is not an Architecture-required grid.
+Measurements may motivate, but do not themselves make, an explicit Architecture revision.
 
 Do not assume a larger vector is always faster; cache footprint and branch behavior matter.
+
+Apply the shared Chapter-42 comparison policy to a predeclared set of representative
+scan/filter, arithmetic projection, hash-probe, and aggregate workloads (or equivalent
+distinct kernel behaviors). Replay the same data, query/operator, expected result,
+material memory budget, and environment across capacities, changing the vector capacity
+as the intended variable. Record configured and effective `DataChunk` capacity (§23.1),
+actual chunk cardinalities and owner-observed operator activity; a configuration value
+that never reaches the executed path does not activate that candidate. Retain result
+correctness and comparable work denominators at each size. No candidate is presumed
+faster, and a faster candidate does not automatically change 1024.
 
 ---
 
@@ -25627,6 +26082,294 @@ buffer hits/misses
 WAL bytes
 spill bytes
 ```
+
+Apply the shared Chapter-42 benchmark evidence policy. Each named workload has stable
+SQL/operation text or a fixed-seed generator, table/schema and row/key/width/NULL
+distributions, named scale with recorded counts, BufferPool and query-memory settings
+where material, expected result/outcome, and observed physical plan and operator work.
+The workload name is not a path oracle: retain validated plan identity plus nonzero
+owner execution events for any mechanism it claims. Reuse the scan/expression, join,
+aggregate, sort/TopN, spill, DML, and transaction correctness suites; a selected plan
+without correct completed output or actual work is insufficient performance evidence.
+
+- Indexed point lookup uses a known key/row and observed point `IndexScan`; selective
+  index range uses declared bounds, qualifying count/selectivity, and an executed index
+  range path. Full table scan uses known rows/pages and an observed full `SeqScan`, not
+  an index-only substitute. Filter + projection declares input rows, selectivity,
+  projected expressions/columns, and expected output, with both physical stages active
+  unless the explicitly named comparison studies optimizer elision.
+- Small join records its two relation sizes, key shape, relationship/selectivity,
+  expected output, and the legal physical algorithm actually chosen; its name alone
+  mandates no hash algorithm. Large hash join records larger deterministic build/probe
+  relations, duplicate behavior, expected output, memory budget, and observed
+  `PhysicalHashJoin` build/probe/output work; record actual in-memory or spill state
+  without inferring spill from size. Group aggregate records input rows, group count,
+  skew, functions, NULLs, expected groups/results, and observed aggregate work.
+- ORDER BY uses input not already satisfying its declared order and verifies an
+  applicable order-enforcement path and semantic result. ORDER BY LIMIT records order,
+  LIMIT/OFFSET and expected permitted result sequence, plus the selected legal strategy;
+  it does not require TopN solely from the query name. Index-driven UPDATE declares
+  indexed target predicate/key, expected target RIDs and updated values, and proves
+  index access supplied the targets before counting successful transaction results.
+  Bulk INSERT replays a known row stream with row shape/count, index presence,
+  transaction batching policy, and expected committed rows under ordinary WAL/durability
+  semantics; failed or aborted rows are not successful insert throughput.
+- Concurrent read/write uses a deterministic reader/writer transaction mix with recorded
+  participant counts, isolation level, operation and key-overlap pattern, and expected
+  success/conflict/retry/abort classes. Controlled barriers or owner activity establish
+  actual read/write overlap within the measured window; merely starting two threads is
+  insufficient. Report successful reads and acknowledged writes/commits separately from
+  attempts, retries, and failures. This is transactional concurrency, not multi-worker
+  scaling of one physical operator.
+
+Declare each workload's start/end latency boundary and successful query, operation,
+row, or transaction throughput denominator and unit. For writing transactions use the
+canonical successful acknowledgement boundary, not earlier durable-WAL publication;
+keep end-to-end latency distinct from operator time. CPU time identifies its measured
+process/thread/worker scope and is not wall time. Peak accounted query bytes come from
+QueryMemoryManager (§24.4), not RSS. Same-interval BufferPool owner hits/misses, valid
+WAL-prefix appended bytes for applicable writes, and SpillManager/query-owner bytes for
+actual temporary spill supply the remaining resource metrics; no spill is zero only
+when owner observations prove none, and unavailable is not fabricated as zero. Do not
+infer any resource counter from low latency, file size, or benchmark-wrapper labels.
+These workloads do not establish parallel scaling or §42.4 hot-loop structural constraints.
+
+---
+
+### Parallel Execution Scaling Benchmark
+
+Apply the shared Chapter-42 benchmark evidence policy only to physical paths whose
+canonical Chapter-32 execution capability supports multiple workers. Inventory the
+validated physical-path/task capabilities at the tested revision: for each supported
+multi-worker family, provide a scaling fixture (or justify an equivalent fixture for the
+same parallel mechanism); classify a genuinely single-worker-only path **NOT APPLICABLE —
+NO MULTI-WORKER CAPABILITY**. A parallel-ready state split alone is not support. A path
+claimed to support multiple workers but not exercisable/observable is **NOT VERIFIED /
+TEST INFRASTRUCTURE INCOMPLETE**, or a recorded implementation-status mismatch, not N/A or
+PASS. Inspect SeqScan, hash build/probe, hash aggregate, sort, and any other supported
+family without assuming that all are implemented. Do not promote ordered B+ range
+partitioning, the single-worker DML write phase, or DDL/VACUUM/ANALYZE control mutation
+through this benchmark. Multi-query concurrency, including the read/write workload above,
+is not one query's multi-worker scaling.
+
+For each applicable family, predeclare a deterministic nonempty data/query fixture,
+generator/seed and scale, expected result, and a validated immutable physical plan that
+uses the target operator/task model. Record structural plan/path identity (operator and
+algorithm, properties/order, and a canonical fingerprint where available), not just
+textual EXPLAIN. Execute that *same* plan, data, transaction/snapshot, vector capacity,
+query-memory budget, BufferPool configuration, and intended in-memory/spill and I/O
+regime across a finite worker series. Use one actual query execution worker on the same
+parallel-capable path as the baseline, then the minimum useful supported multi-worker
+level and one or more higher supported levels where available, including a representative
+high level for a wider range. Predeclare the concrete supported counts; a genuinely
+limited range uses only its available points, whereas failure to exercise a predeclared
+representative supported level is missing evidence. A one-worker special-case algorithm
+or a worker-count-dependent plan change is not a pure scaling series. Keep setup outside
+the timed window and use the same successful work denominator at every level; avoid
+LIMIT/early-stop as the sole fixture.
+Choose enough required tasks/morsels for distributed useful work without imposing a
+universal row-count threshold. Record material background activity, affinity and NUMA
+environment; neither affinity nor NUMA-specific testing is mandatory.
+
+At each level record configured pool size, query worker limit, intended worker count,
+actual participating execution-worker identities/count, required and claimed/completed
+morsels/tasks, per-worker rows/bytes/chunks or equivalent useful work, and dependency/
+finalization state. Use Chapter-40 operator/pipeline profiles and direct Chapter-32 task
+observations, not the OS thread count, configured limit, plan label, or wrapper assertion
+as proof. The one-worker run must open the target path and process nonzero expected work.
+Each family's positive multi-worker control needs at least two workers with nonzero
+meaningful target-path work and complete required task coverage. Created but idle workers,
+or one worker doing essentially all useful work, do not establish an unqualified scaling
+curve; record imbalance and strengthen the fixture when necessary. Reuse Parallel
+Execution Tests and the relevant operator correctness owners at *every* level: compare
+unordered SeqScan results as bags, required ordered results through the finalized order
+owner, and parallel FLOAT64 aggregates under §29.3's admitted reduction-tree semantics.
+Wrong results, incomplete required work, failures, or cancellation invalidate ordinary
+scaling samples rather than supplying throughput points.
+
+Report elapsed execution time and successful work rate (same declared rows/bytes/query
+denominator), total query-scoped CPU time and per-worker CPU where supported, peak
+QueryMemoryManager-accounted query bytes, participating workers, task/morsel and operator
+work, and applicable BufferPool hits/misses/physical reads and spill-owner bytes for the
+same measured interval. CPU is measured, not elapsed time multiplied by worker count.
+Worker-local memory may grow with worker count; report the tradeoff rather than declaring
+failure. A changed spill or resident/I/O regime is useful evidence but not an unqualified
+worker-only comparison. Optional speedup is one-worker elapsed time divided by N-worker
+elapsed time (or a stated comparable throughput ratio); optional efficiency is speedup/N.
+Neither has a universal acceptance threshold.
+
+For a scaling plateau, attempt causal attribution from direct evidence: ready-task queue
+delay, idle workers with runnable work, dispatch/claim delay, and per-worker work skew for
+scheduler/imbalance; dependency, barrier, latch/mutex, Combine/Finalize wait and work for
+synchronization or serialized boundaries; and processed bytes, CPU utilization, working-
+set controls, and available bandwidth counters for memory-bandwidth pressure. Distinguish
+CPU-cache behavior from BufferPool residency and OS/file-cache warmth. Hardware cache or
+bandwidth counters may strengthen a diagnosis but are not required; controlled working-
+set comparisons may support a qualified **CACHE-SENSITIVE** observation. Rising BufferPool
+misses/physical reads instead evidence an I/O effect, not CPU-cache misses. Record a
+scheduler-, synchronization-, cache-, memory-bandwidth-, I/O-, or mixed *evidenced*
+limit only with supporting observations. A plateau or high CPU alone does not identify a
+cause; use **UNRESOLVED / INSUFFICIENT ATTRIBUTION EVIDENCE** when observations cannot
+separate causes. Missing applicable owner metrics follow the shared evidence policy;
+never invent zero or mandate PMU/perf/NUMA instrumentation.
+
+Representative fixtures, when each path is capability-enabled, are:
+
+- Parallel SeqScan over known pages/rows spanning multiple page-range morsels, with a
+  known unordered result bag, stable BufferPool/I/O regime, and per-worker rows/bytes and
+  morsel coverage; no cross-worker row-emission order is required.
+- Parallel HashJoin with fixed build/probe relations and output bag, distributed build
+  and probe work, finalized build state before probe, and recorded build barrier,
+  memory, and spill regime.
+- Parallel HashAggregate with controlled row/group distribution, worker-local input
+  and state work, Combine/Finalize work, final groups, and accounted memory; use the
+  aggregate owner's exact or admitted FLOAT64 result oracle as applicable.
+- Parallel Sort of deterministic unordered input with the same required order and
+  comparable in-memory or external regime, observing local-run distribution,
+  merge/finalization work, ordering correctness, and spill bytes.
+
+An additional supported path needs its own equivalent fixture. Keep diagnostic changes
+to morsel size, data skew, memory budget, or working-set scale separate from the core
+worker-count series; record the changed variable and use them only to support qualified
+attribution. Poor scaling alone neither requires a scheduler redesign nor proves any
+§42.4 structural hot-path constraint; those have separate evidence owners.
+
+---
+
+### Execution Hot-Path Structural Evidence
+
+Apply the shared Chapter-42 evidence policy to §42.4 constraints 1–13. Correct output and
+elapsed time are prerequisites/context, not structural oracles: fast execution does not
+prove absent per-row allocation, redispatch, or generic `Value` construction; low memory
+does not prove compact hash storage; good sort throughput does not prove large/sequential
+spill requests; a fast scan does not prove required-column-only decode; and low latency
+does not prove buffer reuse. Reuse G5's activated execution/spill fixtures and G6's
+worker/profile procedure only where those paths apply. Test-only allocation/event scopes,
+generation IDs, request traces, and owner profiles are permitted; no new SQL syntax,
+persisted metadata, production ABI, specific allocator override, or always-on expensive
+instrumentation is required. Source review may supplement but not replace occurrence
+evidence.
+
+| §42.4 constraint | Evidence / primary oracle | Applicability |
+|---|---|---|
+| 1. No inherent one-per-row/cell general-purpose heap allocation | Scoped steady-state allocation events versus fixture rows/cells; procedure below | Hot execution |
+| 2. No per-row redispatch of batch-known choice | Batch selection versus row-loop dispatch events; procedure below | Resolved batch/kernel choice |
+| 3. No generic `Value` per hot cell | Construction events versus typed hot cells; procedure below | Typed hot-cell execution |
+| 4. No page pin merely for VARCHAR references | V23-G/H, V27-C/O page release/poison and owner-generation oracle | Page-backed VARCHAR scan |
+| 5. Blocking owners retain varlen backing | V24-F, V26-M, V28-G, V29-G/N, V30-D producer reset/poison | Retaining operator |
+| 6. Large operator memory accounted | V24-B/D/F committed-capacity `ML` and ownership ledger | Query-owned growing capacity |
+| 7. Large/sequential spill I/O where practical | SpillManager request trace versus owner block/run design; procedure below | Spilling path |
+| 8. DataChunk/vector backing reuse | Capacity/generation/reset trace plus V23-G/H | Repeated chunk path |
+| 9. Decode only required scan columns | Independent required-slot oracle versus per-column decode trace; V27-C/N | Valid wide-tuple scan |
+| 10. Compact/contiguous hash/directory where practical | Owner entry/region/metadata/allocation scale series; procedure below | Hash/directory owner |
+| 11. Tiny-budget/forced-spill correctness | V24-H/J, V28-K, V29-N, V30-F/H semantic and pressure oracles | Resource-pressure path |
+| 12. Aggressive optimization remains measurable | Chapter-40 / EXPLAIN ANALYZE and Profiling Tests, direct counters | Present optimized path; base profile always applies |
+| 13. Profile-justified optional complexity; JIT deferred | Profile-to-change package and owner correctness; procedure below | Present permitted SIMD/radix/prefetch; absent option N/A |
+
+For constraints 1–3, use deterministic typed INT64/FLOAT64 arithmetic, filter/project,
+and a many-row vectorized output path, with nullable/VARCHAR variants where relevant.
+Establish capacity and reusable state first, then process multiple predeclared scales of
+many nonempty, multi-row chunks without deliberately changing capacity. Record actual
+rows/cells/chunks, kernel invocations, and scoped events in the steady window. Attribute
+general-purpose allocations to the hot query worker/owner, excluding harness and setup.
+Keep setup, initial reserve, amortized arena/vector/StringHeap/RowCollection/block growth,
+spill buffering, retained-data ownership, and exceptional paths distinguishable; they
+are not automatically violations. Reject an ordinary one-separate-general-purpose-
+allocation-per-row or -cell occurrence pattern even if renamed output growth, delayed
+allocation, or pool-node acquisition. One-row chunks, zero work, setup only, or G5's
+aggregate allocation total cannot prove the property; the scale series aids diagnosis
+without a universal slope threshold.
+
+For constraint 2, independently establish the resolved operation, physical type, and
+supported representation at setup/batch/kernel boundary; record those selections,
+invocations, processed rows, and any virtual/type-switch event reselecting the *same*
+choice inside the row loop. A test-only site marker may observe the decision without
+changing it or adding a production per-row interface. Batch, normalization, and operator-
+boundary dispatch is legal; row-dependent NULL, predicate, hash-match, selection,
+comparison, and continuation branches are not redundant redispatch. Multi-row batches
+make row-proportional reselects observable; CPU percentage is not the oracle. For
+constraint 3, count generic `Value` constructions at their actual owner in the scoped
+typed kernel and reject per-hot-cell construction. Separately scope legitimate client/
+result conversion and ensure it neither contaminates nor disguises hot-kernel work.
+Instrumentation itself must not construct Values or change their representation.
+
+For constraints 4–5, reuse the named lifetime suites with page/input-chunk generation
+poisoning. After scan VARCHAR materialization, release the heap guard and poison its page;
+downstream bytes remain exact. A pin retained solely to keep downstream `StringRef` alive
+fails, although another canonical pin reason may remain. For HashJoin build,
+HashAggregate, Sort, and materialized spools, reset/poison the producer chunk or release
+its page after lawful handoff; retained VARCHAR resolves through stable query-owned
+backing or exact spill/reload ownership, not expired input, page, or expression scratch.
+V23-H also checks cardinality, validity, selection, and StringHeap reset without mutating
+a live borrower.
+
+For constraint 6, V24-B/D's committed-capacity ledger covers growing hash, aggregate,
+sort, RowCollection, result/DML spool, spill buffers, and worker-local state. Compare
+owner charges with live committed regions, including positive aggregate-growth fixtures;
+thousands of individually small allocations are not exempt. BufferPool frames remain
+under their separate bounded owner, not the query ledger.
+
+For constraint 7, activate real spill through G5's external-sort and Chapter-24/operator
+fixtures. At the SpillManager/I/O helper boundary, retain ordered read/write requests
+with resource/run/partition, offset, requested and completed lengths, and operation kind.
+For a large sequential run, check ordinary middle requests against that owner's
+configured block/transfer granularity (Chapter 24's configurable ~1 MiB target), and
+check monotone contiguous/nonoverlapping run progress. A header, final partial block,
+small total object, or fault boundary may explain short operations. Many row/cell-sized
+requests throughout a large run without a concrete owner constraint argue against
+“where practical”; one global byte or syscall threshold is not prescribed. Total spill
+bytes, file name, or throughput alone do not reveal request shape. Retain the technical
+reason for any exception.
+
+For constraint 8, drive many same-shape chunks after initial capacity establishment.
+Record logical chunk and backing owner/generation, capacity/growth events, emissions, and
+resets. Reusable backing recurs across ordinary batches without requiring one permanent
+address or one chunk object; fresh equivalent backing every chunk without an owner reason
+is adverse evidence. Apply V23-G/H so reset clears logical state and StringHeap/selection
+as needed and never invalidates a live borrower.
+
+For constraint 9, build a valid wide tuple with independently specified output,
+predicate-only, hidden/owner-required, and unrequired ColumnIds/LogicalSlotIds. Include
+a narrow fixed-width projection, an unrequired wide VARCHAR, and alternate required sets.
+Derive the expected physical required set from the validated plan/predicate/owner rules,
+not final SELECT text or the scan's own claimed set. Trace scalar decode and StringHeap
+materialization per column at the tuple/scan owner, separately from mandatory whole-
+retained-tuple framing, offset, NULL-bitmap, and corruption validation (V27-C). Valid
+required columns may decode; an unrequired user column has no ordinary scalar decode or
+copy. A predicate-only column decodes when needed despite not being emitted; the
+unrequired VARCHAR is not copied merely because it is stored. Malformed unselected data
+remains subject to V27-C's independent corruption oracle—pruning never waives validation.
+
+For constraint 10, inspect actual HashJoin, HashAggregate, DISTINCT, and other applicable
+hash/directory owners across predeclared entry scales. Record entries, directory/bucket
+capacity, retained payload and metadata bytes, block/region count, allocation and growth
+events, and bytes/entry as a diagnostic, without making pointer addresses semantic.
+Coarse blocks and compact directories can satisfy the guidance; one general-purpose node
+allocation per entry, disproportionate pointer metadata, or avoidable fragmentation are
+adverse evidence absent a concrete technical reason. A segmented alternative may conform
+with that reason and measured structure while satisfying V24 accounting. No single hash
+representation, bytes/entry maximum, or universal growth slope is mandated.
+
+Constraint 11 uses V24-H/J and the named join/aggregate/sort spill owners for valid tiny
+budgets, denied grants, one and multiple finite spills, reload, exact lower-memory paths,
+errors, and result/order equivalence. Slow but correct forced spill may pass. For
+constraint 12, compare applicable Chapter-40 operator/pipeline identity, rows/chunks/work,
+CPU where available, memory, spill, and worker counters with direct owner observations on
+optimized paths; SIMD, radix, or prefetch must not hide or fabricate enclosing work. If
+no optional aggressive path exists, no extra optimized-path fixture is required, but the
+base profile contract remains. Instrumentation may be test-enabled rather than always on.
+
+For constraint 13, when explicit SIMD, an Architecture-permitted radix strategy, or
+explicit prefetch is present, retain a review/evidence package linking a pre-change
+Chapter-40 hotspot/profile to the exact path, G1-comparable baseline and optimized
+measurements, semantic equivalence, and changed resource/profile behavior. No fixed
+benefit percentage is required. SIMD uses the portable scalar/vector SQL, NULL, error,
+FLOAT64, and lifetime oracles; radix is limited to owner-permitted equivalence (for
+example §30.4's sound sort strategies), not a blanket mandate for radix join/sort;
+prefetch preserves page/data lifetimes under §32.12. Absence of these optional
+optimizations is N/A for this package. JIT remains outside v1 absent explicit
+Architecture revision; favorable measurements alone authorize neither JIT nor any other
+implementation or Architecture change.
 
 ---
 
@@ -25669,6 +26412,109 @@ When §34.8's bounded small-table exact mode applies, compare every non-NULL fre
 NDV with an exact map. Repeat immediately below/above the configured threshold and with an
 insufficient maintenance-memory budget to verify that changing collection mode changes
 approximation strategy, not descriptor validity or SQL semantics.
+
+### ANALYZE Performance Benchmark
+
+Apply the shared Chapter-42 benchmark evidence policy to explicit `PhysicalAnalyze`.
+Reuse Statistics Tests, Statistics Algorithm Tests, Statistics Publication and Versioning
+Tests, Statistics Persistence and Validation Tests, and V34-A/F/H/I for correctness;
+speed or compactness cannot substitute for a complete valid candidate and successful
+statement. The v1 data-collection path is Chapter 34's vectorized *full heap scan*, not
+page/block sampling, automatic scheduling, or persisted incremental sketches. Internal
+bounded reservoir sampling and permitted physical index-statistics sampling do not
+replace that heap scan. One coordinator owns the statement; no parallel ANALYZE is
+required. This benchmark does not calibrate base access or estimator error distributions.
+
+Predeclare deterministic table fixtures with stable TableId, SchemaVer, ColumnIds/types,
+index manifest, generated values/seed, visible row and physical heap-page counts, row/
+VARCHAR widths, NULL/distinctness/skew distributions, BufferPool capacity, maintenance
+budget, and expected valid statistics generation. Include fixed-width, nullable, and
+VARCHAR columns, a material row-width difference, multiple pages and nonzero visible
+rows. For a row-scale series vary rows/pages while holding analyzed schema and value
+distributions materially comparable; for a column-scale series vary explicit analyzed
+base ColumnIds/types while holding the visible row population comparable. Record exact
+fixture parameters rather than treating “large” as a scale. Use a stable table/snapshot
+without concurrent DML for the primary comparison; Chapter-34 concurrent-DML fixtures
+remain the visibility oracle. Record physical versions encountered separately from
+visible rows because dead/invisible versions may consume scan work without contributing
+to SQL-visible statistics.
+
+The primary measured interval begins when the resolved `PhysicalAnalyze` statement
+starts its required collection and ends at successful ANALYZE *statement* completion:
+full scan, bounded collection/finalization, index-statistics work where required,
+candidate validation, payload encoding, and transactional `sys_statistics` row writes
+are included. Require the complete valid transaction-local descriptor and all required
+rows at that boundary (§§31.12.1, 34.3); terminal transaction COMMIT/C4/C5 global cache
+publication is a separate outcome, not silently included in this statement rows/sec
+interval. If scan, finalization, encoding, or publication component times are reported,
+label their own owner-observed boundaries separately. Aborted, canceled, corrupt,
+resource-failed, or partial candidates are not successful performance samples; retain
+their canonical outcomes. A declared failure-stress diagnostic cannot replace this run.
+
+| Required metric | Denominator/scope and canonical source | Positive control / prerequisite |
+|---|---|---|
+| Rows/second | Snapshot-visible heap rows actually accepted into Chapter-34 column/table collection, divided by primary statement elapsed seconds; direct scan/collector count reconciled with independently expected visible rows, not output estimates or sampled values | Nonzero visible rows, multiple chunks/pages, complete valid ANALYZE |
+| Columns analyzed | Distinct base ColumnIds whose required column-statistics state was actually collected and appears in the complete TABLE manifest; one ColumnId counts once despite HLL, MCV, and histogram substructures | Column-scale series and per-ColumnId collection/member evidence, not schema width |
+| Peak maintenance memory | Maximum simultaneous live/charged ANALYZE-owned bytes during the interval, from `PhysicalAnalyze` QueryMemoryManager/maintenance-region owner ledger (§§24.4, 31.12.1; V34-H/V24-B/D) | Growing collection/candidate fixture, valid cleanup/transfer; not RSS or sum of separate component peaks |
+| HLL memory | Process-local HLL owner live state/capacity bytes and simultaneous column states, separately from persisted NDV | High-cardinality non-NULL HLL-active column and nonzero owner work/state |
+| MCV memory | Heavy-hitter owner live state/capacity and retained value bytes, separately from final MCV payload | Skewed MCV-active column with observed owner state |
+| Sample memory | Reservoir/sample owner capacity, occupancy, element and owned varlen backing bytes | Sample-active column with observed nonzero state |
+| Statistics payload bytes | Sum of exact `total_length` for valid reassembled §34.14 TABLE/COLUMN/INDEX `StatisticsPayloadV1` byte sequences in this StatsVersion, with per-scope subtotals | At least one nonempty complete encoded generation passing chunk/CRC/manifest/semantic validation |
+| Full-scan I/O | Required heap pages logically visited; same-scan BufferPool hits/misses and completed physical heap reads/pages or bytes from Chapter-7/40 storage owners, reported separately | Independently known multi-page extent, observed full required page coverage and owner I/O events |
+
+The rows/sec numerator deliberately uses Chapter 34's SQL-visible analyzed live-row
+population: the full scan supplies every row visible to the one ANALYZE snapshot exactly
+once (V34-036), and those rows produce `analyzed_live_row_count` and column statistics.
+Physical tuple versions visited, dead-version pressure, and heap pages visited are
+separate diagnostic work counts, not substitute rows/sec numerators. The direct collector
+event must agree with the independent snapshot fixture; the final TABLE row-count field
+alone is not a work counter. A required column enters collection and contributes a
+valid COLUMN candidate before it counts; table-level fields, hidden catalog fields,
+index-key components, and fragments do not add base columns. One column with three
+substructures still counts once. No rows/sec, memory, or payload pass threshold is set.
+
+Capture one live maintenance-memory event history so its peak is a simultaneous maximum,
+not HLL peak plus MCV peak plus sample peak measured at different instants. Identify
+scan chunks/vectors, HLL/MCV/reservoir state, owned VARCHAR values, candidate/encoding
+buffers, and maintenance-owned I/O buffers under their canonical QueryMemoryManager or
+collection-region charges; V34-H/V24-B/D check coverage, transfer, and release. Record
+HLL, MCV, and sample components separately and reconcile their live charges with the
+whole ledger; other live ANALYZE state may make the total larger. HLL's configured
+register formula may check but not replace observed owner-backed bytes. A representative
+fixture must activate HLL, MCV, and reservoir states simultaneously where Chapter 34
+permits, without requiring every column to use each structure. Retained VARCHAR samples/
+MCVs need stable owned bytes, not a borrowed heap-page lifetime (V34-H/V23-G). Exclude
+the separately owned BufferPool frame pool, unrelated queries and RSS. At valid transfer
+to immutable descriptor/catalog/cache ownership, preserve continuous coverage without
+double-charging the old maintenance owner indefinitely; transient cleanup must release.
+
+Measure §34.14 encoded payloads *before* their at-most-4096-byte catalog-row
+fragmentation: report TABLE, COLUMN, applicable INDEX, and whole-generation length
+subtotals from canonical reassembled `total_length` values. A nonempty payload positive
+control and varying column/type/MCV/histogram/index fixtures expose useful payload-size
+changes. Fragment count, catalog tuple/page bytes, publication writes, and WAL bytes may
+be supplementary, separately labeled metrics; file growth or final descriptor object
+size is not payload bytes. Require the existing round-trip, CRC, manifest-completeness,
+and numerical-validity oracles before accepting a payload measurement. HLL registers and
+reservoir state are process-local, not extra persisted payload fields.
+
+For full-scan I/O, compare the independently known required heap-page extent with direct
+scan-page visits. Record table working-set pages versus actual BufferPool frame capacity,
+preconditioning, same-interval owner hits/misses, and *completed physical heap reads*
+separately from logical visits. Use one declared baseline residency regime across a
+comparison; an additional mostly resident or larger-than-BufferPool case may diagnose
+I/O. If deliberate file-cache deconditioning is used, record its method and call it
+less-warm unless stronger evidence exists, as in Storage Benchmarks. No perfectly cold OS
+cache or mandatory platform cache eviction is assumed. A sampled subset of heap pages
+does not activate v1 full-scan collection. Index full-walk/bounded-sample reads and
+catalog publication writes/WAL are separately scoped from heap full-scan I/O; row count
+times row width and heap-page count alone are not physical-read observations. A column-
+scale change may increase decoding/memory while leaving heap-page extent unchanged.
+Missing required physical-read observations follow the shared NOT VERIFIED policy, not
+an inferred zero. HLL quality, MCV/histogram correctness, snapshot visibility, index
+statistics, persistence, and publication remain with their Chapter-34/V34 owners.
+
+---
 
 ### Statistics Algorithm Tests
 
@@ -26172,6 +27018,64 @@ with reference group counts while retaining heuristic provenance.
 
 ---
 
+### Cardinality-Estimator Quality Benchmarks
+
+Apply the shared Chapter-42 benchmark evidence policy to a predeclared, multi-case
+deterministic campaign per workload family; retain generator parameters/seeds, schema,
+query/predicate/join shape, snapshot, exact fixture/reference result, analyzed SchemaVer
+and StatsVersion, estimator configuration, and estimate confidence/provenance. Use the
+existing Selectivity Estimation Tests, Join Estimation Tests, V35, and Chapter-34 owners
+for formula/SQL correctness. An analytically known cardinality or independent reference
+execution under the same snapshot supplies actual rows/pairs, including duplicate and
+NULL join semantics; the production estimate or EXPLAIN actual field is not its own
+oracle. Hold statistics generation stable within a comparison. Label stale, missing,
+rejected, or fallback statistics as distinct strata rather than mixing them invisibly
+with current complete descriptors.
+
+For every cardinality-comparable case retain raw estimated rows `E`, independently
+observed actual rows `A`, Chapter-40 q-error, family, shape, statistic identity,
+provenance/confidence, and any limitation label. Use §40.8's exact rule: positive `E,A`
+give `max(E/A,A/E)`; both zero give `1`; exactly one zero gives an explicit infinity.
+Never clip or drop infinity. Not-started, partial, demand-censored, failed, or cancelled
+operator observations are not comparable q-error samples under §40.6; use a complete
+reference result or explicitly classify unavailability. A statistical zero is still
+only an estimate; approved §35.2/Chapter-20 semantic-empty proofs retain their separate
+provenance and are reported separately where their output boundary differs.
+
+Report case count, median/p50, predeclared upper-tail quantiles (for example p90/p95),
+maximum/infinite cases, and a histogram/CDF or retained raw values, separately or
+stratifiably by family and estimate provenance. Identify worst cases with query shape,
+`E`, `A`, q-error, StatsVersion, and limitation reason. A mean may supplement but never
+replace the distribution. Use enough predeclared distinct cases per family to expose a
+tail, not a single representative; fixed-seed randomized cases may supplement exact
+hand-built fixtures. No universal q-error acceptance threshold is imposed here.
+
+- Baseline/uniform, skewed hot-value/long-tail and nonuniform-range fixtures retain exact
+  frequencies so uniform-assumption error is visible. MCV fixtures distinguish a proven
+  MCV member, a non-MCV residual value, multiple hot values, and common-MCV versus
+  residual join mass; membership comes from the independent statistics fixture, not low
+  observed error. Reuse the canonical MCV correctness owner.
+- NULL cases cover no-NULL, NULL-heavy and applicable all-NULL populations with `IS NULL`,
+  `IS NOT NULL`, nullable equality/range, IN/three-valued logic, and nullable join keys.
+  Record exact NULL fractions and reference cardinalities; catalog NOT NULL proof remains
+  distinct from observed/statistical zero. Reuse existing selectivity/join fixtures.
+- Correlation-limitation cases use deterministic positively correlated, anti-correlated,
+  or functionally related columns whose individually plausible single-column statistics
+  cannot describe joint predicate frequency. Label them `MODEL-LIMITATION` under §35.17
+  but retain their comparable q-errors in the family distribution, even when large.
+  Do not manufacture v1 multi-column extended statistics or excuse difficult cases as
+  N/A. This inter-column limitation is distinct from Chapter-36 index/heap correlation.
+
+Controlled unique-to-many, many-to-many, hot-key, partial-overlap, and duplicate-heavy
+join cases enrich the campaign without turning it into join-order performance testing;
+optional GROUP/DISTINCT cases use their existing reference-group oracles. Record whether
+MCV, histogram, NDV, NULL fraction, uniqueness, independence/multicolumn damping, exact
+constraint, or missing/stale fallback contributed to each estimate, using Chapter-35
+owner tags rather than inferring provenance from the number. Distributional quality,
+base-access cost choice, and measured execution speed remain separate conclusions.
+
+---
+
 ### Access Path Tests
 
 Construct catalog/stats scenarios where optimizer should choose:
@@ -26215,6 +27119,62 @@ exact leftmost-prefix bounds, transient sentinel use, and residual classificatio
 Do not assert arbitrary exact cost numbers unless testing the cost formula itself.
 
 Prefer plan-shape expectations under controlled parameters.
+
+For Chapter-42 measured base-access calibration, additionally apply the shared benchmark
+policy to deterministic same-logical-shape query families with validated immutable
+TableId/IndexId/SchemaVer, complete statistics generation, and one retained validated
+CostConfig (including deployment-calibrated §36.4 weights). For each condition, execute
+*both* a direct validated `PhysicalSeqScan` and the relevant legal `PhysicalIndexScan`
+with the same snapshot, predicate, output, order requirement, data, and comparable full
+physical-operation start/completion window. Reuse V22/V27, MVCC/index and Access Path
+correctness oracles: both results must equal an independent SQL reference result before
+their performance samples count. The unselected alternative is measured too; optimizer
+choice or abstract cost alone is not a physical measurement. Cost remains an abstract
+weighted resource model, not predicted milliseconds.
+
+Predeclare controlled series for every §42.5 dimension, making each the principal
+changed variable while recording unavoidable couplings:
+
+| Dimension | Replayable fixture and independent activation evidence |
+|---|---|
+| Selectivity | Same predicate form with varied literal/range parameters and exact fixture/reference qualifying counts over snapshot-visible rows; include narrow, intermediate, and broad cases without a universal percentage cutoff. |
+| Heap pages / rows per page | Comparable live-row counts with deliberately different actual heap-page extents/physical-version density; observe pages, row/version counts, and occupancy rather than deriving pages from nominal width. |
+| Index/heap correlation | Same leading-key distribution placed in high-locality and poorly localized heap-page order; record canonical `leading_key_heap_correlation`, candidate RIDs, distinct heap pages reached, and actual locality/I/O, not insertion order alone. |
+| Cache budget | Vary configured `effective_cache_pages` in its canonical page unit so estimated I/O terms demonstrably consume the assumption; hold/record execution BufferPool capacity, preconditioning and hit/miss regime separately. The planner never reads momentary residency. |
+| Required output width | On a wide relation hold predicate/index/layout fixed and vary RequiredSlotSet/ColumnIds from narrow to wide; record canonical estimated row width, actual decoded/materialized columns, CPU/memory, and similar or changed page I/O. |
+| VARCHAR width | Fixed-seed short/long payload classes with recorded actual stored/logical widths, comparison/copy work, rows/page and I/O; qualify any coupled page-density change rather than attributing it solely to decode width. |
+| Dead-version fraction | Stable or comparable visible rows plus controlled MVCC obsolete/dead versions; report owner-observed dead/invisible physical versions divided by relevant physical tuple versions, along with both counts, pages, index garbage/candidates, and MVCC rejects. This fraction is a Verification fixture measure, not a new persisted statistic. |
+
+For each alternative retain elapsed time, measured CPU scope, logical/physical rows,
+SeqScan pages and tuple versions considered, visible and output rows, required decode/
+materialization, and same-window BufferPool hits/misses and completed physical reads
+where applicable. For IndexScan also retain physical entries/candidate RIDs, distinct
+heap pages touched, stale/invisible rejects, residual checks, and heap MVCC checks;
+logical qualifying rows are not candidate pressure. Source these from Chapter-7/27/40
+owners, not a wrapper or abstract cost. Record actual selectivity from fixture truth,
+actual physical density from heap observations, VARCHAR payload width rather than
+`sizeof(StringRef)`, and RequiredSlotSet width rather than full schema width. A changed
+VARCHAR width may change rows/page; narrow projection need not change scan-page I/O.
+
+At each condition record validated CostConfig identity, selected TABLE/INDEX StatsVersion
+and analyzed schema, freshness/fallback provenance, `effective_cache_pages`, actual
+BufferPool state, actual selectivity/pages/rows-per-page/correlation/output and VARCHAR
+width/dead fraction, SeqScan and IndexScan measured work, both alternatives' estimated
+rows/physical candidate pressure/component costs, required/provided ordering, and the
+optimizer-selected legal path. Statistics must correspond to the changed physical data;
+an intentional stale-statistics case is separately labeled. Direct measurements and
+cost/plan evidence are distinct. Optional ordering-benefit and combined-dimension
+diagnostics may supplement, not replace, the seven one-principal-variable series.
+
+Include a positive same-shape switch series with measured condition sets on opposite
+sides of a real cost break-even: one selects SeqScan, another IndexScan, both legal and
+both measured under each key condition. Verify the chosen path follows the lower valid
+abstract cost under the active objective, not a wrapper's expected label or a hard-coded
+selectivity threshold; observe the changed physical/resource conditions that caused the
+component-cost change. No specific literal, percentage, or machine-independent switch
+point is prescribed. A slower selected path in a noisy run is not semantic failure;
+stable disagreement is retained as §36.4 calibration evidence, without silently changing
+weights, declaring global optimality, or beginning G10 operator-cost ranking.
 
 ---
 
@@ -26302,6 +27262,21 @@ downstream order, and constrained memory. Include any necessary Sort enforcement
 total cost; an implementation's local operator cost is not compared as if properties were
 free.
 
+For measured interesting-order evidence, predeclare one same-logical-query fixture with
+identical required final OrderingProperty and two validated complete alternatives: a
+locally cheaper unordered provider plus explicit Sort, and a locally more expensive
+ordered provider that avoids that Sort (or enables another supported ordered operator).
+Structured cost observations must show `ordered local > unordered local` yet `ordered
+complete < unordered + enforcement complete`; a locally cheaper ordered provider is not
+this positive control. Execute both complete plans on the same data, CostConfig,
+statistics, memory budget, and environment. Record elapsed time, CPU, peak query memory,
+Sort comparisons/work, and applicable spill for each, with direct evidence that the
+ordered plan avoids enforcement. Reuse the property and V30 ordered-result oracle:
+incidental row order is not a provided property, and both alternatives must satisfy the
+same direction/NULL/collation/tie semantics. A runtime reversal is calibration evidence,
+not a correctness failure or a required universal speedup. Optional MergeJoin/ordered
+aggregate benefits may supplement Sort avoidance but are not mandatory.
+
 ---
 
 ### Memory/Spill Plan Tests
@@ -26333,6 +27308,25 @@ With absent, rejected, stale, and low-confidence statistics, assert centralized 
 fallback assumptions, explicit confidence/provenance, deterministic planning, retained
 runtime alternatives, and semantic correctness. A slower fallback plan is acceptable; a
 fabricated proof is not.
+
+For measured memory-aware plan choice, keep the same logical query, data/schema,
+StatsVersion, cardinality/selectivity estimates, CostConfig, properties, and capability
+set. Vary the retained §38.19 `query_execution_memory_budget_bytes` (the per-query soft
+execution-memory input) and record each blocker's assigned target, predicted need/peak,
+estimated spill bytes/passes and cost components, all legal alternatives, and selected
+plan. Hold §38.21 `optimizer_planning_arena_budget_bytes` fixed and nonbinding: its guard
+or search fallback is not execution-memory plan-choice evidence. Choose an implemented
+pair with different memory/spill behavior—HashAggregate versus a supported ordered
+alternative, HashJoin versus a legal join, Sort/TopN, or another owned pair. Include a
+positive large/constrained-budget series where estimated spill changes *and* a legal
+selected plan changes; stable-plan cases are supplementary, not a substitute. Directly
+execute the chosen plan and key legal alternative where practical under each budget,
+checking independent result semantics and QueryMemoryManager peak, owner spill bytes,
+runs/partitions, CPU, I/O, and elapsed time. Require owner-observed positive spill in at
+least one constrained spill-capable control; record no/reduced spill at the larger budget
+where practical. Predicted/actual disagreement is calibration evidence, not a fabricated
+success or a failed SQL result. Controlled OutOfMemory is an owner failure, not a valid
+positive plan-choice sample. Neither budget is a universal cutoff.
 
 ---
 
@@ -26556,9 +27550,63 @@ predicted relative ranking
 actual runtime ranking
 ```
 
-The goal is not perfect milliseconds.
+Apply the shared Chapter-42 evidence policy. For each listed operator, predeclare a
+deterministic multi-scale physical fixture with input/output cardinalities, key/group and
+payload widths, selectivity/skew, required/provided properties, statistics/CostConfig,
+vector size, BufferPool setting, query-memory target, capability, and expected result.
+Reuse G9's directly measured SeqScan/IndexScan series rather than recreating it; associate
+their predicted page/version/candidate/locality/decode terms with owner-observed CPU,
+BufferPool/page I/O, rows, and output. Reuse G5 and V27–V30/V24 correctness and positive
+operator/spill activation. Each sample needs actual nonzero target-path work and correct
+output; plan presence or a benchmark label alone is insufficient. Record exact structured
+startup/total costs and major components from the optimizer owner, not rounded EXPLAIN
+prose or elapsed time. Keep weights stable during a campaign; a §36.4 proposal follows
+the campaign rather than silently tuning every sample to agree.
 
-The goal is that cheaper predicted plans usually correspond to faster actual plans.
+Compare alternatives only when they satisfy the *same* logical requirement, or compare
+one path across controlled scale points; do not globally rank unrelated queries. To
+measure an unselected legal alternative, use a validated direct physical fixture or
+retained alternative without public optimizer hints or changed production selection.
+Keep the timed operation boundary comparable within each family. Record elapsed time,
+CPU, page/BufferPool I/O, rows, comparisons/hash work, peak QueryMemoryManager memory,
+spill bytes/runs/passes and other applicable Chapter-40/operator counters separately.
+Predicted abstract cost is not milliseconds, and measured resources are a vector, not an
+invented scalar actual cost. For each pair retain predicted ordering and component basis,
+measured runtime order or tie/inconclusive result under G1 variability, measured resource
+tradeoffs, correctness, and any disagreement. Never force a winner from overlapping noisy
+results or impose a universal ranking-agreement percentage. Summaries by family may count
+agreements/disagreements/inconclusive cases for diagnosis, not PASS thresholds.
+
+- HashJoin: vary legal INNER-equijoin build/probe rows, key/payload width, duplicates,
+  skew, output, memory and spill regime; record build/probe/output work, hash CPU, memory,
+  spill, and time. NestedLoopJoin: vary outer/inner rows, predicate work/selectivity and
+  output, observing repeated comparison/evaluation work. Directly compare both for at
+  least one same logical join with meaningful scale variation, without a fixed crossover.
+- IndexNestedLoopJoin: use a legal indexed inner, varying outer size/selectivity; count
+  index probes, candidate RIDs, heap MVCC checks, matches, BufferPool/I/O, CPU and time.
+  Compare with HashJoin/NestedLoopJoin for the same join where each is legal; all three
+  need not coexist in every fixture.
+- HashAggregate: control input rows, groups, key/state width, skew, memory target and
+  spill; compare predicted update/finalize/memory/spill terms with actual work. Where
+  supported, compare a complete legal ordered/sort-aggregate alternative, including
+  enforcement and retained-output cost; unsupported optional operators are N/A.
+- Sort: use disordered inputs varying rows, key/payload width, comparison shape and
+  memory, recording comparisons where available, runs, merge passes, spill, memory, CPU
+  and time. TopN: use legal exact-`K` ORDER BY LIMIT/OFFSET cases varying input, `K`,
+  key/row width; compare complete TopN and Sort+Limit alternatives under the same
+  Chapter-20/V30 ordered-result family, including permitted boundary ties. Ineligible
+  TopN is not a calibration alternative.
+- Spill paths: for supported Sort, HashJoin, and/or HashAggregate fixtures, include
+  in-memory and positive owner-observed spill cases for the same operator requirement.
+  Compare predicted spill/merge/repartition/temporary-I/O components to owner bytes,
+  passes, memory, CPU and elapsed work. A correct spill is valid execution, not failure;
+  an annotation or temp-file final size alone does not prove spill activity.
+
+This comparison records relative predicted cost versus measured runtime *and* each
+applicable resource dimension. Persistent disagreement informs §36.4 calibration; it
+does not invalidate a correct plan or require that one abstract cost unit equal a time
+unit. No unsupported algorithm, global operator tournament, or perfect concordance is
+required.
 
 ---
 
@@ -26590,6 +27638,44 @@ peak planning memory
 
 Verify exhaustive search transitions to bounded heuristic behavior.
 
+Treat the grid above as Verification-owned supplementary fixtures, not an Architecture
+join-count mandate. For the core transition curve choose and record a valid nonzero
+`exhaustive_join_limit` with enough planning-arena budget to avoid guard fallback. Count
+distinct BindingId occurrences in one maximal legal reorderable region: §37.11 selects
+exhaustive bushy DP for `N <= limit` (including equality) and §37.13 bounded heuristic
+for `N > limit`. Zero is legal for ordinary heuristic-only configuration but cannot
+demonstrate both modes. Use a deterministic connected INNER-join graph family with
+recorded BindingIds, predicates, table statistics/StatsVersions, CostConfig, required
+properties, and resource configuration. Include below, at, immediately above the active
+limit and larger heuristic counts; add/substitute boundary-adjacent points if the grid
+does not bracket the chosen limit. Optional graph classes remain separate.
+
+Measure planning wall time with a monotonic timer from canonical optimizer invocation
+entry through validated physical-plan completion, excluding execution. From the *same*
+invocation's Chapter-37/38 owner trace record configured threshold, region size, initial
+and selected search mode/transition reason, distinct logical join subsets explored by
+BindingId set, legal subset partitions considered, physical alternatives that actually
+reached costing (not merely enumerated), and memo alternatives/entries retained versus
+pruned by dominance as two separately scoped counts. State whether a counter denotes
+groups, alternatives, or entries; do not derive partitions from subsets or pruned from
+created-minus-final unless the owner event semantics make that exact. Peak planning
+memory is the simultaneous live byte peak of the dedicated §38.21 planning arena, not
+RSS, execution query memory, or final live bytes. Reuse its lifecycle/cleanup tests.
+
+For heuristic points record greedy connected-tree extension/candidate work and local-
+improvement passes, legal moves considered, and accepted improvements from the §37.13
+owner. One larger case must show nonzero heuristic work; `large_join_max_local_passes=0`
+may truthfully give zero optional local-improvement work, whereas a configured active
+pass fixture records actual pass/move evidence without fabricating accepted changes.
+Direct search-mode events must prove both sides of the threshold and a completed legal
+plan; fast wall time, relation count alone, or planning-arena fallback does not prove
+the intended transition. Resource-guard fallback and OptimizerResourceLimit belong to
+separate correctness/resource diagnostics, not this core threshold curve. Keep required
+wall time, subset, partition, costed-alternative, retained/pruned memo, peak-arena, and
+heuristic-work evidence together by optimizer invocation identity; missing fields follow
+G1's NOT VERIFIED disposition. The Star Schema Benchmark remains optional SHOULD-level
+supplementary stress, not official TPC compliance or a substitute for this curve.
+
 ---
 
 ### Star Schema Benchmark
@@ -26611,15 +27697,112 @@ TPC-H-inspired queries may be added without claiming benchmark compliance.
 
 ### No Benchmark Gaming
 
-Do not hardcode:
+Optimizer decisions must not recognize benchmark-specific raw SQL bytes or hashes,
+whitespace/comments, query numbers, suite/case labels, ordinary user table/index/column
+names, magic fixture object IDs, or known logical-plan/join-graph fingerprints to select
+a special rewrite, access path, join order, algorithm, property, memory strategy, or
+search path. This list is not exhaustive. Decisions instead follow general statistics,
+semantic rewrites, properties, costing, and search (§42.6). Names remain valid for
+binding, catalog lookup, EXPLAIN, errors, and diagnostics; stable TableId, ColumnId,
+IndexId, BindingId, and LogicalSlotId remain valid for lookup, semantic identity,
+structural keys, and deterministic ties. Architecture-owned handling of system objects
+is outside the ordinary-user-name oracle. Generic sargability, rewrite, connectivity,
+star-topology, and interesting-order rules are valid when their preconditions and
+resulting decisions are general, correct, and explainable through those owners. A
+branch recognizing a particular benchmark query/shape or magic user ID to bypass
+ordinary costing/search is not such a rule.
 
-```text
-query text fingerprints
-known benchmark table names
-special-case TPC query shapes
-```
+Use paired metamorphic *invariance* and *sensitivity* controls, plus generated holdouts
+and a supplementary read-only review of production optimizer decision code. For each
+variant retain raw fixture/query identity, bound and normalized logical identity,
+declared semantic-ID bijection if any, schema/StatsVersion and statistics values,
+CostConfig, execution and planning memory settings, required properties, capabilities,
+search configuration, candidate set, structured cost components, optimizer trace/mode
+and counters, selected structured plan, and correctness result. Keep harness case labels
+outside the optimizer invocation. Record a trace-delta ledger of changed identity,
+estimates, properties, costs, search inputs, and selection; do not infer cause from the
+selected plan alone. Reuse Optimizer Diagnostics Tests for owner trace evidence and
+the Plan Regression Suite for named scenarios, without overfitting incidental costs.
 
-Optimizer improvements must arise from general statistics/rules/costing.
+For *exact-input* controls, produce raw SQL with different bytes but owner-certified
+identical bound/logical optimizer input: whitespace, legal comments, keyword case,
+formatting or harmless parentheses where valid under Chapter 18/20; rename aliases
+only when the binder establishes the same semantics. Owner-certified logical
+normalization variants may supplement these, but do not assume reordered executable
+conjuncts, reversed comparisons, or textual INNER-join order are equivalent: Chapter
+20's demanded evaluation, source-error provenance, predicate occurrences, and join
+graph must be checked first. Compare candidate set, cost components, search mode and
+decision, and selected plan exactly, excluding only source spans, raw text, and display
+diagnostics. A formatting-only SourceSpan shift is not a physical-plan input. The
+different-byte/same-input pair detects raw-query-text or raw-hash selection without
+requiring a production hash. Parser/binder possession of raw SQL is not itself gaming.
+
+For *isomorphic-input* controls, clone ordinary user schemas/queries with unrelated
+table, index, and column names, neutral and benchmark-like names, alias changes, and
+rekeyed TableIds/ColumnIds/IndexIds/BindingIds under a declared bijection. Include a
+name-swap control that preserves mapped statistical/semantic roles. Hold mapped types,
+constraints, statistics, physical pressure, index properties, CostConfig, memory,
+capabilities, and search settings equivalent. Use a strict unique cost winner and
+compare legal access/join/property candidates, exact structured costs, and selected
+operator/access/join/property/enforcement/memory-spill structure modulo the mapping;
+do not require raw IDs or compact fingerprints to match. This exposes magic IDs or
+benchmark-like spelling without prohibiting semantic ID lookup. An exact tie can
+legitimately select another mapped tied representative under §38.4's structural key;
+compare its legal cost-equivalence class and tie rule, not identical mapped selection.
+Bounded heuristic search can also depend on canonical structural ordering: use
+name-only identical-input variants for the strongest invariance oracle and demand
+mapped equivalence only where a strict winner and the search comparison are well
+founded. Do not infer mode from time or require identical incidental trace iteration.
+
+Include fixed-seed isomorphic many-join/star variants with unrelated names/IDs and
+equivalent graph, fact/dimension statistics, and selective dimensions. A general
+topology/statistics heuristic may make the same mapped choice across these; a special
+known-shape override is forbidden. Generate multiple additional non-benchmark names,
+aliases, formatting variants, isomorphic schemas, and controlled parameter changes
+from a recorded recipe, not one hand-picked rename or secret cases. For any
+benchmark-motivated improvement, include non-benchmark holdouts satisfying the same
+general preconditions; the mechanism need not yield equal speedup or improve every
+holdout. A fixed-seed cost-margin family stays within a predeclared strict-winner
+region, requiring the same mapped choice without a universal numeric margin.
+
+For *sensitivity*, hold benchmark identity fixed and cross a genuine owner-defined
+decision boundary by changing legitimate inputs. Reuse G9's measured selectivity,
+density, correlation, cache, required width, VARCHAR, or dead-version controls for
+base access; reuse G10's join costing, interesting-order, memory/spill, and
+exhaustive/heuristic configuration controls as applicable. Include at least one
+boundary-crossing holdout with a cost/trace-supported plan or mode change and one
+invariance control where only forbidden identity/presentation changes. Record whether
+statistics/estimates, semantic rewrite preconditions, required/provided properties,
+capabilities, CostConfig/cost components, execution-memory/spill estimates, search
+configuration/state, or deterministic tie rules explain each decision. A benchmark-
+shaped plan frozen across a strict general-input crossover is adverse evidence, just
+as an unexplained plan change under identity-only variation is a benchmark-gaming or
+generality failure. Do not demand a particular speedup; G1/G9/G10 own performance
+comparability and uncertainty. A legitimate input change need not always change plan.
+
+Compare canonical structured plans and candidate/cost/search evidence, not the compact
+`PlanFingerprint` alone. Chapter 38 permits it for diagnostics and regression comparison,
+not semantic identity, costing, dominance, ties, or special-plan selection; reuse the
+Optimizer Determinism and Resource-Limit Tests' forced-collision case. Check mapped
+logical subproblems, physical operators and child orientation, access class, properties,
+enforcement, memory/spill form, and cost components. If only forbidden presentation or
+benchmark identity changes, an unexplained candidate, cost, search, or plan delta fails;
+investigate canonical determinism rather than dismissing it as hash-order noise.
+All variants must pass binder/rewrite/plan-validation correctness and, when execution
+semantics need checking, the appropriate differential/reference result oracle. Pure
+decision-invariance cases need not all execute after equivalence is established.
+Optimizer Fuzzing may add reproducible identifier permutations and controlled statistics
+perturbations but cannot replace the explicit positive controls.
+
+When implementation exists, supplement behavior with a narrow read-only review of
+production rewrite/cost/search decision branches for benchmark names/query numbers,
+raw SQL comparisons/hashes, magic ordinary-user IDs, and exact known graph/plan-shape
+fingerprints. Classify each match: tests, comments, benchmark harnesses, fixture
+definitions, catalog binding, and diagnostic name display are not decision branches.
+A static string scan alone cannot exclude encoded hashes or indirect shape/ID cases and
+cannot establish generality. Do not add a public anti-gaming API, persistent benchmark
+IDs/fingerprints/allowlists, hidden-test requirement, or external benchmark-compliance
+claim; this procedure defines Verification/CI evidence, not a stored format.
 
 ---
 
