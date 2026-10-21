@@ -8,7 +8,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t SLOT_COUNT_OFFSET = 0;
@@ -110,7 +110,7 @@ bool EncodeHeapSlotEntry(std::span<std::byte> destination, const HeapSlotEntry& 
 
 HeapSlotEntryDecodeResult DecodeHeapSlotEntry(std::span<const std::byte> source) noexcept {
     if (source.size() < HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE) {
-        return {.entry = std::nullopt, .error = HeapSlotEntryDecodeError::BUFFER_TOO_SMALL};
+        return Unexpected{HeapSlotEntryDecodeError::BUFFER_TOO_SMALL};
     }
 
     using SlotStateValue = std::underlying_type_t<HeapSlotState>;
@@ -124,24 +124,20 @@ HeapSlotEntryDecodeResult DecodeHeapSlotEntry(std::span<const std::byte> source)
         source.subspan(HEAP_SLOT_AUX_OFFSET, sizeof(std::uint16_t)));
     if (!tuple_offset.has_value() || !tuple_length.has_value() || !raw_state.has_value() ||
         !aux.has_value()) {
-        return {.entry = std::nullopt, .error = HeapSlotEntryDecodeError::BUFFER_TOO_SMALL};
+        return Unexpected{HeapSlotEntryDecodeError::BUFFER_TOO_SMALL};
     }
 
     const auto state = static_cast<HeapSlotState>(*raw_state);
     if (!IsValidHeapSlotState(state)) {
-        return {.entry = std::nullopt, .error = HeapSlotEntryDecodeError::INVALID_SLOT_STATE};
+        return Unexpected{HeapSlotEntryDecodeError::INVALID_SLOT_STATE};
     }
 
-    return HeapSlotEntryDecodeResult{
-        .entry =
-            HeapSlotEntry{
-                .tuple_offset = *tuple_offset,
-                .tuple_length = *tuple_length,
-                .state = state,
-                .aux = *aux,
-            },
-        .error = HeapSlotEntryDecodeError::NONE,
+    return HeapSlotEntry{
+        .tuple_offset = *tuple_offset,
+        .tuple_length = *tuple_length,
+        .state = state,
+        .aux = *aux,
     };
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

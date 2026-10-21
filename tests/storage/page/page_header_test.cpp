@@ -8,7 +8,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 static_assert(COMMON_PAGE_HEADER_ENCODED_SIZE == 32);
@@ -170,4 +170,4 @@ TEST(CommonPageHeaderCodecTest, RejectsUndersizedBuffersWithoutModification) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

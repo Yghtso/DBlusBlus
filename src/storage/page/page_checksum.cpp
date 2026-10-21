@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <array>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t CHECKSUM_OFFSET = detail::COMMON_PAGE_HEADER_CHECKSUM_OFFSET;
@@ -34,4 +34,4 @@ bool VerifyPageChecksum(std::span<const std::byte, PAGE_SIZE> page) noexcept {
     return stored.has_value() && *stored == ComputePageChecksum(page);
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

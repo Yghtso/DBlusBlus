@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_HEAP_PAGE_FORMAT_H_
-#define DBLUSBLUS_STORAGE_HEAP_PAGE_FORMAT_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/page/page_header.h"
 
@@ -9,7 +9,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::uint16_t HEAP_PAGE_FORMAT_VERSION = 1;
 inline constexpr std::size_t HEAP_PAGE_HEADER_OFFSET = COMMON_PAGE_HEADER_ENCODED_SIZE;
@@ -62,15 +62,11 @@ struct HeapSlotEntry {
 };
 
 enum class HeapSlotEntryDecodeError : std::uint8_t {
-    NONE,
     BUFFER_TOO_SMALL,
     INVALID_SLOT_STATE,
 };
 
-struct HeapSlotEntryDecodeResult {
-    std::optional<HeapSlotEntry> entry;
-    HeapSlotEntryDecodeError error{HeapSlotEntryDecodeError::NONE};
-};
+using HeapSlotEntryDecodeResult = Result<HeapSlotEntry, HeapSlotEntryDecodeError>;
 
 [[nodiscard]] bool EncodeHeapPageHeader(std::span<std::byte> destination,
                                         const HeapPageHeader& header) noexcept;
@@ -87,6 +83,4 @@ static_assert(HEAP_PAGE_HEADER_OFFSET + HEAP_PAGE_HEADER_ENCODED_SIZE ==
 static_assert(HEAP_PAGE_RESERVED_OFFSET + sizeof(std::uint32_t) == HEAP_PAGE_TOTAL_HEADER_SIZE);
 static_assert(HEAP_SLOT_AUX_OFFSET + sizeof(std::uint16_t) == HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_HEAP_PAGE_FORMAT_H_
+} // namespace dblusblus::storage

@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_TUPLE_CODEC_H_
-#define DBLUSBLUS_STORAGE_TUPLE_CODEC_H_
+#pragma once
 
+#include "common/result.h"
 #include "storage/tuple/tuple_layout.h"
 
 #include <algorithm>
@@ -13,7 +13,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 struct VarcharDescriptor {
     std::uint32_t payload_offset{0};
@@ -23,20 +23,12 @@ struct VarcharDescriptor {
 };
 
 enum class VarcharDescriptorCodecError : std::uint8_t {
-    NONE,
     BUFFER_TOO_SMALL,
 };
 
-struct VarcharDescriptorDecodeResult {
-    std::optional<VarcharDescriptor> descriptor;
-    VarcharDescriptorCodecError error{VarcharDescriptorCodecError::NONE};
+using VarcharDescriptorDecodeResult = Result<VarcharDescriptor, VarcharDescriptorCodecError>;
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return descriptor.has_value();
-    }
-};
-
-[[nodiscard]] VarcharDescriptorCodecError
+[[nodiscard]] Status<VarcharDescriptorCodecError>
 EncodeVarcharDescriptor(std::span<std::byte> destination,
                         const VarcharDescriptor& descriptor) noexcept;
 [[nodiscard]] VarcharDescriptorDecodeResult
@@ -89,7 +81,6 @@ using TupleValue = std::variant<std::monostate,
                                 VarcharValue>;
 
 enum class FixedScalarCodecError : std::uint8_t {
-    NONE,
     DESTINATION_TOO_SMALL,
     SOURCE_TOO_SMALL,
     TYPE_MISMATCH,
@@ -98,18 +89,11 @@ enum class FixedScalarCodecError : std::uint8_t {
     INVALID_BOOLEAN,
 };
 
-struct FixedScalarDecodeResult {
-    std::optional<TupleValue> value;
-    FixedScalarCodecError error{FixedScalarCodecError::NONE};
+using FixedScalarDecodeResult = Result<TupleValue, FixedScalarCodecError>;
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return value.has_value();
-    }
-};
-
-[[nodiscard]] FixedScalarCodecError EncodeFixedScalar(std::span<std::byte> destination,
-                                                      PhysicalType type,
-                                                      const TupleValue& value) noexcept;
+[[nodiscard]] Status<FixedScalarCodecError> EncodeFixedScalar(std::span<std::byte> destination,
+                                                              PhysicalType type,
+                                                              const TupleValue& value) noexcept;
 [[nodiscard]] FixedScalarDecodeResult DecodeFixedScalar(PhysicalType type,
                                                         std::span<const std::byte> source) noexcept;
 
@@ -143,36 +127,20 @@ enum class TupleCodecError : std::uint8_t {
     TRAILING_BYTES,
 };
 
-struct TupleEncodeResult {
-    std::optional<std::vector<std::byte>> tuple;
-    TupleCodecError error{TupleCodecError::NONE};
+// Why a tuple could not be encoded, validated, or decoded.
+struct TupleCodecFailure {
+    TupleCodecError code{TupleCodecError::MALFORMED_TUPLE};
+    // The column the failure concerns, for column-specific codes.
     std::size_t column_index{0};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return tuple.has_value();
-    }
-};
-
-struct TupleValidationResult {
-    std::optional<TupleHeader> header;
-    TupleCodecError error{TupleCodecError::NONE};
-    TupleHeaderDecodeError header_error{TupleHeaderDecodeError::NONE};
-    std::size_t column_index{0};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return header.has_value();
-    }
-};
-
-struct TupleDecodeResult {
-    std::optional<TupleValue> value;
-    TupleCodecError error{TupleCodecError::NONE};
+    // Header detail for INVALID_HEADER_METADATA.
     TupleHeaderDecodeError header_error{TupleHeaderDecodeError::NONE};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return value.has_value();
-    }
+    bool operator==(const TupleCodecFailure&) const = default;
 };
+
+using TupleEncodeResult = Result<std::vector<std::byte>, TupleCodecFailure>;
+using TupleValidationResult = Result<TupleHeader, TupleCodecFailure>;
+using TupleDecodeResult = Result<TupleValue, TupleCodecFailure>;
 
 // This owning-vector encoder is a storage construction primitive. It is intentionally not the
 // allocation model for future vectorized execution.
@@ -191,6 +159,4 @@ struct TupleDecodeResult {
 static_assert(sizeof(double) == sizeof(std::uint64_t));
 static_assert(std::numeric_limits<double>::is_iec559);
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_TUPLE_CODEC_H_
+} // namespace dblusblus::storage

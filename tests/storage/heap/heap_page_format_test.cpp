@@ -9,7 +9,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 static_assert(HEAP_PAGE_HEADER_OFFSET == 32);
@@ -148,12 +148,12 @@ TEST(HeapSlotEntryCodecTest, EmitsExactEightByteLayoutAndRoundTrips) {
     ASSERT_TRUE(EncodeHeapSlotEntry(encoded, expected));
     EXPECT_EQ(encoded, expected_bytes);
     const auto decoded = DecodeHeapSlotEntry(encoded);
-    if (!decoded.entry.has_value()) {
+    if (!decoded.Ok()) {
         ADD_FAILURE() << "slot entry decode unexpectedly failed";
         return;
     }
-    EXPECT_EQ(decoded.error, HeapSlotEntryDecodeError::NONE);
-    EXPECT_EQ(*decoded.entry, expected);
+    EXPECT_TRUE(decoded);
+    EXPECT_EQ(*decoded, expected);
 }
 
 TEST(HeapSlotEntryCodecTest, PinsEveryExplicitPersistedSlotStateCode) {
@@ -175,11 +175,11 @@ TEST(HeapSlotEntryCodecTest, PinsEveryExplicitPersistedSlotStateCode) {
         EXPECT_EQ(encoded[HEAP_SLOT_FLAGS_OFFSET + 1], std::byte{0});
 
         const auto decoded = DecodeHeapSlotEntry(encoded);
-        if (!decoded.entry.has_value()) {
+        if (!decoded.Ok()) {
             ADD_FAILURE() << "slot state decode unexpectedly failed";
             continue;
         }
-        EXPECT_EQ(decoded.entry->state, state.state);
+        EXPECT_EQ(decoded->state, state.state);
     }
 }
 
@@ -199,11 +199,11 @@ TEST(HeapSlotEntryCodecTest, SupportsUnalignedSpansAndIntegerBoundaries) {
     EXPECT_EQ(buffer.front(), padding);
     EXPECT_EQ(buffer.back(), padding);
     const auto decoded = DecodeHeapSlotEntry(unaligned);
-    if (!decoded.entry.has_value()) {
+    if (!decoded.Ok()) {
         ADD_FAILURE() << "unaligned slot entry decode unexpectedly failed";
         return;
     }
-    EXPECT_EQ(*decoded.entry, expected);
+    EXPECT_EQ(*decoded, expected);
 }
 
 TEST(HeapSlotEntryCodecTest, RejectsUndersizedAndInvalidStateWithoutModification) {
@@ -215,7 +215,7 @@ TEST(HeapSlotEntryCodecTest, RejectsUndersizedAndInvalidStateWithoutModification
 
     EXPECT_FALSE(EncodeHeapSlotEntry(undersized, HeapSlotEntry{}));
     EXPECT_EQ(buffer, original);
-    EXPECT_EQ(DecodeHeapSlotEntry(undersized).error, HeapSlotEntryDecodeError::BUFFER_TOO_SMALL);
+    EXPECT_EQ(DecodeHeapSlotEntry(undersized).Error(), HeapSlotEntryDecodeError::BUFFER_TOO_SMALL);
 
     const HeapSlotEntry invalid{.state = static_cast<HeapSlotState>(99)};
     EXPECT_FALSE(EncodeHeapSlotEntry(buffer, invalid));
@@ -225,9 +225,9 @@ TEST(HeapSlotEntryCodecTest, RejectsUndersizedAndInvalidStateWithoutModification
     ASSERT_TRUE(EncodeLittleEndian(std::span{invalid_bytes}.subspan(HEAP_SLOT_FLAGS_OFFSET, 2),
                                    std::uint16_t{99}));
     const auto decoded = DecodeHeapSlotEntry(invalid_bytes);
-    EXPECT_FALSE(decoded.entry.has_value());
-    EXPECT_EQ(decoded.error, HeapSlotEntryDecodeError::INVALID_SLOT_STATE);
+    EXPECT_FALSE(decoded.Ok());
+    EXPECT_EQ(decoded.Error(), HeapSlotEntryDecodeError::INVALID_SLOT_STATE);
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

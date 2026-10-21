@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_TUPLE_HEADER_H_
-#define DBLUSBLUS_STORAGE_TUPLE_HEADER_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 
 #include <cstddef>
@@ -8,7 +8,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 using TupleFlags = std::uint16_t;
 
@@ -54,14 +54,7 @@ enum class TupleHeaderDecodeError : std::uint8_t {
     NONZERO_RESERVED,
 };
 
-struct TupleHeaderDecodeResult {
-    std::optional<TupleHeader> header;
-    TupleHeaderDecodeError error{TupleHeaderDecodeError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return header.has_value();
-    }
-};
+using TupleHeaderDecodeResult = Result<TupleHeader, TupleHeaderDecodeError>;
 
 [[nodiscard]] bool EncodeTupleHeader(std::span<std::byte> destination,
                                      const TupleHeader& header) noexcept;
@@ -75,6 +68,4 @@ static_assert(sizeof(TupleFlags) == 2);
 static_assert(sizeof(SchemaVer) == 4);
 static_assert(TUPLE_HEADER_RESERVED_OFFSET + sizeof(std::uint32_t) == TUPLE_HEADER_ENCODED_SIZE);
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_TUPLE_HEADER_H_
+} // namespace dblusblus::storage

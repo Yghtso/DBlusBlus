@@ -3,14 +3,19 @@ add_library(dblusblus_core STATIC)
 target_sources(
     dblusblus_core
     PRIVATE
+        common/assert.cpp
+        common/assert.h
         common/crc32c.cpp
         common/crc32c.h
         common/encoding.h
+        common/result.h
         common/types.h
         storage/buffer/buffer_error.h
         storage/buffer/buffer_frame.h
         storage/buffer/buffer_pool.cpp
         storage/buffer/buffer_pool.h
+        storage/buffer/buffer_pool_inspector.cpp
+        storage/buffer/buffer_pool_inspector.h
         storage/buffer/clock_replacer.cpp
         storage/buffer/clock_replacer.h
         storage/buffer/page_guard.cpp

@@ -6,7 +6,7 @@
 #include <optional>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] PageFileError DiskFailure(PageFileOperation operation, DiskError disk_error) {
@@ -18,11 +18,11 @@ namespace {
 }
 
 [[nodiscard]] PageFileResult Failure(PageFileError error) {
-    return PageFileResult{.page_file = std::nullopt, .error = std::move(error)};
+    return Unexpected{std::move(error)};
 }
 
 [[nodiscard]] PageAllocationResult AllocationFailure(PageFileError error) {
-    return PageAllocationResult{.page_id = std::nullopt, .error = std::move(error)};
+    return Unexpected{std::move(error)};
 }
 
 void CleanupRegistration(DiskManager& disk_manager, FileId file_id) {
@@ -55,20 +55,20 @@ PageFileResult PageFile::Create(DiskManager& disk_manager,
                                 const FileSuperblock& superblock) {
     auto create = disk_manager.CreateFile(superblock.file_id, path);
     if (!create) {
-        return Failure(DiskFailure(PageFileOperation::CREATE, std::move(create.error)));
+        return Failure(DiskFailure(PageFileOperation::CREATE, std::move(create).Error()));
     }
 
     auto page_count = disk_manager.PageCount(superblock.file_id);
     if (!page_count) {
-        auto error = DiskFailure(PageFileOperation::CREATE, std::move(page_count.error));
+        auto error = DiskFailure(PageFileOperation::CREATE, std::move(page_count).Error());
         CleanupRegistration(disk_manager, superblock.file_id);
         return Failure(std::move(error));
     }
-    if (page_count.value != 0) {
+    if (page_count.Value() != 0) {
         PageFileError error{
             .code = PageFileErrorCode::UNEXPECTED_INITIAL_PAGE_COUNT,
             .operation = PageFileOperation::CREATE,
-            .actual_page_count = page_count.value,
+            .actual_page_count = page_count.Value(),
         };
         CleanupRegistration(disk_manager, superblock.file_id);
         return Failure(std::move(error));
@@ -76,15 +76,15 @@ PageFileResult PageFile::Create(DiskManager& disk_manager,
 
     auto extended = disk_manager.ExtendFile(superblock.file_id);
     if (!extended) {
-        auto error = DiskFailure(PageFileOperation::CREATE, std::move(extended.error));
+        auto error = DiskFailure(PageFileOperation::CREATE, std::move(extended).Error());
         CleanupRegistration(disk_manager, superblock.file_id);
         return Failure(std::move(error));
     }
-    if (extended.value != 0) {
+    if (extended.Value() != 0) {
         PageFileError error{
             .code = PageFileErrorCode::UNEXPECTED_SUPERBLOCK_PAGE_NUMBER,
             .operation = PageFileOperation::CREATE,
-            .actual_page_no = extended.value,
+            .actual_page_no = extended.Value(),
         };
         CleanupRegistration(disk_manager, superblock.file_id);
         return Failure(std::move(error));
@@ -102,23 +102,20 @@ PageFileResult PageFile::Create(DiskManager& disk_manager,
 
     auto write = disk_manager.WritePage(superblock_page.Id(), superblock_page.Bytes());
     if (!write) {
-        auto error = DiskFailure(PageFileOperation::CREATE, std::move(write.error));
+        auto error = DiskFailure(PageFileOperation::CREATE, std::move(write).Error());
         CleanupRegistration(disk_manager, superblock.file_id);
         return Failure(std::move(error));
     }
 
     auto sync = disk_manager.SyncFile(superblock.file_id);
     if (!sync) {
-        auto error = DiskFailure(PageFileOperation::CREATE, std::move(sync.error));
+        auto error = DiskFailure(PageFileOperation::CREATE, std::move(sync).Error());
         CleanupRegistration(disk_manager, superblock.file_id);
         return Failure(std::move(error));
     }
 
     PageFile page_file{disk_manager, superblock};
-    return PageFileResult{
-        .page_file = std::optional<PageFile>{std::move(page_file)},
-        .error = {},
-    };
+    return page_file;
 }
 
 PageFileResult PageFile::Open(DiskManager& disk_manager,
@@ -128,16 +125,16 @@ PageFileResult PageFile::Open(DiskManager& disk_manager,
                               std::optional<std::uint64_t> expected_object_id) {
     auto open = disk_manager.OpenFile(expected_file_id, path);
     if (!open) {
-        return Failure(DiskFailure(PageFileOperation::OPEN, std::move(open.error)));
+        return Failure(DiskFailure(PageFileOperation::OPEN, std::move(open).Error()));
     }
 
     auto page_count = disk_manager.PageCount(expected_file_id);
     if (!page_count) {
-        auto error = DiskFailure(PageFileOperation::OPEN, std::move(page_count.error));
+        auto error = DiskFailure(PageFileOperation::OPEN, std::move(page_count).Error());
         CleanupRegistration(disk_manager, expected_file_id);
         return Failure(std::move(error));
     }
-    if (page_count.value == 0) {
+    if (page_count.Value() == 0) {
         PageFileError error{
             .code = PageFileErrorCode::MISSING_SUPERBLOCK,
             .operation = PageFileOperation::OPEN,
@@ -150,23 +147,23 @@ PageFileResult PageFile::Open(DiskManager& disk_manager,
     Page superblock_page{PageId{.file_id = expected_file_id, .page_no = 0}};
     auto read = disk_manager.ReadPage(superblock_page.Id(), superblock_page.Bytes());
     if (!read) {
-        auto error = DiskFailure(PageFileOperation::OPEN, std::move(read.error));
+        auto error = DiskFailure(PageFileOperation::OPEN, std::move(read).Error());
         CleanupRegistration(disk_manager, expected_file_id);
         return Failure(std::move(error));
     }
 
     auto decoded = DecodeFileSuperblock(superblock_page.Bytes());
-    if (!decoded.superblock.has_value()) {
+    if (!decoded.Ok()) {
         PageFileError error{
             .code = PageFileErrorCode::SUPERBLOCK_INVALID,
             .operation = PageFileOperation::OPEN,
-            .superblock_error = decoded.error,
+            .superblock_error = decoded.Error(),
         };
         CleanupRegistration(disk_manager, expected_file_id);
         return Failure(std::move(error));
     }
 
-    const FileSuperblock superblock = *decoded.superblock;
+    const FileSuperblock superblock = *decoded;
     if (superblock.file_id != expected_file_id) {
         PageFileError error{
             .code = PageFileErrorCode::FILE_ID_MISMATCH,
@@ -199,10 +196,7 @@ PageFileResult PageFile::Open(DiskManager& disk_manager,
     }
 
     PageFile page_file{disk_manager, superblock};
-    return PageFileResult{
-        .page_file = std::optional<PageFile>{std::move(page_file)},
-        .error = {},
-    };
+    return page_file;
 }
 
 const FileSuperblock& PageFile::Superblock() const noexcept {
@@ -220,20 +214,17 @@ PageAllocationResult PageFile::AllocatePage() {
     auto extended = disk_manager_->ExtendFile(superblock_.file_id);
     if (!extended) {
         return AllocationFailure(
-            DiskFailure(PageFileOperation::ALLOCATE_PAGE, std::move(extended.error)));
+            DiskFailure(PageFileOperation::ALLOCATE_PAGE, std::move(extended).Error()));
     }
-    if (extended.value == 0) {
+    if (extended.Value() == 0) {
         return AllocationFailure(PageFileError{
             .code = PageFileErrorCode::DATA_PAGE_ZERO_ALLOCATED,
             .operation = PageFileOperation::ALLOCATE_PAGE,
-            .actual_page_no = extended.value,
+            .actual_page_no = extended.Value(),
         });
     }
 
-    return PageAllocationResult{
-        .page_id = PageId{.file_id = superblock_.file_id, .page_no = extended.value},
-        .error = {},
-    };
+    return PageId{.file_id = superblock_.file_id, .page_no = extended.Value()};
 }
 
 void PageFile::Release() noexcept {
@@ -243,4 +234,4 @@ void PageFile::Release() noexcept {
     }
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

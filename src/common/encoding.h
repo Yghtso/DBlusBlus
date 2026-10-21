@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_COMMON_ENCODING_H_
-#define DBLUSBLUS_COMMON_ENCODING_H_
+#pragma once
 
 #include "common/types.h"
 
@@ -67,6 +66,22 @@ DecodeLittleEndian(std::span<const std::byte> source) noexcept {
     }
 
     return std::bit_cast<Integer>(bits);
+}
+
+// Identifiers are stored as their raw little-endian integer.
+template <StrongIdType Id>
+[[nodiscard]] constexpr bool EncodeLittleEndian(std::span<std::byte> destination, Id id) noexcept {
+    return EncodeLittleEndian(destination, id.Value());
+}
+
+template <StrongIdType Id>
+[[nodiscard]] constexpr std::optional<Id>
+DecodeLittleEndian(std::span<const std::byte> source) noexcept {
+    const auto raw = DecodeLittleEndian<typename Id::RepType>(source);
+    if (!raw.has_value()) {
+        return std::nullopt;
+    }
+    return Id{*raw};
 }
 
 [[nodiscard]] constexpr bool EncodePageId(std::span<std::byte> destination,
@@ -141,5 +156,3 @@ DecodePageId(std::span<const std::byte> source) noexcept {
 }
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_COMMON_ENCODING_H_

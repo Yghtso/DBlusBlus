@@ -1,14 +1,14 @@
 #include "storage/heap/fsm_candidate_index.h"
 
+#include "common/assert.h"
 #include "storage/heap/fsm_page.h"
 
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] bool IsValidHeapPageNumber(PageNo page_no) noexcept {
@@ -17,84 +17,74 @@ namespace {
 
 } // namespace
 
-FsmCandidateIndexError FsmCandidateIndex::Upsert(PageNo page_no, std::uint8_t category) {
+Status<FsmCandidateIndexError> FsmCandidateIndex::Upsert(PageNo page_no, std::uint8_t category) {
     if (!IsValidHeapPageNumber(page_no)) {
-        return FsmCandidateIndexError::INVALID_PAGE_NUMBER;
+        return Unexpected{FsmCandidateIndexError::INVALID_PAGE_NUMBER};
     }
 
     const auto existing = page_categories_.find(page_no);
     if (existing == page_categories_.end()) {
         const auto [category_iterator, inserted_in_map] =
             page_categories_.emplace(page_no, category);
-        assert(inserted_in_map);
-        static_cast<void>(inserted_in_map);
+        DBLUS_ASSERT(inserted_in_map, "page was absent from the category map");
         try {
-            const auto [bucket_iterator, inserted_in_bucket] = buckets_[category].insert(page_no);
-            static_cast<void>(bucket_iterator);
-            assert(inserted_in_bucket);
-            static_cast<void>(inserted_in_bucket);
+            [[maybe_unused]] const auto [bucket_iterator, inserted_in_bucket] =
+                buckets_[category].insert(page_no);
+            DBLUS_ASSERT(inserted_in_bucket, "page was absent from its category bucket");
         } catch (...) {
             page_categories_.erase(category_iterator);
             throw;
         }
-        return FsmCandidateIndexError::NONE;
+        return {};
     }
     if (existing->second == category) {
-        assert(buckets_[category].contains(page_no));
-        return FsmCandidateIndexError::NONE;
+        DBLUS_ASSERT(buckets_[category].contains(page_no), "map and buckets agree");
+        return {};
     }
 
-    const auto [bucket_iterator, inserted_in_new_bucket] = buckets_[category].insert(page_no);
-    static_cast<void>(bucket_iterator);
-    assert(inserted_in_new_bucket);
-    static_cast<void>(inserted_in_new_bucket);
+    [[maybe_unused]] const auto [bucket_iterator, inserted_in_new_bucket] =
+        buckets_[category].insert(page_no);
+    DBLUS_ASSERT(inserted_in_new_bucket, "page was absent from its new category bucket");
     const std::size_t erased = buckets_[existing->second].erase(page_no);
-    assert(erased == 1U);
-    static_cast<void>(erased);
+    DBLUS_ASSERT(erased == 1U, "page was in its old category bucket");
     existing->second = category;
-    return FsmCandidateIndexError::NONE;
+    return {};
 }
 
-FsmCandidateIndexError FsmCandidateIndex::Remove(PageNo page_no) {
+Status<FsmCandidateIndexError> FsmCandidateIndex::Remove(PageNo page_no) {
     if (!IsValidHeapPageNumber(page_no)) {
-        return FsmCandidateIndexError::INVALID_PAGE_NUMBER;
+        return Unexpected{FsmCandidateIndexError::INVALID_PAGE_NUMBER};
     }
 
     const auto existing = page_categories_.find(page_no);
     if (existing == page_categories_.end()) {
-        return FsmCandidateIndexError::NONE;
+        return {};
     }
 
     const std::size_t erased = buckets_[existing->second].erase(page_no);
-    assert(erased == 1U);
-    static_cast<void>(erased);
+    DBLUS_ASSERT(erased == 1U, "page was in its category bucket");
     page_categories_.erase(existing);
-    return FsmCandidateIndexError::NONE;
+    return {};
 }
 
 FsmCandidateResult
 FsmCandidateIndex::FindCandidate(std::size_t required_tuple_bytes) const noexcept {
     const auto minimum_category = MinimumFsmCategoryForTupleBytes(required_tuple_bytes);
-    if (!minimum_category.category.has_value()) {
-        assert(minimum_category.error == FsmTupleRequestError::TUPLE_TOO_LARGE);
-        return {
-            .page_no = std::nullopt,
-            .error = FsmCandidateIndexError::TUPLE_REQUEST_TOO_LARGE,
-        };
+    if (!minimum_category.Ok()) {
+        DBLUS_ASSERT(minimum_category.Error() == FsmTupleRequestError::TUPLE_TOO_LARGE,
+                     "TUPLE_TOO_LARGE is the only tuple-request error");
+        return Unexpected{FsmCandidateIndexError::TUPLE_REQUEST_TOO_LARGE};
     }
 
-    const std::size_t first_category = minimum_category.category.value_or(0);
+    const std::size_t first_category = *minimum_category;
     constexpr std::size_t maximum_category = std::numeric_limits<std::uint8_t>::max();
     for (std::size_t category = first_category; category <= maximum_category; ++category) {
         if (!buckets_[category].empty()) {
-            return {
-                .page_no = *buckets_[category].begin(),
-                .error = FsmCandidateIndexError::NONE,
-            };
+            return std::optional<PageNo>{*buckets_[category].begin()};
         }
     }
 
-    return {};
+    return std::optional<PageNo>{};
 }
 
 void FsmCandidateIndex::Clear() noexcept {
@@ -108,4 +98,4 @@ std::size_t FsmCandidateIndex::Size() const noexcept {
     return page_categories_.size();
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

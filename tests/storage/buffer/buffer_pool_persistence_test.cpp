@@ -11,7 +11,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using buffer_test::InitializeHeap;
@@ -19,7 +19,7 @@ using buffer_test::Must;
 using buffer_test::TemporaryDirectory;
 using buffer_test::ValidateHeap;
 
-constexpr FileId FILE_ID = 11;
+constexpr FileId FILE_ID{11};
 
 // A valid 200-byte heap test tuple whose VARCHAR payload bytes are a key-specific pattern.
 [[nodiscard]] std::vector<std::byte> TupleFor(std::uint32_t key) {
@@ -35,9 +35,9 @@ constexpr FileId FILE_ID = 11;
 // once, shuts down durably, then reopens with a fresh DiskManager and pool and checks every tuple.
 TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndReopen) {
     TemporaryDirectory directory;
-    ASSERT_TRUE(directory.valid());
+    ASSERT_TRUE(directory.Valid());
     const auto path = directory.File("relation.heap");
-    constexpr std::uint32_t TUPLE_COUNT = 600;
+    constexpr std::uint32_t tuple_count = 600;
     std::vector<Rid> rids;
 
     {
@@ -54,24 +54,24 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
         ASSERT_TRUE(pool.RegisterFile(FILE_ID, ValidateHeap));
 
         PageId current{};
-        for (std::uint32_t key = 0; key < TUPLE_COUNT; ++key) {
+        for (std::uint32_t key = 0; key < tuple_count; ++key) {
             const auto tuple = TupleFor(key);
             if (current.file_id != INVALID_FILE_ID) {
                 auto guard = Must(pool.FetchWrite(current));
                 ASSERT_TRUE(guard.Valid());
                 const auto result = heap_test::TestHeapPage(guard.MutablePage()).Insert(tuple);
-                if (result.rid.has_value()) {
+                if (result.Ok()) {
                     guard.MarkDirty();
-                    rids.push_back(result.rid.value_or(Rid{}));
+                    rids.push_back(result.AsOptional().value_or(Rid{}));
                     continue;
                 }
             }
             auto created = Must(pool.NewPage(FILE_ID, InitializeHeap));
             ASSERT_TRUE(created.Valid());
             const auto result = heap_test::TestHeapPage(created.MutablePage()).Insert(tuple);
-            ASSERT_TRUE(result.rid.has_value());
+            ASSERT_TRUE(result.Ok());
             created.MarkDirty();
-            rids.push_back(result.rid.value_or(Rid{}));
+            rids.push_back(result.AsOptional().value_or(Rid{}));
             current = created.Id();
         }
         ASSERT_GT(current.page_no, 10U);
@@ -84,7 +84,7 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
     ASSERT_TRUE(file);
     BufferPool pool{disk, BufferPoolOptions{.frame_count = 3}};
     ASSERT_TRUE(pool.RegisterFile(FILE_ID, ValidateHeap));
-    for (std::uint32_t key = 0; key < TUPLE_COUNT; ++key) {
+    for (std::uint32_t key = 0; key < tuple_count; ++key) {
         const Rid rid = rids[key];
         auto guard = Must(pool.FetchRead(rid.page));
         ASSERT_TRUE(guard.Valid()) << "page " << rid.page.page_no;
@@ -97,4 +97,4 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

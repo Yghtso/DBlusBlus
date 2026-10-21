@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_PAGE_FILE_H_
-#define DBLUSBLUS_STORAGE_PAGE_FILE_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/disk/disk_manager.h"
 #include "storage/file/file_superblock.h"
@@ -9,7 +9,7 @@
 #include <filesystem>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class PageFileOperation : std::uint8_t {
     CREATE,
@@ -18,7 +18,6 @@ enum class PageFileOperation : std::uint8_t {
 };
 
 enum class PageFileErrorCode : std::uint8_t {
-    NONE,
     DISK_ERROR,
     SUPERBLOCK_ENCODING_FAILED,
     SUPERBLOCK_INVALID,
@@ -33,7 +32,7 @@ enum class PageFileErrorCode : std::uint8_t {
 };
 
 struct PageFileError {
-    PageFileErrorCode code{PageFileErrorCode::NONE};
+    PageFileErrorCode code{PageFileErrorCode::DISK_ERROR};
     PageFileOperation operation{PageFileOperation::OPEN};
     DiskError disk_error{};
     FileSuperblockDecodeError superblock_error{FileSuperblockDecodeError::NONE};
@@ -48,8 +47,8 @@ struct PageFileError {
 };
 
 class PageFile;
-struct PageFileResult;
-struct PageAllocationResult;
+using PageFileResult = Result<PageFile, PageFileError>;
+using PageAllocationResult = Result<PageId, PageFileError>;
 
 // Move-only RAII controller for one FileId registration held by a caller-owned DiskManager.
 //
@@ -94,24 +93,4 @@ class PageFile {
     FileSuperblock superblock_{};
 };
 
-struct PageFileResult {
-    std::optional<PageFile> page_file;
-    PageFileError error;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return page_file.has_value();
-    }
-};
-
-struct PageAllocationResult {
-    std::optional<PageId> page_id;
-    PageFileError error;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return page_id.has_value();
-    }
-};
-
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_PAGE_FILE_H_
+} // namespace dblusblus::storage

@@ -1,12 +1,11 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_CLOCK_REPLACER_H_
-#define DBLUSBLUS_STORAGE_BUFFER_CLOCK_REPLACER_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 using FrameId = std::uint32_t;
 
@@ -62,6 +61,4 @@ class ClockReplacer {
     std::size_t last_pass_visits_{0};
 };
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_CLOCK_REPLACER_H_
+} // namespace dblusblus::storage

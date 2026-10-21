@@ -1,7 +1,7 @@
-#ifndef DBLUSBLUS_TESTS_STORAGE_BUFFER_TEST_SUPPORT_H_
-#define DBLUSBLUS_TESTS_STORAGE_BUFFER_TEST_SUPPORT_H_
+#pragma once
 
 #include "storage/buffer/buffer_pool.h"
+#include "storage/buffer/buffer_pool_inspector.h"
 #include "storage/buffer/page_io.h"
 #include "storage/disk/disk_manager.h"
 #include "storage/file/file_superblock.h"
@@ -10,6 +10,7 @@
 #include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
 #include "storage/page/page_checksum.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -30,39 +31,9 @@
 #include <utility>
 #include <vector>
 
-namespace dblusblus::buffer_test {
+namespace dblusblus::storage::buffer_test {
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{'/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u',
-                                 's', '-', 'b', 'u', 'f', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0'};
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-    TemporaryDirectory(TemporaryDirectory&&) = delete;
-    TemporaryDirectory& operator=(TemporaryDirectory&&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 enum class WriteFault : std::uint8_t {
     NONE,
@@ -92,16 +63,16 @@ class FaultInjectingPageIo final : public PageIo {
         fail_next_extend_ = true;
     }
 
-    [[nodiscard]] std::size_t reads() const noexcept {
+    [[nodiscard]] std::size_t ReadCount() const noexcept {
         return reads_.load();
     }
-    [[nodiscard]] std::size_t writes() const noexcept {
+    [[nodiscard]] std::size_t WriteCount() const noexcept {
         return writes_.load();
     }
-    [[nodiscard]] std::size_t syncs() const noexcept {
+    [[nodiscard]] std::size_t SyncCount() const noexcept {
         return syncs_.load();
     }
-    [[nodiscard]] std::size_t extends() const noexcept {
+    [[nodiscard]] std::size_t ExtendCount() const noexcept {
         return extends_.load();
     }
 
@@ -152,7 +123,7 @@ class FaultInjectingPageIo final : public PageIo {
         if (TakeFlag(fail_next_extend_)) {
             const auto status = Injected(PageId{.file_id = file_id, .page_no = INVALID_PAGE_NO},
                                          DiskOperation::EXTEND_FILE);
-            return {.success = false, .value = 0, .error = status.error};
+            return Unexpected{status.Error()};
         }
         return inner_.ExtendFile(file_id);
     }
@@ -164,14 +135,13 @@ class FaultInjectingPageIo final : public PageIo {
     }
 
     [[nodiscard]] static DiskStatus Injected(PageId page_id, DiskOperation operation) {
-        return {.success = false,
-                .error = DiskError{.code = DiskErrorCode::SYSTEM_ERROR,
-                                   .operation = operation,
-                                   .file_id = page_id.file_id,
-                                   .page_no = page_id.page_no,
-                                   .path = {},
-                                   .system_error = EIO,
-                                   .message = "injected fault"}};
+        return Unexpected{DiskError{.code = DiskErrorCode::SYSTEM_ERROR,
+                                    .operation = operation,
+                                    .file_id = page_id.file_id,
+                                    .page_no = page_id.page_no,
+                                    .path = {},
+                                    .system_error = EIO,
+                                    .message = "injected fault"}};
     }
 
     DiskPageIo inner_;
@@ -257,7 +227,7 @@ inline PageValidationOutcome ValidateHeap(Page& page) {
 }
 
 inline bool InitializeHeap(Page& page) {
-    return heap_test::TestHeapPage(page).Initialize();
+    return heap_test::TestHeapPage(page).Initialize().Ok();
 }
 
 // Spin (yielding) until a predicate over observable pool state holds. State-based, not
@@ -269,7 +239,7 @@ void WaitFor(Predicate&& predicate) {
     }
 }
 
-inline constexpr FileId HEAP_FILE_ID = 7;
+inline constexpr FileId HEAP_FILE_ID{7};
 
 // One registered heap file with a DiskManager, PageFile, and fault-injecting I/O.
 class HeapFileFixture {
@@ -277,7 +247,7 @@ class HeapFileFixture {
     HeapFileFixture() : io_(disk_) {}
 
     [[nodiscard]] bool Create(FileId file_id = HEAP_FILE_ID) {
-        if (!directory_.valid()) {
+        if (!directory_.Valid()) {
             return false;
         }
         path_ = directory_.File("heap.dat");
@@ -288,10 +258,10 @@ class HeapFileFixture {
                                                        .page_lsn = INVALID_LSN,
                                                        .object_id = 1,
                                                        .creation_epoch = 1});
-        if (!created.page_file.has_value()) {
+        if (!created.Ok()) {
             return false;
         }
-        page_file_.emplace(std::move(*created.page_file));
+        page_file_.emplace(std::move(*created));
         file_id_ = file_id;
         return true;
     }
@@ -304,10 +274,10 @@ class HeapFileFixture {
             return std::nullopt;
         }
         const auto allocated = page_file_->AllocatePage();
-        if (!allocated.page_id.has_value()) {
+        if (!allocated.Ok()) {
             return std::nullopt;
         }
-        Page page{*allocated.page_id};
+        Page page{*allocated};
         if (!heap_test::TestHeapPage(page).Initialize()) {
             return std::nullopt;
         }
@@ -334,16 +304,16 @@ class HeapFileFixture {
         return page;
     }
 
-    [[nodiscard]] DiskManager& disk() noexcept {
+    [[nodiscard]] DiskManager& Disk() noexcept {
         return disk_;
     }
-    [[nodiscard]] FaultInjectingPageIo& io() noexcept {
+    [[nodiscard]] FaultInjectingPageIo& Io() noexcept {
         return io_;
     }
-    [[nodiscard]] FileId file_id() const noexcept {
+    [[nodiscard]] FileId TestFileId() const noexcept {
         return file_id_;
     }
-    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept {
         return path_;
     }
     void ClosePageFile() {
@@ -361,7 +331,7 @@ class HeapFileFixture {
 
 // Non-optional accessors so tests do not dereference unchecked optionals.
 [[nodiscard]] inline PageTableSnapshot EntryOf(const BufferPool& pool, PageId page_id) {
-    auto entry = pool.InspectPage(page_id);
+    auto entry = BufferPoolInspector{pool}.InspectPage(page_id);
     if (!entry.has_value()) {
         ADD_FAILURE() << "page " << page_id.page_no << " has no page-table entry";
         return {};
@@ -392,17 +362,15 @@ class HeapFileFixture {
 // Unwraps a successful fetch; records a failure and returns an inert guard otherwise.
 template <typename Guard>
 [[nodiscard]] Guard Must(BufferResult<Guard>&& result) {
-    if (!result.value.has_value()) {
-        ADD_FAILURE() << "BufferPool operation failed: " << result.error.message;
+    if (!result.Ok()) {
+        ADD_FAILURE() << "BufferPool operation failed: " << result.Error().message;
         return Guard{};
     }
-    return std::move(*result.value);
+    return std::move(*result);
 }
 
 [[nodiscard]] inline PageId Pid(PageNo page_no) {
     return PageId{.file_id = HEAP_FILE_ID, .page_no = page_no};
 }
 
-} // namespace dblusblus::buffer_test
-
-#endif // DBLUSBLUS_TESTS_STORAGE_BUFFER_TEST_SUPPORT_H_
+} // namespace dblusblus::storage::buffer_test

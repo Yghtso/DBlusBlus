@@ -16,7 +16,7 @@
 #include <unistd.h>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr mode_t PAGE_FILE_MODE = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
@@ -40,21 +40,21 @@ constexpr mode_t PAGE_FILE_MODE = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
 }
 
 [[nodiscard]] DiskStatus SuccessStatus() noexcept {
-    return DiskStatus{.success = true, .error = {}};
+    return {};
 }
 
 [[nodiscard]] DiskStatus FailureStatus(DiskError error) {
-    return DiskStatus{.success = false, .error = std::move(error)};
+    return Unexpected{std::move(error)};
 }
 
-template <typename Value>
-[[nodiscard]] DiskResult<Value> SuccessResult(Value value) noexcept {
-    return DiskResult<Value>{.success = true, .value = value, .error = {}};
+template <typename T>
+[[nodiscard]] DiskResult<T> SuccessResult(T value) noexcept {
+    return value;
 }
 
-template <typename Value>
-[[nodiscard]] DiskResult<Value> FailureResult(DiskError&& error) {
-    return DiskResult<Value>{.success = false, .value = {}, .error = std::move(error)};
+template <typename T>
+[[nodiscard]] DiskResult<T> FailureResult(DiskError error) {
+    return Unexpected{std::move(error)};
 }
 
 [[nodiscard]] int OpenWithRetry(const std::filesystem::path& path, int flags, mode_t mode) {
@@ -198,7 +198,7 @@ DiskStatus DiskManager::OpenFile(FileId file_id, const std::filesystem::path& pa
                                        system_error));
     }
 
-    struct stat status{};
+    struct stat status {};
     if (FstatWithRetry(descriptor, status) < 0) {
         const int system_error = errno;
         static_cast<void>(CloseDescriptor(descriptor));
@@ -262,7 +262,7 @@ DiskResult<std::uint64_t> DiskManager::FileSize(FileId file_id) const {
                                                       "FileId is not registered"));
     }
 
-    struct stat status{};
+    struct stat status {};
     if (FstatWithRetry(file->descriptor, status) < 0) {
         const int system_error = errno;
         return FailureResult<std::uint64_t>(MakeError(DiskErrorCode::SYSTEM_ERROR,
@@ -287,9 +287,9 @@ DiskResult<std::uint64_t> DiskManager::FileSize(FileId file_id) const {
 DiskResult<PageNo> DiskManager::PageCount(FileId file_id) const {
     auto size = FileSize(file_id);
     if (!size) {
-        return FailureResult<PageNo>(std::move(size.error));
+        return FailureResult<PageNo>(std::move(size).Error());
     }
-    return SuccessResult(static_cast<PageNo>(size.value / PAGE_SIZE));
+    return SuccessResult(static_cast<PageNo>(size.Value() / PAGE_SIZE));
 }
 
 DiskStatus DiskManager::ReadPage(PageId page_id, std::span<std::byte, PAGE_SIZE> output) const {
@@ -305,7 +305,7 @@ DiskStatus DiskManager::ReadPage(PageId page_id, std::span<std::byte, PAGE_SIZE>
     }
     const auto offset = PageOffset(page_id, file->path, DiskOperation::READ_PAGE);
     if (!offset) {
-        return FailureStatus(offset.error);
+        return FailureStatus(offset.Error());
     }
 
     std::array<std::byte, PAGE_SIZE> page{};
@@ -314,7 +314,7 @@ DiskStatus DiskManager::ReadPage(PageId page_id, std::span<std::byte, PAGE_SIZE>
         const auto result = ::pread(file->descriptor,
                                     page.data() + transferred,
                                     PAGE_SIZE - transferred,
-                                    offset.value + static_cast<off_t>(transferred));
+                                    offset.Value() + static_cast<off_t>(transferred));
         if (result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -361,16 +361,16 @@ DiskStatus DiskManager::WritePage(PageId page_id,
     }
     const auto offset = PageOffset(page_id, file->path, DiskOperation::WRITE_PAGE);
     if (!offset) {
-        return FailureStatus(offset.error);
+        return FailureStatus(offset.Error());
     }
     const auto page_count = PageCount(page_id.file_id);
     if (!page_count) {
-        auto error = page_count.error;
+        auto error = page_count.Error();
         error.operation = DiskOperation::WRITE_PAGE;
         error.page_no = page_id.page_no;
         return FailureStatus(std::move(error));
     }
-    if (page_id.page_no >= page_count.value) {
+    if (page_id.page_no >= page_count.Value()) {
         return FailureStatus(MakeError(DiskErrorCode::PAGE_NOT_FOUND,
                                        DiskOperation::WRITE_PAGE,
                                        page_id.file_id,
@@ -385,7 +385,7 @@ DiskStatus DiskManager::WritePage(PageId page_id,
         const auto result = ::pwrite(file->descriptor,
                                      data.data() + transferred,
                                      PAGE_SIZE - transferred,
-                                     offset.value + static_cast<off_t>(transferred));
+                                     offset.Value() + static_cast<off_t>(transferred));
         if (result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -426,11 +426,11 @@ DiskResult<PageNo> DiskManager::ExtendFile(FileId file_id) {
 
     const auto page_count = PageCount(file_id);
     if (!page_count) {
-        auto error = page_count.error;
+        auto error = page_count.Error();
         error.operation = DiskOperation::EXTEND_FILE;
         return FailureResult<PageNo>(std::move(error));
     }
-    if (page_count.value >
+    if (page_count.Value() >
         (static_cast<PageNo>(std::numeric_limits<off_t>::max()) / PAGE_SIZE) - 1U) {
         return FailureResult<PageNo>(MakeError(DiskErrorCode::OFFSET_OVERFLOW,
                                                DiskOperation::EXTEND_FILE,
@@ -439,7 +439,7 @@ DiskResult<PageNo> DiskManager::ExtendFile(FileId file_id) {
                                                "extended file size exceeds POSIX off_t range"));
     }
 
-    const auto new_size = static_cast<off_t>((page_count.value + 1U) * PAGE_SIZE);
+    const auto new_size = static_cast<off_t>((page_count.Value() + 1U) * PAGE_SIZE);
     if (FtruncateWithRetry(file->descriptor, new_size) < 0) {
         const int system_error = errno;
         return FailureResult<PageNo>(MakeError(DiskErrorCode::SYSTEM_ERROR,
@@ -449,7 +449,7 @@ DiskResult<PageNo> DiskManager::ExtendFile(FileId file_id) {
                                                "ftruncate failed",
                                                system_error));
     }
-    return SuccessResult(page_count.value);
+    return SuccessResult(page_count.Value());
 }
 
 DiskStatus DiskManager::SyncFile(FileId file_id) const {
@@ -473,4 +473,4 @@ DiskStatus DiskManager::SyncFile(FileId file_id) const {
     return SuccessStatus();
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

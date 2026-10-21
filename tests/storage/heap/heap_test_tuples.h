@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_TESTS_STORAGE_HEAP_HEAP_TEST_TUPLES_H_
-#define DBLUSBLUS_TESTS_STORAGE_HEAP_HEAP_TEST_TUPLES_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/heap/heap_page.h"
@@ -15,13 +14,13 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus::heap_test {
+namespace dblusblus::storage::heap_test {
 
 // Heap pages validate every retained tuple under a schema, so heap tests store real tuples.
 // The test relation has one NOT NULL VARCHAR column: a 48-byte header, a 1-byte null bitmap,
 // an 8-byte VARCHAR descriptor, and then the payload. Any size from TEST_TUPLE_MIN_SIZE up to
 // the inline limit is reachable by choosing the payload length.
-inline constexpr SchemaVer TEST_SCHEMA_VERSION = 1;
+inline constexpr SchemaVer TEST_SCHEMA_VERSION{1};
 inline constexpr std::size_t TEST_TUPLE_MIN_SIZE = 57;
 
 [[nodiscard]] inline std::span<const TuplePhysicalLayout> TestTupleLayouts() {
@@ -30,11 +29,11 @@ inline constexpr std::size_t TEST_TUPLE_MIN_SIZE = 57;
             PhysicalColumnSpec{.type = PhysicalType::VARCHAR, .nullable = false},
         };
         auto built = BuildTuplePhysicalLayout(columns, TEST_SCHEMA_VERSION);
-        if (!built.layout.has_value()) {
+        if (!built.Ok()) {
             ADD_FAILURE() << "test tuple layout unexpectedly failed to build";
             return std::vector<TuplePhysicalLayout>{};
         }
-        return std::vector<TuplePhysicalLayout>{*built.layout};
+        return std::vector<TuplePhysicalLayout>{*built};
     }();
     return layouts;
 }
@@ -63,11 +62,11 @@ MakeTestTuple(std::size_t size,
     const std::vector<std::byte> payload(size - TEST_TUPLE_MIN_SIZE, fill);
     const std::array values{TupleValue{VarcharValue{.bytes = payload}}};
     auto encoded = EncodeTuple(TestTupleLayouts().front(), metadata, values);
-    if (!encoded.tuple.has_value() || encoded.tuple->size() != size) {
+    if (!encoded.Ok() || encoded->size() != size) {
         ADD_FAILURE() << "test tuple encoding unexpectedly failed";
         return {};
     }
-    return std::move(*encoded.tuple);
+    return std::move(*encoded);
 }
 
 // Writes a valid test tuple of `size` bytes at `offset` without touching the slot directory.
@@ -82,6 +81,4 @@ inline void WriteTestTuple(Page& page,
     std::ranges::copy(tuple, page.Bytes().begin() + static_cast<std::ptrdiff_t>(offset));
 }
 
-} // namespace dblusblus::heap_test
-
-#endif // DBLUSBLUS_TESTS_STORAGE_HEAP_HEAP_TEST_TUPLES_H_
+} // namespace dblusblus::storage::heap_test

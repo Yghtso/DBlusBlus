@@ -6,11 +6,11 @@
 #include <cstddef>
 #include <gtest/gtest.h>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 TEST(PageChecksumTest, TreatsChecksumFieldAsZeroAndStoresLittleEndian) {
-    Page page{PageId{.file_id = 1, .page_no = 1}};
+    Page page{PageId{.file_id = FileId{1}, .page_no = 1}};
     page.Bytes()[100] = std::byte{0x42};
     std::array<std::byte, PAGE_SIZE> zeroed{};
     std::ranges::copy(page.Bytes(), zeroed.begin());
@@ -26,7 +26,7 @@ TEST(PageChecksumTest, TreatsChecksumFieldAsZeroAndStoresLittleEndian) {
 }
 
 TEST(PageChecksumTest, DetectsAnyChangedByte) {
-    Page page{PageId{.file_id = 1, .page_no = 1}};
+    Page page{PageId{.file_id = FileId{1}, .page_no = 1}};
     FinalizePageChecksum(page.Bytes());
     ASSERT_TRUE(VerifyPageChecksum(page.Bytes()));
     page.Bytes()[PAGE_SIZE - 1U] = std::byte{1};
@@ -39,4 +39,4 @@ TEST(PageChecksumTest, AllZeroPageDoesNotVerify) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -1,5 +1,6 @@
 #include "storage/heap/fsm_page.h"
 
+#include "common/assert.h"
 #include "common/encoding.h"
 
 #include <algorithm>
@@ -10,7 +11,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t FIRST_HEAP_PAGE_NO_OFFSET = 0;
@@ -42,17 +43,9 @@ constexpr std::size_t FSM_CATEGORY_MAX = std::numeric_limits<std::uint8_t>::max(
            (std::numeric_limits<PageNo>::max() - 1U) - final_entry_offset;
 }
 
-[[nodiscard]] FsmPageValidationResult
-ValidationFailure(FsmPageValidationError error,
-                  std::optional<CommonPageHeader> common_header,
-                  std::optional<FsmPageHeader> fsm_header = std::nullopt,
-                  std::size_t entry_index = 0) noexcept {
-    return {
-        .common_header = common_header,
-        .fsm_header = fsm_header,
-        .error = error,
-        .entry_index = entry_index,
-    };
+[[nodiscard]] FsmPageValidationResult ValidationFailure(FsmPageValidationError error,
+                                                        std::size_t entry_index = 0) noexcept {
+    return Unexpected{FsmPageValidationFailure{.code = error, .entry_index = entry_index}};
 }
 
 } // namespace
@@ -77,42 +70,32 @@ std::size_t FsmCategoryMinimumUsableBytes(std::uint8_t category) noexcept {
 FsmMinimumCategoryResult
 MinimumFsmCategoryForTupleBytes(std::size_t required_tuple_bytes) noexcept {
     if (required_tuple_bytes > FSM_MAX_USABLE_INSERTION_BYTES) {
-        return {
-            .category = std::nullopt,
-            .error = FsmTupleRequestError::TUPLE_TOO_LARGE,
-        };
+        return Unexpected{FsmTupleRequestError::TUPLE_TOO_LARGE};
     }
     if (required_tuple_bytes == 0) {
-        return {.category = std::uint8_t{0}};
+        return std::uint8_t{0};
     }
 
     const std::size_t category =
         (((required_tuple_bytes - 1U) * FSM_CATEGORY_MAX) / FSM_MAX_USABLE_INSERTION_BYTES) + 1U;
-    return {.category = static_cast<std::uint8_t>(category)};
+    return static_cast<std::uint8_t>(category);
 }
 
 FsmPageMappingResult FsmLocationForHeapPage(PageNo heap_page_no) noexcept {
     if (heap_page_no == 0 || heap_page_no == INVALID_PAGE_NO) {
-        return {
-            .location = std::nullopt,
-            .error = FsmPageMappingError::INVALID_HEAP_PAGE_NUMBER,
-        };
+        return Unexpected{FsmPageMappingError::INVALID_HEAP_PAGE_NUMBER};
     }
 
     const PageNo heap_data_index = heap_page_no - 1U;
     const PageNo fsm_page_index = heap_data_index / FSM_PAGE_ENTRY_CAPACITY;
     if (fsm_page_index == std::numeric_limits<PageNo>::max()) {
-        return {.location = std::nullopt, .error = FsmPageMappingError::OVERFLOW};
+        return Unexpected{FsmPageMappingError::OVERFLOW};
     }
     const PageNo fsm_page_no = 1U + fsm_page_index;
     const auto entry_index = static_cast<std::uint16_t>(heap_data_index % FSM_PAGE_ENTRY_CAPACITY);
-    return {
-        .location =
-            FsmEntryLocation{
-                .fsm_page_no = fsm_page_no,
-                .entry_index = entry_index,
-            },
-        .error = FsmPageMappingError::NONE,
+    return FsmEntryLocation{
+        .fsm_page_no = fsm_page_no,
+        .entry_index = entry_index,
     };
 }
 
@@ -172,13 +155,13 @@ FsmPage::FsmPage(Page& page) noexcept : page_(&page) {}
 FsmPageInitializeResult FsmPage::Initialize(const FsmPageInitialization& initialization) noexcept {
     PageNo first_heap_page_no = 0;
     if (page_->Id().page_no == 0 || page_->Id().page_no == INVALID_PAGE_NO) {
-        return {.error = FsmPageInitializeError::INVALID_FSM_PAGE_NUMBER};
+        return Unexpected{FsmPageInitializeError::INVALID_FSM_PAGE_NUMBER};
     }
     if (!FirstHeapPageForFsmPage(page_->Id().page_no, first_heap_page_no)) {
-        return {.error = FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW};
+        return Unexpected{FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW};
     }
     if (initialization.entry_count > FSM_PAGE_ENTRY_CAPACITY) {
-        return {.error = FsmPageInitializeError::ENTRY_COUNT_OUT_OF_RANGE};
+        return Unexpected{FsmPageInitializeError::ENTRY_COUNT_OUT_OF_RANGE};
     }
 
     const CommonPageHeader common_header{
@@ -198,14 +181,14 @@ FsmPageInitializeResult FsmPage::Initialize(const FsmPageInitialization& initial
         .reserved32 = 0,
     };
     if (!InitializedRangeFits(fsm_header)) {
-        return {.error = FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW};
+        return Unexpected{FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW};
     }
     std::array<std::byte, COMMON_PAGE_HEADER_ENCODED_SIZE> encoded_common_header{};
     std::array<std::byte, FSM_PAGE_HEADER_ENCODED_SIZE> encoded_fsm_header{};
-    if (!EncodeCommonPageHeader(encoded_common_header, common_header) ||
-        !EncodeFsmPageHeader(encoded_fsm_header, fsm_header)) {
-        return {.error = FsmPageInitializeError::ENCODING_FAILED};
-    }
+    // The buffers are sized exactly for their headers, so encoding cannot fail.
+    const bool encoded = EncodeCommonPageHeader(encoded_common_header, common_header) &&
+                         EncodeFsmPageHeader(encoded_fsm_header, fsm_header);
+    DBLUS_CHECK(encoded, "FSM page headers must fit their exact-size buffers");
 
     auto page_bytes = page_->Bytes();
     std::ranges::fill(page_bytes, std::byte{0});
@@ -223,112 +206,87 @@ std::optional<FsmPageHeader> FsmPage::Header() const noexcept {
 FsmPageValidationResult FsmPage::Validate() const noexcept {
     const auto common_header = page_->DecodeHeader();
     if (!common_header.has_value()) {
-        return ValidationFailure(FsmPageValidationError::COMMON_HEADER_DECODE_FAILED, std::nullopt);
+        return ValidationFailure(FsmPageValidationError::COMMON_HEADER_DECODE_FAILED);
     }
     if (common_header->page_type != PageType::FSM_DATA) {
-        return ValidationFailure(FsmPageValidationError::WRONG_PAGE_TYPE, common_header);
+        return ValidationFailure(FsmPageValidationError::WRONG_PAGE_TYPE);
     }
     if (common_header->page_no != page_->Id().page_no) {
-        return ValidationFailure(FsmPageValidationError::WRONG_PAGE_NUMBER, common_header);
+        return ValidationFailure(FsmPageValidationError::WRONG_PAGE_NUMBER);
     }
     if (common_header->header_size != FSM_PAGE_TOTAL_HEADER_SIZE) {
-        return ValidationFailure(FsmPageValidationError::WRONG_HEADER_SIZE, common_header);
+        return ValidationFailure(FsmPageValidationError::WRONG_HEADER_SIZE);
     }
     if (common_header->format_version != FSM_PAGE_FORMAT_VERSION) {
-        return ValidationFailure(FsmPageValidationError::UNSUPPORTED_FORMAT_VERSION, common_header);
+        return ValidationFailure(FsmPageValidationError::UNSUPPORTED_FORMAT_VERSION);
     }
     if (common_header->flags != 0) {
-        return ValidationFailure(FsmPageValidationError::NONZERO_COMMON_FLAGS, common_header);
+        return ValidationFailure(FsmPageValidationError::NONZERO_COMMON_FLAGS);
     }
     if (common_header->reserved16 != 0) {
-        return ValidationFailure(FsmPageValidationError::NONZERO_COMMON_RESERVED, common_header);
+        return ValidationFailure(FsmPageValidationError::NONZERO_COMMON_RESERVED);
     }
 
     const auto fsm_header = Header();
     if (!fsm_header.has_value()) {
-        return ValidationFailure(FsmPageValidationError::FSM_HEADER_DECODE_FAILED, common_header);
+        return ValidationFailure(FsmPageValidationError::FSM_HEADER_DECODE_FAILED);
     }
     if (fsm_header->reserved16 != 0 || fsm_header->reserved32 != 0) {
-        return ValidationFailure(
-            FsmPageValidationError::NONZERO_FSM_RESERVED, common_header, fsm_header);
+        return ValidationFailure(FsmPageValidationError::NONZERO_FSM_RESERVED);
     }
     if (page_->Id().page_no == 0 || page_->Id().page_no == INVALID_PAGE_NO) {
-        return ValidationFailure(
-            FsmPageValidationError::INVALID_FSM_PAGE_NUMBER, common_header, fsm_header);
+        return ValidationFailure(FsmPageValidationError::INVALID_FSM_PAGE_NUMBER);
     }
 
     PageNo expected_first_heap_page_no = 0;
     if (!FirstHeapPageForFsmPage(page_->Id().page_no, expected_first_heap_page_no)) {
-        return ValidationFailure(
-            FsmPageValidationError::FIRST_HEAP_PAGE_OVERFLOW, common_header, fsm_header);
+        return ValidationFailure(FsmPageValidationError::FIRST_HEAP_PAGE_OVERFLOW);
     }
     if (fsm_header->first_heap_page_no != expected_first_heap_page_no) {
-        return ValidationFailure(
-            FsmPageValidationError::FIRST_HEAP_PAGE_MISMATCH, common_header, fsm_header);
+        return ValidationFailure(FsmPageValidationError::FIRST_HEAP_PAGE_MISMATCH);
     }
     if (fsm_header->entry_count > FSM_PAGE_ENTRY_CAPACITY) {
-        return ValidationFailure(
-            FsmPageValidationError::ENTRY_COUNT_OUT_OF_RANGE, common_header, fsm_header);
+        return ValidationFailure(FsmPageValidationError::ENTRY_COUNT_OUT_OF_RANGE);
     }
     if (!InitializedRangeFits(*fsm_header)) {
-        return ValidationFailure(
-            FsmPageValidationError::INITIALIZED_HEAP_RANGE_OVERFLOW, common_header, fsm_header);
+        return ValidationFailure(FsmPageValidationError::INITIALIZED_HEAP_RANGE_OVERFLOW);
     }
 
     const auto entries = page_->Bytes().subspan(FSM_PAGE_ENTRIES_OFFSET, FSM_PAGE_ENTRY_CAPACITY);
     for (std::size_t index = fsm_header->entry_count; index < entries.size(); ++index) {
         if (entries[index] != std::byte{0}) {
-            return ValidationFailure(FsmPageValidationError::NONZERO_UNINITIALIZED_ENTRY,
-                                     common_header,
-                                     fsm_header,
-                                     index);
+            return ValidationFailure(FsmPageValidationError::NONZERO_UNINITIALIZED_ENTRY, index);
         }
     }
 
-    return {
-        .common_header = common_header,
-        .fsm_header = fsm_header,
-        .error = FsmPageValidationError::NONE,
-    };
+    return FsmPageHeaders{.common = *common_header, .fsm = *fsm_header};
 }
 
-FsmPageCategoryResult FsmPage::GetCategory(std::size_t entry_index) const noexcept {
+FsmPageCategoryResult FsmPage::Category(std::size_t entry_index) const noexcept {
     const auto validation = Validate();
-    if (!validation || !validation.fsm_header.has_value()) {
-        return {
-            .category = std::nullopt,
-            .error = FsmPageEntryError::PAGE_INVALID,
-            .page_error = validation.error,
-        };
+    if (!validation) {
+        return Unexpected{FsmPageEntryFailure{.code = FsmPageEntryError::PAGE_INVALID,
+                                              .page_error = validation.Error().code}};
     }
-    if (entry_index >= validation.fsm_header->entry_count) {
-        return {
-            .category = std::nullopt,
-            .error = FsmPageEntryError::ENTRY_OUT_OF_RANGE,
-        };
+    if (entry_index >= validation->fsm.entry_count) {
+        return Unexpected{FsmPageEntryError::ENTRY_OUT_OF_RANGE};
     }
 
-    return {
-        .category =
-            std::to_integer<std::uint8_t>(page_->Bytes()[FSM_PAGE_ENTRIES_OFFSET + entry_index]),
-        .error = FsmPageEntryError::NONE,
-    };
+    return std::to_integer<std::uint8_t>(page_->Bytes()[FSM_PAGE_ENTRIES_OFFSET + entry_index]);
 }
 
 FsmPageUpdateResult FsmPage::SetCategory(std::size_t entry_index, std::uint8_t category) noexcept {
     const auto validation = Validate();
-    if (!validation || !validation.fsm_header.has_value()) {
-        return {
-            .error = FsmPageEntryError::PAGE_INVALID,
-            .page_error = validation.error,
-        };
+    if (!validation) {
+        return Unexpected{FsmPageEntryFailure{.code = FsmPageEntryError::PAGE_INVALID,
+                                              .page_error = validation.Error().code}};
     }
-    if (entry_index >= validation.fsm_header->entry_count) {
-        return {.error = FsmPageEntryError::ENTRY_OUT_OF_RANGE};
+    if (entry_index >= validation->fsm.entry_count) {
+        return Unexpected{FsmPageEntryError::ENTRY_OUT_OF_RANGE};
     }
 
     page_->Bytes()[FSM_PAGE_ENTRIES_OFFSET + entry_index] = static_cast<std::byte>(category);
     return {};
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

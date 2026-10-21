@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_ERROR_H_
-#define DBLUSBLUS_STORAGE_BUFFER_ERROR_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/disk/disk_manager.h"
 
@@ -9,13 +9,12 @@
 #include <string>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // BufferPool error categories (ARCHITECTURE.md §7.12.7). Categories that depend on the WAL
 // (WAL_RESERVATION_OR_APPEND_FAILURE, WAL_DURABILITY_FAILURE, STORAGE_NONCONTINUABLE) and file
 // formats the pool does not dispatch (UNSUPPORTED_FILE_FORMAT) are absent until those owners exist.
 enum class BufferErrorCode : std::uint8_t {
-    NONE,
     FILE_OR_PAGE_NOT_FOUND,
     RAW_IO_FAILURE,
     CORRUPT_PAGE,
@@ -37,7 +36,7 @@ enum class BufferOperation : std::uint8_t {
 };
 
 struct BufferError {
-    BufferErrorCode code{BufferErrorCode::NONE};
+    BufferErrorCode code{BufferErrorCode::INTERNAL_INVARIANT_FAILURE};
     BufferOperation operation{BufferOperation::FETCH_PAGE};
     PageId page_id{};
     // Populated when the failure originated in the raw I/O layer.
@@ -45,27 +44,9 @@ struct BufferError {
     std::string message;
 };
 
-struct BufferStatus {
-    BufferError error;
+using BufferStatus = Status<BufferError>;
 
-    [[nodiscard]] bool Ok() const noexcept {
-        return error.code == BufferErrorCode::NONE;
-    }
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return Ok();
-    }
-};
+template <typename T>
+using BufferResult = Result<T, BufferError>;
 
-template <typename Value>
-struct BufferResult {
-    std::optional<Value> value;
-    BufferError error;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return value.has_value();
-    }
-};
-
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_ERROR_H_
+} // namespace dblusblus::storage

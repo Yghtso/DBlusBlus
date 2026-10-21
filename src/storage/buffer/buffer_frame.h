@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_FRAME_H_
-#define DBLUSBLUS_STORAGE_BUFFER_FRAME_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/buffer/clock_replacer.h"
@@ -8,7 +7,7 @@
 #include <cstdint>
 #include <shared_mutex>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // Canonical frame ownership state (ARCHITECTURE.md §7.6.1).
 enum class FrameState : std::uint8_t {
@@ -53,6 +52,4 @@ struct BufferFrame {
     std::shared_mutex latch;
 };
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_FRAME_H_
+} // namespace dblusblus::storage

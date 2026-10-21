@@ -116,9 +116,13 @@ history directly.
 Cross-page previous-version targets and version-chain acyclicity are L2/L3 checks and are
 not performed by the page-local validator.
 
-Every `HeapPage` operation validates the page first. Insertion additionally validates the new
-tuple bytes under the same tuple rules, as if already stored in its new slot, before any
-mutation, so a writer cannot produce a page the validator would reject. It stores the tuple
+`HeapPage` operations (`Insert`, `MarkDead`, `Compact`, `TupleBytes`) work on a page that already
+passed `Validate`, which the BufferPool runs before a page becomes resident (§4.13.1). They first
+run `ValidateStructure`: every check above except decoding the stored tuples, at O(slots) cost,
+which also keeps their byte writes inside the page. A rejected operation leaves the page
+unchanged. Insertion additionally validates the new tuple bytes under the full tuple rules, as
+if already stored in its new slot, before any mutation; `MarkDead` and `Compact` never change
+tuple bytes. Each mutation therefore keeps the page valid under `Validate`. It stores the tuple
 in one page, allocates a stable new slot, and returns a physical `Rid`. Insertion enforces the
 architecture-defined raw inline tuple bound (§5.6). Slot reuse is not implemented, so `UNUSED` validation exists without an
 active writer transition that creates reusable slots.

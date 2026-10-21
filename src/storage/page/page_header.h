@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_COMMON_PAGE_HEADER_H_
-#define DBLUSBLUS_COMMON_PAGE_HEADER_H_
+#pragma once
 
 #include "common/encoding.h"
 #include "common/types.h"
@@ -10,7 +9,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::size_t PAGE_SIZE = 8192;
 inline constexpr std::size_t COMMON_PAGE_HEADER_ENCODED_SIZE = 32;
@@ -160,6 +159,4 @@ DecodeCommonPageHeader(std::span<const std::byte> source) noexcept {
     };
 }
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_COMMON_PAGE_HEADER_H_
+} // namespace dblusblus::storage

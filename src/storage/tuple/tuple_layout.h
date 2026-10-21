@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_TUPLE_LAYOUT_H_
-#define DBLUSBLUS_STORAGE_TUPLE_LAYOUT_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/tuple/tuple_header.h"
 
@@ -10,7 +10,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::size_t BOOLEAN_PHYSICAL_SIZE = 1;
 inline constexpr std::size_t INT32_PHYSICAL_SIZE = 4;
@@ -37,27 +37,19 @@ enum class PhysicalType : std::uint8_t {
 [[nodiscard]] std::optional<std::uint16_t> NullBitmapBytes(std::size_t column_count) noexcept;
 
 enum class NullBitmapError : std::uint8_t {
-    NONE,
     COLUMN_COUNT_TOO_LARGE,
     COLUMN_OUT_OF_RANGE,
     BITMAP_TOO_SMALL,
 };
 
-struct NullBitmapReadResult {
-    bool is_null{false};
-    NullBitmapError error{NullBitmapError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == NullBitmapError::NONE;
-    }
-};
+using NullBitmapReadResult = Result<bool, NullBitmapError>;
 
 [[nodiscard]] NullBitmapReadResult IsNull(std::span<const std::byte> bitmap,
                                           std::size_t column_count,
                                           std::size_t column_index) noexcept;
-[[nodiscard]] NullBitmapError
+[[nodiscard]] Status<NullBitmapError>
 SetNull(std::span<std::byte> bitmap, std::size_t column_count, std::size_t column_index) noexcept;
-[[nodiscard]] NullBitmapError
+[[nodiscard]] Status<NullBitmapError>
 ClearNull(std::span<std::byte> bitmap, std::size_t column_count, std::size_t column_index) noexcept;
 
 struct PhysicalColumnSpec {
@@ -90,32 +82,39 @@ struct TupleSizePlan {
 };
 
 enum class TupleSizePlanningError : std::uint8_t {
-    NONE,
     VARLEN_VALUE_COUNT_MISMATCH,
     VARCHAR_LENGTH_TOO_LARGE,
     SIZE_OVERFLOW,
     TUPLE_TOO_LARGE,
 };
 
-struct TupleSizePlanningResult {
-    std::optional<TupleSizePlan> plan;
-    TupleSizePlanningError error{TupleSizePlanningError::NONE};
+struct TupleSizePlanningFailure {
+    TupleSizePlanningError code{TupleSizePlanningError::SIZE_OVERFLOW};
+    // The variable-length value the failure concerns, for value-specific codes.
     std::size_t varlen_index{0};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return plan.has_value();
-    }
+    bool operator==(const TupleSizePlanningFailure&) const = default;
 };
 
+using TupleSizePlanningResult = Result<TupleSizePlan, TupleSizePlanningFailure>;
+
 enum class TuplePhysicalLayoutBuildError : std::uint8_t {
-    NONE,
     INVALID_PHYSICAL_TYPE,
     NULL_BITMAP_TOO_LARGE,
     SIZE_OVERFLOW,
     TUPLE_TOO_LARGE,
 };
 
-struct TuplePhysicalLayoutBuildResult;
+struct TuplePhysicalLayoutBuildFailure {
+    TuplePhysicalLayoutBuildError code{TuplePhysicalLayoutBuildError::SIZE_OVERFLOW};
+    // The column the failure concerns, for column-specific codes.
+    std::size_t column_index{0};
+
+    bool operator==(const TuplePhysicalLayoutBuildFailure&) const = default;
+};
+
+class TuplePhysicalLayout;
+using TuplePhysicalLayoutBuildResult = Result<TuplePhysicalLayout, TuplePhysicalLayoutBuildFailure>;
 
 class TuplePhysicalLayout {
   public:
@@ -150,22 +149,10 @@ class TuplePhysicalLayout {
     BuildTuplePhysicalLayout(std::span<const PhysicalColumnSpec> columns, SchemaVer schema_version);
 };
 
-struct TuplePhysicalLayoutBuildResult {
-    std::optional<TuplePhysicalLayout> layout;
-    TuplePhysicalLayoutBuildError error{TuplePhysicalLayoutBuildError::NONE};
-    std::size_t column_index{0};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return layout.has_value();
-    }
-};
-
 [[nodiscard]] TuplePhysicalLayoutBuildResult
 BuildTuplePhysicalLayout(std::span<const PhysicalColumnSpec> columns, SchemaVer schema_version);
 
 static_assert(VARCHAR_DESCRIPTOR_LENGTH_OFFSET + sizeof(std::uint32_t) ==
               VARCHAR_DESCRIPTOR_ENCODED_SIZE);
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_TUPLE_LAYOUT_H_
+} // namespace dblusblus::storage

@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_FSM_PAGE_H_
-#define DBLUSBLUS_STORAGE_FSM_PAGE_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/heap/heap_page_format.h"
 #include "storage/page/page.h"
@@ -12,7 +12,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::uint16_t FSM_PAGE_FORMAT_VERSION = 1;
 inline constexpr std::size_t FSM_PAGE_HEADER_OFFSET = COMMON_PAGE_HEADER_ENCODED_SIZE;
@@ -32,18 +32,10 @@ inline constexpr std::size_t FSM_MAX_USABLE_INSERTION_BYTES = HEAP_PAGE_MAX_RAW_
 [[nodiscard]] std::size_t FsmCategoryMinimumUsableBytes(std::uint8_t category) noexcept;
 
 enum class FsmTupleRequestError : std::uint8_t {
-    NONE,
     TUPLE_TOO_LARGE,
 };
 
-struct FsmMinimumCategoryResult {
-    std::optional<std::uint8_t> category;
-    FsmTupleRequestError error{FsmTupleRequestError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return category.has_value();
-    }
-};
+using FsmMinimumCategoryResult = Result<std::uint8_t, FsmTupleRequestError>;
 
 // Returns the smallest category whose represented lower bound can satisfy the raw tuple size.
 [[nodiscard]] FsmMinimumCategoryResult
@@ -57,19 +49,11 @@ struct FsmEntryLocation {
 };
 
 enum class FsmPageMappingError : std::uint8_t {
-    NONE,
     INVALID_HEAP_PAGE_NUMBER,
     OVERFLOW,
 };
 
-struct FsmPageMappingResult {
-    std::optional<FsmEntryLocation> location;
-    FsmPageMappingError error{FsmPageMappingError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return location.has_value();
-    }
-};
+using FsmPageMappingResult = Result<FsmEntryLocation, FsmPageMappingError>;
 
 [[nodiscard]] FsmPageMappingResult FsmLocationForHeapPage(PageNo heap_page_no) noexcept;
 
@@ -88,20 +72,12 @@ struct FsmPageHeader {
 DecodeFsmPageHeader(std::span<const std::byte> source) noexcept;
 
 enum class FsmPageInitializeError : std::uint8_t {
-    NONE,
     INVALID_FSM_PAGE_NUMBER,
     HEAP_PAGE_RANGE_OVERFLOW,
     ENTRY_COUNT_OUT_OF_RANGE,
-    ENCODING_FAILED,
 };
 
-struct FsmPageInitializeResult {
-    FsmPageInitializeError error{FsmPageInitializeError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == FsmPageInitializeError::NONE;
-    }
-};
+using FsmPageInitializeResult = Status<FsmPageInitializeError>;
 
 struct FsmPageInitialization {
     std::uint16_t entry_count{0};
@@ -127,41 +103,39 @@ enum class FsmPageValidationError : std::uint8_t {
     NONZERO_FSM_RESERVED,
 };
 
-struct FsmPageValidationResult {
-    std::optional<CommonPageHeader> common_header;
-    std::optional<FsmPageHeader> fsm_header;
-    FsmPageValidationError error{FsmPageValidationError::NONE};
-    std::size_t entry_index{0};
+// The decoded headers of a valid FSM page.
+struct FsmPageHeaders {
+    CommonPageHeader common;
+    FsmPageHeader fsm;
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == FsmPageValidationError::NONE;
-    }
+    bool operator==(const FsmPageHeaders&) const = default;
 };
 
+struct FsmPageValidationFailure {
+    FsmPageValidationError code{FsmPageValidationError::NONE};
+    // The entry the failure concerns, for entry-specific codes.
+    std::size_t entry_index{0};
+
+    bool operator==(const FsmPageValidationFailure&) const = default;
+};
+
+using FsmPageValidationResult = Result<FsmPageHeaders, FsmPageValidationFailure>;
+
 enum class FsmPageEntryError : std::uint8_t {
-    NONE,
     PAGE_INVALID,
     ENTRY_OUT_OF_RANGE,
 };
 
-struct FsmPageCategoryResult {
-    std::optional<std::uint8_t> category;
-    FsmPageEntryError error{FsmPageEntryError::NONE};
+struct FsmPageEntryFailure {
+    FsmPageEntryError code{FsmPageEntryError::PAGE_INVALID};
+    // Why the page itself was rejected, for PAGE_INVALID.
     FsmPageValidationError page_error{FsmPageValidationError::NONE};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return category.has_value();
-    }
+    bool operator==(const FsmPageEntryFailure&) const = default;
 };
 
-struct FsmPageUpdateResult {
-    FsmPageEntryError error{FsmPageEntryError::NONE};
-    FsmPageValidationError page_error{FsmPageValidationError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == FsmPageEntryError::NONE;
-    }
-};
+using FsmPageCategoryResult = Result<std::uint8_t, FsmPageEntryFailure>;
+using FsmPageUpdateResult = Status<FsmPageEntryFailure>;
 
 class FsmPage {
   public:
@@ -171,7 +145,7 @@ class FsmPage {
     Initialize(const FsmPageInitialization& initialization = {}) noexcept;
     [[nodiscard]] std::optional<FsmPageHeader> Header() const noexcept;
     [[nodiscard]] FsmPageValidationResult Validate() const noexcept;
-    [[nodiscard]] FsmPageCategoryResult GetCategory(std::size_t entry_index) const noexcept;
+    [[nodiscard]] FsmPageCategoryResult Category(std::size_t entry_index) const noexcept;
     [[nodiscard]] FsmPageUpdateResult SetCategory(std::size_t entry_index,
                                                   std::uint8_t category) noexcept;
 
@@ -183,6 +157,4 @@ static_assert(FSM_PAGE_HEADER_OFFSET + FSM_PAGE_HEADER_ENCODED_SIZE == FSM_PAGE_
 static_assert(FSM_PAGE_ENTRIES_OFFSET + FSM_PAGE_ENTRY_CAPACITY == PAGE_SIZE);
 static_assert(FSM_PAGE_ENTRY_CAPACITY <= std::numeric_limits<std::uint16_t>::max());
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_FSM_PAGE_H_
+} // namespace dblusblus::storage

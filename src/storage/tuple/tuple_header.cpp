@@ -8,7 +8,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] TupleHeaderDecodeError ValidateTupleHeader(const TupleHeader& header) noexcept {
@@ -78,7 +78,7 @@ bool EncodeTupleHeader(std::span<std::byte> destination, const TupleHeader& head
 
 TupleHeaderDecodeResult DecodeTupleHeader(std::span<const std::byte> source) noexcept {
     if (source.size() < TUPLE_HEADER_ENCODED_SIZE) {
-        return {.header = std::nullopt, .error = TupleHeaderDecodeError::SOURCE_TOO_SMALL};
+        return Unexpected{TupleHeaderDecodeError::SOURCE_TOO_SMALL};
     }
 
     const auto xmin =
@@ -108,7 +108,7 @@ TupleHeaderDecodeResult DecodeTupleHeader(std::span<const std::byte> source) noe
         !prev_page_no.has_value() || !prev_slot.has_value() || !tuple_flags.has_value() ||
         !header_bytes.has_value() || !null_bitmap_bytes.has_value() ||
         !schema_version.has_value() || !reserved.has_value()) {
-        return {.header = std::nullopt, .error = TupleHeaderDecodeError::SOURCE_TOO_SMALL};
+        return Unexpected{TupleHeaderDecodeError::SOURCE_TOO_SMALL};
     }
 
     const TupleHeader header{
@@ -126,10 +126,10 @@ TupleHeaderDecodeResult DecodeTupleHeader(std::span<const std::byte> source) noe
     };
     const auto validation_error = ValidateTupleHeader(header);
     if (validation_error != TupleHeaderDecodeError::NONE) {
-        return {.header = std::nullopt, .error = validation_error};
+        return Unexpected{validation_error};
     }
 
-    return {.header = header, .error = TupleHeaderDecodeError::NONE};
+    return header;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

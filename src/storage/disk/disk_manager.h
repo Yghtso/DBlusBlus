@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_STORAGE_DISK_MANAGER_H_
-#define DBLUSBLUS_STORAGE_DISK_MANAGER_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/page/page_header.h"
 
@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class DiskOperation : std::uint8_t {
     CREATE_FILE,
@@ -49,25 +49,10 @@ struct DiskError {
     std::string message;
 };
 
-struct DiskStatus {
-    bool success{false};
-    DiskError error;
+using DiskStatus = Status<DiskError>;
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return success;
-    }
-};
-
-template <typename Value>
-struct DiskResult {
-    bool success{false};
-    Value value{};
-    DiskError error;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return success;
-    }
-};
+template <typename T>
+using DiskResult = Result<T, DiskError>;
 
 class DiskManager {
   public:
@@ -114,6 +99,4 @@ class DiskManager {
     std::mutex extension_mutex_;
 };
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_DISK_MANAGER_H_
+} // namespace dblusblus::storage

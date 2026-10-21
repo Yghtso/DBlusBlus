@@ -1,9 +1,11 @@
 #include "storage/page/page.h"
 
+#include "common/assert.h"
+
 #include <cstddef>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 Page::Page(PageId page_id) noexcept : page_id_(page_id) {}
 
@@ -19,31 +21,33 @@ std::span<const std::byte, PAGE_SIZE> Page::Bytes() const noexcept {
     return bytes_;
 }
 
-bool Page::Initialize(const CommonPageHeader& header) noexcept {
+void Page::Initialize(const CommonPageHeader& header) noexcept {
     bytes_.fill(std::byte{0});
-    return WriteHeader(header);
+    WriteHeader(header);
 }
 
 std::optional<CommonPageHeader> Page::DecodeHeader() const noexcept {
     return DecodeCommonPageHeader(Bytes());
 }
 
-bool Page::WriteHeader(const CommonPageHeader& header) noexcept {
-    return EncodeCommonPageHeader(Bytes(), header);
+void Page::WriteHeader(const CommonPageHeader& header) noexcept {
+    // A whole page always has room for the common header.
+    const bool encoded = EncodeCommonPageHeader(Bytes(), header);
+    DBLUS_CHECK(encoded, "common page header must fit in a page");
 }
 
 PageHeaderValidationResult Page::ValidateHeader(PageType expected_type) const noexcept {
     auto header = DecodeHeader();
     if (!header.has_value()) {
-        return {.header = std::nullopt, .error = PageHeaderValidationError::DECODE_FAILED};
+        return Unexpected{PageHeaderValidationError::DECODE_FAILED};
     }
     if (header->page_type != expected_type) {
-        return {.header = header, .error = PageHeaderValidationError::UNEXPECTED_PAGE_TYPE};
+        return Unexpected{PageHeaderValidationError::UNEXPECTED_PAGE_TYPE};
     }
     if (header->page_no != page_id_.page_no) {
-        return {.header = header, .error = PageHeaderValidationError::UNEXPECTED_PAGE_NUMBER};
+        return Unexpected{PageHeaderValidationError::UNEXPECTED_PAGE_NUMBER};
     }
-    return {.header = header, .error = PageHeaderValidationError::NONE};
+    return *header;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

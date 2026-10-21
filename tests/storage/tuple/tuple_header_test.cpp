@@ -15,7 +15,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 static_assert(TUPLE_HEADER_XMIN_OFFSET == 0);
@@ -39,12 +39,12 @@ void ExpectRoundTrip(const TupleHeader& expected) {
     ASSERT_TRUE(EncodeTupleHeader(encoded, expected));
 
     const auto decoded = DecodeTupleHeader(encoded);
-    if (!decoded.header.has_value()) {
+    if (!decoded.Ok()) {
         ADD_FAILURE() << "tuple header unexpectedly failed to decode";
         return;
     }
-    EXPECT_EQ(decoded.error, TupleHeaderDecodeError::NONE);
-    EXPECT_EQ(*decoded.header, expected);
+    EXPECT_TRUE(decoded);
+    EXPECT_EQ(*decoded, expected);
 }
 
 [[nodiscard]] std::array<std::byte, TUPLE_HEADER_ENCODED_SIZE>
@@ -145,8 +145,8 @@ TEST(TupleHeaderCodecTest, RejectsUnknownFlagBitsOnEncodeAndDecode) {
         std::span<std::byte>{encoded}.subspan(TUPLE_HEADER_FLAGS_OFFSET, sizeof(TupleFlags)),
         unknown_flag));
     const auto decoded = DecodeTupleHeader(encoded);
-    EXPECT_FALSE(decoded.header.has_value());
-    EXPECT_EQ(decoded.error, TupleHeaderDecodeError::INVALID_FLAGS);
+    EXPECT_FALSE(decoded.Ok());
+    EXPECT_EQ(decoded.Error(), TupleHeaderDecodeError::INVALID_FLAGS);
 }
 
 TEST(TupleHeaderCodecTest, RequiresConsistentPreviousVersionSentinelPair) {
@@ -166,7 +166,7 @@ TEST(TupleHeaderCodecTest, RequiresConsistentPreviousVersionSentinelPair) {
     ASSERT_TRUE(EncodeLittleEndian(std::span<std::byte>{invalid_page}.subspan(
                                        TUPLE_HEADER_PREV_PAGE_NO_OFFSET, sizeof(PageNo)),
                                    INVALID_PAGE_NO));
-    EXPECT_EQ(DecodeTupleHeader(invalid_page).error,
+    EXPECT_EQ(DecodeTupleHeader(invalid_page).Error(),
               TupleHeaderDecodeError::INVALID_PREVIOUS_VERSION_POINTER);
 
     auto invalid_slot =
@@ -174,7 +174,7 @@ TEST(TupleHeaderCodecTest, RequiresConsistentPreviousVersionSentinelPair) {
     ASSERT_TRUE(EncodeLittleEndian(
         std::span<std::byte>{invalid_slot}.subspan(TUPLE_HEADER_PREV_SLOT_OFFSET, sizeof(SlotId)),
         INVALID_SLOT_ID));
-    EXPECT_EQ(DecodeTupleHeader(invalid_slot).error,
+    EXPECT_EQ(DecodeTupleHeader(invalid_slot).Error(),
               TupleHeaderDecodeError::INVALID_PREVIOUS_VERSION_POINTER);
 }
 
@@ -192,13 +192,14 @@ TEST(TupleHeaderCodecTest, RequiresFixedHeaderSizeAndZeroReservedField) {
     ASSERT_TRUE(EncodeLittleEndian(std::span<std::byte>{encoded_size}.subspan(
                                        TUPLE_HEADER_HEADER_BYTES_OFFSET, sizeof(std::uint16_t)),
                                    std::uint16_t{47}));
-    EXPECT_EQ(DecodeTupleHeader(encoded_size).error, TupleHeaderDecodeError::INVALID_HEADER_SIZE);
+    EXPECT_EQ(DecodeTupleHeader(encoded_size).Error(), TupleHeaderDecodeError::INVALID_HEADER_SIZE);
 
     auto encoded_reserved = EncodeValidHeader();
     ASSERT_TRUE(EncodeLittleEndian(std::span<std::byte>{encoded_reserved}.subspan(
                                        TUPLE_HEADER_RESERVED_OFFSET, sizeof(std::uint32_t)),
                                    std::uint32_t{1}));
-    EXPECT_EQ(DecodeTupleHeader(encoded_reserved).error, TupleHeaderDecodeError::NONZERO_RESERVED);
+    EXPECT_EQ(DecodeTupleHeader(encoded_reserved).Error(),
+              TupleHeaderDecodeError::NONZERO_RESERVED);
 }
 
 TEST(TupleHeaderCodecTest, SupportsUnalignedSpans) {
@@ -224,11 +225,11 @@ TEST(TupleHeaderCodecTest, SupportsUnalignedSpans) {
     EXPECT_EQ(buffer.front(), padding);
     EXPECT_EQ(buffer.back(), padding);
     const auto decoded = DecodeTupleHeader(unaligned);
-    if (!decoded.header.has_value()) {
+    if (!decoded.Ok()) {
         ADD_FAILURE() << "unaligned tuple header unexpectedly failed to decode";
         return;
     }
-    EXPECT_EQ(*decoded.header, expected);
+    EXPECT_EQ(*decoded, expected);
 }
 
 TEST(TupleHeaderCodecTest, RejectsUndersizedBuffersWithoutModification) {
@@ -241,8 +242,8 @@ TEST(TupleHeaderCodecTest, RejectsUndersizedBuffersWithoutModification) {
     EXPECT_FALSE(EncodeTupleHeader(undersized, TupleHeader{}));
     EXPECT_EQ(buffer, original);
     const auto decoded = DecodeTupleHeader(undersized);
-    EXPECT_FALSE(decoded.header.has_value());
-    EXPECT_EQ(decoded.error, TupleHeaderDecodeError::SOURCE_TOO_SMALL);
+    EXPECT_FALSE(decoded.Ok());
+    EXPECT_EQ(decoded.Error(), TupleHeaderDecodeError::SOURCE_TOO_SMALL);
 }
 
 TEST(TupleHeaderCodecTest, SurvivesValidatedHeapPageInsertion) {
@@ -264,11 +265,11 @@ TEST(TupleHeaderCodecTest, SurvivesValidatedHeapPageInsertion) {
         PhysicalColumnSpec{.type = PhysicalType::VARCHAR, .nullable = false},
     };
     const auto built = BuildTuplePhysicalLayout(columns, SchemaVer{7});
-    if (!built.layout.has_value()) {
+    if (!built.Ok()) {
         ADD_FAILURE() << "tuple layout did not build";
         return;
     }
-    const TuplePhysicalLayout& layout = *built.layout;
+    const TuplePhysicalLayout& layout = *built;
     constexpr std::array payload{
         std::byte{0x80},
         std::byte{0x00},
@@ -281,22 +282,22 @@ TEST(TupleHeaderCodecTest, SurvivesValidatedHeapPageInsertion) {
         TupleValue{VarcharValue{.bytes = payload}},
     };
     const auto encoded = EncodeTuple(layout, TupleVersionMetadata{.xmin = TxnId{41}}, values);
-    if (!encoded.tuple.has_value()) {
+    if (!encoded.Ok()) {
         ADD_FAILURE() << "tuple did not encode";
         return;
     }
-    const std::vector<std::byte>& tuple = *encoded.tuple;
+    const std::vector<std::byte>& tuple = *encoded;
 
     const PageId page_id{.file_id = FileId{9}, .page_no = PageNo{4}};
     Page page{page_id};
     HeapPage heap_page{page, HeapTupleSchemaHistory{std::span{&layout, 1}}};
     ASSERT_TRUE(heap_page.Initialize());
     const auto insertion = heap_page.Insert(tuple);
-    if (!insertion.rid.has_value()) {
+    if (!insertion.Ok()) {
         ADD_FAILURE() << "tuple unexpectedly failed to insert";
         return;
     }
-    EXPECT_EQ(*insertion.rid, (Rid{.page = page_id, .slot = SlotId{0}}));
+    EXPECT_EQ(*insertion, (Rid{.page = page_id, .slot = SlotId{0}}));
 
     const auto stored = heap_page.TupleBytes(0);
     if (!stored.has_value()) {
@@ -308,13 +309,13 @@ TEST(TupleHeaderCodecTest, SurvivesValidatedHeapPageInsertion) {
     EXPECT_TRUE(std::ranges::equal(stored_bytes, tuple));
 
     const auto decoded = DecodeTupleHeader(stored_bytes.first(TUPLE_HEADER_ENCODED_SIZE));
-    if (!decoded.header.has_value()) {
+    if (!decoded.Ok()) {
         ADD_FAILURE() << "stored tuple header unexpectedly failed to decode";
         return;
     }
-    EXPECT_EQ(*decoded.header, expected_header);
+    EXPECT_EQ(*decoded, expected_header);
     EXPECT_TRUE(std::ranges::equal(stored_bytes.last(payload.size()), payload));
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

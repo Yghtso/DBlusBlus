@@ -1,6 +1,6 @@
-#ifndef DBLUSBLUS_COMMON_FILE_SUPERBLOCK_H_
-#define DBLUSBLUS_COMMON_FILE_SUPERBLOCK_H_
+#pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/page/page_header.h"
 
@@ -10,7 +10,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::array FILE_SUPERBLOCK_MAGIC{
     std::byte{'D'},
@@ -62,10 +62,7 @@ enum class FileSuperblockDecodeError : std::uint8_t {
     NONZERO_RESERVED_BYTES,
 };
 
-struct FileSuperblockDecodeResult {
-    std::optional<FileSuperblock> superblock;
-    FileSuperblockDecodeError error;
-};
+using FileSuperblockDecodeResult = Result<FileSuperblock, FileSuperblockDecodeError>;
 
 // This common-prefix codec supports the generic 72-byte HEAP, FSM, and CATALOG superblocks.
 // BTREE requires its architecture-defined 128-byte specialized codec and is rejected here.
@@ -78,6 +75,4 @@ ComputeFileSuperblockChecksum(std::span<const std::byte> page) noexcept;
 [[nodiscard]] FileSuperblockDecodeResult
 DecodeFileSuperblock(std::span<const std::byte> source) noexcept;
 
-} // namespace dblusblus
-
-#endif // DBLUSBLUS_COMMON_FILE_SUPERBLOCK_H_
+} // namespace dblusblus::storage
