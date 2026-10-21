@@ -403,8 +403,8 @@ using EncodedSlotDirectory =
     plan.new_upper = PAGE_SIZE;
     for (const SlotId slot_id : live_slots) {
         plan.new_upper -= plan.source_lengths[slot_id];
-        // Validate() proved retained ranges disjoint and inside [upper, PAGE_SIZE), so packing
-        // in descending source order only ever moves a payload toward the page end.
+        // ValidateStructure() proved retained ranges disjoint and inside [upper, PAGE_SIZE), so
+        // packing in descending source order only ever moves a payload toward the page end.
         DBLUS_ASSERT(plan.new_upper >= plan.source_offsets[slot_id],
                      "compaction must move tuples toward the page end");
         plan.planned_slots[slot_id].tuple_offset = static_cast<std::uint16_t>(plan.new_upper);
@@ -513,6 +513,14 @@ std::optional<HeapPageHeader> HeapPage::Header() const noexcept {
 }
 
 HeapPageValidationResult HeapPage::Validate() const noexcept {
+    return ValidateWith(TupleChecks::ALL);
+}
+
+HeapPageValidationResult HeapPage::ValidateStructure() const noexcept {
+    return ValidateWith(TupleChecks::SKIP);
+}
+
+HeapPageValidationResult HeapPage::ValidateWith(TupleChecks tuple_checks) const noexcept {
     const auto common_header = page_->DecodeHeader();
     if (!common_header.has_value()) {
         return ValidationFailure(HeapPageValidationError::COMMON_HEADER_DECODE_FAILED);
@@ -541,7 +549,9 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
     if (auto status = CheckRetainedRangesDisjoint(directory); !status) {
         return Unexpected{status.Error()};
     }
-    if (auto status = ValidateRetainedTuples(bytes, page_->Id(), schema_history_, directory);
+    if (auto status = tuple_checks == TupleChecks::ALL
+                          ? ValidateRetainedTuples(bytes, page_->Id(), schema_history_, directory)
+                          : HeapPageValidationStatus{};
         !status) {
         return Unexpected{status.Error()};
     }
@@ -552,7 +562,7 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
 }
 
 HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept {
-    const auto validation = Validate();
+    const auto validation = ValidateStructure();
     if (!validation) {
         return Unexpected{HeapPageInsertFailure{.code = HeapPageInsertError::PAGE_INVALID,
                                                 .page_error = validation.Error().code}};
@@ -625,7 +635,7 @@ HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept
 }
 
 HeapPageMarkDeadResult HeapPage::MarkDead(SlotId slot_id) noexcept {
-    const auto validation = Validate();
+    const auto validation = ValidateStructure();
     if (!validation) {
         return Unexpected{HeapPageMarkDeadFailure{
             .code = HeapPageMarkDeadError::PAGE_INVALID,
@@ -681,7 +691,7 @@ HeapPageMarkDeadResult HeapPage::MarkDead(SlotId slot_id) noexcept {
 }
 
 HeapPageCompactResult HeapPage::Compact() noexcept {
-    const auto validation = Validate();
+    const auto validation = ValidateStructure();
     if (!validation) {
         return Unexpected{HeapPageCompactFailure{
             .code = HeapPageCompactError::PAGE_INVALID,
@@ -709,7 +719,7 @@ HeapPageCompactResult HeapPage::Compact() noexcept {
 }
 
 std::optional<std::span<const std::byte>> HeapPage::TupleBytes(SlotId slot_id) const noexcept {
-    const auto validation = Validate();
+    const auto validation = ValidateStructure();
     if (!validation || !validation.Ok() || slot_id >= validation->heap.slot_count) {
         return std::nullopt;
     }

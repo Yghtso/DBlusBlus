@@ -257,13 +257,15 @@ TEST(HeapPageDeadTransitionTest, RejectsDisallowedTransitionsWithoutMutation) {
                      HeapPageMarkDeadError::PAGE_INVALID,
                      HeapPageValidationError::INVALID_SLOT_STATE);
 
+    // MarkDead trusts tuple bytes that passed load-time validation and does not decode them again.
+    // Validate() still reports the damaged tuple, and the transition leaves its bytes alone.
     Page invalid_tuple = InitializedHeapPage();
     ConfigureOneNormalSlot(invalid_tuple);
     std::ranges::fill(invalid_tuple.Bytes().subspan(8000, 192), std::byte{0});
-    expect_unchanged(invalid_tuple,
-                     0,
-                     HeapPageMarkDeadError::PAGE_INVALID,
-                     HeapPageValidationError::INVALID_TUPLE);
+    ASSERT_TRUE(heap_test::TestHeapPage(invalid_tuple).ValidateStructure());
+    EXPECT_EQ(heap_test::TestHeapPage(invalid_tuple).Validate().Error().code,
+              HeapPageValidationError::INVALID_TUPLE);
+    EXPECT_TRUE(heap_test::TestHeapPage(invalid_tuple).MarkDead(0));
 
     Page already_dead = InitializedHeapPage();
     ConfigureOneNormalSlot(already_dead);

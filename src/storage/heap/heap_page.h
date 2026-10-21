@@ -147,8 +147,17 @@ enum class HeapPageInitializeError : std::uint8_t {
     INVALID_PAGE_NUMBER,
 };
 
-// Every operation first applies the complete page-local (L1) owner validation of
-// ARCHITECTURE.md §4.13.3, including schema-directed validation of every retained tuple.
+// Controller over one HEAP_DATA page (ARCHITECTURE.md §4.13.3, Chapter 5).
+//
+// Validate() is the complete page-local (L1) owner validation, including schema-directed
+// decoding of every retained tuple. The BufferPool runs it before a loaded page becomes
+// resident (§4.13.1).
+//
+// Insert, MarkDead, Compact and TupleBytes operate on such a resident page, so they do not decode
+// the stored tuples again. They still run ValidateStructure(): every header, slot-directory,
+// range-bound, overlap and free-chain check, which costs O(slots) and keeps their byte writes
+// inside the page. A rejected operation leaves the page unchanged. Each mutation keeps the page
+// L1-valid: Insert validates the new tuple, MarkDead and Compact never change tuple bytes.
 class HeapPage {
   public:
     HeapPage(Page& page, HeapTupleSchemaHistory schema_history) noexcept;
@@ -156,6 +165,8 @@ class HeapPage {
     [[nodiscard]] Status<HeapPageInitializeError> Initialize(Lsn page_lsn = INVALID_LSN) noexcept;
     [[nodiscard]] std::optional<HeapPageHeader> Header() const noexcept;
     [[nodiscard]] HeapPageValidationResult Validate() const noexcept;
+    // Validate() without decoding retained tuples.
+    [[nodiscard]] HeapPageValidationResult ValidateStructure() const noexcept;
     [[nodiscard]] HeapPageInsertResult Insert(std::span<const std::byte> tuple) noexcept;
     [[nodiscard]] HeapPageMarkDeadResult MarkDead(SlotId slot_id) noexcept;
     [[nodiscard]] HeapPageCompactResult Compact() noexcept;
@@ -163,6 +174,12 @@ class HeapPage {
     TupleBytes(SlotId slot_id) const noexcept;
 
   private:
+    enum class TupleChecks : std::uint8_t {
+        ALL,
+        SKIP,
+    };
+    [[nodiscard]] HeapPageValidationResult ValidateWith(TupleChecks tuple_checks) const noexcept;
+
     Page* page_;
     HeapTupleSchemaHistory schema_history_;
 };
