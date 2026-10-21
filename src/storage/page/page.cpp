@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 Page::Page(PageId page_id) noexcept : page_id_(page_id) {}
 
@@ -50,4 +50,4 @@ PageHeaderValidationResult Page::ValidateHeader(PageType expected_type) const no
     return *header;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

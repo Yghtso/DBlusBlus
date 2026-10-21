@@ -10,7 +10,7 @@
 #include <set>
 #include <unordered_map>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class FsmCandidateIndexError : std::uint8_t {
     INVALID_PAGE_NUMBER,
@@ -41,4 +41,4 @@ class FsmCandidateIndex {
     std::unordered_map<PageNo, std::uint8_t> page_categories_;
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

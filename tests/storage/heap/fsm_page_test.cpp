@@ -23,7 +23,7 @@
 #include <system_error>
 #include <unistd.h>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::RequireValue;
@@ -39,7 +39,7 @@ static_assert(FSM_MAX_USABLE_INSERTION_BYTES == 8135);
 using test::TemporaryDirectory;
 
 [[nodiscard]] Page InitializedFsmPage(std::uint16_t entry_count = 3) {
-    Page page{PageId{.file_id = 17, .page_no = 1}};
+    Page page{PageId{.file_id = FileId{17}, .page_no = 1}};
     FsmPage fsm_page{page};
     if (!fsm_page.Initialize({.entry_count = entry_count})) {
         ADD_FAILURE() << "FSM page initialization unexpectedly failed";
@@ -223,7 +223,7 @@ TEST(FsmPageHeaderCodecTest, SupportsUnalignedAndAtomicUndersizedBuffers) {
 }
 
 TEST(FsmPageTest, InitializesDeterministicBlankPageAndDerivesRangeMetadata) {
-    Page page{PageId{.file_id = 19, .page_no = 2}};
+    Page page{PageId{.file_id = FileId{19}, .page_no = 2}};
     std::ranges::fill(page.Bytes(), std::byte{0xA5});
     FsmPage fsm_page{page};
 
@@ -291,14 +291,14 @@ TEST(FsmPageTest, InitializationFailuresLeavePageUnchanged) {
                                         [](std::byte value) { return value == std::byte{0xA5}; }));
     };
 
-    Page page_zero{PageId{.file_id = 23, .page_no = 0}};
+    Page page_zero{PageId{.file_id = FileId{23}, .page_no = 0}};
     std::ranges::fill(page_zero.Bytes(), std::byte{0xA5});
     FsmPage page_zero_fsm{page_zero};
     const auto page_zero_result = page_zero_fsm.Initialize();
     EXPECT_EQ(page_zero_result.Error(), FsmPageInitializeError::INVALID_FSM_PAGE_NUMBER);
     expect_unchanged(page_zero, page_zero_result);
 
-    Page oversized_count{PageId{.file_id = 23, .page_no = 1}};
+    Page oversized_count{PageId{.file_id = FileId{23}, .page_no = 1}};
     std::ranges::fill(oversized_count.Bytes(), std::byte{0xA5});
     FsmPage oversized_count_fsm{oversized_count};
     const auto count_result = oversized_count_fsm.Initialize({
@@ -307,7 +307,8 @@ TEST(FsmPageTest, InitializationFailuresLeavePageUnchanged) {
     EXPECT_EQ(count_result.Error(), FsmPageInitializeError::ENTRY_COUNT_OUT_OF_RANGE);
     expect_unchanged(oversized_count, count_result);
 
-    Page overflow{PageId{.file_id = 23, .page_no = std::numeric_limits<PageNo>::max() - 1U}};
+    Page overflow{
+        PageId{.file_id = FileId{23}, .page_no = std::numeric_limits<PageNo>::max() - 1U}};
     std::ranges::fill(overflow.Bytes(), std::byte{0xA5});
     FsmPage overflow_fsm{overflow};
     const auto overflow_result = overflow_fsm.Initialize();
@@ -417,12 +418,12 @@ TEST(FsmPageValidationTest, EnforcesRepresentableHeapRangeAtPageNumberLimit) {
         return;
     }
 
-    Page page{PageId{.file_id = 29, .page_no = location->fsm_page_no}};
+    Page page{PageId{.file_id = FileId{29}, .page_no = location->fsm_page_no}};
     FsmPage fsm_page{page};
     ASSERT_TRUE(fsm_page.Initialize({.entry_count = 5390}));
     EXPECT_TRUE(fsm_page.Validate());
 
-    Page overflow_page{PageId{.file_id = 29, .page_no = location->fsm_page_no}};
+    Page overflow_page{PageId{.file_id = FileId{29}, .page_no = location->fsm_page_no}};
     std::ranges::fill(overflow_page.Bytes(), std::byte{0xA5});
     FsmPage overflow_fsm_page{overflow_page};
     const auto overflow = overflow_fsm_page.Initialize({.entry_count = 5391});
@@ -435,7 +436,7 @@ TEST(FsmPagePersistenceTest, SurvivesPageFileWriteReopenAndValidation) {
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("table.fsm");
-    constexpr FileId file_id = 81;
+    constexpr FileId file_id{81};
     constexpr std::uint64_t table_id = 1801;
     const FileSuperblock superblock{
         .file_kind = FileKind::FSM,
@@ -482,4 +483,4 @@ TEST(FsmPagePersistenceTest, SurvivesPageFileWriteReopenAndValidation) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

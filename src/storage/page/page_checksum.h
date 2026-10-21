@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // Random-access page checksum rule (ARCHITECTURE.md §4.12): CRC32C over all 8192 bytes with the
 // checksum field (bytes 16..19) treated as zero, stored little-endian in bytes 16..19.
@@ -20,4 +20,4 @@ void FinalizePageChecksum(std::span<std::byte, PAGE_SIZE> page) noexcept;
 // True when bytes 16..19 hold the checksum of the page.
 [[nodiscard]] bool VerifyPageChecksum(std::span<const std::byte, PAGE_SIZE> page) noexcept;
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

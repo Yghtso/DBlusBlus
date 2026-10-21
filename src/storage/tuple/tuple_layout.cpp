@@ -9,7 +9,7 @@
 #include <span>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] bool CheckedAdd(std::size_t left, std::size_t right, std::size_t& result) noexcept {
@@ -266,4 +266,4 @@ TuplePhysicalLayoutBuildResult BuildTuplePhysicalLayout(std::span<const Physical
     return layout;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

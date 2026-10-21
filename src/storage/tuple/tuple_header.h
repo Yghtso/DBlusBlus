@@ -8,7 +8,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 using TupleFlags = std::uint16_t;
 
@@ -68,4 +68,4 @@ static_assert(sizeof(TupleFlags) == 2);
 static_assert(sizeof(SchemaVer) == 4);
 static_assert(TUPLE_HEADER_RESERVED_OFFSET + sizeof(std::uint32_t) == TUPLE_HEADER_ENCODED_SIZE);
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

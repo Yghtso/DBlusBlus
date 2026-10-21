@@ -11,7 +11,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t MAGIC_OFFSET = COMMON_PAGE_HEADER_ENCODED_SIZE;
@@ -222,4 +222,4 @@ FileSuperblockDecodeResult DecodeFileSuperblock(std::span<const std::byte> sourc
     };
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

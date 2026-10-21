@@ -16,7 +16,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::RequireValue;
@@ -101,7 +101,7 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
             expected_values.emplace_back(VarcharValue{.bytes = bytes});
         }
 
-        const auto schema_version = static_cast<SchemaVer>(random());
+        const auto schema_version = SchemaVer{static_cast<std::uint32_t>(random())};
         const auto built = BuildTuplePhysicalLayout(columns, schema_version);
         const auto* layout = RequireValue(built, AtIteration("physical layout", iteration));
         ASSERT_NE(layout, nullptr);
@@ -116,10 +116,10 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
             previous_slot = static_cast<SlotId>(INVALID_SLOT_ID - 1U);
         }
         const TupleVersionMetadata metadata{
-            .xmin = random(),
-            .xmax = random(),
-            .cmin = static_cast<CommandId>(random()),
-            .cmax = static_cast<CommandId>(random()),
+            .xmin = TxnId{random()},
+            .xmax = TxnId{random()},
+            .cmin = CommandId{static_cast<std::uint32_t>(random())},
+            .cmax = CommandId{static_cast<std::uint32_t>(random())},
             .prev_page_no = has_previous ? previous_page_no : INVALID_PAGE_NO,
             .prev_slot = has_previous ? previous_slot : INVALID_SLOT_ID,
         };
@@ -156,4 +156,4 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

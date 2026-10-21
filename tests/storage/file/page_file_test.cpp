@@ -18,7 +18,7 @@
 #include <system_error>
 #include <unistd.h>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::TemporaryDirectory;
@@ -282,9 +282,9 @@ TEST(PageFileTest, KeepsIndependentFileAllocationSequences) {
         ADD_FAILURE() << "independent page allocation unexpectedly failed";
         return;
     }
-    EXPECT_EQ(*first_page_one, (PageId{.file_id = 109, .page_no = 1}));
-    EXPECT_EQ(*second_page_one, (PageId{.file_id = 110, .page_no = 1}));
-    EXPECT_EQ(*first_page_two, (PageId{.file_id = 109, .page_no = 2}));
+    EXPECT_EQ(*first_page_one, (PageId{.file_id = FileId{109}, .page_no = 1}));
+    EXPECT_EQ(*second_page_one, (PageId{.file_id = FileId{110}, .page_no = 1}));
+    EXPECT_EQ(*first_page_two, (PageId{.file_id = FileId{109}, .page_no = 2}));
 }
 
 TEST(PageFileTest, SupportsEveryGenericSuperblockFileKind) {
@@ -298,7 +298,7 @@ TEST(PageFileTest, SupportsEveryGenericSuperblockFileKind) {
     DiskManager manager;
 
     for (std::size_t index = 0; index < file_kinds.size(); ++index) {
-        const auto file_id = static_cast<FileId>(120U + index);
+        const auto file_id = FileId{static_cast<std::uint32_t>(120U + index)};
         const auto object_id = std::uint64_t{7200} + index;
         const auto path = temporary_directory.File("kind-" + std::to_string(index) + ".pages");
         {
@@ -385,4 +385,4 @@ TEST(PageFileTest, LeavesFailedPostCreationFileButCleansRegistration) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

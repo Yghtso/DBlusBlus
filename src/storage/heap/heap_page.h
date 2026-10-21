@@ -13,7 +13,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class HeapPageValidationError : std::uint8_t {
     NONE,
@@ -167,4 +167,4 @@ class HeapPage {
     HeapTupleSchemaHistory schema_history_;
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

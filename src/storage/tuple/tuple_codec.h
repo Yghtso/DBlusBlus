@@ -13,7 +13,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 struct VarcharDescriptor {
     std::uint32_t payload_offset{0};
@@ -159,4 +159,4 @@ using TupleDecodeResult = Result<TupleValue, TupleCodecFailure>;
 static_assert(sizeof(double) == sizeof(std::uint64_t));
 static_assert(std::numeric_limits<double>::is_iec559);
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

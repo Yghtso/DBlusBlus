@@ -10,7 +10,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::array FILE_SUPERBLOCK_MAGIC{
     std::byte{'D'},
@@ -75,4 +75,4 @@ ComputeFileSuperblockChecksum(std::span<const std::byte> page) noexcept;
 [[nodiscard]] FileSuperblockDecodeResult
 DecodeFileSuperblock(std::span<const std::byte> source) noexcept;
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

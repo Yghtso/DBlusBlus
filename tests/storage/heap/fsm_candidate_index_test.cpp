@@ -10,7 +10,7 @@
 #include <optional>
 #include <random>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] std::uint8_t RequireMinimumCategory(std::size_t required_tuple_bytes) {
@@ -258,4 +258,4 @@ TEST(FsmCandidateIndexTest, RandomizedOperationsMatchReferenceModel) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

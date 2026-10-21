@@ -14,7 +14,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] bool IsNullValue(const TupleValue& value) noexcept {
@@ -580,4 +580,4 @@ TupleDecodeResult DecodeTupleValue(const TuplePhysicalLayout& layout,
     return decoded.Value();
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -8,7 +8,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t SLOT_COUNT_OFFSET = 0;
@@ -140,4 +140,4 @@ HeapSlotEntryDecodeResult DecodeHeapSlotEntry(std::span<const std::byte> source)
     };
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

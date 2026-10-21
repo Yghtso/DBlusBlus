@@ -8,7 +8,7 @@
 #include <limits>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] bool IsValidHeapPageNumber(PageNo page_no) noexcept {
@@ -98,4 +98,4 @@ std::size_t FsmCandidateIndex::Size() const noexcept {
     return page_categories_.size();
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

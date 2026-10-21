@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 class BufferPool;
 
@@ -135,4 +135,4 @@ class WritePageGuard : public detail::PageGuardBase {
 #endif
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

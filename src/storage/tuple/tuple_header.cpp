@@ -8,7 +8,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] TupleHeaderDecodeError ValidateTupleHeader(const TupleHeader& header) noexcept {
@@ -132,4 +132,4 @@ TupleHeaderDecodeResult DecodeTupleHeader(std::span<const std::byte> source) noe
     return header;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

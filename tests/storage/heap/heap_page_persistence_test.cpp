@@ -19,7 +19,7 @@
 #include <system_error>
 #include <unistd.h>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using heap_test::SlotBytes;
@@ -32,7 +32,7 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap-dead.pages");
-    constexpr FileId file_id = 42;
+    constexpr FileId file_id{42};
     constexpr std::uint64_t object_id = 7002;
     PageId page_id{};
 
@@ -107,7 +107,7 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap-compact.pages");
-    constexpr FileId file_id = 52;
+    constexpr FileId file_id{52};
     constexpr std::uint64_t object_id = 7003;
     PageId page_id{};
 
@@ -195,7 +195,7 @@ TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) 
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap.pages");
-    constexpr FileId file_id = 41;
+    constexpr FileId file_id{41};
     DiskManager manager;
     auto page_file = PageFile::Create(manager,
                                       path,
@@ -241,4 +241,4 @@ TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) 
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

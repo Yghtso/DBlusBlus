@@ -16,7 +16,7 @@
 #include <thread>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using buffer_test::EntryOf;
@@ -76,7 +76,7 @@ TEST_F(BufferPoolTest, RejectsSuperblockUnpublishedAndUnregisteredPages) {
 
     EXPECT_EQ(pool_->FetchRead(Pid(0)).Error().code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
     EXPECT_EQ(pool_->FetchRead(Pid(2)).Error().code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
-    EXPECT_EQ(pool_->FetchRead(PageId{.file_id = 99, .page_no = 1}).Error().code,
+    EXPECT_EQ(pool_->FetchRead(PageId{.file_id = FileId{99}, .page_no = 1}).Error().code,
               BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
     EXPECT_EQ(file_.Io().ReadCount(), 0U);
     EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(2)).has_value());
@@ -90,7 +90,7 @@ TEST_F(BufferPoolTest, RegistrationRejectsDuplicates) {
 
 TEST_F(BufferPoolTest, RegistrationWithoutAValidatorIsAnInternalCheckFailure) {
     MakePool(3);
-    EXPECT_DEATH(static_cast<void>(pool_->RegisterFile(55, PageValidator{})),
+    EXPECT_DEATH(static_cast<void>(pool_->RegisterFile(FileId{55}, PageValidator{})),
                  "an owner page validator is required");
 }
 
@@ -696,4 +696,4 @@ TEST_F(BufferPoolTest, ShutdownFlushFailureIsReported) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

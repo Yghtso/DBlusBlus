@@ -14,13 +14,13 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus::heap_test {
+namespace dblusblus::storage::heap_test {
 
 // Heap pages validate every retained tuple under a schema, so heap tests store real tuples.
 // The test relation has one NOT NULL VARCHAR column: a 48-byte header, a 1-byte null bitmap,
 // an 8-byte VARCHAR descriptor, and then the payload. Any size from TEST_TUPLE_MIN_SIZE up to
 // the inline limit is reachable by choosing the payload length.
-inline constexpr SchemaVer TEST_SCHEMA_VERSION = 1;
+inline constexpr SchemaVer TEST_SCHEMA_VERSION{1};
 inline constexpr std::size_t TEST_TUPLE_MIN_SIZE = 57;
 
 [[nodiscard]] inline std::span<const TuplePhysicalLayout> TestTupleLayouts() {
@@ -81,4 +81,4 @@ inline void WriteTestTuple(Page& page,
     std::ranges::copy(tuple, page.Bytes().begin() + static_cast<std::ptrdiff_t>(offset));
 }
 
-} // namespace dblusblus::heap_test
+} // namespace dblusblus::storage::heap_test

@@ -10,7 +10,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t FLAGS_OFFSET = 4;
@@ -38,7 +38,7 @@ void RefreshChecksum(std::span<std::byte> page) {
         EncodeLittleEndian(page.subspan(CHECKSUM_OFFSET, sizeof(std::uint32_t)), *checksum));
 }
 
-template <detail::FixedWidthInteger Integer>
+template <dblusblus::detail::FixedWidthInteger Integer>
 void ReplaceFieldAndRefreshChecksum(std::span<std::byte> page, std::size_t offset, Integer value) {
     ASSERT_TRUE(EncodeLittleEndian(page.subspan(offset, sizeof(Integer)), value));
     RefreshChecksum(page);
@@ -323,4 +323,4 @@ TEST(FileSuperblockTest, VerifiesChecksumAndTreatsStoredFieldAsZero) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

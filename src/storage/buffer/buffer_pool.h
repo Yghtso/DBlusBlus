@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // Result of a registered file owner's page-local validation (ARCHITECTURE.md §7.6.4).
 enum class PageValidationOutcome : std::uint8_t {
@@ -279,4 +279,4 @@ class BufferPool {
     bool quiescing_{false};
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -10,7 +10,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::size_t BOOLEAN_PHYSICAL_SIZE = 1;
 inline constexpr std::size_t INT32_PHYSICAL_SIZE = 4;
@@ -155,4 +155,4 @@ BuildTuplePhysicalLayout(std::span<const PhysicalColumnSpec> columns, SchemaVer 
 static_assert(VARCHAR_DESCRIPTOR_LENGTH_OFFSET + sizeof(std::uint32_t) ==
               VARCHAR_DESCRIPTOR_ENCODED_SIZE);
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

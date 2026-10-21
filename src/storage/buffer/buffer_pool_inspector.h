@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // Diagnostic snapshot of one frame, taken atomically under the pool mutex.
 struct FrameSnapshot {
@@ -52,4 +52,4 @@ class BufferPoolInspector {
     const BufferPool* pool_;
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using PageImage = std::array<std::byte, PAGE_SIZE>;
@@ -921,4 +921,4 @@ std::size_t BufferPool::FreeFrameCount() const {
     return free_list_.size();
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

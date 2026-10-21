@@ -6,7 +6,7 @@
 #include <optional>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 [[nodiscard]] PageFileError DiskFailure(PageFileOperation operation, DiskError disk_error) {
@@ -234,4 +234,4 @@ void PageFile::Release() noexcept {
     }
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

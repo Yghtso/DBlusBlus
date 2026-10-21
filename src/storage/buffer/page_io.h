@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // The raw page-file operations BufferPool needs. The production implementation forwards to
 // DiskManager; tests substitute a wrapper that injects transfer and synchronization faults.
@@ -58,4 +58,4 @@ class DiskPageIo final : public PageIo {
     DiskManager* disk_manager_;
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

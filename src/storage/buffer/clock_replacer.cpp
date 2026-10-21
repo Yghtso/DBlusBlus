@@ -2,7 +2,7 @@
 
 #include "common/assert.h"
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 ClockReplacer::ClockReplacer(std::size_t frame_count) : referenced_(frame_count, 0U) {
     DBLUS_CHECK(frame_count > 0U, "buffer pool needs at least one frame");
@@ -20,4 +20,4 @@ bool ClockReplacer::IsReferenced(FrameId frame_id) const noexcept {
     return referenced_[frame_id] != 0U;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

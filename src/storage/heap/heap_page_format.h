@@ -9,7 +9,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::uint16_t HEAP_PAGE_FORMAT_VERSION = 1;
 inline constexpr std::size_t HEAP_PAGE_HEADER_OFFSET = COMMON_PAGE_HEADER_ENCODED_SIZE;
@@ -83,4 +83,4 @@ static_assert(HEAP_PAGE_HEADER_OFFSET + HEAP_PAGE_HEADER_ENCODED_SIZE ==
 static_assert(HEAP_PAGE_RESERVED_OFFSET + sizeof(std::uint32_t) == HEAP_PAGE_TOTAL_HEADER_SIZE);
 static_assert(HEAP_SLOT_AUX_OFFSET + sizeof(std::uint16_t) == HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

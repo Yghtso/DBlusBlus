@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <shared_mutex>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // Canonical frame ownership state (ARCHITECTURE.md §7.6.1).
 enum class FrameState : std::uint8_t {
@@ -52,4 +52,4 @@ struct BufferFrame {
     std::shared_mutex latch;
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

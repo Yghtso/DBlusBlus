@@ -16,7 +16,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using heap_test::CopyPageBytes;
@@ -51,7 +51,7 @@ void ConfigureOneNormalSlot(Page& page,
 using heap_test::MakeTestTuple;
 
 TEST(HeapPageInsertionTest, InsertsValidTupleAndReturnsStableRid) {
-    Page page = InitializedHeapPage(PageId{.file_id = 17, .page_no = 23});
+    Page page = InitializedHeapPage(PageId{.file_id = FileId{17}, .page_no = 23});
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     const auto tuple = MakeTestTuple(64, std::byte{0x7F});
 
@@ -62,7 +62,7 @@ TEST(HeapPageInsertionTest, InsertsValidTupleAndReturnsStableRid) {
         return;
     }
     EXPECT_TRUE(result);
-    EXPECT_EQ(*result, (Rid{.page = PageId{.file_id = 17, .page_no = 23}, .slot = 0}));
+    EXPECT_EQ(*result, (Rid{.page = PageId{.file_id = FileId{17}, .page_no = 23}, .slot = 0}));
 
     const auto validation = heap_page.Validate();
     ASSERT_TRUE(validation);
@@ -194,7 +194,7 @@ TEST(HeapPageInsertionTest, RejectsTuplesThatWouldFailOwnerValidationWithoutMuta
     };
 
     // The page under test is page 3, and the first insertion would occupy slot 0.
-    Page page = InitializedHeapPage({.file_id = 7, .page_no = 3});
+    Page page = InitializedHeapPage({.file_id = FileId{7}, .page_no = 3});
     expect_rejected(page, {}, HeapPageValidationError::INVALID_TUPLE);
     const std::vector<std::byte> garbage(64, std::byte{0x42});
     expect_rejected(page, garbage, HeapPageValidationError::INVALID_TUPLE);
@@ -224,7 +224,7 @@ TEST(HeapPageInsertionTest, RejectsTuplesThatWouldFailOwnerValidationWithoutMuta
 }
 
 TEST(HeapPageInsertionTest, AcceptsSamePagePreviousVersionOfExistingSlot) {
-    Page page = InitializedHeapPage({.file_id = 7, .page_no = 3});
+    Page page = InitializedHeapPage({.file_id = FileId{7}, .page_no = 3});
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     ASSERT_TRUE(heap_page.Insert(MakeTestTuple(64)));
 
@@ -300,4 +300,4 @@ TEST(HeapPageInsertionTest, TupleBytesRejectsInvalidAndNonNormalSlots) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -9,7 +9,7 @@
 #include <span>
 #include <type_traits>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 static_assert(HEAP_PAGE_HEADER_OFFSET == 32);
@@ -230,4 +230,4 @@ TEST(HeapSlotEntryCodecTest, RejectsUndersizedAndInvalidStateWithoutModification
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

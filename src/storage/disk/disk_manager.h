@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class DiskOperation : std::uint8_t {
     CREATE_FILE,
@@ -99,4 +99,4 @@ class DiskManager {
     std::mutex extension_mutex_;
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

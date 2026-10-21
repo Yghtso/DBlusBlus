@@ -6,7 +6,7 @@
 
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // ---------------------------------------------------------------------------------------------
 // PageGuardBase
@@ -149,4 +149,4 @@ void WritePageGuard::Release() noexcept {
     ReleaseLatchAndPin(Latch::EXCLUSIVE);
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

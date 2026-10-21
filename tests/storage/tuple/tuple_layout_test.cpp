@@ -10,7 +10,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 static_assert(BOOLEAN_PHYSICAL_SIZE == 1);
@@ -434,4 +434,4 @@ TEST(TuplePhysicalLayoutTest, ComposesNullBitmapSizeAndSchemaVersionWithTupleHea
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

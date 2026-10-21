@@ -10,7 +10,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class PageHeaderValidationError : std::uint8_t {
     DECODE_FAILED,
@@ -45,4 +45,4 @@ class Page {
 
 static_assert(sizeof(Page::ByteStorage) == PAGE_SIZE);
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

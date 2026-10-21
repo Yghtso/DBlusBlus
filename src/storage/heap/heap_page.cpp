@@ -14,7 +14,7 @@
 #include <tuple>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t MAX_HEAP_PAGE_SLOT_COUNT =
@@ -109,7 +109,7 @@ struct TupleCheck {
     // xmin is FROZEN or normal; xmax is INVALID or normal; no deleter means cmax == 0.
     const bool xmin_valid = header.xmin != INVALID_TXN_ID;
     const bool xmax_valid = header.xmax != FROZEN_TXN_ID;
-    const bool cmax_valid = header.xmax != INVALID_TXN_ID || header.cmax == 0;
+    const bool cmax_valid = header.xmax != INVALID_TXN_ID || header.cmax == CommandId{0};
     if (!xmin_valid || !xmax_valid || !cmax_valid) {
         return {.error = HeapPageValidationError::INVALID_TUPLE_TRANSACTION_FIELDS};
     }
@@ -469,7 +469,7 @@ HeapTupleSchemaHistory::HeapTupleSchemaHistory(
 
 const TuplePhysicalLayout*
 HeapTupleSchemaHistory::Resolve(SchemaVer schema_version) const noexcept {
-    if (schema_version == 0) {
+    if (schema_version == SchemaVer{0}) {
         return nullptr;
     }
     for (const TuplePhysicalLayout& layout : layouts_) {
@@ -727,4 +727,4 @@ std::optional<std::span<const std::byte>> HeapPage::TupleBytes(SlotId slot_id) c
     return page.Bytes().subspan(decoded_slot->tuple_offset, decoded_slot->tuple_length);
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

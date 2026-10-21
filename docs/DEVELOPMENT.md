@@ -604,6 +604,16 @@ src/
 Tests should mirror these responsibility groups under `tests/common/` and `tests/storage/`,
 with cross-project smoke coverage at the test root.
 
+#### Namespaces and identifiers
+
+Shared building blocks in `src/common/` live in `dblusblus`; everything under `src/storage/`
+lives in `dblusblus::storage`. Tests use the namespace of the code they test.
+
+Identifiers that are names rather than positions (`FileId`, `TxnId`, `CommandId`, `Lsn`,
+`TableId`, `IndexId`, `SchemaVer`) are `StrongId` types from `src/common/types.h`: they are built
+explicitly from an integer, read back with `Value()`, and do not convert to each other. `PageNo`
+and `SlotId` stay plain integers because they are counted and used as indexes.
+
 #### Error handling
 
 Runtime failures (I/O errors, corrupt persistent bytes, bad caller input) are returned, never

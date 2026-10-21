@@ -16,7 +16,7 @@
 #include <unistd.h>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr mode_t PAGE_FILE_MODE = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
@@ -473,4 +473,4 @@ DiskStatus DiskManager::SyncFile(FileId file_id) const {
     return SuccessStatus();
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -9,15 +9,29 @@
 namespace dblusblus {
 namespace {
 
-static_assert(std::is_same_v<FileId, std::uint32_t>);
+static_assert(std::is_same_v<FileId::RepType, std::uint32_t>);
 static_assert(std::is_same_v<PageNo, std::uint64_t>);
 static_assert(std::is_same_v<SlotId, std::uint16_t>);
-static_assert(std::is_same_v<TxnId, std::uint64_t>);
-static_assert(std::is_same_v<CommandId, std::uint32_t>);
-static_assert(std::is_same_v<Lsn, std::uint64_t>);
-static_assert(std::is_same_v<TableId, std::uint64_t>);
-static_assert(std::is_same_v<IndexId, std::uint64_t>);
-static_assert(std::is_same_v<SchemaVer, std::uint32_t>);
+static_assert(std::is_same_v<TxnId::RepType, std::uint64_t>);
+static_assert(std::is_same_v<CommandId::RepType, std::uint32_t>);
+static_assert(std::is_same_v<Lsn::RepType, std::uint64_t>);
+static_assert(std::is_same_v<TableId::RepType, std::uint64_t>);
+static_assert(std::is_same_v<IndexId::RepType, std::uint64_t>);
+static_assert(std::is_same_v<SchemaVer::RepType, std::uint32_t>);
+
+// Strong identifiers cost nothing over the raw integer.
+static_assert(sizeof(FileId) == sizeof(std::uint32_t));
+static_assert(sizeof(TxnId) == sizeof(std::uint64_t));
+static_assert(std::is_trivially_copyable_v<FileId>);
+static_assert(std::is_trivially_copyable_v<Lsn>);
+
+// They do not mix with raw integers or with each other.
+static_assert(!std::is_convertible_v<std::uint32_t, FileId>);
+static_assert(!std::is_convertible_v<FileId, std::uint32_t>);
+static_assert(!std::is_convertible_v<FileId, SchemaVer>);
+static_assert(!std::is_constructible_v<SchemaVer, FileId>);
+static_assert(!std::is_constructible_v<IndexId, TableId>);
+static_assert(!std::is_convertible_v<TxnId, Lsn>);
 static_assert(std::is_trivially_copyable_v<PageId>);
 static_assert(std::is_trivially_copyable_v<Rid>);
 

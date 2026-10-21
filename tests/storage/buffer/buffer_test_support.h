@@ -31,7 +31,7 @@
 #include <utility>
 #include <vector>
 
-namespace dblusblus::buffer_test {
+namespace dblusblus::storage::buffer_test {
 
 using test::TemporaryDirectory;
 
@@ -239,7 +239,7 @@ void WaitFor(Predicate&& predicate) {
     }
 }
 
-inline constexpr FileId HEAP_FILE_ID = 7;
+inline constexpr FileId HEAP_FILE_ID{7};
 
 // One registered heap file with a DiskManager, PageFile, and fault-injecting I/O.
 class HeapFileFixture {
@@ -373,4 +373,4 @@ template <typename Guard>
     return PageId{.file_id = HEAP_FILE_ID, .page_no = page_no};
 }
 
-} // namespace dblusblus::buffer_test
+} // namespace dblusblus::storage::buffer_test

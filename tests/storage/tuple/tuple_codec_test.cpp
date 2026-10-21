@@ -19,7 +19,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::RequireValue;
@@ -704,4 +704,4 @@ TEST(FixedTupleCodecTest, ComposesWithHeapPageValidatedInsertionAndRetrieval) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

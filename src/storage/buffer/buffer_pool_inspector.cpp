@@ -2,7 +2,7 @@
 
 #include <mutex>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 FrameSnapshot BufferPoolInspector::SnapshotFrameLocked(FrameId frame_id) const {
     const BufferFrame& frame = pool_->frames_[frame_id];
@@ -52,4 +52,4 @@ bool BufferPoolInspector::IsCurrentBinding(FrameId frame_id,
            frame.binding_epoch == binding_epoch;
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

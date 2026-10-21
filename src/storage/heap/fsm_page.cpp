@@ -11,7 +11,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 constexpr std::size_t FIRST_HEAP_PAGE_NO_OFFSET = 0;
@@ -289,4 +289,4 @@ FsmPageUpdateResult FsmPage::SetCategory(std::size_t entry_index, std::uint8_t c
     return {};
 }
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

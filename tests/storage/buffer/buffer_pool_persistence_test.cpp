@@ -11,7 +11,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using buffer_test::InitializeHeap;
@@ -19,7 +19,7 @@ using buffer_test::Must;
 using buffer_test::TemporaryDirectory;
 using buffer_test::ValidateHeap;
 
-constexpr FileId FILE_ID = 11;
+constexpr FileId FILE_ID{11};
 
 // A valid 200-byte heap test tuple whose VARCHAR payload bytes are a key-specific pattern.
 [[nodiscard]] std::vector<std::byte> TupleFor(std::uint32_t key) {
@@ -97,4 +97,4 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

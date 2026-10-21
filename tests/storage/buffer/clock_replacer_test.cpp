@@ -4,7 +4,7 @@
 #include <optional>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 TEST(ClockReplacerTest, ChoosesFirstEligibleUnreferencedFrameFromTheHand) {
@@ -64,4 +64,4 @@ TEST(ClockReplacerTest, ContinuesFromTheHandAcrossAttempts) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

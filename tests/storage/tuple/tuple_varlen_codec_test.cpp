@@ -25,7 +25,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::RequireValue;
@@ -633,7 +633,7 @@ TEST(VarlenTuplePersistenceTest, SurvivesHeapPageFileWriteReopenAndDecode) {
     TemporaryDirectory temporary_directory;
     ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("mixed.heap");
-    constexpr FileId file_id = 71;
+    constexpr FileId file_id{71};
     const FileSuperblock superblock{
         .file_kind = FileKind::HEAP,
         .file_id = file_id,
@@ -711,4 +711,4 @@ TEST(VarlenTuplePersistenceTest, SurvivesHeapPageFileWriteReopenAndDecode) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 // BufferPool error categories (ARCHITECTURE.md §7.12.7). Categories that depend on the WAL
 // (WAL_RESERVATION_OR_APPEND_FAILURE, WAL_DURABILITY_FAILURE, STORAGE_NONCONTINUABLE) and file
@@ -49,4 +49,4 @@ using BufferStatus = Status<BufferError>;
 template <typename T>
 using BufferResult = Result<T, BufferError>;
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

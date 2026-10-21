@@ -12,7 +12,7 @@
 #include <optional>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 inline constexpr std::uint16_t FSM_PAGE_FORMAT_VERSION = 1;
 inline constexpr std::size_t FSM_PAGE_HEADER_OFFSET = COMMON_PAGE_HEADER_ENCODED_SIZE;
@@ -157,4 +157,4 @@ static_assert(FSM_PAGE_HEADER_OFFSET + FSM_PAGE_HEADER_ENCODED_SIZE == FSM_PAGE_
 static_assert(FSM_PAGE_ENTRIES_OFFSET + FSM_PAGE_ENTRY_CAPACITY == PAGE_SIZE);
 static_assert(FSM_PAGE_ENTRY_CAPACITY <= std::numeric_limits<std::uint16_t>::max());
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

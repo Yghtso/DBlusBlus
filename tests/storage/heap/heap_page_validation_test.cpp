@@ -16,7 +16,7 @@
 #include <limits>
 #include <span>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using heap_test::CopyPageBytes;
@@ -140,7 +140,7 @@ RetainedSlot(HeapSlotState state, std::uint16_t offset, std::uint16_t length) no
 }
 
 TEST(HeapPageTest, InitializesDeterministicBlankHeapDataPage) {
-    Page page{PageId{.file_id = 17, .page_no = 23}};
+    Page page{PageId{.file_id = FileId{17}, .page_no = 23}};
     std::ranges::fill(page.Bytes(), std::byte{0xA5});
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
 
@@ -184,7 +184,7 @@ TEST(HeapPageTest, InitializesDeterministicBlankHeapDataPage) {
 }
 
 TEST(HeapPageTest, InitializesLowestOrdinaryPageNumber) {
-    Page page{PageId{.file_id = 18, .page_no = 1}};
+    Page page{PageId{.file_id = FileId{18}, .page_no = 1}};
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
 
     ASSERT_TRUE(heap_page.Initialize());
@@ -201,7 +201,7 @@ TEST(HeapPageTest, InitializationRejectsNonOrdinaryPageNumbersWithoutMutation) {
     constexpr std::array invalid_page_numbers{PageNo{0}, INVALID_PAGE_NO};
 
     for (const PageNo page_no : invalid_page_numbers) {
-        Page page{PageId{.file_id = 19, .page_no = page_no}};
+        Page page{PageId{.file_id = FileId{19}, .page_no = page_no}};
         std::ranges::fill(page.Bytes(), std::byte{0xA5});
         const auto original = CopyPageBytes(page);
 
@@ -211,7 +211,7 @@ TEST(HeapPageTest, InitializationRejectsNonOrdinaryPageNumbersWithoutMutation) {
 }
 
 TEST(HeapPageTest, InitializationWritesZeroFlagsAndPreservesExplicitPageLsn) {
-    Page page{PageId{.file_id = 18, .page_no = 24}};
+    Page page{PageId{.file_id = FileId{18}, .page_no = 24}};
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     ASSERT_TRUE(heap_page.Initialize(Lsn{77}));
 
@@ -274,11 +274,11 @@ TEST(HeapPageValidationTest, RejectsWrongCommonHeaderIdentityAndFormat) {
 }
 
 TEST(HeapPageValidationTest, RejectsNonOrdinaryOwningPageNumbers) {
-    const Page canonical = InitializedHeapPage({.file_id = 20, .page_no = 1});
+    const Page canonical = InitializedHeapPage({.file_id = FileId{20}, .page_no = 1});
     constexpr std::array invalid_page_numbers{PageNo{0}, INVALID_PAGE_NO};
 
     for (const PageNo page_no : invalid_page_numbers) {
-        Page page{PageId{.file_id = 20, .page_no = page_no}};
+        Page page{PageId{.file_id = FileId{20}, .page_no = page_no}};
         std::ranges::copy(canonical.Bytes(), page.Bytes().begin());
         auto common_header = page.DecodeHeader();
         if (!common_header.has_value()) {
@@ -769,14 +769,14 @@ TEST(HeapPageValidationTest, AppliesTupleTransactionFieldDomains) {
     };
     const std::array cases{
         Case{.metadata = {.xmin = INVALID_TXN_ID}, .valid = false},
-        Case{.metadata = {.xmin = FIRST_NORMAL_TXN_ID, .xmax = FROZEN_TXN_ID, .cmax = 1},
+        Case{.metadata = {.xmin = FIRST_NORMAL_TXN_ID, .xmax = FROZEN_TXN_ID, .cmax = CommandId{1}},
              .valid = false},
-        Case{.metadata = {.xmin = FIRST_NORMAL_TXN_ID, .cmax = 1}, .valid = false},
+        Case{.metadata = {.xmin = FIRST_NORMAL_TXN_ID, .cmax = CommandId{1}}, .valid = false},
         Case{.metadata = {.xmin = FROZEN_TXN_ID}, .valid = true},
         Case{.metadata = {.xmin = FIRST_NORMAL_TXN_ID,
-                          .xmax = FIRST_NORMAL_TXN_ID + 1,
-                          .cmin = 3,
-                          .cmax = 4},
+                          .xmax = TxnId{FIRST_NORMAL_TXN_ID.Value() + 1},
+                          .cmin = CommandId{3},
+                          .cmax = CommandId{4}},
              .valid = true},
     };
     for (const auto& test_case : cases) {
@@ -811,7 +811,7 @@ TEST(HeapPageValidationTest, AppliesBoundedPreviousVersionPointerChecks) {
         Case{.prev_page_no = 900, .prev_slot = 4000, .valid = true},
     };
     for (const auto& test_case : cases) {
-        Page page = InitializedHeapPage({.file_id = 7, .page_no = 3});
+        Page page = InitializedHeapPage({.file_id = FileId{7}, .page_no = 3});
         TupleVersionMetadata metadata = heap_test::TestTupleMetadata();
         metadata.prev_page_no = test_case.prev_page_no;
         metadata.prev_slot = test_case.prev_slot;
@@ -888,4 +888,4 @@ TEST(HeapPageValidationTest, ReportsLowestSlotForDeterministicTupleFailure) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

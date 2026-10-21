@@ -14,7 +14,7 @@
 #include <span>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using heap_test::CopyPageBytes;
@@ -81,7 +81,7 @@ void ConfigureSlotsForValidation(Page& page,
 }
 
 TEST(HeapPageDeadTransitionTest, MarksNormalSlotDeadWithoutReclaimingBytesOrIdentity) {
-    Page page = InitializedHeapPage(PageId{.file_id = 31, .page_no = 37});
+    Page page = InitializedHeapPage(PageId{.file_id = FileId{31}, .page_no = 37});
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     const auto tuple = MakeTestTuple(64, std::byte{0x41});
     const auto insertion = heap_page.Insert(tuple);
@@ -272,7 +272,7 @@ TEST(HeapPageDeadTransitionTest, RejectsDisallowedTransitionsWithoutMutation) {
 }
 
 TEST(HeapPageCompactionTest, ReclaimsDeadPayloadAndPreservesStableRids) {
-    Page page = InitializedHeapPage(PageId{.file_id = 51, .page_no = 57});
+    Page page = InitializedHeapPage(PageId{.file_id = FileId{51}, .page_no = 57});
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     const auto first = MakeTestTuple(60, std::byte{0xA1});
     const auto second = MakeTestTuple(70, std::byte{0xB1});
@@ -680,4 +680,4 @@ TEST(HeapPageCompactionTest, ReclaimedSpaceSupportsAppendOnlyInsertionWithoutSlo
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

@@ -9,7 +9,7 @@
 #include <filesystem>
 #include <optional>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 
 enum class PageFileOperation : std::uint8_t {
     CREATE,
@@ -93,4 +93,4 @@ class PageFile {
     FileSuperblock superblock_{};
 };
 
-} // namespace dblusblus
+} // namespace dblusblus::storage

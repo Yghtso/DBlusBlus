@@ -18,7 +18,7 @@
 #include <thread>
 #include <unistd.h>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::TemporaryDirectory;
@@ -164,16 +164,16 @@ TEST(DiskManagerTest, MapsFileIdsAndReadsWritesPagesPositionally) {
     const auto second_page = PageFilledWith(std::byte{0x22});
     const auto other_file_page = PageFilledWith(std::byte{0x33});
 
-    ASSERT_TRUE(manager.WritePage(PageId{.file_id = 11, .page_no = 1}, second_page));
-    ASSERT_TRUE(manager.WritePage(PageId{.file_id = 12, .page_no = 0}, other_file_page));
-    ASSERT_TRUE(manager.WritePage(PageId{.file_id = 11, .page_no = 0}, first_page));
+    ASSERT_TRUE(manager.WritePage(PageId{.file_id = FileId{11}, .page_no = 1}, second_page));
+    ASSERT_TRUE(manager.WritePage(PageId{.file_id = FileId{12}, .page_no = 0}, other_file_page));
+    ASSERT_TRUE(manager.WritePage(PageId{.file_id = FileId{11}, .page_no = 0}, first_page));
 
     std::array<std::byte, PAGE_SIZE> output{};
-    ASSERT_TRUE(manager.ReadPage(PageId{.file_id = 11, .page_no = 0}, output));
+    ASSERT_TRUE(manager.ReadPage(PageId{.file_id = FileId{11}, .page_no = 0}, output));
     EXPECT_EQ(output, first_page);
-    ASSERT_TRUE(manager.ReadPage(PageId{.file_id = 12, .page_no = 0}, output));
+    ASSERT_TRUE(manager.ReadPage(PageId{.file_id = FileId{12}, .page_no = 0}, output));
     EXPECT_EQ(output, other_file_page);
-    ASSERT_TRUE(manager.ReadPage(PageId{.file_id = 11, .page_no = 1}, output));
+    ASSERT_TRUE(manager.ReadPage(PageId{.file_id = FileId{11}, .page_no = 1}, output));
     EXPECT_EQ(output, second_page);
 }
 
@@ -186,14 +186,14 @@ TEST(DiskManagerTest, RejectsMissingPagesWithoutChangingReadDestination) {
 
     auto output = PageFilledWith(std::byte{0xA5});
     const auto original = output;
-    const auto read = manager.ReadPage(PageId{.file_id = 21, .page_no = 1}, output);
+    const auto read = manager.ReadPage(PageId{.file_id = FileId{21}, .page_no = 1}, output);
     EXPECT_FALSE(read);
     EXPECT_EQ(read.Error().code, DiskErrorCode::PAGE_NOT_FOUND);
     EXPECT_EQ(read.Error().operation, DiskOperation::READ_PAGE);
     EXPECT_EQ(read.Error().page_no, PageNo{1});
     EXPECT_EQ(output, original);
 
-    const auto write = manager.WritePage(PageId{.file_id = 21, .page_no = 1}, output);
+    const auto write = manager.WritePage(PageId{.file_id = FileId{21}, .page_no = 1}, output);
     EXPECT_FALSE(write);
     EXPECT_EQ(write.Error().code, DiskErrorCode::PAGE_NOT_FOUND);
     const auto size = manager.FileSize(FileId{21});
@@ -217,7 +217,7 @@ TEST(DiskManagerTest, RejectsMisalignedFilesAndReportsMidPageShortReads) {
 
     auto output = PageFilledWith(std::byte{0xA5});
     const auto original = output;
-    const auto read = manager.ReadPage(PageId{.file_id = 31, .page_no = 1}, output);
+    const auto read = manager.ReadPage(PageId{.file_id = FileId{31}, .page_no = 1}, output);
     EXPECT_FALSE(read);
     EXPECT_EQ(read.Error().code, DiskErrorCode::SHORT_READ);
     EXPECT_EQ(output, original);
@@ -235,7 +235,7 @@ TEST(DiskManagerTest, RejectsUnregisteredAndOverflowingPageIdsWithContext) {
     DiskManager manager;
     auto output = PageFilledWith(std::byte{0xA5});
 
-    const auto unregistered = manager.ReadPage(PageId{.file_id = 99, .page_no = 4}, output);
+    const auto unregistered = manager.ReadPage(PageId{.file_id = FileId{99}, .page_no = 4}, output);
     EXPECT_FALSE(unregistered);
     EXPECT_EQ(unregistered.Error().code, DiskErrorCode::FILE_NOT_REGISTERED);
     EXPECT_EQ(unregistered.Error().operation, DiskOperation::READ_PAGE);
@@ -245,7 +245,7 @@ TEST(DiskManagerTest, RejectsUnregisteredAndOverflowingPageIdsWithContext) {
 
     ASSERT_TRUE(manager.CreateFile(FileId{41}, path));
     const auto overflow = manager.ReadPage(
-        PageId{.file_id = 41, .page_no = std::numeric_limits<PageNo>::max()}, output);
+        PageId{.file_id = FileId{41}, .page_no = std::numeric_limits<PageNo>::max()}, output);
     EXPECT_FALSE(overflow);
     EXPECT_EQ(overflow.Error().code, DiskErrorCode::OFFSET_OVERFLOW);
     EXPECT_EQ(overflow.Error().path, path);
@@ -262,14 +262,14 @@ TEST(DiskManagerTest, ReopeningPreservesBytesAndSyncsValidFiles) {
         DiskManager manager;
         ASSERT_TRUE(manager.CreateFile(FileId{51}, path));
         ASSERT_TRUE(manager.ExtendFile(FileId{51}));
-        ASSERT_TRUE(manager.WritePage(PageId{.file_id = 51, .page_no = 0}, expected));
+        ASSERT_TRUE(manager.WritePage(PageId{.file_id = FileId{51}, .page_no = 0}, expected));
         EXPECT_TRUE(manager.SyncFile(FileId{51}));
     }
 
     DiskManager reopened;
     ASSERT_TRUE(reopened.OpenFile(FileId{51}, path));
     std::array<std::byte, PAGE_SIZE> actual{};
-    ASSERT_TRUE(reopened.ReadPage(PageId{.file_id = 51, .page_no = 0}, actual));
+    ASSERT_TRUE(reopened.ReadPage(PageId{.file_id = FileId{51}, .page_no = 0}, actual));
     EXPECT_EQ(actual, expected);
 }
 
@@ -293,4 +293,4 @@ TEST(DiskManagerTest, RejectsInvalidFileIdsAndMissingPaths) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

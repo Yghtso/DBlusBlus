@@ -17,7 +17,7 @@
 #include <thread>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 using test::ErrorCodeOf;
@@ -352,4 +352,4 @@ TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

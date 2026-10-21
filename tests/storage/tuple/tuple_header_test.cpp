@@ -15,7 +15,7 @@
 #include <variant>
 #include <vector>
 
-namespace dblusblus {
+namespace dblusblus::storage {
 namespace {
 
 static_assert(TUPLE_HEADER_XMIN_OFFSET == 0);
@@ -318,4 +318,4 @@ TEST(TupleHeaderCodecTest, SurvivesValidatedHeapPageInsertion) {
 }
 
 } // namespace
-} // namespace dblusblus
+} // namespace dblusblus::storage

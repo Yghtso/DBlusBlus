@@ -12,7 +12,7 @@
 #include <span>
 
 // Byte-level helpers shared by the HeapPage tests.
-namespace dblusblus::heap_test {
+namespace dblusblus::storage::heap_test {
 
 [[nodiscard]] inline std::span<std::byte> HeapHeaderBytes(Page& page) {
     return page.Bytes().subspan(HEAP_PAGE_HEADER_OFFSET, HEAP_PAGE_HEADER_ENCODED_SIZE);
@@ -39,7 +39,8 @@ inline void WriteCommonHeader(Page& page, const CommonPageHeader& header) {
     page.WriteHeader(header);
 }
 
-[[nodiscard]] inline Page InitializedHeapPage(PageId page_id = {.file_id = 7, .page_no = 3}) {
+[[nodiscard]] inline Page InitializedHeapPage(PageId page_id = {.file_id = FileId{7},
+                                                                .page_no = 3}) {
     Page page{page_id};
     HeapPage heap_page{page, TestSchemaHistory()};
     if (!heap_page.Initialize()) {
@@ -48,4 +49,4 @@ inline void WriteCommonHeader(Page& page, const CommonPageHeader& header) {
     return page;
 }
 
-} // namespace dblusblus::heap_test
+} // namespace dblusblus::storage::heap_test
