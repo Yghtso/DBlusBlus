@@ -1,5 +1,6 @@
 #include "buffer_test_support.h"
 #include "storage/buffer/buffer_pool.h"
+#include "storage/buffer/buffer_pool_inspector.h"
 #include "storage/heap/heap_page.h"
 #include "storage/page/page_checksum.h"
 #include "storage/page/page_header.h"
@@ -78,7 +79,7 @@ TEST_F(BufferPoolTest, RejectsSuperblockUnpublishedAndUnregisteredPages) {
     EXPECT_EQ(pool_->FetchRead(PageId{.file_id = 99, .page_no = 1}).Error().code,
               BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
     EXPECT_EQ(file_.Io().ReadCount(), 0U);
-    EXPECT_FALSE(pool_->InspectPage(Pid(2)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(2)).has_value());
 }
 
 TEST_F(BufferPoolTest, RegistrationRejectsDuplicates) {
@@ -140,7 +141,7 @@ TEST_P(BufferPoolCorruptionTest, MalformedPagesNeverBecomeResidentAndRetrySuccee
     const auto failed = pool_->FetchRead(page_id);
     ASSERT_FALSE(failed);
     EXPECT_EQ(failed.Error().code, GetParam().expected);
-    EXPECT_FALSE(pool_->InspectPage(page_id).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(page_id).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 3U);
 
     // Not poison-cached: repair the fixture and fetch again.
@@ -287,7 +288,7 @@ TEST_F(BufferPoolTest, UnreportedMutationIsAnInvariantViolation) {
             guard.MutableBytes()[500] = std::byte{7};
             guard.Release();
         },
-        "");
+        "MarkDirty\\(\\) did not publish");
 }
 #endif
 
@@ -339,7 +340,7 @@ TEST_F(BufferPoolTest, InvalidInitializerAndExtensionFailureLeaveNoMappingOrFram
     const auto invalid = pool_->NewPage(file_.TestFileId(), [](Page&) { return true; });
     ASSERT_FALSE(invalid);
     EXPECT_EQ(invalid.Error().code, BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
-    EXPECT_FALSE(pool_->InspectPage(invalid.Error().page_id).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(invalid.Error().page_id).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 2U);
     // The unpublished page is not fetchable.
     EXPECT_EQ(pool_->FetchRead(invalid.Error().page_id).Error().code,
@@ -456,7 +457,7 @@ TEST_F(BufferPoolTest, CleanVictimIsEvictedWithoutWritingAndFullyReset) {
 
     // All three were referenced; the second-chance sweep clears them and returns to frame 0.
     EXPECT_EQ(FrameOf(*pool_, Pid(4)).frame_id, victim_frame.frame_id);
-    EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(1)).has_value());
     EXPECT_EQ(FrameOf(*pool_, Pid(4)).binding_epoch, victim_frame.binding_epoch + 1U);
     EXPECT_EQ(FrameOf(*pool_, Pid(4)).modification_generation,
               victim_frame.modification_generation);
@@ -478,7 +479,7 @@ TEST_F(BufferPoolTest, DirtyVictimIsStablyWrittenBeforeReuse) {
     }
     EXPECT_EQ(file_.Io().WriteCount(), 1U);
     EXPECT_EQ(file_.Io().SyncCount(), 1U);
-    EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(1)).has_value());
 
     auto on_disk = file_.ReadRawPage(Pid(1));
     EXPECT_TRUE(VerifyPageChecksum(on_disk.Bytes()));
@@ -530,8 +531,8 @@ TEST_F(BufferPoolTest, OneUnsuccessfulClockPassReturnsNoReplaceableFrame) {
     const auto failed = pool_->FetchRead(Pid(4));
     ASSERT_FALSE(failed);
     EXPECT_EQ(failed.Error().code, BufferErrorCode::NO_REPLACEABLE_FRAME);
-    EXPECT_EQ(pool_->LastClockPassVisits(), 6U);
-    EXPECT_FALSE(pool_->InspectPage(Pid(4)).has_value());
+    EXPECT_EQ(BufferPoolInspector{*pool_}.LastClockPassVisits(), 6U);
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(4)).has_value());
     for (PageNo page_no = 1; page_no <= 3; ++page_no) {
         EXPECT_EQ(Frame(Pid(page_no)).pin_count, 1U);
         EXPECT_EQ(Frame(Pid(page_no)).state, FrameState::RESIDENT);
@@ -542,7 +543,7 @@ TEST_F(BufferPoolTest, OneUnsuccessfulClockPassReturnsNoReplaceableFrame) {
     held.erase(held.begin() + 1);
     std::thread fetcher{[&] { EXPECT_TRUE(pool_->FetchRead(Pid(4))); }};
     fetcher.join();
-    EXPECT_FALSE(pool_->InspectPage(Pid(2)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(2)).has_value());
 }
 
 TEST_F(BufferPoolTest, RecentlyReferencedPagesSurviveTheSecondChanceSweep) {
@@ -554,8 +555,8 @@ TEST_F(BufferPoolTest, RecentlyReferencedPagesSurviveTheSecondChanceSweep) {
     ASSERT_TRUE(pool_->FetchRead(Pid(4))); // sweep clears all bits, evicts page 1, hand at frame 1
     ASSERT_TRUE(pool_->FetchRead(Pid(2))); // re-reference page 2 in frame 1
     ASSERT_TRUE(pool_->FetchRead(Pid(5))); // frame 1 gets its second chance; page 3 is evicted
-    EXPECT_TRUE(pool_->InspectPage(Pid(2)).has_value());
-    EXPECT_FALSE(pool_->InspectPage(Pid(3)).has_value());
+    EXPECT_TRUE(BufferPoolInspector{*pool_}.InspectPage(Pid(2)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(3)).has_value());
 }
 
 TEST_F(BufferPoolTest, StaleViewIsDetectableAfterReassignment) {
@@ -568,10 +569,10 @@ TEST_F(BufferPoolTest, StaleViewIsDetectableAfterReassignment) {
         ASSERT_TRUE(guard.Valid());
         frame_id = guard.Frame();
         epoch = guard.BindingEpoch();
-        EXPECT_TRUE(pool_->IsCurrentBinding(frame_id, Pid(1), epoch));
+        EXPECT_TRUE(BufferPoolInspector{*pool_}.IsCurrentBinding(frame_id, Pid(1), epoch));
     }
     ASSERT_TRUE(pool_->FetchRead(Pid(2)));
-    EXPECT_FALSE(pool_->IsCurrentBinding(frame_id, Pid(1), epoch));
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.IsCurrentBinding(frame_id, Pid(1), epoch));
     EXPECT_EQ(Frame(Pid(2)).frame_id, frame_id);
 }
 
@@ -587,12 +588,12 @@ TEST_F(BufferPoolTest, RetirementFlushesDirtyPagesAndClosesTheRegistration) {
     }
     ASSERT_TRUE(pool_->RetireFile(file_.TestFileId(), RetireDisposition::FLUSH_DIRTY));
     EXPECT_EQ(file_.Io().WriteCount(), 1U);
-    EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(1)).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 3U);
     EXPECT_EQ(pool_->FetchRead(Pid(1)).Error().code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
 #ifndef NDEBUG
     // Reset frames carry the debug poison pattern.
-    EXPECT_EQ(pool_->InspectFrame(0).state, FrameState::FREE);
+    EXPECT_EQ(BufferPoolInspector{*pool_}.InspectFrame(0).state, FrameState::FREE);
 #endif
 }
 
@@ -631,7 +632,7 @@ TEST_F(BufferPoolTest, RetirementWaitsForExistingGuardsAndRejectsNewClaims) {
     held.Release();
     retirer.join();
     EXPECT_TRUE(retired.load());
-    EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(1)).has_value());
 }
 
 TEST_F(BufferPoolTest, FailedRetirementFlushLeavesTheFileRetiringAndRetryable) {
@@ -648,7 +649,7 @@ TEST_F(BufferPoolTest, FailedRetirementFlushLeavesTheFileRetiringAndRetryable) {
     EXPECT_EQ(pool_->FetchRead(Pid(1)).Error().code, BufferErrorCode::FILE_RETIRED_OR_CLOSING);
 
     ASSERT_TRUE(pool_->RetireFile(file_.TestFileId(), RetireDisposition::FLUSH_DIRTY));
-    EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
+    EXPECT_FALSE(BufferPoolInspector{*pool_}.InspectPage(Pid(1)).has_value());
 }
 
 TEST_F(BufferPoolTest, ShutdownDrainsGuardsFlushesDirtyPagesAndRejectsNewWork) {

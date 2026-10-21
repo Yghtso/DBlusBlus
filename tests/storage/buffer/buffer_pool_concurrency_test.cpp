@@ -1,5 +1,6 @@
 #include "buffer_test_support.h"
 #include "storage/buffer/buffer_pool.h"
+#include "storage/buffer/buffer_pool_inspector.h"
 #include "storage/heap/heap_page.h"
 #include "support/require.h"
 
@@ -52,7 +53,7 @@ class BufferPoolConcurrencyTest : public ::testing::Test {
     }
 
     [[nodiscard]] std::optional<PageTableSnapshot> Entry(PageId page_id) const {
-        return pool_->InspectPage(page_id);
+        return BufferPoolInspector{*pool_}.InspectPage(page_id);
     }
 
     HeapFileFixture file_;
@@ -199,7 +200,8 @@ TEST_F(BufferPoolConcurrencyTest, MutationDuringWritebackKeepsTheNewerGeneration
     std::atomic<bool> dirty_after_first_writeback{false};
     observer_.SetCallback([&](const BufferPoolEvent& event) {
         if (event.type == BufferPoolEventType::WRITEBACK_IMAGE_COPIED && ++copies == 2) {
-            dirty_after_first_writeback = pool_->InspectFrame(*event.frame_id).dirty;
+            dirty_after_first_writeback =
+                BufferPoolInspector{*pool_}.InspectFrame(*event.frame_id).dirty;
         }
     });
     observer_.PauseAt(BufferPoolEventType::WRITEBACK_WRITE_STARTED, Pid(1));

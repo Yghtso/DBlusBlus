@@ -103,26 +103,6 @@ struct BufferPoolOptions {
     BufferPoolObserver* observer{nullptr};
 };
 
-// Diagnostic snapshot of one frame, taken atomically under the pool mutex.
-struct FrameSnapshot {
-    FrameId frame_id{0};
-    PageId page_id{};
-    FrameState state{FrameState::FREE};
-    FrameIoState io_state{FrameIoState::NONE};
-    std::uint32_t pin_count{0};
-    bool dirty{false};
-    bool referenced{false};
-    std::uint64_t modification_generation{0};
-    std::uint64_t binding_epoch{0};
-};
-
-// Diagnostic snapshot of one page-table entry.
-struct PageTableSnapshot {
-    PageTableEntryState state{PageTableEntryState::LOAD_INTENT};
-    std::optional<FrameSnapshot> frame;
-    std::uint32_t pending_claims{0};
-};
-
 // Process-local cache of database pages (ARCHITECTURE.md Chapter 7).
 //
 // The BufferPool owns the PageId -> frame binding, pins, page latches, dirty state, CLOCK
@@ -184,17 +164,12 @@ class BufferPool {
         return frame_count_;
     }
     [[nodiscard]] std::size_t FreeFrameCount() const;
-    [[nodiscard]] FrameSnapshot InspectFrame(FrameId frame_id) const;
-    [[nodiscard]] std::optional<PageTableSnapshot> InspectPage(PageId page_id) const;
-    [[nodiscard]] std::size_t LastClockPassVisits() const;
-    // True while the guard's residency (frame + PageId + binding epoch) is still the frame's
-    // current binding. Test facility for stale-view detection.
-    [[nodiscard]] bool
-    IsCurrentBinding(FrameId frame_id, PageId page_id, std::uint64_t binding_epoch) const;
 
   private:
-    friend class ReadPageGuard;
+    friend class detail::PageGuardBase;
     friend class WritePageGuard;
+    // Test-only read access to frame and page-table state (buffer_pool_inspector.h).
+    friend class BufferPoolInspector;
 
     enum class FileState : std::uint8_t {
         ACTIVE,
@@ -231,8 +206,30 @@ class BufferPool {
 
     // Returns the pinned frame for page_id, loading it when needed.
     [[nodiscard]] BufferResult<FrameId> PinPage(PageId page_id);
+    // Fails unless page_id is an ordinary page of an active registered file. Requires the lock.
+    [[nodiscard]] BufferStatus CheckFetchableLocked(PageId page_id) const;
+    [[nodiscard]] BufferResult<FrameId> PinResidentLocked(FrameId frame_id, PageId page_id);
+    // Adds a claim to another fetch's in-progress load and waits for its result.
+    [[nodiscard]] BufferResult<FrameId> JoinLoad(std::unique_lock<std::mutex>& lock,
+                                                 PageId page_id,
+                                                 std::shared_ptr<LoadOperation> load);
     [[nodiscard]] BufferResult<FrameId> LoadPage(std::unique_lock<std::mutex>& lock,
                                                  PageId page_id);
+    // The error a finished read and validation turn into, if any. Requires the lock.
+    [[nodiscard]] std::optional<BufferError>
+    LoadFailureLocked(PageId page_id, const DiskStatus& read, PageValidationOutcome outcome) const;
+    // Waits until no other NewPage is running for file_id. Fails if the file or pool stops
+    // accepting work meanwhile. Requires the lock.
+    [[nodiscard]] BufferStatus WaitForNewPageTurn(std::unique_lock<std::mutex>& lock,
+                                                  FileId file_id);
+    // Picks the PageNo for a new page: first_unpublished (the page just past the published bound)
+    // if an earlier failed creation left it on disk, else a newly appended page. Called without
+    // the lock.
+    [[nodiscard]] DiskResult<PageNo> ReserveNewPageNo(PageId first_unpublished);
+    void PublishLoadLocked(std::unique_lock<std::mutex>& lock,
+                           PageId page_id,
+                           FrameId frame_id,
+                           LoadOperation& load);
     // Obtains a FREE frame owned exclusively by the caller: from the free list or by evicting a
     // CLOCK victim. May release the lock during eviction writeback.
     [[nodiscard]] BufferResult<FrameId>
@@ -261,7 +258,6 @@ class BufferPool {
     void PublishMutation(FrameId frame_id) noexcept;
     void Notify(std::unique_lock<std::mutex>& lock, const BufferPoolEvent& event);
     void NotifyUnlocked(const BufferPoolEvent& event);
-    [[nodiscard]] FrameSnapshot SnapshotFrameLocked(FrameId frame_id) const;
 
     template <typename Guard>
     [[nodiscard]] BufferResult<Guard> MakeGuard(FrameId frame_id, LatchMode mode);

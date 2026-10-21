@@ -1,6 +1,7 @@
 #pragma once
 
 #include "storage/buffer/buffer_pool.h"
+#include "storage/buffer/buffer_pool_inspector.h"
 #include "storage/buffer/page_io.h"
 #include "storage/disk/disk_manager.h"
 #include "storage/file/file_superblock.h"
@@ -330,7 +331,7 @@ class HeapFileFixture {
 
 // Non-optional accessors so tests do not dereference unchecked optionals.
 [[nodiscard]] inline PageTableSnapshot EntryOf(const BufferPool& pool, PageId page_id) {
-    auto entry = pool.InspectPage(page_id);
+    auto entry = BufferPoolInspector{pool}.InspectPage(page_id);
     if (!entry.has_value()) {
         ADD_FAILURE() << "page " << page_id.page_no << " has no page-table entry";
         return {};

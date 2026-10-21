@@ -214,36 +214,35 @@ BufferResult<Guard> BufferPool::MakeGuard(FrameId frame_id, LatchMode mode) {
     return Guard{*this, frame_id, frame.page, frame.binding_epoch};
 }
 
+BufferStatus BufferPool::CheckFetchableLocked(PageId page_id) const {
+    const auto fail = [&](BufferErrorCode code, const char* message) {
+        return FailureStatus(MakeError(code, BufferOperation::FETCH_PAGE, page_id, message));
+    };
+    if (quiescing_) {
+        return fail(BufferErrorCode::BUFFERPOOL_QUIESCING, "BufferPool is quiescing");
+    }
+    const auto file = files_.find(page_id.file_id);
+    if (file == files_.end()) {
+        return fail(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
+                    "FileId is not registered with this BufferPool");
+    }
+    if (file->second.state != FileState::ACTIVE) {
+        return fail(BufferErrorCode::FILE_RETIRED_OR_CLOSING, "file is retiring");
+    }
+    // Page 0 is the superblock and is served only by the PageFile open path. Pages at or beyond
+    // the published bound are not ordinary page addresses.
+    if (page_id.page_no == 0U || page_id.page_no >= file->second.published_page_count) {
+        return fail(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND, "page is not a published data page");
+    }
+    return {};
+}
+
 BufferResult<FrameId> BufferPool::PinPage(PageId page_id) {
     std::unique_lock lock{mutex_};
     bool hit_notified = false;
     for (;;) {
-        if (quiescing_) {
-            return Failure<FrameId>(MakeError(BufferErrorCode::BUFFERPOOL_QUIESCING,
-                                              BufferOperation::FETCH_PAGE,
-                                              page_id,
-                                              "BufferPool is quiescing"));
-        }
-        const auto file = files_.find(page_id.file_id);
-        if (file == files_.end()) {
-            return Failure<FrameId>(MakeError(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
-                                              BufferOperation::FETCH_PAGE,
-                                              page_id,
-                                              "FileId is not registered with this BufferPool"));
-        }
-        if (file->second.state != FileState::ACTIVE) {
-            return Failure<FrameId>(MakeError(BufferErrorCode::FILE_RETIRED_OR_CLOSING,
-                                              BufferOperation::FETCH_PAGE,
-                                              page_id,
-                                              "file is retiring"));
-        }
-        // Page 0 is the superblock and is served only by the PageFile open path. Pages at or
-        // beyond the published bound are not ordinary page addresses.
-        if (page_id.page_no == 0U || page_id.page_no >= file->second.published_page_count) {
-            return Failure<FrameId>(MakeError(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
-                                              BufferOperation::FETCH_PAGE,
-                                              page_id,
-                                              "page is not a published data page"));
+        if (auto fetchable = CheckFetchableLocked(page_id); !fetchable) {
+            return Failure<FrameId>(std::move(fetchable).Error());
         }
 
         const auto entry = page_table_.find(page_id);
@@ -252,7 +251,7 @@ BufferResult<FrameId> BufferPool::PinPage(PageId page_id) {
         }
 
         switch (entry->second.state) {
-        case PageTableEntryState::RESIDENT: {
+        case PageTableEntryState::RESIDENT:
             if (observer_ != nullptr && !hit_notified) {
                 hit_notified = true;
                 Notify(lock,
@@ -261,49 +260,55 @@ BufferResult<FrameId> BufferPool::PinPage(PageId page_id) {
                         .frame_id = entry->second.frame_id});
                 continue; // Re-examine: eviction may have won while the lock was released.
             }
-            const FrameId frame_id = entry->second.frame_id;
-            BufferFrame& frame = frames_[frame_id];
-            if (frame.pin_count >= max_pin_count_) {
-                return Failure<FrameId>(MakeError(BufferErrorCode::PIN_COUNT_OVERFLOW,
-                                                  BufferOperation::FETCH_PAGE,
-                                                  page_id,
-                                                  "pin count is at its maximum"));
-            }
-            // Resident-hit linearization point.
-            ++frame.pin_count;
-            replacer_.SetReferenced(frame_id);
-            return frame_id;
-        }
+            return PinResidentLocked(entry->second.frame_id, page_id);
         case PageTableEntryState::EVICTING:
             // The old frame cannot be pinned. Wait for eviction to finish or fail, then retry.
             state_changed_.wait(lock);
             continue;
         case PageTableEntryState::LOAD_INTENT:
-        case PageTableEntryState::LOADING: {
-            const std::shared_ptr<LoadOperation> load = entry->second.load;
-            if (load == nullptr) {
-                // A private new-page construction; its PageNo is not yet published.
-                return Failure<FrameId>(MakeError(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
-                                                  BufferOperation::FETCH_PAGE,
-                                                  page_id,
-                                                  "page is not a published data page"));
-            }
-            if (load->claims >= max_pin_count_) {
-                return Failure<FrameId>(MakeError(BufferErrorCode::PIN_COUNT_OVERFLOW,
-                                                  BufferOperation::FETCH_PAGE,
-                                                  page_id,
-                                                  "too many pending fetch claims"));
-            }
-            ++load->claims;
-            state_changed_.wait(lock, [&] { return load->done; });
-            if (const std::optional<FrameId> frame_id = load->frame_id; frame_id.has_value()) {
-                // Publication already converted this claim into one pin.
-                return *frame_id;
-            }
-            return Failure<FrameId>(load->error);
-        }
+        case PageTableEntryState::LOADING:
+            return JoinLoad(lock, page_id, entry->second.load);
         }
     }
+}
+
+BufferResult<FrameId> BufferPool::PinResidentLocked(FrameId frame_id, PageId page_id) {
+    BufferFrame& frame = frames_[frame_id];
+    if (frame.pin_count >= max_pin_count_) {
+        return Failure<FrameId>(MakeError(BufferErrorCode::PIN_COUNT_OVERFLOW,
+                                          BufferOperation::FETCH_PAGE,
+                                          page_id,
+                                          "pin count is at its maximum"));
+    }
+    // Resident-hit linearization point.
+    ++frame.pin_count;
+    replacer_.SetReferenced(frame_id);
+    return frame_id;
+}
+
+BufferResult<FrameId> BufferPool::JoinLoad(std::unique_lock<std::mutex>& lock,
+                                           PageId page_id,
+                                           std::shared_ptr<LoadOperation> load) {
+    if (load == nullptr) {
+        // A private new-page construction; its PageNo is not yet published.
+        return Failure<FrameId>(MakeError(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
+                                          BufferOperation::FETCH_PAGE,
+                                          page_id,
+                                          "page is not a published data page"));
+    }
+    if (load->claims >= max_pin_count_) {
+        return Failure<FrameId>(MakeError(BufferErrorCode::PIN_COUNT_OVERFLOW,
+                                          BufferOperation::FETCH_PAGE,
+                                          page_id,
+                                          "too many pending fetch claims"));
+    }
+    ++load->claims;
+    state_changed_.wait(lock, [&] { return load->done; });
+    if (const std::optional<FrameId> frame_id = load->frame_id; frame_id.has_value()) {
+        // Publication already converted this claim into one pin.
+        return *frame_id;
+    }
+    return Failure<FrameId>(load->error);
 }
 
 BufferResult<FrameId> BufferPool::LoadPage(std::unique_lock<std::mutex>& lock, PageId page_id) {
@@ -358,50 +363,66 @@ BufferResult<FrameId> BufferPool::LoadPage(std::unique_lock<std::mutex>& lock, P
         read ? ValidateLoadedPage(frame, validator, true) : PageValidationOutcome::VALID;
     lock.lock();
 
-    std::optional<BufferError> error;
-    if (!read) {
-        error = MakeError(ReadErrorCode(read.Error()),
-                          BufferOperation::FETCH_PAGE,
-                          page_id,
-                          "page read failed",
-                          read.Error());
-    } else if (outcome == PageValidationOutcome::CORRUPT) {
-        error = MakeError(BufferErrorCode::CORRUPT_PAGE,
-                          BufferOperation::FETCH_PAGE,
-                          page_id,
-                          "page failed validation");
-    } else if (outcome == PageValidationOutcome::UNSUPPORTED_FORMAT) {
-        error = MakeError(BufferErrorCode::UNSUPPORTED_PAGE_FORMAT,
-                          BufferOperation::FETCH_PAGE,
-                          page_id,
-                          "page uses an unsupported format");
-    } else if (files_.at(page_id.file_id).state != FileState::ACTIVE) {
-        error = MakeError(BufferErrorCode::FILE_RETIRED_OR_CLOSING,
-                          BufferOperation::FETCH_PAGE,
-                          page_id,
-                          "file began retiring during load");
-    }
-    if (error.has_value()) {
+    if (auto error = LoadFailureLocked(page_id, read, outcome); error.has_value()) {
         // LOADING -> FREE: nothing was published; all joiners receive this error.
         ResetFrame(frame_id);
         ReleaseFrameToFreeList(frame_id);
         return fail(std::move(*error));
     }
 
+    PublishLoadLocked(lock, page_id, frame_id, *load);
+    return frame_id;
+}
+
+std::optional<BufferError> BufferPool::LoadFailureLocked(PageId page_id,
+                                                         const DiskStatus& read,
+                                                         PageValidationOutcome outcome) const {
+    if (!read) {
+        return MakeError(ReadErrorCode(read.Error()),
+                         BufferOperation::FETCH_PAGE,
+                         page_id,
+                         "page read failed",
+                         read.Error());
+    }
+    if (outcome == PageValidationOutcome::CORRUPT) {
+        return MakeError(BufferErrorCode::CORRUPT_PAGE,
+                         BufferOperation::FETCH_PAGE,
+                         page_id,
+                         "page failed validation");
+    }
+    if (outcome == PageValidationOutcome::UNSUPPORTED_FORMAT) {
+        return MakeError(BufferErrorCode::UNSUPPORTED_PAGE_FORMAT,
+                         BufferOperation::FETCH_PAGE,
+                         page_id,
+                         "page uses an unsupported format");
+    }
+    if (files_.at(page_id.file_id).state != FileState::ACTIVE) {
+        return MakeError(BufferErrorCode::FILE_RETIRED_OR_CLOSING,
+                         BufferOperation::FETCH_PAGE,
+                         page_id,
+                         "file began retiring during load");
+    }
+    return std::nullopt;
+}
+
+void BufferPool::PublishLoadLocked(std::unique_lock<std::mutex>& lock,
+                                   PageId page_id,
+                                   FrameId frame_id,
+                                   LoadOperation& load) {
     // LOADING -> RESIDENT: one atomic publication that turns every claim into one pin.
+    BufferFrame& frame = frames_[frame_id];
     frame.state = FrameState::RESIDENT;
     frame.io_state = FrameIoState::NONE;
-    frame.pin_count = load->claims;
+    frame.pin_count = load.claims;
     replacer_.SetReferenced(frame_id);
     PageTableEntry& published = page_table_.at(page_id);
     published.state = PageTableEntryState::RESIDENT;
     published.load.reset();
-    load->frame_id = frame_id;
-    load->done = true;
+    load.frame_id = frame_id;
+    load.done = true;
     state_changed_.notify_all();
     Notify(lock,
            {.type = BufferPoolEventType::LOAD_PUBLISHED, .page_id = page_id, .frame_id = frame_id});
-    return frame_id;
 }
 
 PageValidationOutcome BufferPool::ValidateLoadedPage(BufferFrame& frame,
@@ -537,36 +558,52 @@ void BufferPool::ReleaseFrameToFreeList(FrameId frame_id) {
 // ---------------------------------------------------------------------------------------------
 // New pages
 
+BufferStatus BufferPool::WaitForNewPageTurn(std::unique_lock<std::mutex>& lock, FileId file_id) {
+    const PageId file_page{.file_id = file_id, .page_no = INVALID_PAGE_NO};
+    const auto fail = [&](BufferErrorCode code, const char* message) {
+        return FailureStatus(MakeError(code, BufferOperation::NEW_PAGE, file_page, message));
+    };
+    for (;;) {
+        if (quiescing_) {
+            return fail(BufferErrorCode::BUFFERPOOL_QUIESCING, "BufferPool is quiescing");
+        }
+        const auto file = files_.find(file_id);
+        if (file == files_.end()) {
+            return fail(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
+                        "FileId is not registered with this BufferPool");
+        }
+        if (file->second.state != FileState::ACTIVE) {
+            return fail(BufferErrorCode::FILE_RETIRED_OR_CLOSING, "file is retiring");
+        }
+        // Append publication is serialized per file so the published bound stays contiguous.
+        if (!file->second.new_page_in_progress) {
+            return {};
+        }
+        state_changed_.wait(lock);
+    }
+}
+
+DiskResult<PageNo> BufferPool::ReserveNewPageNo(PageId first_unpublished) {
+    const FileId file_id = first_unpublished.file_id;
+    const PageNo published = first_unpublished.page_no;
+    auto physical = io_->PageCount(file_id);
+    if (!physical) {
+        return physical;
+    }
+    // A physical page beyond the published bound was left by an earlier failed creation. It was
+    // never published, so its PageNo is reused instead of growing the file again.
+    if (*physical > published) {
+        return published;
+    }
+    return io_->ExtendFile(file_id);
+}
+
 BufferResult<WritePageGuard> BufferPool::NewPage(FileId file_id,
                                                  const PageInitializer& initializer) {
     PageId page_id{.file_id = file_id, .page_no = INVALID_PAGE_NO};
     std::unique_lock lock{mutex_};
-    for (;;) {
-        if (quiescing_) {
-            return Failure<WritePageGuard>(MakeError(BufferErrorCode::BUFFERPOOL_QUIESCING,
-                                                     BufferOperation::NEW_PAGE,
-                                                     page_id,
-                                                     "BufferPool is quiescing"));
-        }
-        const auto file = files_.find(file_id);
-        if (file == files_.end()) {
-            return Failure<WritePageGuard>(
-                MakeError(BufferErrorCode::FILE_OR_PAGE_NOT_FOUND,
-                          BufferOperation::NEW_PAGE,
-                          page_id,
-                          "FileId is not registered with this BufferPool"));
-        }
-        if (file->second.state != FileState::ACTIVE) {
-            return Failure<WritePageGuard>(MakeError(BufferErrorCode::FILE_RETIRED_OR_CLOSING,
-                                                     BufferOperation::NEW_PAGE,
-                                                     page_id,
-                                                     "file is retiring"));
-        }
-        // Append publication is serialized per file so the published bound stays contiguous.
-        if (!file->second.new_page_in_progress) {
-            break;
-        }
-        state_changed_.wait(lock);
+    if (auto claimed = WaitForNewPageTurn(lock, file_id); !claimed) {
+        return Failure<WritePageGuard>(std::move(claimed).Error());
     }
     FileEntry& file = files_.at(file_id);
     file.new_page_in_progress = true;
@@ -586,34 +623,20 @@ BufferResult<WritePageGuard> BufferPool::NewPage(FileId file_id,
     const FrameId frame_id = *acquired;
     BufferFrame& frame = frames_[frame_id];
 
-    // A physical page beyond the published bound was left by an earlier failed creation. It was
-    // never published, so its PageNo is reused instead of growing the file again.
     const PageNo published = file.published_page_count;
     lock.unlock();
-    std::optional<DiskError> io_error;
-    const auto physical = io_->PageCount(file_id);
-    if (!physical) {
-        io_error = physical.Error();
-    } else if (physical.Value() > published) {
-        page_id.page_no = published;
-    } else {
-        const auto extended = io_->ExtendFile(file_id);
-        if (extended) {
-            page_id.page_no = extended.Value();
-        } else {
-            io_error = extended.Error();
-        }
-    }
+    auto page_no = ReserveNewPageNo({.file_id = file_id, .page_no = published});
     lock.lock();
-    if (io_error.has_value()) {
+    if (!page_no) {
         ReleaseFrameToFreeList(frame_id);
         finish();
         return Failure<WritePageGuard>(MakeError(BufferErrorCode::RAW_IO_FAILURE,
                                                  BufferOperation::NEW_PAGE,
                                                  page_id,
                                                  "file extension failed",
-                                                 std::move(io_error)));
+                                                 std::move(page_no).Error()));
     }
+    page_id.page_no = *page_no;
     if (page_id.page_no == 0U || page_id.page_no != file.published_page_count) {
         ReleaseFrameToFreeList(frame_id);
         finish();
@@ -893,57 +916,9 @@ void BufferPool::NotifyUnlocked(const BufferPoolEvent& event) {
 // ---------------------------------------------------------------------------------------------
 // Diagnostics
 
-FrameSnapshot BufferPool::SnapshotFrameLocked(FrameId frame_id) const {
-    const BufferFrame& frame = frames_[frame_id];
-    return {.frame_id = frame_id,
-            .page_id = frame.page.Id(),
-            .state = frame.state,
-            .io_state = frame.io_state,
-            .pin_count = frame.pin_count,
-            .dirty = frame.dirty,
-            .referenced = replacer_.IsReferenced(frame_id),
-            .modification_generation = frame.modification_generation,
-            .binding_epoch = frame.binding_epoch};
-}
-
 std::size_t BufferPool::FreeFrameCount() const {
     const std::scoped_lock lock{mutex_};
     return free_list_.size();
-}
-
-FrameSnapshot BufferPool::InspectFrame(FrameId frame_id) const {
-    const std::scoped_lock lock{mutex_};
-    return SnapshotFrameLocked(frame_id);
-}
-
-std::optional<PageTableSnapshot> BufferPool::InspectPage(PageId page_id) const {
-    const std::scoped_lock lock{mutex_};
-    const auto entry = page_table_.find(page_id);
-    if (entry == page_table_.end()) {
-        return std::nullopt;
-    }
-    PageTableSnapshot snapshot{.state = entry->second.state,
-                               .frame = std::nullopt,
-                               .pending_claims =
-                                   entry->second.load ? entry->second.load->claims : 0U};
-    if (entry->second.state != PageTableEntryState::LOAD_INTENT) {
-        snapshot.frame = SnapshotFrameLocked(entry->second.frame_id);
-    }
-    return snapshot;
-}
-
-std::size_t BufferPool::LastClockPassVisits() const {
-    const std::scoped_lock lock{mutex_};
-    return replacer_.LastPassVisits();
-}
-
-bool BufferPool::IsCurrentBinding(FrameId frame_id,
-                                  PageId page_id,
-                                  std::uint64_t binding_epoch) const {
-    const std::scoped_lock lock{mutex_};
-    const BufferFrame& frame = frames_[frame_id];
-    return frame.state != FrameState::FREE && frame.page.Id() == page_id &&
-           frame.binding_epoch == binding_epoch;
 }
 
 } // namespace dblusblus

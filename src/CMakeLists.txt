@@ -14,6 +14,8 @@ target_sources(
         storage/buffer/buffer_frame.h
         storage/buffer/buffer_pool.cpp
         storage/buffer/buffer_pool.h
+        storage/buffer/buffer_pool_inspector.cpp
+        storage/buffer/buffer_pool_inspector.h
         storage/buffer/clock_replacer.cpp
         storage/buffer/clock_replacer.h
         storage/buffer/page_guard.cpp
