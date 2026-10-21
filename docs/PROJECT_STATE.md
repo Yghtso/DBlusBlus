@@ -10,27 +10,10 @@ contract. [`ARCHITECTURE.md`](ARCHITECTURE.md) is authoritative for intended beh
 
 ### Common primitives and encoding
 
-The implementation defines fixed-width storage identifiers and sentinels:
-
-```text
-FileId      uint32
-PageNo      uint64
-SlotId      uint16
-TxnId       uint64
-CommandId   uint32
-Lsn         uint64
-TableId     uint64
-IndexId     uint64
-SchemaVer   uint32
-```
-
-`PageId` and `Rid` represent persistent page identity and physical tuple-version identity.
-`CommandId{0}` is valid; `TxnId{0}` is the invalid transaction sentinel.
-
-Byte-oriented codecs provide fixed-width little-endian encoding and decoding without
-persisting native C++ object layout. The persisted `PageId` and `Rid` encodings are 12 and
-16 bytes respectively. RID encoding writes two reserved bytes as zero, and decoding
-rejects either reserved byte when nonzero.
+The common layer implements fixed-width storage identifiers, `PageId`, `Rid`, sentinels,
+and checked byte-oriented codecs. Identifier domains and persisted encodings are owned by
+`ARCHITECTURE.md` §§4.3–4.5; the codecs use explicit little-endian bytes and validate RID
+reserved bytes rather than serializing native C++ object layout.
 
 A portable CRC-32C/Castagnoli primitive is available. It is used by the file-superblock
 codec; ordinary mutable data-page checksum integration depends on the durability layer and
@@ -58,13 +41,15 @@ serialization.
 
 ### File superblocks and managed page files
 
-The generic `FileSuperblock` codec implements the 72-byte common format for `HEAP`, `FSM`,
-and `CATALOG` files, including the 8192-byte page image, magic, file kind, page size,
-logical identities, creation epoch, CRC32C, and required-zero reserved/trailing bytes.
+The generic `FileSuperblock` codec implements the common format for `HEAP`, `FSM`, and
+`CATALOG` files, decoding logical identity fields and validating checksum, kind, and
+reserved/trailing-byte structure. Expected FileId, FileKind, and optional object-id
+matching is owned by `PageFile::Open`.
+`ARCHITECTURE.md` §4.10 owns its format. Common flag validation has the mismatch described
+below.
 
-`FileKind::BTREE` and its numeric code are recognized, but the generic encoder and decoder
-reject it. The architecture-defined specialized 128-byte B+ tree superblock codec is not
-implemented.
+`FileKind::BTREE` and its numeric code are recognized, but the generic codec rejects it.
+The specialized B+ tree superblock codec defined by §8.2.1 is not implemented.
 
 `PageFile` provides:
 
@@ -80,8 +65,8 @@ allocation is page-type agnostic.
 
 ### Page representation
 
-`Page` owns one `PageId` and one contiguous, deterministically initialized 8192-byte byte
-buffer. It encodes, decodes, and validates the 32-byte common page header against expected
+`Page` owns one `PageId` and one contiguous, deterministically initialized page buffer.
+It encodes, decodes, and validates the §4.8 common page header against expected
 page type and page number. Page-format controllers operate over this caller-owned buffer
 instead of allocating a second page-sized representation.
 
@@ -94,15 +79,9 @@ The heap implementation separates persisted format ownership from page-local mut
 - `heap_page.*` provides `HeapPage` initialization, validation, insertion, tuple-byte
   access, `NORMAL -> DEAD` transition, and compaction.
 
-`HEAP_DATA` format version 1 uses:
-
-```text
-common page header       32 bytes
-heap-specific header     16 bytes
-total heap header        48 bytes
-slot entry                8 bytes
-page size              8192 bytes
-```
+The heap page codec implements the `HEAP_DATA` representation owned by
+`ARCHITECTURE.md` §§5.3–5.6. The page controller stores opaque tuple bytes and does not
+provide schema-directed owner validation.
 
 Initialization writes common flags and reserved fields as zero and rejects page 0 and
 `INVALID_PAGE_NO`. Page-local validation checks common identity/version/geometry,
@@ -111,7 +90,7 @@ required-zero fields, explicit slot-state codes, NORMAL tuple bounds, and canoni
 slot exactly once.
 
 Insertion stores opaque tuple bytes in one page, allocates a stable new slot, and returns a
-physical `Rid`. The maximum raw inline tuple is 8135 bytes. Slot reuse is not implemented,
+physical `Rid`. Insertion enforces the architecture-defined raw inline tuple bound (§5.6). Slot reuse is not implemented,
 so `UNUSED` validation exists without an active writer transition that creates reusable
 slots.
 
@@ -122,31 +101,23 @@ reclaimed DEAD slots use zero tuple coordinates and are non-reusable.
 
 ### Tuple physical representation
 
-The tuple layer implements:
+`TuplePhysicalLayout` and `TupleCodec` implement schema-directed layout planning,
+construction, validation, and typed decoding for BOOLEAN, INT32, INT64, FLOAT64, DATE,
+TIMESTAMP, and VARCHAR. The layout builder accepts caller-supplied `SchemaVer` values,
+including zero; `TupleCodec` validates tuple bytes against the selected layout. Neither
+provides catalog-backed schema-version domain enforcement. The codecs implement the tuple
+layout, flags, null bitmap, scalar, reserved-byte, packed-payload, and inline-size checks
+exercised by the current storage tests. Full tuple-header conformance to
+`ARCHITECTURE.md` §5.7.3 is not implemented:
+the codec accepts the noncanonical pair `xmax = INVALID_TXN_ID` with nonzero `cmax`.
 
-- an exact 48-byte tuple header with version metadata, flags, schema version, and
-  reserved-zero validation;
-- schema-directed physical layouts for `BOOLEAN`, `INT32`, `INT64`, `FLOAT64`, `DATE`,
-  `TIMESTAMP`, and `VARCHAR`;
-- one LSB-first null bit per physical column;
-- tightly packed fixed fields without native alignment padding;
-- 8-byte VARCHAR descriptors and packed inline payloads;
-- checked tuple-size planning, construction, validation, and typed decoding.
+Signed values use explicit bytes; FLOAT64 retains its binary64 payload with compile-time
+representation checks. DATE and TIMESTAMP decoding provides physical scalars, without
+implementing SQL calendar/time semantics. `PhysicalType` is in-memory layout metadata;
+its enum values are not persisted type codes.
 
-The persisted tuple flags are `HAS_NULLS = 0x0001` and `HAS_VARLEN = 0x0002`. Validation
-enforces their relationship to the schema and null bitmap, rejects nonzero unused bitmap
-bits, rejects NULL in non-nullable columns, and requires present BOOLEAN values to be
-exactly `0x00` or `0x01`.
-
-Fixed-width signed values use explicit two's-complement bytes. FLOAT64 preserves the exact
-IEEE-754 binary64 payload and is guarded by compile-time representation checks. DATE and
-TIMESTAMP are raw signed 32-bit and 64-bit physical scalars. `PhysicalType` is in-memory
-layout metadata; its enum values are not persisted type codes.
-
-VARCHAR payloads are inline and packed in schema order without gaps. NULL VARCHAR uses
-descriptor `(0,0)`, an empty present value is distinct from NULL, trailing
-unreferenced bytes are rejected, and decoded VARCHAR values borrow from the tuple bytes.
-All encoded tuples are subject to the 8135-byte inline limit.
+VARCHAR decoding distinguishes NULL from empty present values and returns views borrowed
+from the tuple bytes. No BufferPool guard currently owns these views' lifetime.
 
 Tuple headers carry MVCC/version-chain fields, but transaction visibility, version-chain
 coordination, and transaction outcome semantics are not implemented.
@@ -157,45 +128,14 @@ coordination, and transaction outcome semantics are not implemented.
 heap-page-to-FSM-entry mapping, category conversion, page initialization, structural
 validation, and one-byte category access/update.
 
-The page has a 48-byte total header and 8144 category entries. Validation enforces page
-identity, deterministic represented heap range, initialized-prefix bounds, zero common and
-FSM flags/reserved fields, and a zero uninitialized suffix. Every byte value `0..255` is a
-valid category.
-
-FSM categories conservatively approximate tuple insertion capacity after accounting for a
-new 8-byte slot. FSM metadata is advisory; validated heap-page geometry is authoritative
-for insertion.
+Validation checks the deterministic represented heap range, initialized-prefix bounds,
+identity, flags/reserved fields, and uninitialized suffix against the §6.5–§6.7 format.
+Category conversion accounts for a new slot. FSM metadata remains advisory; heap-page
+geometry determines insertion capacity under the Chapter-6 contract.
 
 `FsmCandidateIndex` is a relation-local, rebuildable in-memory accelerator with 256 ordered
 category buckets and reverse PageNo membership. It chooses the smallest PageNo in the
 smallest sufficient category, performs no I/O, and is not thread-safe.
-
-## Persisted-format implementation summary
-
-This section is a compact implementation inventory; `ARCHITECTURE.md` owns the complete
-format contracts.
-
-```text
-PAGE_SIZE                              8192
-
-CommonPageHeader                         32 bytes
-Generic FileSuperblock header            72 bytes
-BTREE FileSuperblock header             128 bytes; specialized codec absent
-
-Heap page total header                   48 bytes
-Heap slot entry                           8 bytes
-Maximum raw inline tuple                8135 bytes
-
-TupleHeader                               48 bytes
-VARCHAR descriptor                         8 bytes
-
-FSM_DATA total header                     48 bytes
-FSM entries/page                        8144
-FSM entry width                             1 byte
-
-PageId persisted size                     12 bytes
-Rid persisted size                        16 bytes
-```
 
 ## Source organization and responsibility boundaries
 
@@ -235,11 +175,11 @@ document.
 
 ## Architecture and implementation consistency
 
-The architecture contract is clear for the implemented storage area, but two implementation
+The architecture contract is clear for the implemented storage area, but five implementation
 mismatches are present:
 
 1. The generic `FileSuperblock` encoder and decoder preserve nonzero common `flags`, and
-   tests exercise that behavior. `ARCHITECTURE.md` §4.10.4 assigns no v1 superblock flag
+   tests exercise that behavior. `ARCHITECTURE.md` §4.10.4 assigns no superblock flag
    bits and requires writers and readers to enforce zero.
 2. `HeapPage::Validate` does not provide the complete HEAP owner validation required by
    `ARCHITECTURE.md` §§4.13.3 and 5.21. It accepts `REDIRECT_RESERVED`, does not validate
@@ -247,6 +187,20 @@ mismatches are present:
    NORMAL/DEAD range non-overlap or schema-directed tuple validity. `Compact` performs
    additional DEAD-range and overlap checks before mutation, but that is not equivalent to
    ordinary owner validation.
+3. `TupleHeader` validation does not enforce `xmax == INVALID_TXN_ID` ⇒ `cmax == 0` as
+   required by `ARCHITECTURE.md` §5.7.3. The current test suite intentionally exercises
+   the accepted noncanonical pair, so the mismatch is an implementation fact rather than
+   an accepted format variant.
+4. `DecodeFileSuperblock` checks the version-1 CRC before family/version dispatch and
+   classifies version zero as an unsupported format. `ARCHITECTURE.md` §§4.10.4 and
+   4.14.2 require dispatch before version-owned checksum/layout validation and distinguish
+   corruption from a positive unsupported version. `PageFile::Open` delegates to this
+   decoder; it does not repair the ordering or classification.
+5. The tuple layout builder accepts caller-supplied `SchemaVer` values, including zero,
+   without enforcing the defined writer/domain rule in `ARCHITECTURE.md` §5.13. The
+   current tests exercise arbitrary values such as `SchemaVer{41}`; this is generic
+   physical-layout support rather than catalog-backed production schema-version
+   enforcement.
 
 These are implementation defects against settled architecture rules, not unresolved
 architecture questions. They require implementation repair rather than an architecture
@@ -256,6 +210,15 @@ The generic BTREE superblock guard is not a noncanonical substitute: B+ tree sup
 its specialized codec are absent.
 
 ## Unimplemented capabilities and material limitations
+
+### Database-root lifecycle
+
+Database-root bootstrap/publication, process/control ownership, lifecycle namespace
+coordination, whole-root retirement, and restarted reclamation are not implemented.
+The existing file-level storage primitives do not provide these database-level
+protocols. Their intended contracts are defined in `ARCHITECTURE.md` §§3.3 and
+4.7.8–4.7.10; raw file creation and synchronization do not imply database-root
+publication or cleanup capability.
 
 ### Buffer management
 
@@ -305,9 +268,3 @@ primitive.
 There is no physical execution engine, vector/data-chunk runtime, expression executor,
 pipeline scheduler, query-memory/spill layer, statistics subsystem, cardinality estimator,
 cost model, physical optimizer, or parallel execution runtime.
-
-## Document maintenance
-
-Update this document when its canonical description of implementation reality becomes
-false or incomplete. Replace stale descriptions rather than appending history; historical
-task information belongs in `devlog/`.
