@@ -4,11 +4,7 @@
 
 The SQL type subsystem defines logical scalar types, nullability/value-state semantics, type promotion, casts, comparison compatibility, BOOLEAN three-valued logic, planning-time scalar values, and centralized operator/function type resolution.
 
-Storage byte layout remains owned by Chapter 5.
-
-Index-key byte ordering remains owned by Chapter 8.
-
-The SQL type layer MUST use semantics compatible with both.
+Storage byte layout remains owned by Chapter 5. Index-key byte ordering remains owned by Chapter 8. The SQL type layer MUST use semantics compatible with both.
 
 ## 17.2 Logical scalar types
 
@@ -109,9 +105,7 @@ here. Empty table cells mean unsupported at bind time.
 
 ### 17.4.1 BOOLEAN
 
-BOOLEAN has SQL TRUE/FALSE values plus nullable NULL state.
-
-No integer truthiness is implied.
+BOOLEAN has SQL TRUE/FALSE values plus nullable NULL state. No integer truthiness is implied.
 
 BOOLEAN has no implicit or explicit numeric conversion. Its only ordered
 physical key representation (`FALSE < TRUE`) exists so indexes can store and
@@ -168,13 +162,7 @@ Execution, constant folding, hashing/grouping support, and B+ ordering MUST NOT 
 
 ### 17.4.4 DATE
 
-DATE is a signed 32-bit count of civil days from:
-
-```text
-1970-01-01
-```
-
-using the proleptic Gregorian calendar.
+DATE is a signed 32-bit count of civil days from `1970-01-01` using the proleptic Gregorian calendar.
 
 The persisted scalar is the signed day count.
 
@@ -184,17 +172,9 @@ text-range DATE to VARCHAR is `INVALID_CAST`.
 
 ### 17.4.5 TIMESTAMP
 
-TIMESTAMP is a signed 64-bit count of microseconds from:
+TIMESTAMP is a signed 64-bit count of microseconds from: `1970-01-01 00:00:00`.
 
-```text
-1970-01-01 00:00:00
-```
-
-TIMESTAMP is timezone-naive.
-
-Timezone-aware types/conversion rules are deferred.
-
-Leap-second modeling is not part of the scalar contract.
+TIMESTAMP is timezone-naive. Timezone-aware types/conversion rules are deferred. Leap-second modeling is not part of the scalar contract.
 
 Textual TIMESTAMP conversion likewise accepts civil years `0001..9999`.
 The wider signed microsecond domain remains comparable/storable, but conversion
@@ -202,19 +182,9 @@ to the canonical text form fails outside that civil range.
 
 ### 17.4.6 VARCHAR
 
-VARCHAR values are byte strings.
+VARCHAR values are byte strings. The architecture uses: `binary bytewise comparison/collation` matching Chapter 8 index ordering.
 
-The architecture uses:
-
-```text
-binary bytewise comparison/collation
-```
-
-matching Chapter 8 index ordering.
-
-The type layer does not require UTF-8 validation, locale collation, character-count semantics, or `VARCHAR(n)` length semantics.
-
-String length in the baseline representation is a byte length.
+The type layer does not require UTF-8 validation, locale collation, character-count semantics, or `VARCHAR(n)` length semantics. String length in the baseline representation is a byte length.
 
 ## 17.5 Literal and textual scalar grammar
 
@@ -789,9 +759,7 @@ small scalar payload
 owned VARCHAR bytes
 ```
 
-It is not the per-cell representation for hot vectorized execution.
-
-The executor's vector representation is defined in Chapter 23.
+It is not the per-cell representation for hot vectorized execution. The executor's vector representation is defined in Chapter 23.
 
 ## 17.12 Type/value invariants
 
@@ -851,13 +819,7 @@ flags bit 0 = IS_NULL
 all other bits = 0
 ```
 
-The complete scalar encoding occupies:
-
-```text
-Align8(16 + payload_length)
-```
-
-bytes.
+The complete scalar encoding occupies: `Align8(16 + payload_length)` bytes.
 
 Any bytes after the payload up to that 8-byte boundary are zero padding.
 
@@ -870,9 +832,7 @@ IS_NULL       = 1
 payload_length = 0
 ```
 
-No payload bytes follow.
-
-The TypeId still records the concrete SQL type of the NULL value.
+No payload bytes follow. The TypeId still records the concrete SQL type of the NULL value.
 
 ### 17.13.3 Non-NULL payloads
 
@@ -888,13 +848,7 @@ For non-NULL values:
 | TIMESTAMP | `8` | signed microsecond-count int64 little-endian |
 | VARCHAR | byte length | exact string bytes, no terminator |
 
-FLOAT64 persistence preserves the sign of zero because it can affect later arithmetic.
-
-Every persisted NaN uses the canonical quiet-NaN bit pattern:
-
-```text
-0x7ff8000000000000
-```
+FLOAT64 persistence preserves the sign of zero because it can affect later arithmetic. Every persisted NaN uses the canonical quiet-NaN bit pattern `0x7ff8000000000000`.
 
 Other NaN payloads are not emitted by the v1 encoder.
 

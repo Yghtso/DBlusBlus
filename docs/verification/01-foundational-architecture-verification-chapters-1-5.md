@@ -669,7 +669,6 @@ identities, and bounds without moving those rules out of Chapters 1–5.
 
 ### Chapters 1–6 reusable-owner map
 
-
 Chapter 6 is covered by Free-space map verification and its obligation map. The
 generic common-header and FileSuperblock procedures above are reusable prerequisites for
 its canonical fixtures; they do not change the Chapter-6 category, mapping, stale-state,

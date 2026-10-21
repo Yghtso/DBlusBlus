@@ -2,11 +2,7 @@
 
 ## 35.1 CardinalityEstimate
 
-Estimated row counts use a wide floating representation such as:
-
-```text
-double
-```
+Estimated row counts use a wide floating representation such as `double`.
 
 Intermediate estimates remain fractional.
 
@@ -17,9 +13,7 @@ estimated_rows >= 0
 is_provably_empty
 ```
 
-These fields are orthogonal. `estimated_rows` is approximate cost metadata. `is_provably_empty` is an exact logical fact with the restricted provenance defined by §35.2.
-
-Pathological arithmetic is clamped to a large finite implementation maximum rather than producing NaN/Infinity inside optimizer math.
+These fields are orthogonal. `estimated_rows` is approximate cost metadata. `is_provably_empty` is an exact logical fact with the restricted provenance defined by §35.2. Pathological arithmetic is clamped to a large finite implementation maximum rather than producing NaN/Infinity inside optimizer math.
 
 The executor still processes integer row counts.
 
@@ -115,17 +109,7 @@ permission to suppress evaluation.
 
 ## 35.3 Row-width estimate
 
-Every logical/physical estimate includes average output width appropriate to the representation/operator being costed.
-
-For fixed types use the relevant execution/temporary representation width.
-
-For VARCHAR use statistics such as:
-
-```text
-average_width
-```
-
-plus applicable vector/row-layout overhead.
+Every logical/physical estimate includes average output width appropriate to the representation/operator being costed. For fixed types use the relevant execution/temporary representation width. For VARCHAR use statistics such as `average_width` plus applicable vector/row-layout overhead.
 
 Estimated width influences:
 
@@ -152,9 +136,7 @@ PredicateTruthEstimate {
 }
 ```
 
-with each fraction finite, clamped to `[0,1]`, and the sum normalized to approximately 1.
-
-Every primitive estimator computes all three components rather than leaving FALSE/UNKNOWN implicit.
+with each fraction finite, clamped to `[0,1]`, and the sum normalized to approximately 1. Every primitive estimator computes all three components rather than leaving FALSE/UNKNOWN implicit.
 
 The three fractions are cardinality-planning fields, even when exact operator semantics determines a particular numerical value. When a primitive or composed NOT/AND/OR formula yields `0` or `1`, semantic impossibility is still derived separately under §35.2; statistical inputs cannot acquire exact logical provenance through composition.
 
@@ -173,29 +155,15 @@ and does not reuse or broaden `STATS_PROBABILITY_SUM_EPSILON`. Persisted inputs
 must already have passed §34.14.6; Chapter 35 clamping cannot legalize a rejected
 payload.
 
-Filter cardinality uses only:
-
-```text
-true_fraction
-```
+Filter cardinality uses only `true_fraction`.
 
 This prevents `NOT`, NULL comparisons, AND, and OR from silently using two-valued Boolean math.
 
 ## 35.5 Selectivity bounds
 
-Every selectivity is clamped to:
+Every selectivity is clamped to: `0 <= s <= 1`.
 
-```text
-0 <= s <= 1
-```
-
-For filters:
-
-```text
-estimated_rows = input_rows * true_fraction
-```
-
-followed by the provably-empty/minimum-nonempty rule.
+For filters: `estimated_rows = input_rows * true_fraction` followed by the provably-empty/minimum-nonempty rule.
 
 Here “provably empty” means an independent §35.2 semantic proof. Multiplication, clamping, or rounding to numerical zero does not set the proof flag.
 
@@ -218,31 +186,17 @@ true_fraction = 0
 unknown_fraction = 1
 ```
 
-for this comparison expression.
-
-This is not rewritten into `IS NULL`.
+for this comparison expression. This is not rewritten into `IS NULL`.
 
 This no-TRUE fact comes from exact SQL comparison semantics, not `null_fraction`. In a WHERE/HAVING/INNER JOIN row-rejecting context, the semantic layer therefore records the approved §35.2 proof even though the expression's exact result is UNKNOWN rather than FALSE.
 
 ### 35.6.2 MCV hit
 
-If the non-NULL constant appears in the MCV list:
-
-```text
-true_fraction = MCV frequency
-```
-
-subject to consistency clamps.
+If the non-NULL constant appears in the MCV list: `true_fraction = MCV frequency` subject to consistency clamps.
 
 ### 35.6.3 Outside statistical range
 
-When a non-NULL constant lies outside available orderable min/max statistics:
-
-```text
-true_fraction = 0
-```
-
-is an allowed numerical estimate for the equality predicate. It MUST NOT set `is_provably_empty`, even for a simple base filter with no other disjunct, because min/max is potentially stale. Absence from the MCV list, histogram, or an HLL-derived domain estimate has the same cost-only status.
+When a non-NULL constant lies outside available orderable min/max statistics: `true_fraction = 0` is an allowed numerical estimate for the equality predicate. It MUST NOT set `is_provably_empty`, even for a simple base filter with no other disjunct, because min/max is potentially stale. Absence from the MCV list, histogram, or an HLL-derived domain estimate has the same cost-only status.
 
 ### 35.6.4 Residual equality
 
@@ -266,13 +220,7 @@ unknown_fraction = n
 false_fraction   = 1 - t - n
 ```
 
-with the normal finite/clamp/normalization step.
-
-`t` is always bounded by the non-NULL mass:
-
-```text
-0 <= t <= 1 - n
-```
+with the normal finite/clamp/normalization step. `t` is always bounded by the non-NULL mass: `0 <= t <= 1 - n`.
 
 If min/max estimates no non-NULL match:
 
@@ -286,13 +234,7 @@ This numerical triple does not prove the filter empty. A separate exact §35.2 r
 
 ## 35.7 Column-to-column equijoin
 
-For:
-
-```text
-A.x = B.y
-```
-
-the baseline non-MCV formula is:
+For: `A.x = B.y` the baseline non-MCV formula is:
 
 ```text
 if nonnull_fraction_A == 0
@@ -329,13 +271,7 @@ unknown_fraction
 
 The estimated TRUE pair probability is bounded by the joint non-NULL mass, and FALSE is the remaining probability.
 
-If compatible statistical min/max ranges are disjoint:
-
-```text
-join_rows = 0
-```
-
-is an allowed cardinality estimate. It does not prove an INNER or range join semantically empty and does not authorize join removal. The same prohibition applies to semi/anti join extensions, which are outside the baseline. Later committed changes may create overlap. A LEFT JOIN remains required to preserve its left side regardless of estimated match absence.
+If compatible statistical min/max ranges are disjoint: `join_rows = 0` is an allowed cardinality estimate. It does not prove an INNER or range join semantically empty and does not authorize join removal. The same prohibition applies to semi/anti join extensions, which are outside the baseline. Later committed changes may create overlap. A LEFT JOIN remains required to preserve its left side regardless of estimated match absence.
 
 ## 35.8 MCV-aware equijoin
 
@@ -360,11 +296,7 @@ No common MCV value, MCV absence on either side, or zero residual estimated mass
 
 ## 35.9 Unique-key refinement
 
-If one equijoin side `U` is a proven unique non-NULL key:
-
-```text
-each opposite-side row matches at most one U row
-```
+If one equijoin side `U` is a proven unique non-NULL key: `each opposite-side row matches at most one U row`.
 
 The estimated pair count is therefore bounded by the non-NULL opposite-side rows, subject to domain overlap.
 
@@ -374,13 +306,7 @@ preserve the same key, multiplicity, NULL, and proof boundaries.
 
 ## 35.10 Range predicates
 
-For:
-
-```text
-<  <=  >  >=
-```
-
-combine:
+For: `<  <=  >  >=` combine:
 
 ```text
 explicit MCV contribution
@@ -388,9 +314,7 @@ explicit MCV contribution
 residual histogram mass
 ```
 
-For a boundary inside a histogram bin, interpolate when the type supports meaningful order interpolation.
-
-For binary VARCHAR, the baseline within-bin interpolation may be rank/uniform-mass based rather than numeric-distance based.
+For a boundary inside a histogram bin, interpolate when the type supports meaningful order interpolation. For binary VARCHAR, the baseline within-bin interpolation may be rank/uniform-mass based rather than numeric-distance based.
 
 Out-of-range statistical min/max may estimate zero or full non-NULL coverage.
 
@@ -420,11 +344,7 @@ Exact contradictory literal bounds are handled separately by §§20.17.8 and 35.
 
 ## 35.11 NULL predicates
 
-Let:
-
-```text
-n = null_fraction
-```
+Let: `n = null_fraction`.
 
 For:
 
@@ -476,11 +396,7 @@ For a constant IN list:
 3. clamp `t` to the column's non-NULL mass,
 4. record whether the IN list contains at least one NULL element.
 
-Let:
-
-```text
-n = column null_fraction
-```
+Let: `n = column null_fraction`.
 
 If the list contains **no NULL**:
 
@@ -498,13 +414,7 @@ false_fraction   = 0
 unknown_fraction = 1 - t
 ```
 
-because a non-NULL value that matches no non-NULL list element is still UNKNOWN when compared with the NULL list member.
-
-A NULL input row is also UNKNOWN.
-
-Filter cardinality counts only TRUE rows.
-
-`NOT IN` obtains its semantics through the normal NOT transformation of this complete truth triple.
+because a non-NULL value that matches no non-NULL list element is still UNKNOWN when compared with the NULL list member. A NULL input row is also UNKNOWN. Filter cardinality counts only TRUE rows. `NOT IN` obtains its semantics through the normal NOT transformation of this complete truth triple.
 
 Statistics-derived equality estimates within `t`, including numerical zero, do not prove an IN/NOT IN filter empty. Only exact evaluation/constraint reasoning over the complete predicate may do so under §35.2.
 
@@ -542,17 +452,9 @@ f = fA + fB - fA * fB
 u = 1 - t - f
 ```
 
-equivalently, UNKNOWN covers the combinations where neither operand is FALSE and at least one is UNKNOWN.
+equivalently, UNKNOWN covers the combinations where neither operand is FALSE and at least one is UNKNOWN. Numerical zero/one produced by this independence formula remains an estimate and cannot promote statistical operands to semantic proof.
 
-Numerical zero/one produced by this independence formula remains an estimate and cannot promote statistical operands to semantic proof.
-
-For simple same-column constraints such as:
-
-```text
-x > 10 AND x < 20
-```
-
-use intersected constraint/histogram logic rather than multiplying independent estimates.
+For simple same-column constraints such as: `x > 10 AND x < 20` use intersected constraint/histogram logic rather than multiplying independent estimates.
 
 ## 35.15 OR
 
@@ -571,9 +473,7 @@ f = fA * fB
 u = 1 - t - f
 ```
 
-equivalently, UNKNOWN covers the combinations where neither operand is TRUE and at least one is UNKNOWN.
-
-Numerical zero/one produced by this independence formula remains an estimate and cannot promote statistical operands to semantic proof.
+equivalently, UNKNOWN covers the combinations where neither operand is TRUE and at least one is UNKNOWN. Numerical zero/one produced by this independence formula remains an estimate and cannot promote statistical operands to semantic proof.
 
 For mutually exclusive/same-column ranges or MCVs, use the stronger union model rather than generic independence.
 
@@ -615,9 +515,7 @@ city = 'Rome'
 AND country = 'Italy'
 ```
 
-may be substantially misestimated under independence.
-
-The optimizer exposes this as a known limitation rather than inventing false precision.
+may be substantially misestimated under independence. The optimizer exposes this as a known limitation rather than inventing false precision.
 
 Optional extended-statistics capabilities outside the baseline include:
 
@@ -646,21 +544,11 @@ demand, error, or occurrence semantics.
 
 ## 35.18 Projection cardinality
 
-Projection normally preserves row count:
-
-```text
-rows_out = rows_in
-```
-
-while recomputing output row width from its output expressions/slots.
+Projection normally preserves row count: `rows_out = rows_in` while recomputing output row width from its output expressions/slots.
 
 ## 35.19 Filter cardinality
 
-```text
-rows_out = rows_in * predicate.true_fraction
-```
-
-followed by exact-empty/minimum-nonempty handling.
+`rows_out = rows_in * predicate.true_fraction` followed by exact-empty/minimum-nonempty handling.
 
 ## 35.20 LIMIT/OFFSET cardinality
 
@@ -712,11 +600,7 @@ distinct_groups
 ≈ NDV + (1 if null_fraction > 0 else 0)
 ```
 
-capped by input rows.
-
-A zero result produced from NDV or `null_fraction` is an estimate only; semantic emptiness follows the child-proof rules in §20.17.10.
-
-For multiple columns without extended statistics use the damping rule in §35.23 rather than unrestricted NDV multiplication.
+capped by input rows. A zero result produced from NDV or `null_fraction` is an estimate only; semantic emptiness follows the child-proof rules in §20.17.10. For multiple columns without extended statistics use the damping rule in §35.23 rather than unrestricted NDV multiplication.
 
 ## 35.22 GROUP BY cardinality
 
@@ -728,15 +612,7 @@ groups
 groups <= input_rows
 ```
 
-For multiple columns, first form each component grouping NDV including its possible NULL group, then apply §35.23.
-
-Global aggregation with no grouping columns produces:
-
-```text
-1 row
-```
-
-even for empty input, matching Chapter 29 aggregate semantics.
+For multiple columns, first form each component grouping NDV including its possible NULL group, then apply §35.23. Global aggregation with no grouping columns produces: `1 row` even for empty input, matching Chapter 29 aggregate semantics.
 
 Grouped aggregation over a provably empty child is provably empty. Global aggregation over that same child is not; it emits one row. Statistical `input_rows == 0` changes neither semantic conclusion.
 
@@ -752,25 +628,13 @@ for every remaining NDV_i:
     combined *= NDV_i ^ 0.25
 ```
 
-then cap:
+then cap: `combined <= input_rows`.
 
-```text
-combined <= input_rows
-```
-
-This is explicitly a heuristic fallback, not claimed correlation knowledge.
-
-Optimizer trace/EXPLAIN diagnostics SHOULD identify when this fallback drove an estimate.
+This is explicitly a heuristic fallback, not claimed correlation knowledge. Optimizer trace/EXPLAIN diagnostics SHOULD identify when this fallback drove an estimate.
 
 ## 35.24 LEFT JOIN cardinality
 
-LEFT JOIN output is bounded below by:
-
-```text
-rows_left
-```
-
-unless the left input itself is provably empty.
+LEFT JOIN output is bounded below by `rows_left` unless the left input itself is provably empty.
 
 Estimate:
 
@@ -780,17 +644,7 @@ matched_pair_output
 estimated_unmatched_left_rows
 ```
 
-The estimator MUST distinguish:
-
-```text
-number of matching pairs
-```
-
-from:
-
-```text
-number of left rows with at least one match
-```
+The estimator MUST distinguish: `number of matching pairs` from: `number of left rows with at least one match`.
 
 A simple bounded probabilistic approximation for unmatched-left rows is acceptable in the defined architecture.
 
@@ -859,9 +713,7 @@ A generic predicate fallback retains any material input-statistics provenance
 and identifies the configured generic-model assumption diagnostically; this
 does not require a new persisted or public provenance enum.
 
-Fallback assumptions are shown in optimizer trace/verbose EXPLAIN diagnostics.
-
-A fallback never changes SQL semantics or proves a relation empty.
+Fallback assumptions are shown in optimizer trace/verbose EXPLAIN diagnostics. A fallback never changes SQL semantics or proves a relation empty.
 
 ## 35.26 Estimate confidence and provenance
 
@@ -912,14 +764,9 @@ missing-stat fallback:
     LOW
 ```
 
-Plan selection is driven by cost, not by a separate confidence penalty.
-
-Confidence/provenance are retained for diagnostics and regression analysis.
-
-A composite estimate carries the least-confident material assumption that substantially determines the result and retains the relevant provenance chain.
+Plan selection is driven by cost, not by a separate confidence penalty. Confidence/provenance are retained for diagnostics and regression analysis. A composite estimate carries the least-confident material assumption that substantially determines the result and retains the relevant provenance chain.
 
 ## 35.27 Estimation invariants
-
 
 1. Estimated rows are nonnegative finite values and may be numerical zero without semantic proof.
 2. Provably-empty state is explicit, carries approved §35.2 semantic provenance, and is never inferred from estimated rows or truth fractions, whether tiny, zero, or one.

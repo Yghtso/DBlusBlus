@@ -18,9 +18,7 @@ Property/randomized testing is particularly important for:
 - MVCC visibility,
 - recovery.
 
-Recovery correctness MUST be tested with simulated failures rather than inferred solely from normal shutdown/reopen behavior.
-
-Tests MUST be able to use intentionally small resource limits, including tiny buffer pools, when required to force eviction and boundary behavior.
+Recovery correctness MUST be tested with simulated failures rather than inferred solely from normal shutdown/reopen behavior. Tests MUST be able to use intentionally small resource limits, including tiny buffer pools, when required to force eviction and boundary behavior.
 
 ## 41.1 Storage verification obligations
 
@@ -43,10 +41,7 @@ Storage verification MUST exercise the architectural properties that cannot be e
 - heap scans after reopen across many pages,
 - stale-FSM candidate repair.
 
-Physical slot reuse tests MUST follow the Chapter-14 grace protocol and persisted free-slot list; immediate DEAD-slot reuse is not a valid test expectation.
-
-Detailed test fixtures and benchmark procedures are maintained in `VERIFICATION.md`; this chapter states the architecture-level verification obligations.
-
+Physical slot reuse tests MUST follow the Chapter-14 grace protocol and persisted free-slot list; immediate DEAD-slot reuse is not a valid test expectation. Detailed test fixtures and benchmark procedures are maintained in `VERIFICATION.md`; this chapter states the architecture-level verification obligations.
 
 ## 41.2 B+ tree verification obligations
 
@@ -87,9 +82,7 @@ tree invariants survive redistribution/merge
 
 It also injects/rejects duplicate stored copies of one exact `(encoded_user_key,RID)`, distinguishes an authorized idempotent physical retry from an unproven executor duplicate, and verifies that recovery redo does not invoke SQL UNIQUE enforcement.
 
-Randomized persistent testing MUST compare the tree against a sorted oracle of physical `(encoded_user_key,RID)` keys across operations such as insert, exact erase, point/range lookup, and close/reopen.
-
-Random seeds must be reproducible when failures occur.
+Randomized persistent testing MUST compare the tree against a sorted oracle of physical `(encoded_user_key,RID)` keys across operations such as insert, exact erase, point/range lookup, and close/reopen. Random seeds must be reproducible when failures occur.
 
 Concurrent verification MUST stress:
 
@@ -230,9 +223,7 @@ spool accounting and cleanup transfer exactly to the result owner.
 
 COMMIT/ABORT fault injection MUST cover every C0–C6 and A0–A4 boundary, including known versus uncertain terminal-record append, repeated WAL-flush failure, connection loss before/after the commit append and durable point, post-durable runtime terminal-cache failure, lock/cache cleanup failure, abort-record failure, and acknowledgement transport failure. Assertions distinguish durable transaction outcome, runtime/database health, and client-observed outcome; no post-durable path may produce ABORTED.
 
-Recovery property tests compare reopened **logical committed contents** against a model containing only transactions whose commit became durable. Physical aborted garbage is allowed.
-
-Table-driven MVCC verification covers creator/deleter committed, active, too-new, aborted, self-command, and frozen cases using exact `xmin/xmax/cmin/cmax` combinations.
+Recovery property tests compare reopened **logical committed contents** against a model containing only transactions whose commit became durable. Physical aborted garbage is allowed. Table-driven MVCC verification covers creator/deleter committed, active, too-new, aborted, self-command, and frozen cases using exact `xmin/xmax/cmin/cmax` combinations.
 
 Isolation verification establishes READ COMMITTED stable-per-statement snapshots and retry re-evaluation, REPEATABLE READ fixed-snapshot behavior and serialization failure on conflicting post-snapshot writes, and the fact that snapshot-isolation write skew remains possible.
 
@@ -281,9 +272,7 @@ DROP delayed retirement
 descriptor invalidation without in-place mutation
 ```
 
-Logical-plan tests assert canonical plan shapes from bound statements.
-
-Every rewrite rule has an input logical plan and expected transformed plan and, once execution exists, differential semantic tests with NULL-rich data and volatility-sensitive cases.
+Logical-plan tests assert canonical plan shapes from bound statements. Every rewrite rule has an input logical plan and expected transformed plan and, once execution exists, differential semantic tests with NULL-rich data and volatility-sensitive cases.
 
 Logical validators are exercised both before and after rewrite phases.
 
@@ -469,9 +458,7 @@ physical B+ garbage/invisible-entry pressure
 cache configuration
 ```
 
-and assert that no fixed selectivity threshold controls the decision.
-
-Composite-bound tests compare B+ cursor results against the normalized SQL predicate for inclusive/exclusive, duplicate RID, NULL, and multi-column leftmost-prefix cases.
+and assert that no fixed selectivity threshold controls the decision. Composite-bound tests compare B+ cursor results against the normalized SQL predicate for inclusive/exclusive, duplicate RID, NULL, and multi-column leftmost-prefix cases.
 
 ## 41.7 Join-search, properties, memo, and optimizer verification obligations
 

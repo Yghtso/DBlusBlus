@@ -216,9 +216,7 @@ catalog schema version
 logical predicate/join/aggregate structure
 ```
 
-Front-end/catalog observability may additionally expose parser/binder latency, catalog cache hits/misses, descriptor-version lookups, and DDL/object-retirement queue size.
-
-These diagnostics must not become a correctness dependency.
+Front-end/catalog observability may additionally expose parser/binder latency, catalog cache hits/misses, descriptor-version lookups, and DDL/object-retirement queue size. These diagnostics must not become a correctness dependency.
 
 ## 40.6 Execution profiling
 
@@ -404,11 +402,7 @@ observed actual rows, when available, with completeness/applicability
 q-error, when comparable; otherwise explicit unavailability
 ```
 
-For positive estimate `E` and actual `A`:
-
-```text
-q_error = max(E / A, A / E)
-```
+For positive estimate `E` and actual `A`: `q_error = max(E / A, A / E)`.
 
 Zero handling is exact:
 
@@ -429,12 +423,6 @@ completion. A genuine completed zero retains the zero rules above. Planning
 estimate provenance, semantic-empty proof provenance, and actual observation
 remain separate; q-error availability is not semantic-empty proof.
 
-Estimate-attribution output should make the earliest material divergence visible together with confidence/provenance, because an upper join-order failure may originate in one lower predicate estimate.
+Estimate-attribution output should make the earliest material divergence visible together with confidence/provenance, because an upper join-order failure may originate in one lower predicate estimate. Estimate provenance and semantic-empty proof provenance are displayed as separate concepts. An estimate of zero with no approved proof remains an executable plan subtree.
 
-Estimate provenance and semantic-empty proof provenance are displayed as separate concepts. An estimate of zero with no approved proof remains an executable plan subtree.
-
-Runtime actual rows are diagnostic only.
-
-The architecture does not automatically write persistent statistics from one query's actual cardinalities.
-
-The canonical plan fingerprint is the compact debug hash defined by §38.5 and is suitable for regression comparison, not as a collision-free semantic identity.
+Runtime actual rows are diagnostic only. The architecture does not automatically write persistent statistics from one query's actual cardinalities. The canonical plan fingerprint is the compact debug hash defined by §38.5 and is suitable for regression comparison, not as a collision-free semantic identity.

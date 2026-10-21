@@ -627,9 +627,7 @@ NULL-heavy keys
 duplicate-heavy MCVs
 ```
 
-Compare baseline NDV estimator against MCV-aware estimator.
-
-Store regression expectations for controlled high-q-error cases.
+Compare baseline NDV estimator against MCV-aware estimator. Store regression expectations for controlled high-q-error cases.
 
 For each distribution, compute reference pair counts and complete NULL truth mass. Compare
 baseline NDV, common-MCV/residual, and trusted unique-key refinements. No common MCV or
@@ -741,9 +739,7 @@ residual predicates. Compare cursor results with the normalized SQL predicate an
 exact leftmost-prefix bounds, transient sentinel use, and residual classification under
 §§36.11–36.14; `IS NULL` may form its exact key bound while `= NULL` may not.
 
-Do not assert arbitrary exact cost numbers unless testing the cost formula itself.
-
-Prefer plan-shape expectations under controlled parameters.
+Do not assert arbitrary exact cost numbers unless testing the cost formula itself. Prefer plan-shape expectations under controlled parameters.
 
 For Chapter-42 measured base-access calibration, additionally apply the shared benchmark
 policy to deterministic same-logical-shape query families with validated immutable
@@ -818,9 +814,7 @@ A ⋈ B produces huge intermediate
 B ⋈ C highly selective
 ```
 
-Verify DP chooses the selective early join when statistics indicate it.
-
-Also test a case where a bushy plan wins.
+Verify DP chooses the selective early join when statistics indicate it. Also test a case where a bushy plan wins.
 
 Generate small join graphs and compare enumerated legal trees with an independent exhaustive
 reference enumerator. Use distinct BindingIds for self-joins. Cover connected and
@@ -852,19 +846,7 @@ unused payload.
 
 ### Interesting orders and enforcement
 
-Verify optimizer can retain a slightly more expensive ordered path and use it to avoid:
-
-```text
-Sort
-```
-
-or enable:
-
-```text
-MergeJoin / streaming aggregate
-```
-
-when total plan cost is lower.
+Verify optimizer can retain a slightly more expensive ordered path and use it to avoid `Sort` or enable: `MergeJoin / streaming aggregate` when total plan cost is lower.
 
 Compare an unordered cheapest child plus Sort with a more expensive naturally ordered
 IndexScan/join/aggregate path. Assert the ordered alternative survives dominance when it
@@ -1327,9 +1309,7 @@ large fact table
 aggregation
 ```
 
-This is an excellent optimizer-learning workload.
-
-TPC-H-inspired queries may be added without claiming benchmark compliance.
+This is an excellent optimizer-learning workload. TPC-H-inspired queries may be added without claiming benchmark compliance.
 
 ---
 

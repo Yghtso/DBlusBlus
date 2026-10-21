@@ -12,9 +12,7 @@ aggregate descriptors
 aggregate argument expressions
 ```
 
-No grouping keys means global aggregation and uses the specialized single-state path in §29.5.
-
-Hash aggregation is a pipeline breaker until its group state is finalized.
+No grouping keys means global aggregation and uses the specialized single-state path in §29.5. Hash aggregation is a pipeline breaker until its group state is finalized.
 
 ## 29.2 Aggregate state API
 
@@ -45,9 +43,7 @@ accumulators or an unbounded, unspecified FLOAT64 variation. A descriptor unable
 to preserve the applicable exact-state or admitted binary64-tree contract cannot
 be capability-enabled for serial, parallel, or spill execution.
 
-The executor does not invoke one virtual aggregate callback per input row.
-
-Function/operator dispatch is resolved per aggregate/vector batch.
+The executor does not invoke one virtual aggregate callback per input row. Function/operator dispatch is resolved per aggregate/vector batch.
 
 ## 29.3 Aggregate semantics registry
 
@@ -459,19 +455,9 @@ All group-table/key/state memory is accounted through the aggregate's memory res
 
 ## 29.5 Global aggregate fast path
 
-With no GROUP BY:
+With no GROUP BY: `one aggregate state block` is sufficient.
 
-```text
-one aggregate state block
-```
-
-is sufficient.
-
-No group hash table is created.
-
-Input vectors update the aggregate states directly.
-
-On empty input, this path still emits exactly one aggregate result row, with the per-function empty-input semantics from §29.3.
+No group hash table is created. Input vectors update the aggregate states directly. On empty input, this path still emits exactly one aggregate result row, with the per-function empty-input semantics from §29.3.
 
 ## 29.6 Hash-aggregate spill
 
@@ -484,9 +470,7 @@ group keys
 aggregate argument values / raw qualifying rows
 ```
 
-then finish one partition at a time and combine equal groups.
-
-It does **not** require opaque in-memory aggregate state bytes to be a stable spill format.
+then finish one partition at a time and combine equal groups. It does **not** require opaque in-memory aggregate state bytes to be a stable spill format.
 
 An aggregate descriptor is eligible for serialized partial-state spilling only
 when it defines safe temporary serialization plus Combine semantics.
@@ -547,13 +531,7 @@ alternative and does not change the baseline hash path's blocking contract.
 
 ## 29.8 Aggregation output properties
 
-Hash aggregation/group hash DISTINCT do not preserve input ordering.
-
-Global aggregate produces at most one result row.
-
-Grouped output order is unspecified unless a different physical operator explicitly advertises order.
-
-The physical optimizer must insert/use Sort when SQL requires an ordering not otherwise produced.
+Hash aggregation/group hash DISTINCT do not preserve input ordering. Global aggregate produces at most one result row. Grouped output order is unspecified unless a different physical operator explicitly advertises order. The physical optimizer must insert/use Sort when SQL requires an ordering not otherwise produced.
 
 ## 29.9 Aggregation invariants
 
@@ -621,13 +599,7 @@ prefix retains Chapter 31's general cursor semantics rather than becoming a
 successful complete result. The operator does not rewind or re-execute its
 original input to produce output.
 
-Otherwise physical planning may enforce the required grouping order with `PhysicalSort` and compare:
-
-```text
-Sort + PhysicalSortAggregate
-```
-
-against `PhysicalHashAggregate`.
+Otherwise physical planning may enforce the required grouping order with `PhysicalSort` and compare: `Sort + PhysicalSortAggregate` against `PhysicalHashAggregate`.
 
 An ordered/streaming DISTINCT similarly requires an input `OrderingProperty`
 proven under Chapter 37 and ordered compatibly by every DISTINCT key. The

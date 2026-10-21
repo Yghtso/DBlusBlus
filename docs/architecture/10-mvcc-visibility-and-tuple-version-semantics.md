@@ -15,47 +15,21 @@ new version:
     prev = old RID
 ```
 
-The new physical version receives a new RID.
-
-Ordinary user-transaction abort is a transaction-status/visibility decision rather than a byte-for-byte physical rollback of heap and B+ tree user-DML changes.
+The new physical version receives a new RID. Ordinary user-transaction abort is a transaction-status/visibility decision rather than a byte-for-byte physical rollback of heap and B+ tree user-DML changes.
 
 ### Aborted INSERT
 
-A version whose:
-
-```text
-xmin = aborted transaction
-```
-
-is invisible to other transactions.
+A version whose: `xmin = aborted transaction` is invisible to other transactions.
 
 Its physical heap bytes and index entries may remain until vacuum.
 
 ### Aborted DELETE
 
-A version whose:
-
-```text
-xmax = aborted transaction
-```
-
-is treated as not deleted.
+A version whose: `xmax = aborted transaction` is treated as not deleted.
 
 ### Aborted UPDATE
 
-The old version's aborted `xmax` is ineffective.
-
-The new version's aborted `xmin` makes the new version invisible.
-
-New physical index entries may remain as vacuumable garbage.
-
-The rollback model therefore preserves:
-
-```text
-STEAL + NO-FORCE
-```
-
-without requiring physical ordinary-user-DML undo or compensation-log-record-style restoration of heap/index bytes.
+The old version's aborted `xmax` is ineffective. The new version's aborted `xmin` makes the new version invisible. New physical index entries may remain as vacuumable garbage. The rollback model therefore preserves: `STEAL + NO-FORCE` without requiring physical ordinary-user-DML undo or compensation-log-record-style restoration of heap/index bytes.
 
 Section 12.10.4 defines abort's treatment of B+ structural shape, while
 §§13.13–13.16 define redo, loser resolution, and the no-user-DML-CLR recovery
@@ -108,29 +82,11 @@ else:
         visibility evaluation fails: impossible status result
 ```
 
-If:
+If: `creator_visible == false` the tuple is invisible regardless of `xmax`.
 
-```text
-creator_visible == false
-```
+The strict self-created rule: `cmin < snapshot.command_id` means a tuple created by the current statement is not rediscovered through ordinary snapshot visibility during that same statement.
 
-the tuple is invisible regardless of `xmax`.
-
-The strict self-created rule:
-
-```text
-cmin < snapshot.command_id
-```
-
-means a tuple created by the current statement is not rediscovered through ordinary snapshot visibility during that same statement.
-
-Equality is the valid current-command case. A self creator with:
-
-```text
-cmin > snapshot.command_id
-```
-
-claims creation by a command in the evaluator's future and is not an ordinary
+Equality is the valid current-command case. A self creator with: `cmin > snapshot.command_id` claims creation by a command in the evaluator's future and is not an ordinary
 invisible case. Persisted tuple metadata with that relation is `CORRUPT_HEAP`;
 an impossible runtime-only form detected before persistence is an internal
 invariant failure under §39.1.
@@ -139,29 +95,15 @@ Operations such as `RETURNING` SHOULD use the operation's produced values rather
 
 ## 10.3 Deleter visibility
 
-After creator visibility succeeds, inspect:
-
-```text
-T.xmax
-```
+After creator visibility succeeds, inspect `T.xmax`.
 
 ### 10.3.1 No deleter
 
-```text
-T.xmax == INVALID_TXN_ID
-```
-
-means the tuple remains visible.
+`T.xmax == INVALID_TXN_ID` means the tuple remains visible.
 
 ### 10.3.2 Deleted/superseded by the current transaction
 
-If:
-
-```text
-T.xmax == S.owner_txn_id
-```
-
-then:
+If: `T.xmax == S.owner_txn_id` then:
 
 ```text
 if T.cmax < S.command_id:
@@ -181,41 +123,15 @@ is an internal invariant failure under §39.1.
 
 ### 10.3.3 Deleted/superseded by another transaction
 
-Let:
+Let: `status_result = Status(T.xmax)`.
 
-```text
-status_result = Status(T.xmax)
-```
+If status lookup fails, visibility propagates the exact lookup failure. If: `status_result == ABORTED` the delete/update never became logically effective, so the tuple remains visible.
 
-If status lookup fails, visibility propagates the exact lookup failure.
+If: `status_result == IN_PROGRESS` the tuple remains visible to this snapshot.
 
-If:
+Read visibility does not wait merely because another transaction currently has an in-progress `xmax`. Write-conflict handling is owned by Chapter 11.
 
-```text
-status_result == ABORTED
-```
-
-the delete/update never became logically effective, so the tuple remains visible.
-
-If:
-
-```text
-status_result == IN_PROGRESS
-```
-
-the tuple remains visible to this snapshot.
-
-Read visibility does not wait merely because another transaction currently has an in-progress `xmax`.
-
-Write-conflict handling is owned by Chapter 11.
-
-If:
-
-```text
-status_result == COMMITTED
-```
-
-the tuple is deleted for snapshot `S` only when:
+If: `status_result == COMMITTED` the tuple is deleted for snapshot `S` only when:
 
 ```text
 T.xmax < S.xmax
@@ -263,11 +179,7 @@ T.xmin == S.owner_txn_id and T.xmax == S.owner_txn_id and T.cmax < T.cmin
 ```
 
 When both transaction fields identify the owner, the tuple therefore MUST
-satisfy:
-
-```text
-T.cmin <= T.cmax
-```
+satisfy: `T.cmin <= T.cmax`.
 
 `T.cmax < T.cmin` would claim deletion or supersession before creation and is
 therefore causally impossible. Impossible persisted tuple metadata is
@@ -298,9 +210,7 @@ classification. Converting such a failure into a Boolean could expose
 uncommitted or aborted data, suppress committed data, or change snapshot
 semantics. Section 39.1 owns the resulting continuation policy.
 
-Readers do not acquire logical tuple locks merely to evaluate MVCC visibility.
-
-The physical heap page supplies tuple metadata.
+Readers do not acquire logical tuple locks merely to evaluate MVCC visibility. The physical heap page supplies tuple metadata.
 
 The visibility subsystem combines that metadata with:
 
@@ -318,13 +228,7 @@ Maintenance may normalize tuple metadata once transaction outcome is permanently
 
 ### Aborted xmax
 
-When:
-
-```text
-Status(xmax) == ABORTED
-```
-
-maintenance may rewrite:
+When: `Status(xmax) == ABORTED` maintenance may rewrite:
 
 ```text
 xmax = INVALID_TXN_ID
@@ -340,9 +244,7 @@ xmin = FROZEN_TXN_ID
 cmin = 0
 ```
 
-These are physical cleanup optimizations.
-
-They do not change the logical history that made the cleanup safe.
+These are physical cleanup optimizations. They do not change the logical history that made the cleanup safe.
 
 Because they modify persistent page bytes, they follow the WAL/page-LSN mutation
 rules in §§12.10–12.12.

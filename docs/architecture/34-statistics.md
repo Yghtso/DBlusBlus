@@ -13,9 +13,7 @@ approximate
 missing
 ```
 
-without making a query semantically incorrect.
-
-A bad estimate may produce a bad plan; it MUST NOT produce a wrong result.
+without making a query semantically incorrect. A bad estimate may produce a bad plan; it MUST NOT produce a wrong result.
 
 Query correctness is invariant under the age or numerical contents of any structurally valid statistics descriptor. Values that were exact for the ANALYZE snapshot, including a zero live-row count, exact NULL count, or exact min/max, become ordinary potentially stale statistics when used for planning. They are not execution-time constraints and MUST NOT establish semantic emptiness.
 
@@ -47,9 +45,7 @@ One ANALYZE invocation uses one stable effective SQL snapshot under the transact
 Snapshot stability does not establish current object liveness for publication;
 §14.17.1 owns the short final publication gate against DROP/schema/index changes.
 
-Rows visible to that snapshot contribute to SQL-visible live-row/column statistics.
-
-Physical heap-page, dead-version, and B+ entry/leaf information may additionally be inspected as approximate maintenance metadata without changing SQL visibility semantics.
+Rows visible to that snapshot contribute to SQL-visible live-row/column statistics. Physical heap-page, dead-version, and B+ entry/leaf information may additionally be inspected as approximate maintenance metadata without changing SQL visibility semantics.
 
 Every ANALYZE statement receives one exact:
 
@@ -60,25 +56,11 @@ StatsVersion {
 }
 ```
 
-equal to the owning transaction and current command that perform the ANALYZE.
+equal to the owning transaction and current command that perform the ANALYZE. The pair is unique for one statement attempt under one TxnId and requires no separate persistent version allocator. Version comparison is lexicographic by: `(txn_id, command_id)` for choosing among multiple visible committed statistics versions for the same table.
 
-The pair is unique for one statement attempt under one TxnId and requires no separate persistent version allocator.
+This ordering is a deterministic freshness preference, not SQL semantic truth; overlapping ANALYZE transactions may still produce approximate/stale statistics. ANALYZE constructs one complete immutable candidate `StatsDescriptor` before writing/publishing its statistics version.
 
-Version comparison is lexicographic by:
-
-```text
-(txn_id, command_id)
-```
-
-for choosing among multiple visible committed statistics versions for the same table.
-
-This ordering is a deterministic freshness preference, not SQL semantic truth; overlapping ANALYZE transactions may still produce approximate/stale statistics.
-
-ANALYZE constructs one complete immutable candidate `StatsDescriptor` before writing/publishing its statistics version.
-
-All `sys_statistics` rows for one StatsVersion are written by the same transaction.
-
-The TABLE-scope payload is the version manifest: it names the exact analyzed ColumnIds and IndexIds that must have complete matching payloads for the version to be accepted.
+All `sys_statistics` rows for one StatsVersion are written by the same transaction. The TABLE-scope payload is the version manifest: it names the exact analyzed ColumnIds and IndexIds that must have complete matching payloads for the version to be accepted.
 
 Publication has two levels:
 
@@ -99,11 +81,7 @@ then C5 installs one complete immutable descriptor/cache entry
 or establishes the required safe cache fallback
 ```
 
-without mutating descriptors held by existing planners.
-
-ABORT, cancellation, an incomplete chunk set, a missing manifest member, or payload validation failure does not globally publish that version.
-
-After restart, the catalog/statistics loader selects the highest visible committed TABLE-manifest StatsVersion whose complete listed COLUMN/INDEX payload set validates.
+without mutating descriptors held by existing planners. ABORT, cancellation, an incomplete chunk set, a missing manifest member, or payload validation failure does not globally publish that version. After restart, the catalog/statistics loader selects the highest visible committed TABLE-manifest StatsVersion whose complete listed COLUMN/INDEX payload set validates.
 
 It may fall back to an older complete visible version or to missing-statistics behavior rather than combining fragments from different versions.
 
@@ -255,9 +233,7 @@ average_width             // especially VARCHAR
 maximum_observed_width
 ```
 
-`NDV` excludes NULL.
-
-All scalar values in statistics use the same logical type semantics as binder/executor comparisons.
+`NDV` excludes NULL. All scalar values in statistics use the same logical type semantics as binder/executor comparisons.
 
 `null_fraction`, NDV, min/max, MCVs, histogram boundaries/masses, widths, and values absent from any collected structure are costing evidence only. In particular, `null_fraction == 0` does not prove `IS NULL` impossible, `null_fraction == 1` does not prove `IS NOT NULL` impossible, and absence from an MCV list or histogram does not prove value absence. An enforced `NOT NULL` catalog constraint is a separate semantic fact.
 
@@ -316,15 +292,7 @@ max(
 )
 ```
 
-and may be used as a fallback when the optimizer lacks a more key-specific garbage distribution model.
-
-`leading_key_heap_correlation` is in:
-
-```text
-[-1.0, +1.0]
-```
-
-and summarizes correlation between leading-key order and heap PageNo order.
+and may be used as a fallback when the optimizer lacks a more key-specific garbage distribution model. `leading_key_heap_correlation` is in: `[-1.0, +1.0]` and summarizes correlation between leading-key order and heap PageNo order.
 
 These statistics are approximate planning metadata, not B+ structural correctness metadata or key-presence facts. A zero `physical_entry_count`, `logical_live_entry_count`, `invisible_entry_count_estimate`, or `leaf_page_count` estimate cannot suppress runtime index/heap access or prove that no key/RID candidate exists.
 
@@ -359,9 +327,7 @@ leaf_page_count / occupancy
 sampled key-rank <-> heap-PageNo correlation
 ```
 
-These index-physical observations are performance metadata and need not be from the identical instant as the MVCC heap snapshot.
-
-The descriptor records their approximate nature rather than treating them as visibility facts.
+These index-physical observations are performance metadata and need not be from the identical instant as the MVCC heap snapshot. The descriptor records their approximate nature rather than treating them as visibility facts.
 
 The baseline deliberately uses the full heap scan rather than a page/block
 sampler. Page/block sampling as a replacement for that scan is outside the
@@ -374,11 +340,7 @@ generation-consistency rules that the writer must satisfy.
 
 ## 34.8 Small-table exact mode
 
-For tables with at most approximately:
-
-```text
-50,000 live rows
-```
+For tables with at most approximately: `50,000 live rows`.
 
 ANALYZE may collect exact:
 
@@ -387,9 +349,7 @@ NDV
 value frequencies
 ```
 
-when its bounded maintenance-memory budget permits.
-
-The threshold is configurable and is not a persistent-format value.
+when its bounded maintenance-memory budget permits. The threshold is configurable and is not a persistent-format value.
 
 ## 34.9 HyperLogLog NDV estimation
 
@@ -402,9 +362,7 @@ p = 14
 register_count = 16,384
 ```
 
-Hash the same canonical non-NULL SQL value representation used by query hash semantics for that logical type.
-
-NULL is excluded.
+Hash the same canonical non-NULL SQL value representation used by query hash semantics for that logical type. NULL is excluded.
 
 The v1 payload persists the resulting NDV estimate, not the HLL sketch.
 Persisted incremental statistics sketches are outside the v1 payload contract.
@@ -463,17 +421,9 @@ alone is not a new failure cause.
 
 ## 34.10 Most-common values
 
-For large inputs use a bounded heavy-hitter method such as:
+For large inputs use a bounded heavy-hitter method such as `SpaceSaving`.
 
-```text
-SpaceSaving
-```
-
-Baseline target:
-
-```text
-64 MCV entries per analyzed column
-```
+Baseline target: `64 MCV entries per analyzed column`.
 
 Persist conceptually:
 
@@ -492,15 +442,7 @@ An unbounded exact value->count map is forbidden for large relations.
 
 ## 34.11 Histogram collection
 
-Maintain a bounded reservoir sample of non-NULL values.
-
-Baseline target:
-
-```text
-100,000 sampled values per analyzed column
-```
-
-subject to maintenance memory pressure.
+Maintain a bounded reservoir sample of non-NULL values. Baseline target: `100,000 sampled values per analyzed column` subject to maintenance memory pressure.
 
 After scanning:
 
@@ -551,13 +493,7 @@ Statistics MUST NOT introduce a second locale/FLOAT ordering model.
 
 ## 34.14 Statistics persistence
 
-Statistics live semantically in `sys_statistics` using the exact relation descriptor and chunked row contract from §16.5.7.
-
-Each TABLE/COLUMN/INDEX scope is first encoded as one complete `StatisticsPayloadV1` byte sequence and then split into catalog-row fragments of at most:
-
-```text
-STATISTICS_CHUNK_BYTES = 4096
-```
+Statistics live semantically in `sys_statistics` using the exact relation descriptor and chunked row contract from §16.5.7. Each TABLE/COLUMN/INDEX scope is first encoded as one complete `StatisticsPayloadV1` byte sequence and then split into catalog-row fragments of at most: `STATISTICS_CHUNK_BYTES = 4096`.
 
 Reassembly concatenates fragments in strictly increasing `chunk_index`.
 
@@ -589,13 +525,7 @@ Every scope payload begins with this 40-byte prefix:
 | `32` | 4 | stats_command_id |
 | `36` | 4 | reserved32 = `0` |
 
-All multi-byte integers are little-endian.
-
-`total_length` is the exact number of bytes in the reassembled scope payload.
-
-CRC32C is computed over exactly `total_length` bytes with bytes `16..19` logically zero.
-
-The `(stats_txn_id, stats_command_id)` pair is the payload's `StatsVersion` and must equal the catalog-row identity.
+All multi-byte integers are little-endian. `total_length` is the exact number of bytes in the reassembled scope payload. CRC32C is computed over exactly `total_length` bytes with bytes `16..19` logically zero. The `(stats_txn_id, stats_command_id)` pair is the payload's `StatsVersion` and must equal the catalog-row identity.
 
 ### 34.14.2 TABLE payload / version manifest
 
@@ -637,11 +567,7 @@ The exact TABLE payload length is:
 + index_count * 8
 ```
 
-with checked uint32 `total_length` arithmetic.
-
-The TABLE payload is the completeness manifest for the StatsVersion.
-
-Its `scope_id` in `sys_statistics` is exactly `0`.
+with checked uint32 `total_length` arithmetic. The TABLE payload is the completeness manifest for the StatsVersion. Its `scope_id` in `sys_statistics` is exactly `0`.
 
 ### 34.14.3 COLUMN payload
 
@@ -687,9 +613,7 @@ histogram_bin_count times:
     one binary64 residual_mass
 ```
 
-Every scalar TypeId must equal the column TypeId.
-
-MCV entries are in descending frequency order with deterministic scalar-order tie breaking.
+Every scalar TypeId must equal the column TypeId. MCV entries are in descending frequency order with deterministic scalar-order tie breaking.
 
 Histogram boundaries are nondecreasing in the §34.14.6 statistics scalar
 order. The complete finite/range, MCV uniqueness/order, histogram, mass,
@@ -737,13 +661,7 @@ TABLE manifest completeness
 
 A payload version unknown to the current engine, malformed statistics payload, or incomplete statistics version invalidates that statistics version. After ordinary catalog rows/chunks reassemble safely, exact `DBLUSSTA` plus a readable positive `payload_version>1` is enough to classify unsupported advisory metadata without applying v1 checksum/layout parsing; version zero or malformed version-1 bytes are an invalid generation. Neither is parsed best-effort.
 
-Because statistics are rebuildable performance metadata, such a failure may produce:
-
-```text
-missing statistics + diagnostic
-```
-
-rather than making otherwise valid user data unreadable.
+Because statistics are rebuildable performance metadata, such a failure may produce: `missing statistics + diagnostic` rather than making otherwise valid user data unreadable.
 
 Neither a structurally valid descriptor nor a descriptor rejected as invalid can produce semantic proof. Rejected statistics are ignored in favor of an older valid descriptor or missing-statistics fallback; the exact §34.14.6 tolerance does not alter this rule.
 
@@ -852,11 +770,7 @@ an input outside this table valid.
 
 #### 34.14.6.3 MCV identity and canonical order
 
-For one COLUMN payload:
-
-```text
-0 <= mcv_count <= 64
-```
+For one COLUMN payload: `0 <= mcv_count <= 64`.
 
 Each MCV scalar is non-NULL, uses the payload TypeId, and is a canonical
 `PersistedScalarV1`. MCV values are pairwise unique under §17.10.3 non-NULL
@@ -991,11 +905,7 @@ histogram entry requires both flags set. Min/max may remain present when both
 arrays are empty. These are exact relationships among statistics produced from
 one analyzed snapshot; they do not compare against current table contents.
 
-For one COLUMN payload:
-
-```text
-0 <= histogram_bin_count <= 100
-```
+For one COLUMN payload: `0 <= histogram_bin_count <= 100`.
 
 The histogram representation is a one-dimensional equi-depth residual histogram. NULLs and MCV value
 identities are excluded from its population. Each entry stores an upper
@@ -1051,13 +961,7 @@ subsection.
 The TABLE manifest, every required scope identity, TypeId, and object/schema
 fingerprint or descriptor fact already present in the architecture must agree exactly under
 §§16.5.7 and 34.14. In addition, every non-partial INDEX payload in the
-generation has:
-
-```text
-logical_live_entry_count = TABLE analyzed_live_row_count
-```
-
-because both describe one logical index entry per visible live heap tuple in the
+generation has: `logical_live_entry_count = TABLE analyzed_live_row_count` because both describe one logical index entry per visible live heap tuple in the
 same ANALYZE snapshot. No exact equality is required among
 `physical_entry_count`, `invisible_entry_count_estimate`, `leaf_page_count`, or
 `average_entries_per_leaf`: §34.7 permits physical index observation to overlap
@@ -1131,9 +1035,7 @@ Materialization first applies the complete §34.14.6 generation validation and
 normalization. Cache publication never exposes raw, partially validated, or
 implementation-locally normalized payload values.
 
-For ordinary cross-transaction planning, the descriptor must come from a complete visible committed StatsVersion.
-
-A transaction that has successfully completed ANALYZE may use its own complete transaction-local descriptor for later commands after the normal CommandId boundary even before COMMIT.
+For ordinary cross-transaction planning, the descriptor must come from a complete visible committed StatsVersion. A transaction that has successfully completed ANALYZE may use its own complete transaction-local descriptor for later commands after the normal CommandId boundary even before COMMIT.
 
 A concurrent committed ANALYZE publishes a new immutable descriptor atomically.
 
@@ -1141,9 +1043,7 @@ Concurrent install, delayed callback, and DROP invalidation are ordered by
 §14.17.1; the cache may not regress to an older applicable StatsVersion or
 reinstall metadata for a retired identity.
 
-Existing planners may finish with the old descriptor.
-
-The catalog/statistics cache is an acceleration mechanism and preserves the caller's catalog visibility rules.
+Existing planners may finish with the old descriptor. The catalog/statistics cache is an acceleration mechanism and preserves the caller's catalog visibility rules.
 
 StatsVersion cache keys obey §34.3.1: they compare the stored unsigned numeric
 pair directly and retain no transaction-status page/cache ownership solely for
@@ -1175,15 +1075,9 @@ changed_rows
 max(1, analyzed_live_row_count)
 ```
 
-The optimizer may surface staleness in traces/EXPLAIN diagnostics.
+The optimizer may surface staleness in traces/EXPLAIN diagnostics. The architecture does not reject or automatically refresh a plan solely because statistics are stale. Exact crash-persistent modification-counter accounting is not a correctness requirement.
 
-The architecture does not reject or automatically refresh a plan solely because statistics are stale.
-
-Exact crash-persistent modification-counter accounting is not a correctness requirement.
-
-When a committed ANALYZE descriptor becomes the global current version for a table, runtime staleness counters may reset relative to that version.
-
-A transaction-local or later-aborted ANALYZE does not reset globally visible modification counters.
+When a committed ANALYZE descriptor becomes the global current version for a table, runtime staleness counters may reset relative to that version. A transaction-local or later-aborted ANALYZE does not reset globally visible modification counters.
 
 ## 34.17 Statistics invariants
 

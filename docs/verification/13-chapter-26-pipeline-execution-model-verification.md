@@ -873,7 +873,6 @@ methodology no longer checks its obligation. No unavailable runtime category req
 | V26-Q08 | 26.4; 26.5; 26.9; 26.10(10) | Resource feasibility differences remain legitimate without changing successful semantics. | V26-Q | EQ/EL/DG/OG | V20-23; V22-C/E; V23-L; V25-P; Parallel Execution Tests |
 | V26-Q09 | 26.4; 26.5; 26.9; 26.10(10) | Chapter 32 retains worker-pool/morsel/combining/scheduling algorithm ownership. | V26-Q | EQ/EL/DG/OG | V20-23; V22-C/E; V23-L; V25-P; Parallel Execution Tests |
 
-
 ### V26 procedure coverage and negative-case checks
 
 For every ledger row, check the named fixture's positive case, one-defect negative case,

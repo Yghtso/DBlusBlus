@@ -53,11 +53,7 @@ NULL position
 binary VARCHAR/type ordering
 ```
 
-If a key cannot contribute a sound prefix, the prefix is shortened rather than guessing an order.
-
-Prefix comparison may decide order when prefixes differ.
-
-On prefix equality, execution performs the complete SQL comparator over the full sort keys.
+If a key cannot contribute a sound prefix, the prefix is shortened rather than guessing an order. Prefix comparison may decide order when prefixes differ. On prefix equality, execution performs the complete SQL comparator over the full sort keys.
 
 ## 30.3 Sort comparator
 
@@ -108,19 +104,9 @@ write sequential spill run
 release/reset run memory
 ```
 
-After input finalization:
+After input finalization: `k-way merge sorted runs`.
 
-```text
-k-way merge sorted runs
-```
-
-Readers/writers are buffered.
-
-Merge fan-in is chosen from available query memory and run count.
-
-If all runs cannot participate in one merge, execution performs multiple merge passes.
-
-Every merge comparison uses the same comparator as in-memory sorting.
+Readers/writers are buffered. Merge fan-in is chosen from available query memory and run count. If all runs cannot participate in one merge, execution performs multiple merge passes. Every merge comparison uses the same comparator as in-memory sorting.
 
 ## 30.6 Sort-run temporary format
 
@@ -135,11 +121,7 @@ checksummed sequential blocks
 sorted records/payload
 ```
 
-The fingerprint detects accidental mismatch inside one query/runtime execution; it is not a long-lived database format registry.
-
-Runs are never WAL logged or crash recovered.
-
-A malformed/checksum-failing run raises `SpillIOError` and aborts the query.
+The fingerprint detects accidental mismatch inside one query/runtime execution; it is not a long-lived database format registry. Runs are never WAL logged or crash recovered. A malformed/checksum-failing run raises `SpillIOError` and aborts the query.
 
 ## 30.7 PhysicalTopN
 
@@ -152,11 +134,7 @@ ORDER BY ... LIMIT N [OFFSET M]
 a physical planner may choose `PhysicalTopN`.
 
 For validated nonnegative INT64 `N` and `OFFSET`, define the physical
-algorithm's required prefix size mathematically:
-
-```text
-K = N + OFFSET
-```
+algorithm's required prefix size mathematically: `K = N + OFFSET`.
 
 `K` is an exact physical-algorithm requirement, not a SQL INT64 value or a
 user-visible arithmetic operation. `PhysicalTopN` is eligible only when the
@@ -172,11 +150,7 @@ independent exact architecture proof establishes that the reduced bound cannot
 under-read in the applicable domain. The architecture defines no global relation-cardinality
 bound that supplies such a proof.
 
-If `K = 0`, the result is empty without consuming unnecessary upstream work when pipeline dependencies permit.
-
-Otherwise Top-N maintains at most `K` best records in a bounded heap using the exact sort comparator.
-
-The heap's root represents the worst retained candidate so a better incoming row can replace it efficiently.
+If `K = 0`, the result is empty without consuming unnecessary upstream work when pipeline dependencies permit. Otherwise Top-N maintains at most `K` best records in a bounded heap using the exact sort comparator. The heap's root represents the worst retained candidate so a better incoming row can replace it efficiently.
 
 After input completion:
 
@@ -186,9 +160,7 @@ skip OFFSET
 emit up to N rows
 ```
 
-Heap/internal container order is never exposed as SQL sort order.
-
-For very large K, a full/external sort may be the better physical plan.
+Heap/internal container order is never exposed as SQL sort order. For very large K, a full/external sort may be the better physical plan.
 
 Exact-K representability is resolved by physical eligibility; genuine
 execution failures such as `OutOfMemory`, `SpillIOError`, or cancellation

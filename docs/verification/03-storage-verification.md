@@ -448,7 +448,6 @@ aliases.
 | Shutdown | active BufferPool | quiesce/drain/flush | no false clean close | §§7.12.6, 3.3.6 |
 | Raw-I/O exceptions | one fixture per named owner | bypass capability | only bounded owner uses bypass | §§7.3–7.5, 13.14 |
 
-
 ### Chapter 7 architecture-obligation coverage map
 
 Domains are: A layer/ownership, B frame state, C identity/page table, D pin, E latch,
@@ -587,7 +586,6 @@ one primary procedure owner; cross-referenced generic procedures remain part of 
 | 126 | R | BufferPool errors preserve exact storage/format/exhaustion/lifecycle distinctions — §7.12.7 | Failure-classification matrix |
 | 127 | S | Frame/page-table/pin/latch/CLOCK state is process-local and not recovered — §7.6.5 | Crash specialization and post-reopen inventory |
 
-
 ## Heap tests
 
 - thousands of tuples,
@@ -676,11 +674,7 @@ wider input domain, also pass 8145 and the converter's maximum representable inp
 that checked clamping produces the same result as 8144; these are converter-saturation cases,
 not valid heap-geometry fixtures.
 
-Independently enumerate every category `c` in `0..255` and calculate:
-
-```text
-minimum_usable(c) = (c * 8135 + 254) / 255
-```
+Independently enumerate every category `c` in `0..255` and calculate: `minimum_usable(c) = (c * 8135 + 254) / 255`.
 
 Assert exact equality with the inverse helper, monotonic nondecrease, checked intermediate
 arithmetic, `minimum_usable(0) = 0`, `minimum_usable(255) = 8135`, and no result above 8135.

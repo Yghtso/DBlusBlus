@@ -24,11 +24,7 @@ Bound Statements / Bound Expressions
 Logical Planner
 ```
 
-The parser does not know physical storage.
-
-The binder does not choose physical algorithms.
-
-Catalog descriptors describe semantic objects and their persistent identities; they do not expose heap-page, B+ node, or BufferPool implementation details.
+The parser does not know physical storage. The binder does not choose physical algorithms. Catalog descriptors describe semantic objects and their persistent identities; they do not expose heap-page, B+ node, or BufferPool implementation details.
 
 The catalog owns knowledge about at least:
 
@@ -53,11 +49,7 @@ It does not own:
 
 ## 16.2 Namespace model
 
-The architecture has one logical database and one SQL namespace:
-
-```text
-main
-```
+The architecture has one logical database and one SQL namespace `main`.
 
 Unqualified table names resolve in `main`.
 
@@ -68,9 +60,7 @@ SELECT * FROM users;
 SELECT * FROM main.users;
 ```
 
-refer to the same namespace lookup.
-
-Multiple SQL schemas/namespaces are deferred.
+refer to the same namespace lookup. Multiple SQL schemas/namespaces are deferred.
 
 Within `main`:
 
@@ -94,9 +84,7 @@ ConstraintId = uint64
 TypeId   = uint32
 ```
 
-A table's `ColumnId` is stable for the lifetime of that column identity.
-
-Internal references after binding use stable IDs rather than object-name strings.
+A table's `ColumnId` is stable for the lifetime of that column identity. Internal references after binding use stable IDs rather than object-name strings.
 
 These identities are distinct from:
 
@@ -107,9 +95,7 @@ physical column position
 display position
 ```
 
-The architecture allocates `TableId`, `IndexId`, and `ConstraintId` from the durable database-wide catalog-object allocator in §13.2.6.
-
-The allocator never returns zero, tolerates crash gaps, and never reuses an ID that may have appeared in persistent state.
+The architecture allocates `TableId`, `IndexId`, and `ConstraintId` from the durable database-wide catalog-object allocator in §13.2.6. The allocator never returns zero, tolerates crash gaps, and never reuses an ID that may have appeared in persistent state.
 
 Column IDs are table-local:
 
@@ -118,11 +104,7 @@ CREATE TABLE:
     assign ColumnId values 1..N in declaration order
 ```
 
-`ColumnId{0}` is not assigned by the defined architecture.
-
-A future schema evolution that adds a column allocates a value greater than every historical ColumnId for that table; dropped/removed ColumnIds are never reused.
-
-Built-in TypeIds remain the fixed registry in §16.4 rather than using the catalog-object allocator.
+`ColumnId{0}` is not assigned by the defined architecture. A future schema evolution that adds a column allocates a value greater than every historical ColumnId for that table; dropped/removed ColumnIds are never reused. Built-in TypeIds remain the fixed registry in §16.4 rather than using the catalog-object allocator.
 
 ## 16.4 Built-in TypeId registry
 
@@ -139,17 +121,11 @@ Because `sys_columns.type_id` is persistent semantic metadata, the architecture 
 | `6` | TIMESTAMP |
 | `7` | VARCHAR |
 
-`NULL` and `UNKNOWN` are not legal persisted column TypeIds.
-
-These TypeId values are a catalog-format contract and MUST NOT be renumbered because of source-language enum order.
+`NULL` and `UNKNOWN` are not legal persisted column TypeIds. These TypeId values are a catalog-format contract and MUST NOT be renumbered because of source-language enum order.
 
 ## 16.5 Catalog schema version 1
 
-This section is the canonical persisted and semantic descriptor set selected by:
-
-```text
-catalog_schema_version = 1
-```
+This section is the canonical persisted and semantic descriptor set selected by: `catalog_schema_version = 1`.
 
 The six relations use the ordinary tuple format and ordinary `SchemaDescriptor` layout rules. There is no catalog-only tuple codec. Every tuple version in these six relations has tuple-header `schema_version=1`; physical column order is exactly the ordinal order in the tables below, and `ColumnId` is the listed stable identity, not an inferred ordinal. Any change to a listed column, order, TypeId, NULLability rule, or catalog-specific code requires a new catalog schema version or an explicit migration.
 
@@ -460,13 +436,7 @@ current schema descriptor
 index/constraint metadata references
 ```
 
-A `SchemaDescriptor` identifies one exact:
-
-```text
-(TableId, SchemaVer)
-```
-
-and contains enough immutable information to interpret tuple format v1 for that schema version, including:
+A `SchemaDescriptor` identifies one exact: `(TableId, SchemaVer)` and contains enough immutable information to interpret tuple format v1 for that schema version, including:
 
 ```text
 stable ColumnIds
@@ -500,15 +470,7 @@ ResolveSchema(TableId, SchemaVer)
     -> immutable SchemaDescriptor
 ```
 
-for every schema version that may still appear in persisted tuple versions or remain referenced by a live query/catalog descriptor.
-
-Tuple decoding uses the tuple's persisted:
-
-```text
-schema_version
-```
-
-to choose that historical physical schema.
+for every schema version that may still appear in persisted tuple versions or remain referenced by a live query/catalog descriptor. Tuple decoding uses the tuple's persisted `schema_version` to choose that historical physical schema.
 
 Vacuum likewise resolves the historical schema before decoding an old tuple version to reconstruct indexed user keys.
 
@@ -519,11 +481,7 @@ Historical schema metadata MUST NOT be discarded while a persisted tuple version
 - exact index garbage cleanup,
 - version-chain maintenance.
 
-The table `schema_version` is the version of the logical/physical column schema used to interpret tuple bodies.
-
-A DDL commit that changes that tuple-interpreting schema monotonically increases `schema_version`.
-
-Index-only metadata changes such as CREATE INDEX / DROP INDEX do not force otherwise-identical tuples to acquire a new tuple schema version.
+The table `schema_version` is the version of the logical/physical column schema used to interpret tuple bodies. A DDL commit that changes that tuple-interpreting schema monotonically increases `schema_version`. Index-only metadata changes such as CREATE INDEX / DROP INDEX do not force otherwise-identical tuples to acquire a new tuple schema version.
 
 DDL may reject changes that require unsupported tuple rewriting, but the metadata model itself remains history-capable.
 
@@ -540,27 +498,15 @@ logical display position
 logical-plan output slot
 ```
 
-Never assume:
+Never assume: `ColumnId == zero-based SELECT * position`.
 
-```text
-ColumnId == zero-based SELECT * position
-```
-
-This identity separation permits schema evolution while old tuple versions remain interpretable; it does not authorize schema-changing DDL outside the supported scope.
-
-`SELECT *` uses the logical presentation order of the bound schema, not ColumnId numeric order.
+This identity separation permits schema evolution while old tuple versions remain interpretable; it does not authorize schema-changing DDL outside the supported scope. `SELECT *` uses the logical presentation order of the bound schema, not ColumnId numeric order.
 
 ## 16.9 Catalog bootstrap
 
-The architecture uses one database-wide bootstrap file at the well-known database-root path:
+The architecture uses one database-wide bootstrap file at the well-known database-root path `catalog.dat`.
 
-```text
-catalog.dat
-```
-
-Its only purpose is to locate and minimally interpret the six self-hosted catalog relations.
-
-It is **not** the ordinary catalog row store.
+Its only purpose is to locate and minimally interpret the six self-hosted catalog relations. It is **not** the ordinary catalog row store.
 
 The file is exactly:
 
@@ -581,9 +527,7 @@ object_id   = 0
 header_size = 72
 ```
 
-`file_id` is one ordinary nonzero FileId allocated through the durable FileId allocator.
-
-Because `catalog.dat` is found by its well-known singleton path, startup can read that FileId from the validated superblock before opening the system-relation files named by the bootstrap page.
+`file_id` is one ordinary nonzero FileId allocated through the durable FileId allocator. Because `catalog.dat` is found by its well-known singleton path, startup can read that FileId from the validated superblock before opening the system-relation files named by the bootstrap page.
 
 ### 16.9.2 CATALOG_DATA bootstrap-page format
 
@@ -639,13 +583,7 @@ Entries occur exactly once and in ascending `system_relation_code` order:
 6 = sys_statistics
 ```
 
-For the bootstrap page:
-
-```text
-relation_schema_version = 1
-```
-
-for every entry.
+For the bootstrap page: `relation_schema_version = 1` for every entry.
 
 Each entry's TableId is exactly equal to its `system_relation_code`, so the six TableIds are exactly `1..6` with the names fixed by §16.5.1. They are the first six allocations from §13.2.6 and are permanently reserved from later user/internal allocation.
 
@@ -681,15 +619,9 @@ The exact family/version classification is §4.14.2: zero version selectors are 
 
 ### 16.9.4 Minimal interpretation rule
 
-The engine contains the one exact built-in descriptor set in §16.5 for:
+The engine contains the one exact built-in descriptor set in §16.5 for: `catalog_schema_version = 1`.
 
-```text
-catalog_schema_version = 1
-```
-
-It contains exactly the physical/schema information listed there to decode the six system relations named by the bootstrap entries.
-
-That bootstrap descriptor set is not an independently mutable metadata authority.
+It contains exactly the physical/schema information listed there to decode the six system relations named by the bootstrap entries. That bootstrap descriptor set is not an independently mutable metadata authority.
 
 Startup proceeds conceptually as:
 
@@ -729,39 +661,23 @@ cmax = 0
 
 It then writes the complete checksummed `catalog.dat`, creates/synchronizes every startup-critical regular file and managed subdirectory, validates the bootstrap, renames the staging root without replacement, and synchronizes the external parent directory. Database creation MUST NOT report success before §4.7.8's final parent-directory `fsync` succeeds.
 
-A failed incomplete creation is not a valid database open target.
-
-`catalog.dat` is immutable after successful database creation.
-
-Changing the bootstrap relation set or bootstrap schema requires a new explicitly versioned bootstrap format/migration; ordinary DDL never edits page 1.
+A failed incomplete creation is not a valid database open target. `catalog.dat` is immutable after successful database creation. Changing the bootstrap relation set or bootstrap schema requires a new explicitly versioned bootstrap format/migration; ordinary DDL never edits page 1.
 
 This keeps bootstrap metadata minimal and prevents a second indefinitely divergent catalog.
 
 ## 16.10 Catalog cache and descriptor lifetime
 
-Frequently used immutable descriptors may be cached in memory.
-
-The cache is an acceleration structure, **not** a catalog-visibility authority.
+Frequently used immutable descriptors may be cached in memory. The cache is an acceleration structure, **not** a catalog-visibility authority.
 
 Maintenance-specific current-object claims, ANALYZE statistics installation,
 and DROP invalidation use the canonical §14.17.1 publication ordering; a cached
 descriptor alone is never an object-lifetime or publication claim.
 
-Cache keys use stable object IDs/schema versions and names where name lookup is required.
+Cache keys use stable object IDs/schema versions and names where name lookup is required. A cache hit may be used only when its descriptor is proven visible to the caller's catalog snapshot; otherwise lookup falls back to snapshot-aware catalog relations.
 
-A cache hit may be used only when its descriptor is proven visible to the caller's catalog snapshot; otherwise lookup falls back to snapshot-aware catalog relations.
+Published descriptors are immutable snapshots. A schema-changing operation invalidates/replaces current-name/current-version cache entries only after its transaction reaches the terminal publication boundary. Older immutable descriptors may remain alive while older snapshots/queries still reference them.
 
-Published descriptors are immutable snapshots.
-
-A schema-changing operation invalidates/replaces current-name/current-version cache entries only after its transaction reaches the terminal publication boundary.
-
-Older immutable descriptors may remain alive while older snapshots/queries still reference them.
-
-Bound/planned queries may retain shared immutable descriptors or generation/versioned handles for their required lifetime.
-
-The exact C++ ownership mechanism is implementation-specific.
-
-The semantic lifetime guarantee is not.
+Bound/planned queries may retain shared immutable descriptors or generation/versioned handles for their required lifetime. The exact C++ ownership mechanism is implementation-specific. The semantic lifetime guarantee is not.
 
 Uncommitted DDL may be visible to its own transaction through normal MVCC/self-visibility after the command boundary, but it is not installed into the globally published committed-descriptor cache.
 

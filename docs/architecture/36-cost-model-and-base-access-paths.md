@@ -50,15 +50,7 @@ Cost {
 }
 ```
 
-`startup_cost` is scalar work required before the first output can become available.
-
-`run_cost` is scalar remaining work to exhaust the operator.
-
-```text
-total_cost = startup_cost + run_cost
-```
-
-for a complete-consumption objective unless a later LIMIT/property rule deliberately evaluates partial-consumption cost.
+`startup_cost` is scalar work required before the first output can become available. `run_cost` is scalar remaining work to exhaust the operator. `total_cost = startup_cost + run_cost` for a complete-consumption objective unless a later LIMIT/property rule deliberately evaluates partial-consumption cost.
 
 Component counters are additive where semantically appropriate; peak memory is combined according to operator lifetime/dependency rather than blindly summed.
 
@@ -87,11 +79,7 @@ valid-input saturation is ordinary approximate planning metadata, is exposed in
 optimizer diagnostics, and is neither `OptimizerResourceLimit` nor semantic
 proof.
 
-`startup_cost` and `run_cost` are finalized independently into this domain, and:
-
-```text
-total_cost = saturating_add(startup_cost, run_cost)
-```
+`startup_cost` and `run_cost` are finalized independently into this domain, and: `total_cost = saturating_add(startup_cost, run_cost)`.
 
 Consequently all three values are finite and nonnegative and
 `startup_cost <= total_cost`. Chapter 38 remains the owner of the active scalar
@@ -199,9 +187,7 @@ and spill partition/fanout settings remain their owners' configuration. They are
 not additional `CostConfig` conversion fields. A capability-specific extension
 may define additional validated parameters only while that capability is enabled.
 
-The architecture does not permanently lock textbook numeric constants.
-
-Defaults are shipped as configuration and may be calibrated against the engine/hardware.
+The architecture does not permanently lock textbook numeric constants. Defaults are shipped as configuration and may be calibrated against the engine/hardware.
 
 ## 36.4 Calibration
 
@@ -218,25 +204,13 @@ sort comparison throughput
 temporary spill read/write throughput
 ```
 
-It proposes relative cost weights.
-
-Calibration results are deployment/configuration data, not persistent database format.
+It proposes relative cost weights. Calibration results are deployment/configuration data, not persistent database format.
 
 ## 36.5 Cache model
 
-The architecture uses a configured:
+The architecture uses a configured `effective_cache_pages` together with relation/index size to estimate likely caching.
 
-```text
-effective_cache_pages
-```
-
-together with relation/index size to estimate likely caching.
-
-The optimizer MUST NOT read exact momentary BufferPool contents during ordinary planning.
-
-Upper B+ levels may be modeled as more likely cached than heap leaf/data pages.
-
-The cache model should be stable enough that plans do not oscillate merely because a particular page happened to be resident during optimization.
+The optimizer MUST NOT read exact momentary BufferPool contents during ordinary planning. Upper B+ levels may be modeled as more likely cached than heap leaf/data pages. The cache model should be stable enough that plans do not oscillate merely because a particular page happened to be resident during optimization.
 
 Cache fractions and page reductions use checked finite arithmetic and explicit
 zero-size handling. A known zero-page object contributes no page reads; an
@@ -316,9 +290,7 @@ CPU:
     + output_rows * output-only decode/materialization work
 ```
 
-Dead-version pressure therefore raises scan CPU even when logical cardinality is unchanged.
-
-Required-column width/decode cost is applied separately from physical page I/O.
+Dead-version pressure therefore raises scan CPU even when logical cardinality is unchanged. Required-column width/decode cost is applied separately from physical page I/O.
 
 ## 36.7 B+ point-lookup cost
 
@@ -344,11 +316,7 @@ upper-level cache likelihood
 key comparison cost
 ```
 
-Not every upper level is automatically charged as a cold random read.
-
-Even a unique index lookup still visits the heap because index entries do not prove MVCC visibility and there is no index-only visibility path.
-
-A SQL UNIQUE index may still contain multiple physical entries for one user key because aborted/obsolete tuple versions are cleaned asynchronously by vacuum.
+Not every upper level is automatically charged as a cold random read. Even a unique index lookup still visits the heap because index entries do not prove MVCC visibility and there is no index-only visibility path. A SQL UNIQUE index may still contain multiple physical entries for one user key because aborted/obsolete tuple versions are cleaned asynchronously by vacuum.
 
 Point-lookup costing therefore may inflate expected candidate-RID/MVCC work using the §34.6 physical-versus-live entry pressure when no key-specific garbage statistic exists.
 
@@ -400,9 +368,7 @@ required heap decode
 residual predicate work
 ```
 
-Logical result selectivity is estimated from live-row/column statistics.
-
-Physical B+ work is then inflated separately when `IndexStatistics` show accumulated non-live entries.
+Logical result selectivity is estimated from live-row/column statistics. Physical B+ work is then inflated separately when `IndexStatistics` show accumulated non-live entries.
 
 When those statistics are unavailable, use the §36.7 derived physical/live
 entry estimates before applying the same candidate-inflation model. Missing
@@ -432,11 +398,7 @@ physical_candidates
       )
 ```
 
-subject to range/point-specific clamps and stronger measurements.
-
-This is intentionally approximate: global index garbage may not be distributed uniformly across key space.
-
-The optimizer trace should expose when this fallback inflation model materially affects cost.
+subject to range/point-specific clamps and stronger measurements. This is intentionally approximate: global index garbage may not be distributed uniformly across key space. The optimizer trace should expose when this fallback inflation model materially affects cost.
 
 Estimated leaf pages use:
 
@@ -456,25 +418,9 @@ Heap fetch locality uses §36.9 correlation or §36.10 fallback.
 
 ## 36.9 Index/heap correlation
 
-When available, `IndexStatistics.leading_key_heap_correlation` is an approximate coefficient:
+When available, `IndexStatistics.leading_key_heap_correlation` is an approximate coefficient: `-1.0 .. +1.0` collected from sampled: `(key rank, heap PageNo rank)` pairs for an indexed leading key.
 
-```text
--1.0 .. +1.0
-```
-
-collected from sampled:
-
-```text
-(key rank, heap PageNo rank)
-```
-
-pairs for an indexed leading key.
-
-High absolute correlation implies range RID fetches tend toward sequential heap-page order.
-
-Low absolute correlation implies near-random access.
-
-The sign describes direction; locality costing primarily uses absolute correlation unless the chosen scan direction makes direction itself relevant.
+High absolute correlation implies range RID fetches tend toward sequential heap-page order. Low absolute correlation implies near-random access. The sign describes direction; locality costing primarily uses absolute correlation unless the chosen scan direction makes direction itself relevant.
 
 The baseline model interpolates conservatively between sequential and random heap-page cost as correlation strengthens rather than applying a binary clustered/unclustered label.
 
@@ -484,15 +430,7 @@ optimizer trace. It is not a claim of measured locality.
 
 ## 36.10 Fallback distinct heap-page estimate
 
-Without useful correlation, assume secondary-index heap candidates are approximately scattered across table pages.
-
-Expected distinct heap pages MUST be capped by:
-
-```text
-physical_heap_pages
-```
-
-and MUST NOT charge one cold random read per matching row when many rows necessarily share pages.
+Without useful correlation, assume secondary-index heap candidates are approximately scattered across table pages. Expected distinct heap pages MUST be capped by `physical_heap_pages` and MUST NOT charge one cold random read per matching row when many rows necessarily share pages.
 
 Use a standard occupancy/distinct-page approximation based on:
 
@@ -523,19 +461,11 @@ scan-pushable condition
 residual condition
 ```
 
-Classification is based on the normalized semantic predicate and the particular index key schema.
-
-A predicate is not index-searchable merely because it mentions an indexed column.
+Classification is based on the normalized semantic predicate and the particular index key schema. A predicate is not index-searchable merely because it mentions an indexed column.
 
 ## 36.12 B+ sargability
 
-For a B+ index on:
-
-```text
-(a, b, c)
-```
-
-a tight search prefix consists of:
+For a B+ index on: `(a, b, c)` a tight search prefix consists of:
 
 ```text
 zero or more leading equality-like constraints
@@ -570,9 +500,7 @@ a > 5
 AND b = 7
 ```
 
-uses the range on `a`; `b = 7` is residual because the leftmost-prefix search cannot skip across the range component.
-
-Expressions/functions on a base column are not searchable through a plain column index unless an optional expression-index capability is defined and enabled.
+uses the range on `a`; `b = 7` is residual because the leftmost-prefix search cannot skip across the range component. Expressions/functions on a base column are not searchable through a plain column index unless an optional expression-index capability is defined and enabled.
 
 ## 36.13 Composite bounds
 
@@ -587,13 +515,7 @@ HIGH_KEY_COMPONENT
 
 search sentinels ordered before/after any valid encoded value for that bound position.
 
-Because physical B+ entries are ordered by:
-
-```text
-(user_key, RID)
-```
-
-search construction may append transient:
+Because physical B+ entries are ordered by: `(user_key, RID)` search construction may append transient:
 
 ```text
 MIN_RID_BOUND
@@ -631,17 +553,9 @@ WHERE a = 5
   AND expensive_function(c)
 ```
 
-search bounds represent:
+search bounds represent: `a = 5, b > 10` while the function predicate remains residual.
 
-```text
-a = 5, b > 10
-```
-
-while the function predicate remains residual.
-
-Because B+ user-key encoding is exact, a predicate fully proven by exact index bounds need not be re-evaluated merely as a safety check.
-
-Any predicate not fully represented by the selected bounds remains residual.
+Because B+ user-key encoding is exact, a predicate fully proven by exact index bounds need not be re-evaluated merely as a safety check. Any predicate not fully represented by the selected bounds remains residual.
 
 A scan-pushable predicate is costed once for each estimated SQL-visible tuple on
 which the scan evaluates it. An index residual is costed once for each estimated
@@ -711,9 +625,7 @@ many scattered heap candidates
     -> SeqScan cheaper
 ```
 
-The break-even point depends on relation size, index/heap correlation, candidate density, cache assumptions, required columns, and calibrated CPU/I/O weights.
-
-It is not a hard-coded selectivity percentage.
+The break-even point depends on relation size, index/heap correlation, candidate density, cache assumptions, required columns, and calibrated CPU/I/O weights. It is not a hard-coded selectivity percentage.
 
 ## 36.18 Required-column cost
 

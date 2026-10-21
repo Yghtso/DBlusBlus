@@ -49,11 +49,7 @@ LocalOperatorState
     mutable state owned by one worker/task
 ```
 
-A physical plan MAY be cached or reused.
-
-Runtime state is created per execution.
-
-Transaction, snapshot, read-epoch registration, cancellation state, memory usage, cursors, and other execution-specific mutable state MUST NOT live directly inside an immutable physical-plan node.
+A physical plan MAY be cached or reused. Runtime state is created per execution. Transaction, snapshot, read-epoch registration, cancellation state, memory usage, cursors, and other execution-specific mutable state MUST NOT live directly inside an immutable physical-plan node.
 
 ## 22.3 Physical operator contract
 
@@ -79,9 +75,7 @@ LogicalGet
     -> PhysicalIndexScan
 ```
 
-but execution methods/state are not SQL AST methods and do not perform binding again.
-
-The detailed optimizer rules that choose one physical operator are owned by the optimizer chapters.
+but execution methods/state are not SQL AST methods and do not perform binding again. The detailed optimizer rules that choose one physical operator are owned by the optimizer chapters.
 
 ## 22.4 Physical operator family
 
@@ -138,9 +132,7 @@ The physical operator family is the architecture's algorithm vocabulary;
 runtime capability determines which algorithms are eligible for physical
 planning.
 
-The physical planner has an explicit capability/implementation registry.
-
-It enumerates an alternative only when the corresponding runtime implementation is available and validated.
+The physical planner has an explicit capability/implementation registry. It enumerates an alternative only when the corresponding runtime implementation is available and validated.
 
 Eligibility is specific to the logical-plan instance. A physical algorithm is
 eligible only when every algorithm-specific exact requirement is representable
@@ -186,19 +178,11 @@ PhysicalSortAggregate
 ordered/streaming DISTINCT
 ```
 
-They are costed/enumerated only when their runtime capability is enabled.
-
-An unavailable algorithm can never appear in the final PhysicalPlan merely because the cost model has a formula for it.
+They are costed/enumerated only when their runtime capability is enabled. An unavailable algorithm can never appear in the final PhysicalPlan merely because the cost model has a formula for it.
 
 ## 22.5 Query execution context
 
-Each execution owns one:
-
-```text
-QueryExecutionContext
-```
-
-containing or referencing at least:
+Each execution owns one `QueryExecutionContext` containing or referencing at least:
 
 ```text
 Transaction
@@ -213,13 +197,9 @@ profiling state
 query-scoped arena
 ```
 
-The `ReadEpochGuard` is held for the period in which execution may retain or dereference index-derived RIDs, satisfying Chapter 14's physical-RID reuse contract.
+The `ReadEpochGuard` is held for the period in which execution may retain or dereference index-derived RIDs, satisfying Chapter 14's physical-RID reuse contract. For READ COMMITTED, the effective snapshot is the statement snapshot.
 
-For READ COMMITTED, the effective snapshot is the statement snapshot.
-
-For REPEATABLE READ, it is the transaction snapshot with the current command boundary.
-
-The execution context does not weaken transaction-owned snapshot/lock lifetimes defined by Chapters 9–15.
+For REPEATABLE READ, it is the transaction snapshot with the current command boundary. The execution context does not weaken transaction-owned snapshot/lock lifetimes defined by Chapters 9–15.
 
 ## 22.6 Runtime ownership
 

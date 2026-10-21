@@ -24,28 +24,18 @@ The architecture supports:
 - physical heap tuple-version RIDs,
 - WAL/recovery integration.
 
-The B+ tree owns physical ordered index structure.
-
-It does not own SQL parsing, snapshot visibility, or user-transaction uniqueness semantics.
+The B+ tree owns physical ordered index structure. It does not own SQL parsing, snapshot visibility, or user-transaction uniqueness semantics.
 
 ## 8.2 Index file and superblock metadata
 
-Each index owns one page-based file:
-
-```text
-index_<index_id>.btree
-```
-
-with:
+Each index owns one page-based file `index_<index_id>.btree` with:
 
 ```text
 page 0       B+ tree superblock
 page 1..N    internal / leaf / free pages
 ```
 
-The file uses the `BTREE` file kind defined by the persistent-storage foundation.
-
-The B+ tree superblock is a file-kind-specific extension of the common 72-byte FileSuperblock prefix.
+The file uses the `BTREE` file kind defined by the persistent-storage foundation. The B+ tree superblock is a file-kind-specific extension of the common 72-byte FileSuperblock prefix.
 
 The common prefix stores:
 
@@ -73,23 +63,13 @@ The B+ extension occupies bytes `72..127`.
 | `128` | 8064 | reserved bytes, all zero |
 |  | **8192** | **total page** |
 
-All multi-byte fields are little-endian.
-
-`index_flags` has no assigned bits. Encoders MUST write zero and decoders MUST reject nonzero `index_flags`.
+All multi-byte fields are little-endian. `index_flags` has no assigned bits. Encoders MUST write zero and decoders MUST reject nonzero `index_flags`.
 
 `key_schema_version` is an independent required format domain under §4.14.6. V1 accepts only `1`; zero is corruption, a greater value makes the committed index unsupported, and a version-1 fingerprint mismatch is corruption rather than forward compatibility.
 
-The B+ tree does not duplicate `IndexId` in the extension; the common FileSuperblock `object_id` is the index identifier.
+The B+ tree does not duplicate `IndexId` in the extension; the common FileSuperblock `object_id` is the index identifier. `root_page_no`, `first_leaf_page_no`, and `last_leaf_page_no` MUST be valid non-sentinel page numbers in an initialized tree.
 
-`root_page_no`, `first_leaf_page_no`, and `last_leaf_page_no` MUST be valid non-sentinel page numbers in an initialized tree.
-
-`free_page_head` uses:
-
-```text
-INVALID_PAGE_NO
-```
-
-for an empty B+ free list.
+`free_page_head` uses `INVALID_PAGE_NO` for an empty B+ free list.
 
 An initialized empty tree is represented by one valid empty leaf:
 
@@ -101,11 +81,7 @@ last_leaf_page_no  = root_page_no
 root.slot_count    = 0
 ```
 
-A normal initialized empty tree MUST NOT use an invalid root.
-
-The B+ superblock extension above is byte-exact.
-
-Its `key_schema_fingerprint` is defined in §8.3.1 so the persisted metadata can be validated independently of compiler enums or ABI layout.
+A normal initialized empty tree MUST NOT use an invalid root. The B+ superblock extension above is byte-exact. Its `key_schema_fingerprint` is defined in §8.3.1 so the persisted metadata can be validated independently of compiler enums or ABI layout.
 
 ## 8.3 Index key schema
 
@@ -119,9 +95,7 @@ NULLS FIRST
 binary VARCHAR collation
 ```
 
-Native descending physical index components and locale-aware collations are deferred.
-
-Descending SQL results MAY be produced by executor sorting; native reverse index traversal is outside the supported scope as specified in §8.20.1.
+Native descending physical index components and locale-aware collations are deferred. Descending SQL results MAY be produced by executor sorting; native reverse index traversal is outside the supported scope as specified in §8.20.1.
 
 The B+ tree's key-order semantics MUST agree with the database's SQL comparison semantics for the supported indexable types.
 
@@ -187,11 +161,7 @@ collation:
     1 = BINARY
 ```
 
-For VARCHAR, the architecture requires `collation = BINARY`.
-
-For non-VARCHAR components, the architecture requires `collation = NONE`.
-
-These codes define only the canonical fingerprint descriptor; they do not replace the catalog's logical type representation.
+For VARCHAR, the architecture requires `collation = BINARY`. For non-VARCHAR components, the architecture requires `collation = NONE`. These codes define only the canonical fingerprint descriptor; they do not replace the catalog's logical type representation.
 
 The fingerprint is a deterministic mismatch detector, not a cryptographic identity. Opening an index MUST reject a mismatch between the expected key-schema descriptor and the persisted fingerprint.
 
@@ -207,9 +177,7 @@ physical key
     (user key, RID)
 ```
 
-RID is a deterministic tiebreaker.
-
-Consequently, every physical B+ tree entry has a unique total position even when multiple SQL rows have equal user keys.
+RID is a deterministic tiebreaker. Consequently, every physical B+ tree entry has a unique total position even when multiple SQL rows have equal user keys.
 
 This physical-key choice simplifies:
 
@@ -231,13 +199,7 @@ An RID stored in a B+ tree entry occupies exactly 16 bytes:
 | `14` | 2 | reserved |
 |  | **16** | **total** |
 
-Multi-byte fields use the persistent integer byte order defined by the storage foundation.
-
-Physical RID ordering is numeric lexicographic order:
-
-```text
-(heap_file_id, heap_page_no, heap_slot_id)
-```
+Multi-byte fields use the persistent integer byte order defined by the storage foundation. Physical RID ordering is numeric lexicographic order: `(heap_file_id, heap_page_no, heap_slot_id)`.
 
 For the defined architecture, bytes `14..15` are strict reserved-zero bytes:
 
@@ -257,27 +219,15 @@ heap_page_no != INVALID_PAGE_NO
 heap_slot_id != INVALID_SLOT_ID
 ```
 
-A context-free RID decoder can validate these sentinel rules.
-
-When the index handle knows the expected heap `FileId`, tree/index-level validation MUST additionally reject a leaf RID whose `heap_file_id` does not belong to the indexed relation.
+A context-free RID decoder can validate these sentinel rules. When the index handle knows the expected heap `FileId`, tree/index-level validation MUST additionally reject a leaf RID whose `heap_file_id` does not belong to the indexed relation.
 
 This strict decoder rule is part of the persisted architecture contract.
 
 ## 8.5 Memcomparable user-key encoding
 
-`IndexKeyCodec` converts logical indexed values into an order-preserving byte sequence.
+`IndexKeyCodec` converts logical indexed values into an order-preserving byte sequence. For supported user keys `A` and `B`: `lexicographic_compare(Encode(A), Encode(B))`.
 
-For supported user keys `A` and `B`:
-
-```text
-lexicographic_compare(Encode(A), Encode(B))
-```
-
-MUST produce the same ordering as the database's index comparator.
-
-The B+ tree therefore compares encoded bytes in the hot path rather than invoking a polymorphic SQL comparator for each binary-search comparison.
-
-The index encoding is allowed to differ from ordinary tuple serialization because its purpose is order preservation, not compact row storage.
+MUST produce the same ordering as the database's index comparator. The B+ tree therefore compares encoded bytes in the hot path rather than invoking a polymorphic SQL comparator for each binary-search comparison. The index encoding is allowed to differ from ordinary tuple serialization because its purpose is order preservation, not compact row storage.
 
 ### 8.5.1 Field presence prefix
 
@@ -288,9 +238,7 @@ Every encoded field begins with:
 0x01 = non-NULL
 ```
 
-which establishes ascending `NULLS FIRST`.
-
-A NULL field consists of the NULL marker for that component; non-NULL fields continue with the type-specific encoding below.
+which establishes ascending `NULLS FIRST`. A NULL field consists of the NULL marker for that component; non-NULL fields continue with the type-specific encoding below.
 
 ### 8.5.2 BOOLEAN
 
@@ -346,9 +294,7 @@ else:
     sortable = u XOR 0x8000000000000000
 ```
 
-where `bitwise_not` and the XOR operate on exactly 64 bits.
-
-Encode `sortable` as an unsigned 64-bit integer in big-endian byte order.
+where `bitwise_not` and the XOR operate on exactly 64 bits. Encode `sortable` as an unsigned 64-bit integer in big-endian byte order.
 
 This yields the required total order:
 
@@ -365,9 +311,7 @@ positive finite values
 NaN
 ```
 
-All NaNs compare equal for index-key semantics because they normalize to the same canonical payload.
-
-The SQL FLOAT64 comparison layer MUST use the same equality/order semantics.
+All NaNs compare equal for index-key semantics because they normalize to the same canonical payload. The SQL FLOAT64 comparison layer MUST use the same equality/order semantics.
 
 ### 8.5.6 VARCHAR
 
@@ -380,39 +324,21 @@ ordinary non-zero byte -> itself
 0x00                   -> 0x00 0xFF
 ```
 
-Terminate the VARCHAR field with:
-
-```text
-0x00 0x00
-```
+Terminate the VARCHAR field with: `0x00 0x00`.
 
 This makes the field self-delimiting while preserving binary lexicographic byte-string ordering.
 
 ### 8.5.7 Composite keys
 
-Composite user keys concatenate encoded component fields in physical key-schema order:
+Composite user keys concatenate encoded component fields in physical key-schema order: `field0 || field1 || ... || fieldN`.
 
-```text
-field0 || field1 || ... || fieldN
-```
-
-The combined user-key byte string remains lexicographically order preserving.
-
-No per-comparison type dispatch is required inside the B+ tree.
+The combined user-key byte string remains lexicographically order preserving. No per-comparison type dispatch is required inside the B+ tree.
 
 ## 8.6 Encoded-key size and physical comparison
 
-The maximum encoded **user-key** size in the architecture is:
+The maximum encoded **user-key** size in the architecture is: `1024 bytes`.
 
-```text
-1024 bytes
-```
-
-An operation whose encoded user key exceeds this bound MUST fail explicitly.
-
-The key MUST NOT be silently truncated.
-
-The bound exists to preserve useful fanout on 8192-byte pages and avoid overflow-key pages in the defined architecture.
+An operation whose encoded user key exceeds this bound MUST fail explicitly. The key MUST NOT be silently truncated. The bound exists to preserve useful fanout on 8192-byte pages and avoid overflow-key pages in the defined architecture.
 
 Physical-key comparison is:
 
@@ -428,15 +354,9 @@ MIN_RID
 MAX_RID
 ```
 
-bound the complete duplicate range for user key `K`:
+bound the complete duplicate range for user key `K`: `(K, MIN_RID) ... (K, MAX_RID)`.
 
-```text
-(K, MIN_RID) ... (K, MAX_RID)
-```
-
-These search sentinels need not be persistable real RIDs.
-
-Deferred key-space extensions include overflow keys, key compression, separator-prefix truncation, and alternative page sizes.
+These search sentinels need not be persistable real RIDs. Deferred key-space extensions include overflow keys, key compression, separator-prefix truncation, and alternative page sizes.
 
 ## 8.7 Node-page organization
 
@@ -449,9 +369,7 @@ Leaf and internal nodes are 8192-byte slotted pages using:
 variable-length packed entries
 ```
 
-The slot directory begins at byte `64` and grows upward.
-
-Packed entry bytes grow downward from the end of the page.
+The slot directory begins at byte `64` and grows upward. Packed entry bytes grow downward from the end of the page.
 
 Conceptually:
 
@@ -502,11 +420,7 @@ lower = 64 + slot_count * 8
 64 <= lower <= upper <= PAGE_SIZE
 ```
 
-The slot array is kept in sorted physical-key order.
-
-Packed entry payload bytes do not need to be physically ordered.
-
-Insertion into the middle of a node SHOULD normally move slot descriptors rather than rewriting all existing variable-length entry payloads.
+The slot array is kept in sorted physical-key order. Packed entry payload bytes do not need to be physically ordered. Insertion into the middle of a node SHOULD normally move slot descriptors rather than rewriting all existing variable-length entry payloads.
 
 Page-local compaction MAY repack entry bytes and rewrite slot offsets while holding the page write latch.
 
@@ -547,11 +461,7 @@ A leaf node has a 64-byte total header:
 | `60` | 4 | reserved |
 |  | **64** | **total** |
 
-Leaf level is always:
-
-```text
-0
-```
+Leaf level is always `0`.
 
 A leaf packed entry is:
 
@@ -560,11 +470,7 @@ encoded user key     user_key_length bytes
 RID                  16 bytes
 ```
 
-Therefore:
-
-```text
-entry_length = user_key_length + 16
-```
+Therefore: `entry_length = user_key_length + 16`.
 
 The B+ tree stores no:
 
@@ -603,11 +509,7 @@ An internal node also has a 64-byte total header:
 | `52` | 12 | reserved |
 |  | **64** | **total** |
 
-An internal node with `N` separator entries has:
-
-```text
-N + 1 children
-```
+An internal node with `N` separator entries has: `N + 1 children`.
 
 Each packed internal entry contains:
 
@@ -617,11 +519,7 @@ separator RID          16 bytes
 right_child_page_no     8 bytes
 ```
 
-Every separator is therefore a complete physical key:
-
-```text
-(user key, RID)
-```
+Every separator is therefore a complete physical key: `(user key, RID)`.
 
 The full physical separator is required so routing remains correct when equal SQL keys span multiple subtrees.
 
@@ -654,17 +552,9 @@ and, when K(i+1) exists:
     all keys in Ci < K(i+1)
 ```
 
-`Ki` is a routing lower bound for child `Ci`.
+`Ki` is a routing lower bound for child `Ci`. Immediately after a split it normally equals the minimum physical key in `Ci`. After ordinary deletion it MAY remain stale-low. For example, if a right subtree minimum moves from `50` to `60`, retaining separator `50` remains correct so long as every key in that subtree is still `>= 50`.
 
-Immediately after a split it normally equals the minimum physical key in `Ci`.
-
-After ordinary deletion it MAY remain stale-low.
-
-For example, if a right subtree minimum moves from `50` to `60`, retaining separator `50` remains correct so long as every key in that subtree is still `>= 50`.
-
-A stale-low separator may cause an unnecessary descent that finds no key; it MUST NOT cause a real key to be missed.
-
-A separator need not be tightened only because deletion increased the right-child minimum.
+A stale-low separator may cause an unnecessary descent that finds no key; it MUST NOT cause a real key to be missed. A separator need not be tightened only because deletion increased the right-child minimum.
 
 A separator MUST change when a structural operation moves entries across its routing boundary, including:
 
@@ -679,13 +569,7 @@ After redistribution, the simplest correct separator is the first physical key o
 
 ### 8.11.1 Internal search
 
-For target physical key `T`, internal routing uses binary search equivalent to:
-
-```text
-upper_bound(separators, T)
-```
-
-so:
+For target physical key `T`, internal routing uses binary search equivalent to: `upper_bound(separators, T)` so:
 
 ```text
 T < K1            -> C0
@@ -699,11 +583,7 @@ Production internal-node lookup MUST NOT linearly scan separators.
 
 ### 8.11.2 Leaf search
 
-Leaf lookup uses binary search equivalent to:
-
-```text
-lower_bound(physical_keys, target)
-```
+Leaf lookup uses binary search equivalent to: `lower_bound(physical_keys, target)`.
 
 Exact physical lookup uses:
 
@@ -719,11 +599,7 @@ target =
     (encoded_user_key, MIN_RID)
 ```
 
-and proceeds forward until the user key changes.
-
-For a range scan, binary search finds the initial slot once; iteration then proceeds sequentially rather than repeating a binary search for every next entry.
-
-The hot comparison path SHOULD primarily be encoded-byte lexicographic comparison plus RID comparison when encoded user keys are equal.
+and proceeds forward until the user key changes. For a range scan, binary search finds the initial slot once; iteration then proceeds sequentially rather than repeating a binary search for every next entry. The hot comparison path SHOULD primarily be encoded-byte lexicographic comparison plus RID comparison when encoded user keys are equal.
 
 ## 8.12 Split trigger and node compaction
 
@@ -735,9 +611,7 @@ and existing fragmented/reclaimable bytes would be sufficient:
     compact the node
 ```
 
-A split occurs only if the pending entry still does not fit after any useful compaction.
-
-Variable-length node capacity, split balance, and occupancy are measured in **bytes**, not entry count.
+A split occurs only if the pending entry still does not fit after any useful compaction. Variable-length node capacity, split balance, and occupancy are measured in **bytes**, not entry count.
 
 ## 8.13 Leaf split and sibling links
 
@@ -750,9 +624,7 @@ A leaf split:
 5. moves higher physical keys to a new right page,
 6. copies the first physical key of the new right leaf into the parent as separator.
 
-The separator remains present in the right leaf.
-
-Splitting solely by entry count is not permitted because encoded keys are variable length.
+The separator remains present in the right leaf. Splitting solely by entry count is not permitted because encoded keys are variable length.
 
 ### 8.13.1 Sibling-link publication
 
@@ -781,9 +653,7 @@ else:
     superblock.last_leaf = R
 ```
 
-Both forward and backward links are persisted.
-
-The architecture exposes native forward scans; maintaining the backward links does not by itself require native reverse scans.
+Both forward and backward links are persisted. The architecture exposes native forward scans; maintaining the backward links does not by itself require native reverse scans.
 
 ## 8.14 Internal split
 
@@ -804,11 +674,7 @@ K1->C1
 K(m-1)->C(m-1)
 ```
 
-The parent receives:
-
-```text
-Km
-```
+The parent receives `Km`.
 
 The right page receives:
 
@@ -865,23 +731,11 @@ used_bytes =
     packed_entry_bytes
 ```
 
-measured relative to:
+measured relative to: `PAGE_SIZE - 64`.
 
-```text
-PAGE_SIZE - 64
-```
+A non-root node becomes a practical rebalance candidate below approximately: `25% byte occupancy`.
 
-A non-root node becomes a practical rebalance candidate below approximately:
-
-```text
-25% byte occupancy
-```
-
-This is a soft threshold, not a strict half-full B+ tree invariant.
-
-The softer threshold is intended to reduce split/merge oscillation and write amplification with variable-length keys.
-
-A temporarily sparse page is a performance issue rather than structural corruption.
+This is a soft threshold, not a strict half-full B+ tree invariant. The softer threshold is intended to reduce split/merge oscillation and write amplification with variable-length keys. A temporarily sparse page is a performance issue rather than structural corruption.
 
 ## 8.17 Redistribution and merge
 
@@ -892,17 +746,11 @@ For an underfull page:
 3. otherwise merge when the combined entries fit in one page,
 4. propagate parent underflow when a separator is removed.
 
-Whenever redistribution moves keys across a routing boundary, the relevant parent separator MUST be updated.
-
-Ordinary deletion that does not move keys between children does not require separator tightening.
+Whenever redistribution moves keys across a routing boundary, the relevant parent separator MUST be updated. Ordinary deletion that does not move keys between children does not require separator tightening.
 
 ### 8.17.1 Leaf merge
 
-When possible, leaf merge is deterministic:
-
-```text
-merge right into left
-```
+When possible, leaf merge is deterministic: `merge right into left`.
 
 Update:
 
@@ -919,13 +767,7 @@ Remove the separator and child pointer for `right` from the parent, then retire 
 
 ### 8.17.2 Internal rebalancing
 
-Internal redistribution/merge is defined in terms of:
-
-```text
-children + routing separators
-```
-
-rather than blindly moving serialized entry bytes.
+Internal redistribution/merge is defined in terms of: `children + routing separators` rather than blindly moving serialized entry bytes.
 
 The parent separator participates in the child boundary and MUST be transformed consistently.
 
@@ -933,11 +775,7 @@ Internal redistribution/merge MAY reconstruct the affected logical child/separat
 
 ## 8.18 Tree-local free pages and safe reuse
 
-The B+ tree superblock stores:
-
-```text
-free_page_head
-```
+The B+ tree superblock stores `free_page_head`.
 
 A retired B+ page becomes `BTREE_FREE`.
 
@@ -958,13 +796,7 @@ common reserved16  = 0
 | `40` | 8152 | reserved bytes, all zero |
 |  | **8192** | **total** |
 
-`next_free_page_no` is a uint64 little-endian PageNo.
-
-The terminal free-list link is:
-
-```text
-INVALID_PAGE_NO
-```
+`next_free_page_no` is a uint64 little-endian PageNo. The terminal free-list link is `INVALID_PAGE_NO`.
 
 A v1 decoder MUST reject nonzero common flags/common reserved16 or any nonzero byte in the free-page reserved region.
 
@@ -977,11 +809,7 @@ else:
     append a page to the index file
 ```
 
-A global extent allocator is not required solely for the B+ tree.
-
-The tree-local free-list head and every terminal free-page link use `INVALID_PAGE_NO`.
-
-The complete in-range/exclusion, acyclic, unique-membership, free/live-disjointness, bounded-allocation, and verifier rules are canonical in §4.13.4–§4.13.5.
+A global extent allocator is not required solely for the B+ tree. The tree-local free-list head and every terminal free-page link use `INVALID_PAGE_NO`. The complete in-range/exclusion, acyclic, unique-membership, free/live-disjointness, bounded-allocation, and verifier rules are canonical in §4.13.4–§4.13.5.
 
 ### 8.18.1 Reuse safety
 
@@ -991,9 +819,7 @@ A retired page may be recycled only after:
 - the write latches required for that detachment are held,
 - no traversal can retain an unprotected stale page reference.
 
-This relies on latch-coupled traversal and guarded leaf handoff.
-
-Long-lived raw `PageNo` cursors MUST NOT be exposed outside the B+ tree implementation.
+This relies on latch-coupled traversal and guarded leaf handoff. Long-lived raw `PageNo` cursors MUST NOT be exposed outside the B+ tree implementation.
 
 ## 8.19 Concurrency and latch ordering
 
@@ -1030,11 +856,7 @@ else:
     retain required ancestors
 ```
 
-For insertion, a node is safe only if the current operation cannot force a split to propagate above it.
-
-For an internal node, this safety test includes possible separator insertion caused by a child split.
-
-For deletion, a node is safe only if the current deletion cannot require redistribution/merge that propagates upward.
+For insertion, a node is safe only if the current operation cannot force a split to propagate above it. For an internal node, this safety test includes possible separator insertion caused by a child split. For deletion, a node is safe only if the current deletion cannot require redistribution/merge that propagates upward.
 
 The architecture does not require a tree-wide write lock for ordinary writes.
 
@@ -1047,11 +869,7 @@ Each tree has a small root-metadata latch protecting process/runtime access to s
 - structurally necessary first/last leaf metadata,
 - free-list-head metadata.
 
-Runtime root metadata also maintains a process-local monotonically increasing:
-
-```text
-root_generation
-```
+Runtime root metadata also maintains a process-local monotonically increasing `root_generation`.
 
 `root_generation` is not persisted and does not participate in crash recovery.
 
@@ -1085,11 +903,7 @@ Normal traversal obtains the root optimistically:
        restart from the root
 ```
 
-A thread MUST NOT wait to acquire a B+ page latch while holding the root-metadata latch.
-
-This is the critical anti-deadlock rule for root acquisition.
-
-A structural operation that already holds the relevant B+ page latch(s) MAY acquire the root-metadata latch to publish a new root/height or other protected metadata.
+A thread MUST NOT wait to acquire a B+ page latch while holding the root-metadata latch. This is the critical anti-deadlock rule for root acquisition. A structural operation that already holds the relevant B+ page latch(s) MAY acquire the root-metadata latch to publish a new root/height or other protected metadata.
 
 Thus the waiting order for operations that hold page latches is:
 
@@ -1099,9 +913,7 @@ B+ page latch(es)
 root-metadata latch
 ```
 
-while root acquisition uses the metadata latch only to snapshot/pin identity and releases it **before** waiting on the page latch.
-
-Root replacement publication increments `root_generation` before releasing the metadata latch.
+while root acquisition uses the metadata latch only to snapshot/pin identity and releases it **before** waiting on the page latch. Root replacement publication increments `root_generation` before releasing the metadata latch.
 
 The old root page cannot become reusable merely because the superblock/runtime root pointer changed; normal B+ safe-detachment/page-reuse rules still apply.
 
@@ -1128,25 +940,11 @@ Equivalent validation/restart applies when first/last leaf metadata must be chan
 
 ### 8.19.5 Page-latch acquisition order
 
-Vertical acquisition order is:
+Vertical acquisition order is: `parent before child`.
 
-```text
-parent before child
-```
+When adjacent leaf pages must be latched horizontally, acquisition order is: `left to right in key order`.
 
-When adjacent leaf pages must be latched horizontally, acquisition order is:
-
-```text
-left to right in key order
-```
-
-If an operation already holding a later/right page discovers it would need to wait for an earlier/left page:
-
-```text
-release and restart
-```
-
-rather than waiting in the reverse order.
+If an operation already holding a later/right page discovers it would need to wait for an earlier/left page: `release and restart` rather than waiting in the reverse order.
 
 This rule avoids a major class of structural deadlocks.
 
@@ -1178,11 +976,7 @@ Holding the current leaf until the next leaf is safely pinned/latched prevents a
 
 ### 8.20.1 Reverse scans
 
-`prev_leaf_page_no` is maintained in the defined architecture, but native descending/reverse scans are deferred from the architecture baseline.
-
-Bidirectional latch coupling introduces additional deadlock-order concerns.
-
-The architecture therefore defines no reverse-cursor latch/restart protocol. Adding native reverse traversal requires an explicit architecture revision that preserves the page-lifetime and latch-order invariants.
+`prev_leaf_page_no` is maintained in the defined architecture, but native descending/reverse scans are deferred from the architecture baseline. Bidirectional latch coupling introduces additional deadlock-order concerns. The architecture therefore defines no reverse-cursor latch/restart protocol. Adding native reverse traversal requires an explicit architecture revision that preserves the page-lifetime and latch-order invariants.
 
 ## 8.21 B+ tree and IndexKeyCodec API boundaries
 
@@ -1197,11 +991,7 @@ LowerBound(encoded_user_key, RID-bound)
 Scan(lower_bound, upper_bound)
 ```
 
-A convenience user-key lookup may be implemented as a physical range:
-
-```text
-(K, MIN_RID) ... (K, MAX_RID)
-```
+A convenience user-key lookup may be implemented as a physical range: `(K, MIN_RID) ... (K, MAX_RID)`.
 
 Exact C++ method names are not part of the architecture contract.
 
@@ -1227,11 +1017,7 @@ One exact physical `(encoded_user_key,RID)` has at most one stored entry. `Inser
 
 ## 8.22 Duplicate keys, uniqueness, and MVCC
 
-The physical tree always permits duplicate SQL user keys because physical keys differ by RID.
-
-Entries with one user key appear consecutively in RID order.
-
-This remains true for a SQL UNIQUE index because obsolete, aborted, and in-progress tuple versions can coexist physically.
+The physical tree always permits duplicate SQL user keys because physical keys differ by RID. Entries with one user key appear consecutively in RID order. This remains true for a SQL UNIQUE index because obsolete, aborted, and in-progress tuple versions can coexist physically.
 
 ### 8.22.1 Transactional uniqueness boundary
 
@@ -1272,9 +1058,7 @@ if any indexed key component is NULL:
     duplicate user keys are allowed
 ```
 
-Only fully non-NULL user keys participate in duplicate rejection.
-
-NULL-containing keys are still physically encoded, ordered, and stored normally.
+Only fully non-NULL user keys participate in duplicate rejection. NULL-containing keys are still physically encoded, ordered, and stored normally.
 
 ### 8.22.2 Visibility
 
@@ -1322,53 +1106,31 @@ new RID
 new physical (key, RID) index entry
 ```
 
-Even if indexed column values are unchanged, UPDATE creates the new physical `(key, new_RID)` entry.
-
-Old physical entries remain until vacuum.
+Even if indexed column values are unchanged, UPDATE creates the new physical `(key, new_RID)` entry. Old physical entries remain until vacuum.
 
 ### DELETE
 
-Logical SQL deletion updates heap MVCC metadata.
-
-It does not synchronously remove every corresponding B+ tree entry.
+Logical SQL deletion updates heap MVCC metadata. It does not synchronously remove every corresponding B+ tree entry.
 
 ### Vacuum
 
-Before physically reclaiming a globally dead heap tuple version, vacuum can derive each indexed user key and erase the exact physical entry:
-
-```text
-Erase(encoded_user_key, dead_RID)
-```
+Before physically reclaiming a globally dead heap tuple version, vacuum can derive each indexed user key and erase the exact physical entry: `Erase(encoded_user_key, dead_RID)`.
 
 RID participation makes this exact even among duplicate user keys.
 
 ### Aborted user DML
 
-The canonical transaction/recovery architecture establishes: ordinary user-DML heap/index modifications are not physically undone on user abort.
+The canonical transaction/recovery architecture establishes: ordinary user-DML heap/index modifications are not physically undone on user abort. Consequently, an aborted INSERT/UPDATE may leave an index entry that references an invisible aborted heap version.
 
-Consequently, an aborted INSERT/UPDATE may leave an index entry that references an invisible aborted heap version.
-
-Vacuum removes such physical garbage later.
-
-This refinement does not change the physical ordering or B+ structural invariants.
-
-HOT-like update behavior that avoids some new index entries remains deferred.
+Vacuum removes such physical garbage later. This refinement does not change the physical ordering or B+ structural invariants. HOT-like update behavior that avoids some new index entries remains deferred.
 
 ## 8.24 BufferPool integration and index-scan cost
 
-Root and internal B+ pages remain ordinary BufferPool pages.
-
-The B+ tree MUST NOT create a second private cache for upper tree levels.
-
-Frequently accessed root/internal pages should become resident naturally through the database replacement policy.
+Root and internal B+ pages remain ordinary BufferPool pages. The B+ tree MUST NOT create a second private cache for upper tree levels. Frequently accessed root/internal pages should become resident naturally through the database replacement policy.
 
 Any specialized residency treatment MUST remain coordinated through BufferPool policy and preserve BufferPool ownership of PageId identity, pin/latch lifetime, validation, dirty state, WAL-before-data, and retirement. It MUST NOT create a second cache or bypass page-lifetime/flush ownership.
 
-Secondary-index order does not imply heap-page locality.
-
-A range scan may therefore generate many random heap-page accesses.
-
-The optimizer MUST model this cost rather than assuming that the presence of an index automatically makes an index scan cheaper.
+Secondary-index order does not imply heap-page locality. A range scan may therefore generate many random heap-page accesses. The optimizer MUST model this cost rather than assuming that the presence of an index automatically makes an index scan cheaper.
 
 ## 8.25 Structural modification and WAL boundary
 
@@ -1387,9 +1149,7 @@ user INSERT
         replace root
 ```
 
-A structurally valid split/merge/root shape is not conceptually rolled back merely because the owning user transaction later aborts.
-
-Chapter 12 defines the exact recovery mechanism: every physical B+ mutation is a recovery-safe B+ mini-transaction/system structural action encoded as one logical `BTREE_MTR` record with a temporary no-flush barrier.
+A structurally valid split/merge/root shape is not conceptually rolled back merely because the owning user transaction later aborts. Chapter 12 defines the exact recovery mechanism: every physical B+ mutation is a recovery-safe B+ mini-transaction/system structural action encoded as one logical `BTREE_MTR` record with a temporary no-flush barrier.
 
 That same protocol also owns non-crash failure atomicity: §12.10.3 requires exact pre-MTR rollback for a known append failure and noncontinuable escalation for append uncertainty, failed restoration, or failed post-append publication. User-transaction abort behavior in §12.10.4 is distinct from this pre-publication storage rollback.
 
@@ -1428,11 +1188,7 @@ Concurrent runtime operations MUST NOT observe:
 - a root pointer to an uninitialized page,
 - a detached child before replacement routing is installed.
 
-New pages are initialized before publication.
-
-Routing pointers are published only while the required structural latches are held.
-
-Runtime atomicity is provided by latch and publication ordering.
+New pages are initialized before publication. Routing pointers are published only while the required structural latches are held. Runtime atomicity is provided by latch and publication ordering.
 
 Provisional MTR bytes are visible only inside the exclusive §12.10.3 ownership domain. Root identity/height/generation, parent/sibling reachability, and free-list effects become ordinary-reader-visible only at the successful MTR publication point; known pre-append failure restores all of them before latches release.
 

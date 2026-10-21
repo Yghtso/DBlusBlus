@@ -2,9 +2,7 @@
 
 ## 37.1 Scope
 
-This chapter defines the physical properties and join-search space used by the cost optimizer.
-
-The property system intentionally remains small.
+This chapter defines the physical properties and join-search space used by the cost optimizer. The property system intentionally remains small.
 
 It tracks:
 
@@ -21,9 +19,7 @@ rewindability
 materialization
 ```
 
-The baseline does not track them or construct a full property lattice.
-
-`required_rows` for LIMIT-sensitive optimization is an optimization objective/requirement, not a physical data property; §38.16 defines how it participates in search identity when propagated.
+The baseline does not track them or construct a full property lattice. `required_rows` for LIMIT-sensitive optimization is an optimization objective/requirement, not a physical data property; §38.16 defines how it participates in search identity when propagated.
 
 ## 37.2 OrderingProperty
 
@@ -38,9 +34,7 @@ OrderKey {
 }
 ```
 
-Physical property reasoning is slot-based.
-
-If SQL ordering refers to a computed expression, logical/physical planning retains or introduces a hidden `LogicalSlotId` for that resolved expression before ordering-property comparison.
+Physical property reasoning is slot-based. If SQL ordering refers to a computed expression, logical/physical planning retains or introduces a hidden `LogicalSlotId` for that resolved expression before ordering-property comparison.
 
 Collation is the binary VARCHAR collation from Chapter 17.
 
@@ -58,11 +52,7 @@ distinct computed-expression occurrences. Two separately bound computed
 expressions with different hidden `LogicalSlotId` values therefore remain
 different keys even when their source text is identical.
 
-An empty key vector means:
-
-```text
-no required/provided ordering
-```
+An empty key vector means: `no required/provided ordering`.
 
 Ordering properties are query-local and never persistent metadata.
 
@@ -84,13 +74,7 @@ available: (a ASC NULLS FIRST, b ASC NULLS FIRST, c ASC NULLS FIRST)
 required:  (a ASC NULLS FIRST, b ASC NULLS FIRST)
 ```
 
-is satisfied.
-
-Changing direction, NULL order, collation, or slot identity breaks satisfaction.
-
-A longer ordering is useful as a provider of its exact prefixes.
-
-The planner never infers descending B+ order from a forward-only index scan.
+is satisfied. Changing direction, NULL order, collation, or slot identity breaks satisfaction. A longer ordering is useful as a provider of its exact prefixes. The planner never infers descending B+ order from a forward-only index scan.
 
 ## 37.4 RequiredSlotSet
 
@@ -108,17 +92,7 @@ DML assignments / RETURNING
 hidden DML target RID/system state
 ```
 
-Projection pruning may remove every other value.
-
-For a fixed optimizer invocation, the required slots of a join `RelationSet` are derived deterministically from final requirements and predicates that cross its boundary.
-
-This lets the common join-DP key use:
-
-```text
-RelationSet + OrderingProperty
-```
-
-while preserving the required-output contract.
+Projection pruning may remove every other value. For a fixed optimizer invocation, the required slots of a join `RelationSet` are derived deterministically from final requirements and predicates that cross its boundary. This lets the common join-DP key use: `RelationSet + OrderingProperty` while preserving the required-output contract.
 
 ## 37.5 Provided-ordering rules
 
@@ -156,9 +130,7 @@ hash PhysicalDistinct:
     no ordering
 ```
 
-Nested-loop/index-nested-loop and capability-enabled merge/ordered-aggregate implementations may advertise additional order only when their execution contract explicitly guarantees it.
-
-The capability registry from §22.4.1 gates such alternatives.
+Nested-loop/index-nested-loop and capability-enabled merge/ordered-aggregate implementations may advertise additional order only when their execution contract explicitly guarantees it. The capability registry from §22.4.1 gates such alternatives.
 
 ## 37.6 Interesting orders
 
@@ -174,23 +146,11 @@ usable index access order
 DISTINCT / ordered-distinct opportunity
 ```
 
-Only orderings normalized by §37.2 that can satisfy a known current/downstream requirement are retained as interesting.
-
-Arbitrary orderings are not generated merely to enlarge the memo.
-
-If one available ordering satisfies another, dominance may treat the longer ordering as at least as useful when all other relevant requirements are equal.
+Only orderings normalized by §37.2 that can satisfy a known current/downstream requirement are retained as interesting. Arbitrary orderings are not generated merely to enlarge the memo. If one available ordering satisfies another, dominance may treat the longer ordering as at least as useful when all other relevant requirements are equal.
 
 ## 37.7 RelationSet
 
-A reorderable join region assigns one bit position to each participating relation occurrence.
-
-Identity is:
-
-```text
-BindingId
-```
-
-not `TableId`.
+A reorderable join region assigns one bit position to each participating relation occurrence. Identity is `BindingId` not `TableId`.
 
 A self-join therefore consumes two different relation bits.
 
@@ -237,17 +197,11 @@ vertex predicates:
     local filters
 ```
 
-Safe equality-equivalence predicates derived by §20.17.7 may add connectivity or access opportunities.
-
-Each edge/predicate retains the exact referenced `RelationSet` so a DP partition can determine whether that predicate crosses its two sides.
+Safe equality-equivalence predicates derived by §20.17.7 may add connectivity or access opportunities. Each edge/predicate retains the exact referenced `RelationSet` so a DP partition can determine whether that predicate crosses its two sides.
 
 For one predicate occurrence with referenced relation set `R`, a candidate node
 with available relation set `S` may evaluate or discharge that occurrence only
-when:
-
-```text
-R is a subset of S
-```
+when: `R is a subset of S`.
 
 For a binary partition `S = L union U`, where `L` and `U` are nonempty and
 disjoint, that occurrence is a crossing predicate exactly when:
@@ -282,9 +236,7 @@ LEFT JOIN and other non-reorderable semantic boundaries are represented as const
 
 ## 37.9 Reorderable regions and outer-join constraints
 
-The optimizer searches maximal regions in which INNER/CROSS associativity/commutativity is semantically legal.
-
-A LEFT JOIN boundary retains its logical nesting relative to dependent relations in the defined architecture.
+The optimizer searches maximal regions in which INNER/CROSS associativity/commutativity is semantically legal. A LEFT JOIN boundary retains its logical nesting relative to dependent relations in the defined architecture.
 
 Within each side of that boundary the optimizer may still choose:
 
@@ -294,9 +246,7 @@ inner-join order
 physical join algorithm
 ```
 
-The optimizer does not reorder across the outer-join boundary unless an earlier, independently proven logical rewrite converts it to semantics where that reorder is valid.
-
-Advanced outer-join reordering is outside the baseline. Only an independently proven Chapter-20 logical rewrite and an applicable supported physical capability may produce a plan that crosses the original boundary.
+The optimizer does not reorder across the outer-join boundary unless an earlier, independently proven logical rewrite converts it to semantics where that reorder is valid. Advanced outer-join reordering is outside the baseline. Only an independently proven Chapter-20 logical rewrite and an applicable supported physical capability may produce a plan that crosses the original boundary.
 
 ## 37.10 Bushy dynamic programming
 
@@ -322,24 +272,12 @@ Predicate-crossing partitions are considered first. A Cartesian partition is
 enumerated only when §37.12 admits it; “connected first” is not permission to
 enumerate every other Cartesian partition afterward.
 
-The search considers bushy trees such as:
-
-```text
-(A ⋈ B) ⋈ (C ⋈ D)
-```
-
-rather than restricting the optimizer to left-deep plans.
+The search considers bushy trees such as: `(A ⋈ B) ⋈ (C ⋈ D)` rather than restricting the optimizer to left-deep plans.
 
 ## 37.11 Exhaustive threshold
 
 `exhaustive_join_limit` is a mandatory nonnegative integer optimizer-search
-configuration value. Its default is:
-
-```text
-exhaustive_join_limit = 10 relation bindings
-```
-
-within one reorderable region. Zero is valid and selects bounded heuristic mode
+configuration value. Its default is: `exhaustive_join_limit = 10 relation bindings` within one reorderable region. Zero is valid and selects bounded heuristic mode
 for every nonempty reorderable region. A configured value must preserve its
 exact mathematical nonnegative value in the implementation's validated
 configuration representation; a missing, negative, or unrepresentable value is
@@ -358,11 +296,7 @@ N > exhaustive_join_limit:
     bounded §37.13 heuristic
 ```
 
-Equality is therefore on the exhaustive side of the boundary.
-
-The threshold is a planning-tuning parameter, not a SQL semantic or relation-count limit.
-
-Raising it requires planning-time/memory evidence.
+Equality is therefore on the exhaustive side of the boundary. The threshold is a planning-tuning parameter, not a SQL semantic or relation-count limit. Raising it requires planning-time/memory evidence.
 
 Chapter 33's retained optimizer-configuration identity fixes this value for one
 optimizer invocation. An external configuration change may affect a later
@@ -402,13 +336,7 @@ dropped, no Cartesian cardinality is treated as exact emptiness, and a required
 Cartesian assembly remains subject to applicable physical capability, cost,
 properties, and final validation.
 
-Their logical cardinality begins from:
-
-```text
-rows_A * rows_B
-```
-
-before later applicable filtering.
+Their logical cardinality begins from: `rows_A * rows_B` before later applicable filtering.
 
 They receive the corresponding materialization/CPU/memory cost rather than an arbitrary correctness-changing ban.
 
@@ -430,11 +358,7 @@ Baseline:
 5. stop early when a complete pass finds no improving legal tree.
 
 `large_join_max_local_passes` is a mandatory nonnegative integer optimizer-search
-configuration value. Its default is:
-
-```text
-large_join_max_local_passes = 4
-```
+configuration value. Its default is: `large_join_max_local_passes = 4`.
 
 Zero is valid: the deterministic greedy tree is still constructed, but no local
 improvement pass runs. A missing, negative, or unrepresentable value is invalid
@@ -479,9 +403,7 @@ PhysicalIndexNestedLoopJoin
 PhysicalMergeJoin when capability-enabled and predicates/order permit
 ```
 
-Join order and physical join algorithm are costed together.
-
-The optimizer does not first freeze a complete join tree and only afterward choose algorithms if doing so would discard a cheaper order/algorithm combination.
+Join order and physical join algorithm are costed together. The optimizer does not first freeze a complete join tree and only afterward choose algorithms if doing so would discard a cheaper order/algorithm combination.
 
 ## 37.15 Hash-join orientation
 
@@ -513,13 +435,7 @@ and the optimizer enumerates only that supported orientation unless a separate s
 
 ## 37.16 Logical join cardinality is algorithm-independent
 
-For the same logical:
-
-```text
-A ⋈ B ON predicate P
-```
-
-the estimated output cardinality is identical regardless of whether the physical algorithm is:
+For the same logical: `A ⋈ B ON predicate P` the estimated output cardinality is identical regardless of whether the physical algorithm is:
 
 ```text
 HashJoin
@@ -538,9 +454,7 @@ provided ordering
 startup behavior
 ```
 
-not logical row semantics.
-
-Likewise, `estimated_join_rows == 0` is algorithm-independent cost metadata, not semantic-empty state. Only an approved exact proof from §§20.17.10 and 35.2 may replace or eliminate the logical join.
+not logical row semantics. Likewise, `estimated_join_rows == 0` is algorithm-independent cost metadata, not semantic-empty state. Only an approved exact proof from §§20.17.10 and 35.2 may replace or eliminate the logical join.
 
 Cardinality is cached by logical relation/predicate identity where practical so alternative physical algorithms do not repeatedly invoke different estimators for the same subproblem.
 

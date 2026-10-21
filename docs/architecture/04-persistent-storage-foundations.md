@@ -18,19 +18,11 @@ It fixes:
 - append-first page allocation,
 - checksum finalization and corruption-detection rules.
 
-Heap-page internals, tuple bytes, the free-space map, BufferPool behavior, B+ tree node formats, WAL records, and recovery protocols are defined by their owning chapters.
-
-The storage foundation is intentionally shared: independently implemented storage, buffer, index, and transaction components MUST agree on these identities and persistent formats.
+Heap-page internals, tuple bytes, the free-space map, BufferPool behavior, B+ tree node formats, WAL records, and recovery protocols are defined by their owning chapters. The storage foundation is intentionally shared: independently implemented storage, buffer, index, and transaction components MUST agree on these identities and persistent formats.
 
 ## 4.2 Page-oriented persistence and serialization
 
-Persistent random-access database structures are page-oriented.
-
-The page size is:
-
-```text
-PAGE_SIZE = 8192 bytes
-```
+Persistent random-access database structures are page-oriented. The page size is: `PAGE_SIZE = 8192 bytes`.
 
 Page size MUST be represented by one canonical constant or configuration value rather than repeated independent assumptions.
 
@@ -42,9 +34,7 @@ Persistent formats use explicit binary encoding. They MUST NOT depend on:
 - host endianness,
 - process memory addresses.
 
-Unless a more specific format explicitly states otherwise, multi-byte integer fields defined by this architecture use explicit little-endian encoding.
-
-Persistent formats define their field widths, byte offsets, format versions, checksum behavior, and reserved-field rules explicitly.
+Unless a more specific format explicitly states otherwise, multi-byte integer fields defined by this architecture use explicit little-endian encoding. Persistent formats define their field widths, byte offsets, format versions, checksum behavior, and reserved-field rules explicitly.
 
 ## 4.3 Fundamental identifier types
 
@@ -74,17 +64,11 @@ The invalid sentinels defined at this layer are:
 | `INVALID_TXN_ID` | `0` |
 | `INVALID_LSN` | `0` |
 
-These values are part of the architecture wherever the corresponding sentinel is used.
-
-This chapter does not define an invalid sentinel for `CommandId`, `TableId`, `ColumnId`, `IndexId`, `ConstraintId`, or `SchemaVer`.
+These values are part of the architecture wherever the corresponding sentinel is used. This chapter does not define an invalid sentinel for `CommandId`, `TableId`, `ColumnId`, `IndexId`, `ConstraintId`, or `SchemaVer`.
 
 ### 4.3.1 File identity versus operating-system handles
 
-`FileId` is a database-level logical identifier.
-
-An operating-system file descriptor is a process-local resource and MUST NOT be exposed or persisted as `FileId`.
-
-Persistent identity MUST remain valid independently of the descriptor number chosen by a particular process execution.
+`FileId` is a database-level logical identifier. An operating-system file descriptor is a process-local resource and MUST NOT be exposed or persisted as `FileId`. Persistent identity MUST remain valid independently of the descriptor number chosen by a particular process execution.
 
 ### 4.3.2 Identifier, counter, position, and encoded-length exhaustion
 
@@ -428,17 +412,9 @@ struct PageId {
 };
 ```
 
-`PageId` denotes the persistent logical identity of one page.
+`PageId` denotes the persistent logical identity of one page. Within the file identified by `file_id`, page `page_no` is physically addressed at: `byte_offset = page_no * PAGE_SIZE`.
 
-Within the file identified by `file_id`, page `page_no` is physically addressed at:
-
-```text
-byte_offset = page_no * PAGE_SIZE
-```
-
-`PageId` MUST be comparable and hashable. It SHOULD be trivially copyable when practical.
-
-Persistent page identity is independent of BufferPool state.
+`PageId` MUST be comparable and hashable. It SHOULD be trivially copyable when practical. Persistent page identity is independent of BufferPool state.
 
 The following MUST NOT be used as persistent page identity:
 
@@ -461,31 +437,15 @@ struct Rid {
 };
 ```
 
-An RID identifies a **physical heap tuple version**, not a permanent logical SQL row.
-
-Consequently, an ordinary UPDATE that creates a new heap version also creates a new RID.
-
-This identity model is intentional: physical-version addressing keeps heap-version MVCC, version chains, index maintenance, and vacuum behavior explicit.
+An RID identifies a **physical heap tuple version**, not a permanent logical SQL row. Consequently, an ordinary UPDATE that creates a new heap version also creates a new RID. This identity model is intentional: physical-version addressing keeps heap-version MVCC, version chains, index maintenance, and vacuum behavior explicit.
 
 The standalone persisted encoding of RID values used by indexes is defined by the B+ tree chapter. The logical meaning defined here applies regardless of the encoding used by a particular persistent structure.
 
 ## 4.6 Index-to-heap version addressing
 
-B+ tree leaf entries reference physical tuple-version RIDs.
+B+ tree leaf entries reference physical tuple-version RIDs. Conceptually, a leaf payload is: `(index key, RID)`.
 
-Conceptually, a leaf payload is:
-
-```text
-(index key, RID)
-```
-
-For every B+ tree index, including a SQL UNIQUE index, physical ordering includes RID:
-
-```text
-(index key, RID)
-```
-
-so duplicate physical entries remain individually addressable.
+For every B+ tree index, including a SQL UNIQUE index, physical ordering includes RID: `(index key, RID)` so duplicate physical entries remain individually addressable.
 
 SQL uniqueness is enforced transactionally above the physical tree; it does not change the B+ tree's physical `(index key, RID)` ordering.
 
@@ -535,9 +495,7 @@ architecture revision.
 
 ## 4.7 Random-access file model and file kinds
 
-Major persistent objects use separate files rather than one monolithic database file.
-
-The storage manager recognizes explicit random-access file kinds.
+Major persistent objects use separate files rather than one monolithic database file. The storage manager recognizes explicit random-access file kinds.
 
 The persisted `file_kind` field is an unsigned 16-bit little-endian integer with these codes:
 
@@ -550,35 +508,17 @@ The persisted `file_kind` field is an unsigned 16-bit little-endian integer with
 | `4` | `CATALOG` | catalog storage |
 | `5` | `TXN_STATUS` | persistent transaction terminal-status storage |
 
-Existing persisted codes MUST NOT be renumbered because of source-language enum declaration order.
-
-Future file kinds MUST receive new explicit numeric codes.
-
-Code `0` MUST be rejected when decoding a random-access file superblock.
+Existing persisted codes MUST NOT be renumbered because of source-language enum declaration order. Future file kinds MUST receive new explicit numeric codes. Code `0` MUST be rejected when decoding a random-access file superblock.
 
 Under §4.14.4, codes `1..5` are the complete v1 registry. Any other code in a superblock claiming format version 1 is `CORRUPT_FILE`; no unknown FileKind is opened through a known codec. A known kind that disagrees with the expected managed basename/catalog descriptor is likewise corruption. `BTREE` dispatches only to its specialized codec.
 
-WAL is not a random-access page-file kind. It uses its own append-only persistent log format.
+WAL is not a random-access page-file kind. It uses its own append-only persistent log format. Every random-access database file reserves: `page 0 = file superblock`.
 
-Every random-access database file reserves:
-
-```text
-page 0 = file superblock
-```
-
-Ordinary object/data pages begin at:
-
-```text
-page 1
-```
+Ordinary object/data pages begin at: `page 1`.
 
 ### 4.7.1 Database namespace root
 
-One opened database owns one caller-selected final directory path:
-
-```text
-database_root
-```
+One opened database owns one caller-selected final directory path `database_root`.
 
 That directory is the database's persistent namespace root. The architecture uses this exact managed layout:
 
@@ -604,9 +544,7 @@ pending/txn_<txn_id>_file_<file_id>.fsm
 pending/txn_<txn_id>_file_<file_id>.btree
 ```
 
-using the same canonical unsigned decimal spelling. The exact private basename identifies its creating normal TxnId, allocated FileId, and file kind; the validated superblock supplies the object identity.
-
-WAL segment basenames are exact in §12.2. Temporary query/spill files are not persistent database objects and remain under Chapter 24's separately managed temporary namespace.
+using the same canonical unsigned decimal spelling. The exact private basename identifies its creating normal TxnId, allocated FileId, and file kind; the validated superblock supplies the object identity. WAL segment basenames are exact in §12.2. Temporary query/spill files are not persistent database objects and remain under Chapter 24's separately managed temporary namespace.
 
 Database-root lifecycle uses two reserved same-parent private sibling grammars
 for final basename `D`:
@@ -833,11 +771,7 @@ The same mutation-plus-parent-`fsync` rule governs deletion of orphan private fi
 
 ### 4.7.8 Database-root bootstrap publication
 
-Engine-managed database creation requires an existing, durably provisioned external parent directory and an absent requested final `database_root` path. Recursive creation/durability of ancestors above that parent belongs to the caller/provisioning environment. Given final basename `D`, creation uses a same-parent, same-filesystem staging directory named exactly:
-
-```text
-D.dblusblus-creating
-```
+Engine-managed database creation requires an existing, durably provisioned external parent directory and an absent requested final `database_root` path. Recursive creation/durability of ancestors above that parent belongs to the caller/provisioning environment. Given final basename `D`, creation uses a same-parent, same-filesystem staging directory named exactly `D.dblusblus-creating`.
 
 The bootstrap protocol is:
 
@@ -1172,15 +1106,9 @@ All multi-byte fields are little-endian.
 
 The meaning of `format_version`, `header_size`, `flags`, and any reserved-field restrictions is completed by the specific page format. A page-format decoder MUST apply both the common-header rules and the rules of the requested page type.
 
-For an ordinary page type whose owning format assigns no common-header flag bits:
+For an ordinary page type whose owning format assigns no common-header flag bits: `flags = 0`.
 
-```text
-flags = 0
-```
-
-The encoder/initializer MUST write zero and the v1 decoder MUST reject nonzero common-header flags.
-
-Future ordinary-page flag meanings require an explicit compatible format rule; unassigned bits are not silently preserved as unknown semantics.
+The encoder/initializer MUST write zero and the v1 decoder MUST reject nonzero common-header flags. Future ordinary-page flag meanings require an explicit compatible format rule; unassigned bits are not silently preserved as unknown semantics.
 
 Every current ordinary page type supports `format_version=1` only. After identifying the expected page family, version zero is corruption and a positive greater version is `UNSUPPORTED_PAGE_FORMAT`; §4.14 forbids applying v1 checksum/layout semantics beyond that discriminator.
 
@@ -1195,13 +1123,7 @@ Although the physical file offset already implies the page number, `page_no` is 
 
 ### 4.8.2 Page LSN
 
-`page_lsn` is the LSN of the newest WAL-protected modification reflected in the page.
-
-The sentinel for absence of a WAL position is:
-
-```text
-INVALID_LSN
-```
+`page_lsn` is the LSN of the newest WAL-protected modification reflected in the page. The sentinel for absence of a WAL position is `INVALID_LSN`.
 
 Under §4.14's field-specific sentinel rule, it is permitted only where the
 owning page contract allows it, such as the immutable catalog bootstrap page
@@ -1225,17 +1147,11 @@ The persisted codes are:
 | `6` | `CATALOG_DATA` |
 | `7` | `TXN_STATUS` |
 
-These numeric codes are part of the persistent page-format contract.
-
-Existing values MUST NOT be renumbered because the source-language enum declaration changes.
-
-Future page types MUST receive new explicit numeric codes.
+These numeric codes are part of the persistent page-format contract. Existing values MUST NOT be renumbered because the source-language enum declaration changes. Future page types MUST receive new explicit numeric codes.
 
 Codes `0..7` are the complete v1 registry. In a page claiming format version 1, an unlisted code or a listed code incompatible with the owning FileKind/page position is `CORRUPT_PAGE`. An implementation cannot preserve or traverse an unknown PageType as opaque state.
 
-Page-type-specific parsing MUST validate that the persisted `page_type` is the expected type before interpreting type-specific bytes.
-
-Arbitrary page bytes MUST NOT be reinterpreted as a requested page format without this validation.
+Page-type-specific parsing MUST validate that the persisted `page_type` is the expected type before interpreting type-specific bytes. Arbitrary page bytes MUST NOT be reinterpreted as a requested page format without this validation.
 
 ## 4.10 File superblock v1
 
@@ -1360,9 +1276,7 @@ Family/version dispatch precedes version-owned checksum/layout validation as §4
 - any nonzero reserved field required to be zero by the base or file-kind-specific format,
 - any nonzero byte in the file-kind-specific trailing reserved region.
 
-The architecture assigns no FileSuperblock flag bits. `flags` is RESERVED_ZERO: writers write zero and readers reject every nonzero value. No unknown superblock bit is preserved or round-tripped.
-
-A codec MAY accept an input buffer larger than one page, but only the leading 8192 bytes participate in the superblock representation.
+The architecture assigns no FileSuperblock flag bits. `flags` is RESERVED_ZERO: writers write zero and readers reject every nonzero value. No unknown superblock bit is preserved or round-tripped. A codec MAY accept an input buffer larger than one page, but only the leading 8192 bytes participate in the superblock representation.
 
 Because the architecture requires every reserved superblock field and every byte after the file-kind-specific header to be zero, assigning future meaning to those bytes requires an explicit compatible file-kind format revision.
 
@@ -1416,13 +1330,7 @@ not permission to begin an extension whose candidate is already exhausted.
 
 ### 4.11.1 WAL-mode page publication
 
-Each managed append-only page file has a process-local **append-publication lock** and a process-local:
-
-```text
-published_page_count
-```
-
-which is the exclusive upper PageNo bound visible to relation/index scans and ordinary allocation users.
+Each managed append-only page file has a process-local **append-publication lock** and a process-local `published_page_count` which is the exclusive upper PageNo bound visible to relation/index scans and ordinary allocation users.
 
 For a new non-B+ ordinary page, publication is:
 
@@ -1504,9 +1412,7 @@ When a new `HEAP_DATA` page is published:
 - the page may be used directly by the allocating insertion path,
 - the corresponding FSM category is then created/repaired as advisory metadata.
 
-If the required FSM_DATA page does not yet exist, it is itself allocated/published through the same PAGE_INIT protocol.
-
-A crash or failure that leaves the FSM behind the heap does not invalidate the heap page; FSM is rebuildable from authoritative heap headers.
+If the required FSM_DATA page does not yet exist, it is itself allocated/published through the same PAGE_INIT protocol. A crash or failure that leaves the FSM behind the heap does not invalidate the heap page; FSM is rebuildable from authoritative heap headers.
 
 ### 4.11.3 Recovery reconciliation of unpublished append tails
 
@@ -1533,9 +1439,7 @@ Before normal database open completes, recovery:
 4. then remove only the **contiguous trailing suffix** of physical pages that have no durable publication,
 5. restore `published_page_count` from the reconciled physical file length.
 
-The append-publication ordering guarantees that recovery never needs to remove an unpublished interior hole while retaining a later published appended page.
-
-If an invalid/torn page is known published and required recovery WAL exists, recovery reconstructs it rather than truncating it.
+The append-publication ordering guarantees that recovery never needs to remove an unpublished interior hole while retaining a later published appended page. If an invalid/torn page is known published and required recovery WAL exists, recovery reconstructs it rather than truncating it.
 
 If a nontrailing invalid page is neither reconstructible nor legitimately unused under an owning page-reuse protocol, recovery reports corruption.
 
@@ -1553,9 +1457,7 @@ Examples include:
 
 Recycling or reinitializing a previously used heap `PageNo` MUST NOT bypass physical RID-reuse safety. If page recycling can make a previously used `(PageNo, SlotId)` identity reusable, it is subject to the global reclamation/read-epoch gate in Chapter 14.
 
-The baseline does not require a general-purpose extent allocator.
-
-General-purpose extent allocation is not a prerequisite for heap, index, or recovery correctness.
+The baseline does not require a general-purpose extent allocator. General-purpose extent allocation is not a prerequisite for heap, index, or recovery correctness.
 
 ## 4.12 Page checksums
 
@@ -1577,9 +1479,7 @@ recovery or normal page open.
 
 ### 4.12.1 Resident-page checksum state
 
-The checksum field in a dirty resident frame is not itself authoritative while the page is being modified.
-
-A persistent mutation may leave the resident bytes `16..19` stale until a flush image or full-page WAL image is finalized.
+The checksum field in a dirty resident frame is not itself authoritative while the page is being modified. A persistent mutation may leave the resident bytes `16..19` stale until a flush image or full-page WAL image is finalized.
 
 Code MUST NOT use a dirty resident page's stored checksum bytes as proof that the mutable in-memory image is internally current.
 
@@ -1623,11 +1523,7 @@ page_lsn = the owning WAL record LSN
 checksum = valid CRC32C for that exact 8192-byte image
 ```
 
-The WAL writer may reserve/know the record LSN before finalizing these bytes.
-
-Recovery may validate a full image's embedded page checksum in addition to validating the WAL record CRC.
-
-`PAGE_DELTA` does not log checksum-byte patches. Recovery installs the logical after-image bytes and page LSN; the normal page-write path finalizes the checksum before the page is persisted again.
+The WAL writer may reserve/know the record LSN before finalizing these bytes. Recovery may validate a full image's embedded page checksum in addition to validating the WAL record CRC. `PAGE_DELTA` does not log checksum-byte patches. Recovery installs the logical after-image bytes and page LSN; the normal page-write path finalizes the checksum before the page is persisted again.
 
 ### 4.12.4 Purpose and limitation
 
@@ -1637,9 +1533,7 @@ Page checksums provide:
 - misdirected/torn-write diagnostics,
 - crash-test observability.
 
-A checksum detects corruption; it does not by itself repair a torn page.
-
-Torn-page repair requires a retained complete WAL page image as defined by Chapters 12–13.
+A checksum detects corruption; it does not by itself repair a torn page. Torn-page repair requires a retained complete WAL page image as defined by Chapters 12–13.
 
 ## 4.13 Persisted structural validation v1
 
@@ -2040,13 +1934,7 @@ rewriter: do not preserve a nonzero input
 
 Nonzero RESERVED_ZERO material in a structure claiming version 1 is corruption, not an ignorable extension and not an unsupported newer version. This applies to explicit serialized padding as well as named fields. In-memory C++/ABI padding has no persisted meaning and is never serialized; persisted objects are field codecs, not raw struct dumps.
 
-Every v1 flag field has an exact known mask. Writers set only semantically required known bits; readers require:
-
-```text
-flags & ~KNOWN_MASK == 0
-```
-
-and enforce every bidirectional canonical known-bit rule. A field with no assigned v1 bits has `KNOWN_MASK=0` and must equal zero. In particular, all common ordinary-page flags, FileSuperblock flags, control flags, WAL-header flags, FSM flags, B+ superblock/node/slot flags, catalog-entry flags, DefaultValueBlob flags, and statistics common flags are zero. Tuple flags have known mask `0x0003`; PersistedScalarV1 flags have known mask `0x00000001`; statistics COLUMN `value_flags` have known mask `0x00000003`.
+Every v1 flag field has an exact known mask. Writers set only semantically required known bits; readers require: `flags & ~KNOWN_MASK == 0` and enforce every bidirectional canonical known-bit rule. A field with no assigned v1 bits has `KNOWN_MASK=0` and must equal zero. In particular, all common ordinary-page flags, FileSuperblock flags, control flags, WAL-header flags, FSM flags, B+ superblock/node/slot flags, catalog-entry flags, DefaultValueBlob flags, and statistics common flags are zero. Tuple flags have known mask `0x0003`; PersistedScalarV1 flags have known mask `0x00000001`; statistics COLUMN `value_flags` have known mask `0x00000003`.
 
 Length delimiting alone never authorizes unknown trailing bytes. A v1 object consumes exactly its grammar-defined length, including canonical zero alignment or fixed trailing reserved area. Extra/nonzero trailing bytes are corruption unless a specific grammar explicitly designates them as an IGNORABLE_EXTENSION. No current required v1 format does so.
 

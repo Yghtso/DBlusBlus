@@ -61,9 +61,7 @@ or
 explicitly de-duplicate target RID during materialization
 ```
 
-A join-expanded target plan MUST NOT cause the same physical target version to be mutated twice merely because multiple input rows produced the same RID.
-
-The spool's RID-uniqueness mechanism is query-temporary and may itself use memory/spill-aware distinct/sort support where required.
+A join-expanded target plan MUST NOT cause the same physical target version to be mutated twice merely because multiple input rows produced the same RID. The spool's RID-uniqueness mechanism is query-temporary and may itself use memory/spill-aware distinct/sort support where required.
 
 ## 31.3 Halloween protection
 
@@ -75,15 +73,11 @@ a newly created heap version
 an altered predicate value
 ```
 
-Current-command MVCC visibility remains important but is not the sole Halloween defense.
-
-No target-table mutation starts before the target identity set is finalized.
+Current-command MVCC visibility remains important but is not the sole Halloween defense. No target-table mutation starts before the target identity set is finalized.
 
 ## 31.4 Target-spool memory and spill
 
-Small target sets use a query-owned `RowCollection`.
-
-Large sets spill through SpillManager.
+Small target sets use a query-owned `RowCollection`. Large sets spill through SpillManager.
 
 The spool row layout contains at least:
 
@@ -95,9 +89,7 @@ values needed for unique-key handling
 values needed for RETURNING
 ```
 
-Columns not required by these semantics are not materialized merely because they exist in the table.
-
-Spill/reload preserves RID identity and old value bytes exactly for this statement attempt.
+Columns not required by these semantics are not materialized merely because they exist in the table. Spill/reload preserves RID identity and old value bytes exactly for this statement attempt.
 
 ### 31.4.1 Ordinary-candidate staging storage
 
@@ -260,11 +252,7 @@ closure its single-worker mutation/write-publication phase installs each
 authoritative target's `xmax/cmax` through Chapter 15. Dynamic conflicts and
 resource/storage failures retain their existing owner.
 
-Secondary-index entries are not physically erased here.
-
-Vacuum remains the exact index-garbage cleanup owner.
-
-The mutation/write phase is single-worker.
+Secondary-index entries are not physically erased here. Vacuum remains the exact index-garbage cleanup owner. The mutation/write phase is single-worker.
 
 ## 31.9 RETURNING spool
 
@@ -277,11 +265,7 @@ old-row result is retained. A winning ordinary RETURNING candidate therefore
 fails before mutation; a later target's expression cannot follow an earlier
 target mutation.
 
-This chapter defines one atomic semantic transition:
-
-```text
-R = successful statement-result publication
-```
+This chapter defines one atomic semantic transition: `R = successful statement-result publication`.
 
 `R` succeeds only when:
 
@@ -445,9 +429,7 @@ unless an independently fatal session condition also applies.
 
 ## 31.10 Query result interface
 
-Execution exposes results through a result sink/cursor abstraction.
-
-An internal borrowed producer DataChunk is never exposed beyond its owner lifetime.
+Execution exposes results through a result sink/cursor abstraction. An internal borrowed producer DataChunk is never exposed beyond its owner lifetime.
 
 The baseline synchronous cursor contract distinguishes:
 
@@ -463,9 +445,7 @@ wire protocol is required. A failed cursor never reports successful
 `FINISHED`, and after terminal error it produces no further successful rows.
 Internal operator/pipeline `FINISHED` is not client `FINISHED`.
 
-The cursor/result layer owns or safely retains every value in the returned chunk.
-
-For a simple synchronous client, a returned chunk remains valid until the next cursor `Next()` call or cursor destruction, whichever comes first; callers that need a longer lifetime copy/materialize it.
+The cursor/result layer owns or safely retains every value in the returned chunk. For a simple synchronous client, a returned chunk remains valid until the next cursor `Next()` call or cursor destruction, whichever comes first; callers that need a longer lifetime copy/materialize it.
 
 A subsequent read or delivery failure does not retrospectively invalidate the
 previous chunk during that guaranteed lifetime. Cursor destruction, voluntary
@@ -486,9 +466,7 @@ failed query a successful complete query. This boundary requires neither
 whole-query buffering nor a different returned-value lifetime or cursor
 protocol.
 
-This lifetime is an API/runtime contract, not a persistent format.
-
-A CLI may format rows immediately while consuming chunks.
+This lifetime is an API/runtime contract, not a persistent format. A CLI may format rows immediately while consuming chunks.
 
 ## 31.11 Physical DDL execution
 
@@ -502,17 +480,13 @@ PhysicalCreateIndex
 PhysicalDrop
 ```
 
-They invoke the Chapter-21 catalog/storage protocols under SchemaLock/TableWriterGate and ordinary transaction rules.
-
-CREATE INDEX runs the offline private build pipeline and does not publish committed catalog metadata before the owning transaction's terminal publication boundary.
+They invoke the Chapter-21 catalog/storage protocols under SchemaLock/TableWriterGate and ordinary transaction rules. CREATE INDEX runs the offline private build pipeline and does not publish committed catalog metadata before the owning transaction's terminal publication boundary.
 
 DDL execution remains single-coordinator in the defined architecture.
 
 ## 31.12 Physical VACUUM
 
-PhysicalVacuum invokes the Chapter-14 VacuumManager/reclamation protocol.
-
-It is a maintenance operator, not a requirement to express vacuum's internal page/index work as ordinary relational Filter/Project/Hash operators.
+PhysicalVacuum invokes the Chapter-14 VacuumManager/reclamation protocol. It is a maintenance operator, not a requirement to express vacuum's internal page/index work as ordinary relational Filter/Project/Hash operators.
 
 PhysicalVacuum produces no relational result-row bag; successful execution is
 reported through ordinary command completion. Internal tracing, metrics,
@@ -570,15 +544,11 @@ terminal COMMITTED C4 -> generation globally committed
 C5 -> install or safely invalidate/bypass the global descriptor/cache entry
 ```
 
-ANALYZE never mutates an existing published `StatsDescriptor` in place.
-
-A cancellation/error before statement success discards the in-memory candidate and leaves the previous committed descriptor authoritative.
+ANALYZE never mutates an existing published `StatsDescriptor` in place. A cancellation/error before statement success discards the in-memory candidate and leaves the previous committed descriptor authoritative.
 
 If no transaction-owned statistics row published, this is a statement-only failure for an explicit transaction unless independently fatal. If one or more rows for the new StatsVersion published, the transaction automatically aborts under §39.1 even though completeness filtering keeps that version globally unusable.
 
-An abort after successful ANALYZE but before transaction commit leaves the new catalog rows MVCC-invisible to other transactions and suppresses global cache publication.
-
-ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinary DML; its SQL-visible row set is stabilized by MVCC.
+An abort after successful ANALYZE but before transaction commit leaves the new catalog rows MVCC-invisible to other transactions and suppresses global cache publication. ANALYZE does not acquire schema-changing DDL exclusivity merely to block ordinary DML; its SQL-visible row set is stabilized by MVCC.
 
 ## 31.13 DML/result invariants
 

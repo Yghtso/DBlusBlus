@@ -18,9 +18,7 @@ It covers:
 - CLOCK replacement,
 - lifetime safety for references into resident page bytes.
 
-The BufferPool is intentionally storage-format agnostic: it manages pages, not tuples, indexes, schemas, or SQL semantics.
-
-The WAL-owned refinements to buffer metadata and flush publication are canonical in §§12.10, 12.12, and 12.16–12.17; redo and torn-page reconstruction are canonical in §§13.13–13.14.
+The BufferPool is intentionally storage-format agnostic: it manages pages, not tuples, indexes, schemas, or SQL semantics. The WAL-owned refinements to buffer metadata and flush publication are canonical in §§12.10, 12.12, and 12.16–12.17; redo and torn-page reconstruction are canonical in §§13.13–13.14.
 
 ## 7.2 Explicit I/O model
 
@@ -100,27 +98,17 @@ A higher page-file/storage layer allocates and writes the superblock and perform
 
 The raw disk layer's create/rename/unlink calls do not themselves publish higher-level objects. The storage namespace owner composes regular-file synchronization and parent-directory synchronization through the canonical §4.7 lifecycle before reporting durable namespace publication.
 
-`FileId` remains a database-level logical identifier.
-
-POSIX file descriptors are private process-local resources of the raw I/O layer and MUST NOT escape as persistent identity.
+`FileId` remains a database-level logical identifier. POSIX file descriptors are private process-local resources of the raw I/O layer and MUST NOT escape as persistent identity.
 
 ## 7.4 Page-file I/O semantics
 
 ### 7.4.1 Positional access
 
-Page reads and writes use positional I/O.
-
-`pread` and `pwrite` MUST NOT depend on or mutate a shared file offset.
+Page reads and writes use positional I/O. `pread` and `pwrite` MUST NOT depend on or mutate a shared file offset.
 
 ### 7.4.2 Complete page transfers
 
-A normal page read requests exactly:
-
-```text
-PAGE_SIZE
-```
-
-bytes.
+A normal page read requests exactly `PAGE_SIZE` bytes.
 
 The I/O layer MUST handle short reads and writes explicitly; one syscall is not assumed to transfer all requested bytes.
 
@@ -161,15 +149,9 @@ Allocation uses the explicit append-first extension contract in §4.11.
 
 ### 7.4.5 File-size validity
 
-A page-file size MUST be an exact multiple of:
+A page-file size MUST be an exact multiple of `PAGE_SIZE`.
 
-```text
-PAGE_SIZE
-```
-
-A misaligned size is an error.
-
-The raw disk layer MUST NOT round, truncate, or silently repair a misaligned page-file size.
+A misaligned size is an error. The raw disk layer MUST NOT round, truncate, or silently repair a misaligned page-file size.
 
 ### 7.4.6 Checked physical offsets
 
@@ -192,13 +174,7 @@ when those concepts apply to the failed operation.
 
 ### 7.4.8 Page-file durability primitive
 
-The regular page-file content synchronization primitive is:
-
-```text
-fdatasync
-```
-
-with `EINTR` handling as above. It makes file bytes and retrieval-critical metadata such as length durable under §4.7.2, but it does not make create/rename/unlink namespace entries durable. `fsync` on each affected parent directory is separately mandatory at §4.7 publication/retirement boundaries.
+The regular page-file content synchronization primitive is `fdatasync` with `EINTR` handling as above. It makes file bytes and retrieval-critical metadata such as length durable under §4.7.2, but it does not make create/rename/unlink namespace entries durable. `fsync` on each affected parent directory is separately mandatory at §4.7 publication/retirement boundaries.
 
 ## 7.5 BufferPool ownership
 
@@ -219,9 +195,7 @@ and is responsible for:
 - page flushing,
 - WAL-before-data coordination.
 
-For one BufferPool instance, one `PageId` has at most one active load operation and at most one frame that can become or is usable as that page. Independently usable duplicate resident copies are forbidden.
-
-The BufferPool MUST NOT parse heap tuples, physical schemas, or B+ tree keys.
+For one BufferPool instance, one `PageId` has at most one active load operation and at most one frame that can become or is usable as that page. Independently usable duplicate resident copies are forbidden. The BufferPool MUST NOT parse heap tuples, physical schemas, or B+ tree keys.
 
 Ordinary managed page-format objects operate over bytes supplied through BufferPool-managed lifetime. `HeapPage`, `FsmPage`, B+ page controllers, and tuple decoders are non-owning page-local views; they do not pin, unpin, evict, flush, or perform I/O.
 
@@ -293,13 +267,9 @@ Its comparison token MUST NOT wrap/repeat while a writeback completion could com
 The complete runtime-token quiesce/reseed rule, including frame reassignment and
 checkpoint/FPI tokens, is §4.3.2.5.
 
-Together with page latching it lets BufferPool determine whether a page changed after a stable flush image was copied but before the I/O completed.
+Together with page latching it lets BufferPool determine whether a page changed after a stable flush image was copied but before the I/O completed. Frame metadata remains process-local. `rec_lsn`, full-image epoch state, and temporary no-flush barriers follow Chapters 12–13.
 
-Frame metadata remains process-local. `rec_lsn`, full-image epoch state, and temporary no-flush barriers follow Chapters 12–13.
-
-The page-byte region SHOULD be suitably aligned for efficient copying/checksum work.
-
-Process-local metadata SHOULD avoid pathological false sharing where measurement shows contention, but cache-line padding is not a persisted or correctness contract.
+The page-byte region SHOULD be suitably aligned for efficient copying/checksum work. Process-local metadata SHOULD avoid pathological false sharing where measurement shows contention, but cache-line padding is not a persisted or correctness contract.
 
 ### 7.6.2 State transition table
 
@@ -479,21 +449,9 @@ There is never a public state in which a page-table entry names Page A while the
 
 ## 7.9 Pinning and eviction eligibility
 
-A frame with:
+A frame with: `pin_count > 0` is not eligible for eviction or frame reuse.
 
-```text
-pin_count > 0
-```
-
-is not eligible for eviction or frame reuse.
-
-One page guard owns one pin.
-
-Background flushing MAY write a pinned page only under safe BufferPool synchronization rules.
-
-A flush does not make a still-pinned frame eligible for replacement.
-
-The implementation must make pin leaks observable/testable because a leaked pin permanently removes a frame from the eviction candidate set.
+One page guard owns one pin. Background flushing MAY write a pinned page only under safe BufferPool synchronization rules. A flush does not make a still-pinned frame eligible for replacement. The implementation must make pin leaks observable/testable because a leaked pin permanently removes a frame from the eviction candidate set.
 
 A replacement candidate must satisfy all of:
 
@@ -511,11 +469,7 @@ The last reservation, not an earlier CLOCK observation, is the eviction lineariz
 
 ## 7.10 Dirty pages and stable writeback
 
-A frame's published dirty state is true exactly when its current published persistent-byte generation is not known to be durably installed in its page file. Bytes temporarily installed behind an owning no-flush/write-latch protocol are not a separately publishable frame state. A persistent mutation increments:
-
-```text
-modification_generation
-```
+A frame's published dirty state is true exactly when its current published persistent-byte generation is not known to be durably installed in its page file. Bytes temporarily installed behind an owning no-flush/write-latch protocol are not a separately publishable frame state. A persistent mutation increments `modification_generation`.
 
 For WAL-protected pages, §12.16 additionally defines the clean-to-dirty `rec_lsn`/full-image transition.
 
@@ -626,9 +580,7 @@ If WAL flush, page write, complete-transfer handling, or required `fdatasync` fa
 - a victim-reserved frame returns to `RESIDENT` and becomes pinnable again,
 - callers waiting for that flush receive the structured storage/WAL error.
 
-The page is never reassigned on failed eviction writeback. Even if some bytes reached the operating system or disk before the reported error, runtime state conservatively treats the frame as dirty.
-
-This section fixes the BufferPool state after failure; §39.1 applies the current statement-write boundary and terminal-protocol rules to that structured result.
+The page is never reassigned on failed eviction writeback. Even if some bytes reached the operating system or disk before the reported error, runtime state conservatively treats the frame as dirty. This section fixes the BufferPool state after failure; §39.1 applies the current statement-write boundary and terminal-protocol rules to that structured result.
 
 ### 7.10.5 DPT and checkpoint synchronization
 
@@ -650,11 +602,7 @@ The canonical WAL-before-data ordering rule is §12.17.
 
 The BufferPool flush path is its centralized enforcement point for BufferPool-managed pages. Before explicit flush, eviction, or background writeback, BufferPool checks the page's `page_lsn` against `WalManager.durable_lsn` and requests `flush_through(page_lsn)` when §12.17 requires it.
 
-Storage objects MUST NOT each implement independent variants of this rule.
-
-The WAL subsystem owns WAL persistence and `durable_lsn`; BufferPool owns enforcing the dependency before data-page writeback.
-
-B+ mini-transactions additionally obey the stronger temporary no-flush condition defined in §12.10.2.
+Storage objects MUST NOT each implement independent variants of this rule. The WAL subsystem owns WAL persistence and `durable_lsn`; BufferPool owns enforcing the dependency before data-page writeback. B+ mini-transactions additionally obey the stronger temporary no-flush condition defined in §12.10.2.
 
 The canonical stable flush sequence is:
 
@@ -672,17 +620,9 @@ If step 3 fails, no data write is attempted. Failure at steps 4–5 leaves the f
 
 ## 7.12 CLOCK replacement
 
-The baseline replacement policy is CLOCK.
+The baseline replacement policy is CLOCK. A frame participates as an eviction candidate only when all §7.9 conditions hold. CLOCK's initial page-use test is: `pin_count == 0`.
 
-A frame participates as an eviction candidate only when all §7.9 conditions hold. CLOCK's initial page-use test is:
-
-```text
-pin_count == 0
-```
-
-Accessing a frame sets its reference/use bit.
-
-Successful resident-hit pin acquisition and successful load publication set the reference bit. `FREE`, `LOADING`, `EVICTING`, and any frame with I/O/no-flush state do not participate in victim selection.
+Accessing a frame sets its reference/use bit. Successful resident-hit pin acquisition and successful load publication set the reference bit. `FREE`, `LOADING`, `EVICTING`, and any frame with I/O/no-flush state do not participate in victim selection.
 
 The clock hand applies:
 
@@ -692,9 +632,7 @@ referenced?   -> clear reference bit and skip
 otherwise     -> victim
 ```
 
-A dirty victim MUST be flushed according to the WAL-before-data and dirty-state synchronization rules before its frame can be reused.
-
-CLOCK operates only on process-local frame/replacement metadata. It does not inspect database tuple or index contents.
+A dirty victim MUST be flushed according to the WAL-before-data and dirty-state synchronization rules before its frame can be reused. CLOCK operates only on process-local frame/replacement metadata. It does not inspect database tuple or index contents.
 
 The replacement abstraction SHOULD remain separable from BufferPool correctness
 and ownership semantics.
@@ -708,9 +646,7 @@ Replacement mechanisms outside the architecture baseline include:
 
 ### 7.12.1 Victim reservation and eviction
 
-CLOCK observation alone does not own a victim. After choosing a candidate, BufferPool atomically rechecks §7.9 and changes `RESIDENT -> EVICTING` while the old page-table entry remains present and marked non-pinnable.
-
-That transition is the victim-reservation linearization point. It prevents the race in which eviction observes zero pins while a concurrent fetch pins the old PageId.
+CLOCK observation alone does not own a victim. After choosing a candidate, BufferPool atomically rechecks §7.9 and changes `RESIDENT -> EVICTING` while the old page-table entry remains present and marked non-pinnable. That transition is the victim-reservation linearization point. It prevents the race in which eviction observes zero pins while a concurrent fetch pins the old PageId.
 
 For a clean victim:
 

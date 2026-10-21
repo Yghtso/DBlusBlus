@@ -690,7 +690,6 @@ check. All other rows name a deterministic method and independent oracle.
 | V27-R07 | 27.1–27.11 | Resource feasibility may differ across legal physical realizations. | V27-R | EQ | V24-L/V26-Q |
 | V27-R08 | 27.1; 27.4 | Corruption exposure may differ only with actually accessed physical storage. | V27-R | EQ/SV | Ch4 tests |
 
-
 ### V27 negative-case and oracle checks
 
 Search Chapter-27-relevant Verification text and reject these stale rules: FSM defines full

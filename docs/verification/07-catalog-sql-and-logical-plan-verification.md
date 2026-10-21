@@ -139,11 +139,7 @@ registered word is exercised in at least one admitted role.
 | EXISTS | EXISTS subquery primary |
 | TRUE, FALSE, NULL | literal primaries |
 
-The exact symbolic oracle is:
-
-```text
-( ) , . ; + - * / % = <> < <= > >=
-```
+The exact symbolic oracle is: `( ) , . ; + - * / % = <> < <= > >=`.
 
 Enumerate each token, each proper prefix, every registered overlap, and adjacent symbol
 pairs. Longest registered spelling wins, so `<=`, `<>`, and `>=` are not split. `!=`,
@@ -1020,7 +1016,6 @@ its count is not a target selected in advance.
 | V18-19.5 — Chapter 29 aggregate registry and star-legality boundary is preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger |
 | V18-19.6 — Sections 39.1–39.3 error and transaction boundaries are preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger |
 | V18-19.7 — Chapter 40 EXPLAIN and Section 41 verification ownership are preserved | Chapters 16–21, 29, 39, 40, 41 | V18-19 | Cross-owner consistency procedure; composition matrix | owner-to-handoff ledger |
-
 
 No debug formatter, fuzzer, production parser, or reference database substitutes for the
 independent lexical, grammar, raw-tree, span, lifetime, and resource oracles above.
@@ -2281,7 +2276,6 @@ primary-family codes are the closed Chapter-19 inventory domains:
 | V19-22.21 | CF | Parameter syntax has no binder semantics | §19.19; Chapter 18 | V19-22 | V19-22 grammar/binder boundary fixture | owner ledger and mandatory procedural matrices |
 | V19-22.22 | F | A no-FROM block has an empty local relation namespace and no implicit relation or OuterRef | §19.20.3 | V19-22 | V19-22 no-FROM fixture | owner ledger and mandatory procedural matrices |
 | V19-22.23 | CD | Binding does not alter Section 39.1 transaction consequences | §19.20.3; §39.1 | V19-22 | V19-22 composition ledger | owner ledger and mandatory procedural matrices |
-
 
 No fuzzer, production binder, debug formatter, reference
 database, container implementation, or downstream executor substitutes for these
@@ -3758,7 +3752,6 @@ result construction from the registry or matrices above.
 | V20-27.2 — Every ledger row names a deterministic procedure or complete reusable family | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | owner-to-procedure enumeration and oracle-presence check |
 | V20-27.3 — Every ledger row names an independent oracle | Chapter 20; §41.4 | V20-27 | V20-27 procedure and applicable mandatory-matrix row | owner-to-procedure enumeration and oracle-presence check |
 
-
 ---
 
 ## Chapter 21 DDL/DML Semantic-Planning Verification
@@ -3776,7 +3769,6 @@ Every fixture starts from fully bound input. Production parsing, binding, planni
 execution, catalog caching, and recovery never serve as their own expected-result oracle.
 No correctness case uses sleeps; controlled barriers, exact event release, explicit
 persisted prefixes, and independent finite models determine every outcome.
-
 
 ### Deterministic Chapter-21 harness
 
@@ -4892,7 +4884,6 @@ layer family) and one independent expected-result oracle.
 | V21-30.3 — Every ledger row names an architecture owner | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, mandatory matrices, and oracle-presence check |
 | V21-30.4 — Every ledger row names a deterministic procedure or complete reusable family | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, mandatory matrices, and oracle-presence check |
 | V21-30.5 — Every ledger row names an independent oracle | Architecture front matter; Chapter 21; §41.4–§41.5 | V21-30 | V21-30 procedure and applicable mandatory-matrix row | cross-owner ledger, mandatory matrices, and oracle-presence check |
-
 
 The Chapter-21 procedures compose the canonical semantic-planning owners.
 Physical-plan/runtime verification belongs to the Chapter-22 family.
@@ -6086,7 +6077,6 @@ BC cross-owner invariants
 | 449 | BC | Closed registry is consistent with tuple/index/catalog handoffs | §§17.1, 17.10.3 | cross-codec matrix |
 | 450 | BC | Every Chapter-17 invariant maps to a direct procedure | §17.12 | invariant-to-map audit |
 
-
 | Required family | Direct ownership in this section |
 |---|---|
 | V17-1 closed TypeResolver/type registry | fixed registry, permuted runtime tags, and complete complement sweeps |
@@ -7059,7 +7049,6 @@ the listed catalog procedure supplies the Chapter-16 composition. Every row is r
 | 287 | AV | Orphan cleanup failure remains retryable when ownership is coherent | §§4.7.6–4.7.7, 21.5 | cleanup fault fixture |
 | 288 | AV | Uncertain required publication/coherence is noncontinuable | §§3.3.5, 39.1 | noncontinuable fixture |
 | 289 | AV | No arbitrary duplicate/fallback/repair makes authoritative state usable | §§4.14, 16.5.10 | single-defect negative suite |
-
 
 | Required family | Direct ownership in this section |
 |---|---|

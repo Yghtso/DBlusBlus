@@ -2,13 +2,7 @@
 
 ## 12.1 Scope and durability model
 
-Write-ahead logging is mandatory.
-
-The database uses:
-
-```text
-STEAL + NO-FORCE
-```
+Write-ahead logging is mandatory. The database uses: `STEAL + NO-FORCE`.
 
 Therefore:
 
@@ -28,13 +22,7 @@ Ordinary user-DML heap/index changes use redo plus transaction-status visibility
 
 The database has one logical WAL byte stream.
 
-It is physically stored in fixed-size files under:
-
-```text
-wal/
-```
-
-with the segment naming shape:
+It is physically stored in fixed-size files under `wal/` with the segment naming shape:
 
 ```text
 0000000000000000.wal
@@ -131,20 +119,14 @@ Bytes in:
  record_lsn + physical_span)
 ```
 
-MUST be zero.
-
-They are not included in the record CRC.
-
-No ordinary record may cross a 64 MiB segment boundary.
+MUST be zero. They are not included in the record CRC. No ordinary record may cross a 64 MiB segment boundary.
 
 If the next record does not fit in the remaining segment bytes:
 
 - when at least 48 bytes remain, emit one `WAL_PAD` record whose `total_length` consumes exactly the remaining bytes and whose payload is all zero;
 - when fewer than 48 bytes remain, write an all-zero raw tail and begin the next record at the next segment boundary.
 
-Recovery recognizes an all-zero short segment tail as padding, not as a record header.
-
-A logical record whose aligned `physical_span` is greater than 64 MiB is rejected as `WAL_RECORD_TOO_LARGE` before LSN reservation. One logical `BTREE_MTR` therefore has the same hard limit.
+Recovery recognizes an all-zero short segment tail as padding, not as a record header. A logical record whose aligned `physical_span` is greater than 64 MiB is rejected as `WAL_RECORD_TOO_LARGE` before LSN reservation. One logical `BTREE_MTR` therefore has the same hard limit.
 
 The exact emitted `total_length`/payload maxima and the no-split MTR exhaustion
 outcome are §4.3.2.4. A uint32 length that is representable but whose aligned
@@ -168,11 +150,7 @@ Every ordinary WAL record begins with exactly 48 bytes:
 | `44` | 4 | `crc32c` |
 |  | **48** | **total header** |
 
-All integer fields are explicit little-endian.
-
-The architecture assigns no WAL-header flag bits. Encoders write zero and decoders reject nonzero `flags` or `reserved`.
-
-These fields are RESERVED_ZERO under §4.14; record length/framing never makes nonzero unknown semantics ignorable.
+All integer fields are explicit little-endian. The architecture assigns no WAL-header flag bits. Encoders write zero and decoders reject nonzero `flags` or `reserved`. These fields are RESERVED_ZERO under §4.14; record length/framing never makes nonzero unknown semantics ignorable.
 
 A decoder requires:
 
@@ -205,9 +183,7 @@ Whenever a WAL payload persists a `PageId`, it uses exactly 16 bytes:
 | `8` | 8 | `page_no` |
 |  | **16** | **total** |
 
-The decoder rejects `INVALID_FILE_ID`, `INVALID_PAGE_NO`, or nonzero reserved bytes when the owning record requires a real page.
-
-This WAL PageId encoding is independent of C++ object layout.
+The decoder rejects `INVALID_FILE_ID`, `INVALID_PAGE_NO`, or nonzero reserved bytes when the owning record requires a real page. This WAL PageId encoding is independent of C++ object layout.
 
 ## 12.6 Per-transaction WAL chain
 
@@ -252,13 +228,7 @@ Codes `0..9` are the complete v1 registry. A different code in an otherwise comp
 
 ### 12.7.1 WAL_PAD
 
-A `WAL_PAD` record is a system record.
-
-Its payload consists only of zero bytes and its `total_length` fills the remainder of the current segment.
-
-The record has a normal valid CRC.
-
-`WAL_PAD` is never passed to page/transaction redo logic.
+A `WAL_PAD` record is a system record. Its payload consists only of zero bytes and its `total_length` fills the remainder of the current segment. The record has a normal valid CRC. `WAL_PAD` is never passed to page/transaction redo logic.
 
 ### 12.7.2 TXN_COMMIT and TXN_ABORT
 
@@ -276,9 +246,7 @@ txn_id       = the normal transaction being terminated
 prev_txn_lsn = that transaction's previous WAL record, or 0
 ```
 
-`TXN_COMMIT` and ordinary user `TXN_ABORT` therefore become the tail of the per-transaction WAL chain.
-
-A recovery-generated TXN_ABORT uses the loser TxnId and the last transaction WAL LSN reconstructed by analysis as `prev_txn_lsn`.
+`TXN_COMMIT` and ordinary user `TXN_ABORT` therefore become the tail of the per-transaction WAL chain. A recovery-generated TXN_ABORT uses the loser TxnId and the last transaction WAL LSN reconstructed by analysis as `prev_txn_lsn`.
 
 These zero-payload records are the semantic evidence for terminal transaction outcome. They are not physical full-page images. When reflecting either outcome into a `TXN_STATUS` page requires a full image, the separate system `PAGE_IMAGE`/`PAGE_INIT` protocol in §12.10.5 supplies the physical reconstruction base.
 
@@ -300,9 +268,7 @@ txn_id = 0
 prev_txn_lsn = 0
 ```
 
-The `PAGE_INIT` or `PAGE_IMAGE` that supplies a `TXN_STATUS` recovery base under §12.10.5 is such a system record. It does not become part of the terminating user's per-transaction WAL chain.
-
-The structural existence of a newly initialized page may survive a user abort even when the PAGE_INIT record participates in that user's WAL chain; no physical user-DML undo follows from the header ownership.
+The `PAGE_INIT` or `PAGE_IMAGE` that supplies a `TXN_STATUS` recovery base under §12.10.5 is such a system record. It does not become part of the terminating user's per-transaction WAL chain. The structural existence of a newly initialized page may survive a user abort even when the PAGE_INIT record participates in that user's WAL chain; no physical user-DML undo follows from the header ownership.
 
 `BTREE_MTR`, checkpoint records, and WAL_PAD are system records with header `txn_id=0` / `prev_txn_lsn=0`. A BTREE_MTR's optional owner TxnId remains diagnostic payload only.
 
@@ -333,33 +299,13 @@ Each patch follows as:
 | 4 | `reserved32 = 0` |
 | `length` | after-image bytes |
 
-Patches are serialized in strictly ascending offset order and MUST be nonempty and nonoverlapping.
-
-For every patch:
-
-```text
-offset + length <= 8192
-```
-
-using checked arithmetic.
+Patches are serialized in strictly ascending offset order and MUST be nonempty and nonoverlapping. For every patch: `offset + length <= 8192` using checked arithmetic.
 
 Delta patches MUST NOT overlap common-header bytes `8..19` (`page_lsn` and checksum). Recovery manages those fields centrally.
 
 The mutation code must ensure the nonempty patch set describes every other persistent byte changed by that logical page mutation. `PAGE_DELTA` represents an actual existing-page mutation; the architecture does not assign mutation meaning to a framing-only record with no patches.
 
-The payload is valid only when parsing exactly `patch_count` entries consumes exactly `payload_length` bytes; trailing payload bytes are forbidden.
-
-Redo applies the delta only when the trusted current page has:
-
-```text
-page.page_lsn < record.lsn
-```
-
-then sets:
-
-```text
-page.page_lsn = record.lsn
-```
+The payload is valid only when parsing exactly `patch_count` entries consumes exactly `payload_length` bytes; trailing payload bytes are forbidden. Redo applies the delta only when the trusted current page has: `page.page_lsn < record.lsn` then sets: `page.page_lsn = record.lsn`.
 
 The resident checksum becomes stale until normal checksum finalization.
 
@@ -385,9 +331,7 @@ page_lsn  = owning WAL record LSN
 checksum  = valid whole-page CRC32C
 ```
 
-`PAGE_INIT` publishes/reconstructs one newly initialized non-B+ page.
-
-`PAGE_IMAGE` replaces the complete state of an already-published page.
+`PAGE_INIT` publishes/reconstructs one newly initialized non-B+ page. `PAGE_IMAGE` replaces the complete state of an already-published page.
 
 ## 12.10 Full-page-image invariant and torn-page protection
 
@@ -402,17 +346,13 @@ B. this is the first WAL-protected modification of that page
    after the most recently completed checkpoint FPI epoch
 ```
 
-For an ordinary non-B+ page, that modification uses `PAGE_IMAGE` (or `PAGE_INIT` for initial publication).
-
-For a B+ MTR, the MTR uses a full-image affected-page entry for each page satisfying either condition.
+For an ordinary non-B+ page, that modification uses `PAGE_IMAGE` (or `PAGE_INIT` for initial publication). For a B+ MTR, the MTR uses a full-image affected-page entry for each page satisfying either condition.
 
 The clean-to-dirty rule is the critical WAL-retention invariant:
 
 > Every dirty interval begins at a WAL record that contains a complete recoverable image of that page.
 
-Therefore the frame's `rec_lsn` always identifies a retained recovery image while the frame is dirty.
-
-Later changes during the same dirty interval may use deltas unless condition B independently requires another checkpoint-epoch image.
+Therefore the frame's `rec_lsn` always identifies a retained recovery image while the frame is dirty. Later changes during the same dirty interval may use deltas unless condition B independently requires another checkpoint-epoch image.
 
 ### 12.10.1 BufferPool recLSN consequence
 
@@ -423,9 +363,7 @@ dirty   = true
 rec_lsn = X
 ```
 
-Already-dirty later modifications preserve the existing `rec_lsn` even when a later checkpoint-epoch full image is emitted.
-
-WAL retention through the minimum DPT `rec_lsn` therefore retains at least one complete recovery image for every dirty page.
+Already-dirty later modifications preserve the existing `rec_lsn` even when a later checkpoint-epoch full image is emitted. WAL retention through the minimum DPT `rec_lsn` therefore retains at least one complete recovery image for every dirty page.
 
 ### 12.10.2 B+ tree mini-transactions
 
@@ -472,13 +410,7 @@ RESERVED_ZERO under §4.14. A future affected-page encoding requires a new
 owning WAL grammar/record type that a v1 reader can reject before interpreting
 its entries.
 
-For `FULL_IMAGE`:
-
-```text
-data_length = 8192
-```
-
-followed by one canonical page image whose `page_lsn = mtr.lsn` and checksum is valid.
+For `FULL_IMAGE`: `data_length = 8192` followed by one canonical page image whose `page_lsn = mtr.lsn` and checksum is valid.
 
 For `PATCH_SET`, the data begins with:
 
@@ -502,15 +434,9 @@ page or persistent metadata participant, and `PATCH_SET` represents actual byte
 patches. The architecture assigns no no-op, heartbeat, position-marker, or barrier semantics
 to either forbidden zero-count form.
 
-Persistent allocation/free/root metadata changes are represented by including the affected metadata/free pages in the MTR; there is no second hidden persistent side channel.
+Persistent allocation/free/root metadata changes are represented by including the affected metadata/free pages in the MTR; there is no second hidden persistent side channel. A newly appended B+ page MUST use `FULL_IMAGE` in the publishing MTR.
 
-A newly appended B+ page MUST use `FULL_IMAGE` in the publishing MTR.
-
-Every MTR-modified page receives:
-
-```text
-page_lsn = mtr.lsn
-```
+Every MTR-modified page receives: `page_lsn = mtr.lsn`.
 
 ### 12.10.3 MTR no-flush barrier
 
@@ -588,9 +514,7 @@ MTR append itself does not require `fdatasync`; later writeback or transaction c
 
 ### 12.10.4 User abort does not reverse B+ shape
 
-User abort leaves valid B+ structural shape in place.
-
-Heap/index versions belonging to the aborted transaction remain logically invisible/vacuumable; split/merge/root/free-list system actions are not physically undone.
+User abort leaves valid B+ structural shape in place. Heap/index versions belonging to the aborted transaction remain logically invisible/vacuumable; split/merge/root/free-list system actions are not physically undone.
 
 ### 12.10.5 TXN_STATUS full-image and terminal mutation protocol
 
@@ -720,17 +644,9 @@ first establish/log heap tuple-version redo
 then append the B+ MTR(s) that reference that RID
 ```
 
-Therefore:
+Therefore: `heap redo LSN < later index MTR LSN` for the relevant dependency.
 
-```text
-heap redo LSN < later index MTR LSN
-```
-
-for the relevant dependency.
-
-If an index page is forced before user commit, flushing WAL through the later index MTR also makes the earlier heap redo record durable.
-
-The user transaction may still abort; MVCC status handles visibility.
+If an index page is forced before user commit, flushing WAL through the later index MTR also makes the earlier heap redo record durable. The user transaction may still abort; MVCC status handles visibility.
 
 ## 12.12 WAL append atomicity and runtime page publication
 
@@ -901,9 +817,7 @@ A dedicated WAL writer/flusher:
 - advances a monotonic atomic `durable_lsn`,
 - wakes waiters whose target record LSN has become durable.
 
-`durable_lsn >= X` means the complete valid WAL record whose LSN is `X`, and all preceding required WAL bytes, are durable.
-
-If `X` lies in a segment created during this process lifetime, this statement also proves that segment's final directory entry was synchronized under §12.2.1 before `durable_lsn` advanced into it.
+`durable_lsn >= X` means the complete valid WAL record whose LSN is `X`, and all preceding required WAL bytes, are durable. If `X` lies in a segment created during this process lifetime, this statement also proves that segment's final directory entry was synchronized under §12.2.1 before `durable_lsn` advanced into it.
 
 A durability request spanning a segment boundary synchronizes every segment containing previously unsynchronized bytes in the requested logical prefix. Synchronizing only the newest segment cannot advance `durable_lsn` past unsynchronized bytes in an older segment.
 
@@ -935,15 +849,7 @@ publish durable_lsn >= 1256
 wake T1, T2, T3
 ```
 
-One durability operation may acknowledge many commits.
-
-`CommitCoordinator` conceptually exposes:
-
-```text
-WaitUntilDurable(commit_lsn)
-```
-
-and batches naturally by waiting on monotonic `durable_lsn`, rather than enqueuing one fsync task per transaction.
+One durability operation may acknowledge many commits. `CommitCoordinator` conceptually exposes `WaitUntilDurable(commit_lsn)` and batches naturally by waiting on monotonic `durable_lsn`, rather than enqueuing one fsync task per transaction.
 
 Commit latency observability should distinguish:
 
@@ -956,31 +862,15 @@ group size
 
 ## 12.15 Synchronous commit
 
-The architecture has synchronous commit.
+The architecture has synchronous commit. For a transaction with persistent writes, successful COMMIT cannot return until: `its TXN_COMMIT WAL record is durable`.
 
-For a transaction with persistent writes, successful COMMIT cannot return until:
+If that terminal record resides in a newly created segment, “durable” includes successful prior synchronization of the segment's `wal/` directory entry under §12.2.1. WAL durability is necessary but not sufficient for successful client acknowledgement. The detailed transaction state/status/cache/lock-release and acknowledgement sequence is canonical in §§15.5 and 39.1.5.
 
-```text
-its TXN_COMMIT WAL record is durable
-```
-
-If that terminal record resides in a newly created segment, “durable” includes successful prior synchronization of the segment's `wal/` directory entry under §12.2.1.
-
-WAL durability is necessary but not sufficient for successful client acknowledgement. The detailed transaction state/status/cache/lock-release and acknowledgement sequence is canonical in §§15.5 and 39.1.5.
-
-Commit does not force the transaction's heap or B+ pages.
-
-Asynchronous commit remains deferred and, if introduced, must expose its weaker durability semantics explicitly.
+Commit does not force the transaction's heap or B+ pages. Asynchronous commit remains deferred and, if introduced, must expose its weaker durability semantics explicitly.
 
 ## 12.16 BufferPool recLSN
 
-Every WAL-protected dirty frame tracks:
-
-```text
-rec_lsn
-```
-
-meaning:
+Every WAL-protected dirty frame tracks `rec_lsn` meaning:
 
 > the LSN of the full page image that began the frame's current clean-to-dirty interval.
 
@@ -1015,17 +905,7 @@ rec_lsn = INVALID_LSN
 
 ## 12.17 WAL-before-data and temporary no-flush state
 
-Before BufferPool writes any WAL-protected dirty page with:
-
-```text
-page_lsn = X
-```
-
-it must establish:
-
-```text
-WalManager.durable_lsn >= X
-```
+Before BufferPool writes any WAL-protected dirty page with: `page_lsn = X` it must establish: `WalManager.durable_lsn >= X`.
 
 This applies to BufferPool-managed:
 

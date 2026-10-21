@@ -613,7 +613,6 @@ by falsifiable rejection rows rather than N/A.
 | V29-U11 | 29 | No stale exact-dyadic/execution-shape-identical FLOAT aggregate rule remains. | V29-V | stale-rule search |
 | V29-U12 | 29 | External differential databases are not FLOAT F2 conformance oracles. | V29-H/R/V | oracle-source audit |
 
-
 ## V29-V — Negative-case and oracle checks
 
 Search all Chapter-29-facing methodology and reject, with direct fixtures above: exact-dyadic

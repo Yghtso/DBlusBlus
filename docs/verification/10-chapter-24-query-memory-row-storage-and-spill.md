@@ -692,7 +692,6 @@ Non-falsifiable or non-correctness Chapter-24 material is accounted for separate
 | X08 | §24.11 | numbered invariant list restates detailed §§24.1–24.10 | consolidated index; A01–H16 cover each falsifiable rule | N/A |
 | X09 | §24.3 | bump-oriented arena allocation strategy | implementation/performance mechanism; C01–C07 own lifetime and accounting correctness | N/A |
 
-
 The closed-set and stale-rule audit for this family requires all of the following:
 
 - no procedure treats only individually large allocations as accounted, exempts unbounded

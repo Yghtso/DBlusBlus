@@ -18,9 +18,7 @@ It owns:
 - FSM maintenance after reclamation,
 - vacuum maintenance counters.
 
-Vacuum does **not** decide tuple visibility using only its own snapshot.
-
-Vacuum does **not** wait for ordinary transactions while holding heap or B+ page latches.
+Vacuum does **not** decide tuple visibility using only its own snapshot. Vacuum does **not** wait for ordinary transactions while holding heap or B+ page latches.
 
 ## 14.2 Global snapshot horizon
 
@@ -80,11 +78,7 @@ Status(xmax) == COMMITTED
 xmax < global_oldest_snapshot_xmin
 ```
 
-together with any active-snapshot consistency check required by the SnapshotManager representation.
-
-At that point no currently registered legal snapshot can require the old version.
-
-Garbage eligibility is a **global** property.
+together with any active-snapshot consistency check required by the SnapshotManager representation. At that point no currently registered legal snapshot can require the old version. Garbage eligibility is a **global** property.
 
 Vacuum MUST NOT reclaim a version merely because the version is invisible to the vacuum worker's own snapshot.
 
@@ -98,15 +92,11 @@ or
 xmax IN_PROGRESS
 ```
 
-Such a candidate is skipped/retried later.
-
-Vacuum MUST NOT wait for the owning transaction while retaining heap/B+ physical latches.
+Such a candidate is skipped/retried later. Vacuum MUST NOT wait for the owning transaction while retaining heap/B+ physical latches.
 
 ## 14.5 Two-phase physical RID reclamation
 
-Secondary indexes store a physical RID without a generation counter.
-
-Therefore a physical `(PageNo, SlotId)` must not be reused while an already-running reader may still possess an old index-derived RID with that identity.
+Secondary indexes store a physical RID without a generation counter. Therefore a physical `(PageNo, SlotId)` must not be reused while an already-running reader may still possess an old index-derived RID with that identity.
 
 Reclamation is:
 
@@ -173,11 +163,7 @@ active_reader_count[e] += 1
 unlock
 ```
 
-The returned `e` is held by an RAII read-epoch guard.
-
-Guard destruction decrements that exact epoch count under the same mutex and removes a zero count.
-
-A reader never changes epoch while one guard is alive.
+The returned `e` is held by an RAII read-epoch guard. Guard destruction decrements that exact epoch count under the same mutex and removes a zero count. A reader never changes epoch while one guard is alive.
 
 The §11.10 UNIQUE candidate scan is such a reader: it registers before consuming an index-derived RID and retains protection through that RID's heap/current-owner recheck. If it must wait for transaction outcome, it discards the candidate and guard first, then re-probes the entire key range under a fresh guard after wakeup.
 
@@ -200,19 +186,11 @@ record (RID, retire_epoch) in the process-local retire queue
 unlock
 ```
 
-Retirement increments the epoch exactly once.
-
-A reader that registered before or during index cleanup may conservatively hold an epoch `<= retire_epoch`.
-
-A reader that registers after retirement obtains an epoch `> retire_epoch` and cannot have obtained the removed index entry through normal post-retirement traversal.
+Retirement increments the epoch exactly once. A reader that registered before or during index cleanup may conservatively hold an epoch `<= retire_epoch`. A reader that registers after retirement obtains an epoch `> retire_epoch` and cannot have obtained the removed index entry through normal post-retirement traversal.
 
 ### 14.6.3 Exact grace predicate
 
-A retired RID with epoch `R` is safe for `DEAD -> UNUSED` exactly when, under the epoch mutex:
-
-```text
-there exists no active reader epoch E such that E <= R
-```
+A retired RID with epoch `R` is safe for `DEAD -> UNUSED` exactly when, under the epoch mutex: `there exists no active reader epoch E such that E <= R`.
 
 Equivalent implementation:
 
@@ -231,33 +209,19 @@ epoch predicate.
 
 ### 14.6.4 Crash/restart
 
-Epochs and the retire queue are process-local and not WAL logged.
-
-After crash/restart there are no surviving pre-crash readers.
+Epochs and the retire queue are process-local and not WAL logged. After crash/restart there are no surviving pre-crash readers.
 
 There are likewise no surviving pre-crash `TUPLE_WRITE` owners or waiters; LockManager
 starts empty and no lock request is WAL-logged, checkpointed, or replayed. This is safe
 because the callers that could resume using those old RIDs also ceased to exist.
 
-A recovered persistent `DEAD` slot that is not represented in the new process retire queue is conservatively re-enqueued with a fresh retirement epoch before being converted to `UNUSED`.
-
-This may delay reuse unnecessarily but cannot reuse too early.
+A recovered persistent `DEAD` slot that is not represented in the new process retire queue is conservatively re-enqueued with a fresh retirement epoch before being converted to `UNUSED`. This may delay reuse unnecessarily but cannot reuse too early.
 
 ## 14.7 Why MVCC visibility is insufficient for RID reuse
 
-An index cursor may obtain:
+An index cursor may obtain: `(key, old RID)` and delay fetching the corresponding heap page.
 
-```text
-(key, old RID)
-```
-
-and delay fetching the corresponding heap page.
-
-Meanwhile vacuum may remove the index entry.
-
-If the physical RID were immediately reused for an unrelated tuple, the old cursor could dereference a physical identity whose meaning changed after the cursor observed it.
-
-MVCC visibility alone is not the physical-identity guarantee.
+Meanwhile vacuum may remove the index entry. If the physical RID were immediately reused for an unrelated tuple, the old cursor could dereference a physical identity whose meaning changed after the cursor observed it. MVCC visibility alone is not the physical-identity guarantee.
 
 The read-epoch grace period establishes:
 
@@ -299,9 +263,7 @@ DEAD
     -> required index cleanup completed before the persisted transition
 ```
 
-Pre-crash epoch registrations do not survive.
-
-A recovered DEAD slot is re-enqueued in the new process ReadEpochManager before reuse, as §14.6.4 specifies.
+Pre-crash epoch registrations do not survive. A recovered DEAD slot is re-enqueued in the new process ReadEpochManager before reuse, as §14.6.4 specifies.
 
 It may also have remained DEAD before the crash solely because a live TUPLE_WRITE claim
 blocked final reuse. That runtime claim disappears with its owner/waiter, but recovery still
@@ -337,43 +299,17 @@ exact physical entry already absent -> success
 B+ corruption / unrelated failure -> error
 ```
 
-Because the physical B+ key is `(user_key,RID)`, there can be at most one exact target entry.
-
-This idempotence is required after a crash that removed some/all exact index entries but did not yet persist `NORMAL -> DEAD`.
-
-The heap slot MUST NOT become DEAD before every required secondary-index entry is known absent.
+Because the physical B+ key is `(user_key,RID)`, there can be at most one exact target entry. This idempotence is required after a crash that removed some/all exact index entries but did not yet persist `NORMAL -> DEAD`. The heap slot MUST NOT become DEAD before every required secondary-index entry is known absent.
 
 Vacuum performs B+ operations without retaining the heap-page latch.
 
 ## 14.10 Version-chain splicing
 
-Before a retired RID becomes reusable, no surviving tuple version may retain a `prev` pointer to that soon-to-be-reused physical storage.
+Before a retired RID becomes reusable, no surviving tuple version may retain a `prev` pointer to that soon-to-be-reused physical storage. During a table vacuum pass, vacuum derives enough reverse-link information to locate surviving direct successors.
 
-During a table vacuum pass, vacuum derives enough reverse-link information to locate surviving direct successors.
+For a removable version `V`: `V.prev = P` each surviving direct successor `S` whose current link is: `S.prev = V` is rewritten to: `S.prev = P`.
 
-For a removable version `V`:
-
-```text
-V.prev = P
-```
-
-each surviving direct successor `S` whose current link is:
-
-```text
-S.prev = V
-```
-
-is rewritten to:
-
-```text
-S.prev = P
-```
-
-The successor-header mutation is WAL logged.
-
-Only after required surviving links have been safely updated may reclamation of `V` progress toward RID reuse.
-
-If the expected relationship cannot be proven under revalidation, vacuum defers that version to a later pass.
+The successor-header mutation is WAL logged. Only after required surviving links have been safely updated may reclamation of `V` progress toward RID reuse. If the expected relationship cannot be proven under revalidation, vacuum defers that version to a later pass.
 
 Version chains are not required for ordinary snapshot visibility, so shortening a chain is permitted when it leaves no surviving pointer to reusable storage.
 
@@ -389,9 +325,7 @@ expected version-chain fields
 physical tuple identity
 ```
 
-If the expected candidate state changed, the operation is skipped/retried.
-
-Heap-page latches are not held while B+ tree cleanup occurs.
+If the expected candidate state changed, the operation is skipped/retried. Heap-page latches are not held while B+ tree cleanup occurs.
 
 Before final `DEAD -> UNUSED` publication, vacuum also obtains a zero-live-claim result for
 `TUPLE_WRITE(TableId,RID)` under a synchronization relationship that linearizes that result
@@ -459,9 +393,7 @@ state        = UNUSED
 aux          = next free SlotId or INVALID_SLOT_ID
 ```
 
-Every reusable slot is discovered through the persisted `free_slot_head` chain defined in §5.3.2.
-
-Insertion never reuses a DEAD slot directly.
+Every reusable slot is discovered through the persisted `free_slot_head` chain defined in §5.3.2. Insertion never reuses a DEAD slot directly.
 
 Because only canonical UNUSED slots enter `free_slot_head`, a later allocation may bind the
 same numeric RID to a new tuple only after no old read epoch, TUPLE_WRITE request, index
@@ -471,13 +403,7 @@ entry, or predecessor link can legally use it as the prior identity.
 
 ### 14.13.1 Aborted xmax
 
-For a still-live version whose deleter outcome is:
-
-```text
-Status(xmax) == ABORTED
-```
-
-vacuum may WAL-log and normalize:
+For a still-live version whose deleter outcome is: `Status(xmax) == ABORTED` vacuum may WAL-log and normalize:
 
 ```text
 xmax = INVALID_TXN_ID
@@ -598,9 +524,7 @@ because no pre-crash transaction can publish new metadata after restart, survivi
 already-persistent references remain subject to the proof above, and Chapter 13 resolves
 terminal outcomes/losers before READY.
 
-The absolute §9.12 TxnId-to-PageNo mapping is preserved permanently.
-
-The architecture therefore reclaims old status history with **sparse hole punching while keeping file length and logical PageNos unchanged**.
+The absolute §9.12 TxnId-to-PageNo mapping is preserved permanently. The architecture therefore reclaims old status history with **sparse hole punching while keeping file length and logical PageNos unchanged**.
 
 ### 14.14.1 Page-aligned reclaim cutoff
 
@@ -611,21 +535,9 @@ first_txn(P) = FIRST_NORMAL_TXN_ID + (P - 1) * 32640
 end_txn(P)   = first_txn(P) + 32640
 ```
 
-where `end_txn` is exclusive.
+where `end_txn` is exclusive. A page is reclaimable only when: `end_txn(P) <= proven frozen cutoff X`.
 
-A page is reclaimable only when:
-
-```text
-end_txn(P) <= proven frozen cutoff X
-```
-
-The persisted:
-
-```text
-database.control.txn_status_reclaim_before
-```
-
-is always page-aligned and means:
+The persisted `database.control.txn_status_reclaim_before` is always page-aligned and means:
 
 > every normal TxnId below this value belongs to logically retired status history.
 
@@ -654,11 +566,7 @@ To advance the cutoff to page-aligned value `C`:
 5. only then optionally sparsely deallocate the corresponding full-page byte ranges from txn_status.dat while preserving logical file length and absolute PageNos
 ```
 
-For status PageNo `P`, the physical sparse-deallocation range is exactly:
-
-```text
-[P * PAGE_SIZE, (P + 1) * PAGE_SIZE)
-```
+For status PageNo `P`, the physical sparse-deallocation range is exactly: `[P * PAGE_SIZE, (P + 1) * PAGE_SIZE)`.
 
 The order is deliberate:
 
@@ -712,13 +620,7 @@ The logical file size is not shrunk and later PageNos are never renumbered.
 
 ### 14.14.3 Lookup below the cutoff
 
-Status lookup for:
-
-```text
-txn_id < txn_status_reclaim_before
-```
-
-returns runtime result `RETIRED` without reading/validating a punched status page.
+Status lookup for: `txn_id < txn_status_reclaim_before` returns runtime result `RETIRED` without reading/validating a punched status page.
 
 Valid persistent tuple/catalog MVCC metadata must not retain a status-dependent
 reference to such a TxnId; creators that still matter must have been rewritten to
@@ -739,21 +641,13 @@ aborted-created tuple versions
 globally dead committed tuple versions
 ```
 
-Because the B+ physical key is `(user_key, RID)`, cleanup removes exactly the stale physical entry.
-
-Resulting underflow, redistribution, merge, or root contraction remains an ordinary B+ MTR system action.
+Because the B+ physical key is `(user_key, RID)`, cleanup removes exactly the stale physical entry. Resulting underflow, redistribution, merge, or root contraction remains an ordinary B+ MTR system action.
 
 ## 14.16 FSM and maintenance statistics
 
-After heap reclamation or repacking:
+After heap reclamation or repacking: `update the table FSM estimate`.
 
-```text
-update the table FSM estimate
-```
-
-FSM remains advisory and rebuildable.
-
-Vacuum may batch FSM estimate changes rather than place every estimate update on the critical transactional path.
+FSM remains advisory and rebuildable. Vacuum may batch FSM estimate changes rather than place every estimate update on the critical transactional path.
 
 Vacuum may collect maintenance counters such as:
 
@@ -773,13 +667,7 @@ that subsystem without assuming ownership of its published state.
 
 ## 14.17 Vacuum execution baseline
 
-The architecture requires an explicit/manual vacuum path, for example:
-
-```text
-VACUUM table
-```
-
-or an equivalent internal maintenance invocation.
+The architecture requires an explicit/manual vacuum path, for example: `VACUUM table` or an equivalent internal maintenance invocation.
 
 A sophisticated autovacuum scheduler is not required for the baseline.
 

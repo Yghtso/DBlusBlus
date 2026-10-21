@@ -46,9 +46,7 @@ validation of every group/aggregate state. No dependent result pipeline exposes
 an aggregate row before that validation succeeds, even if a hash partition or
 ordered group happened to finish earlier.
 
-The immutable physical operator tree remains useful for optimizer output, EXPLAIN, and plan validation.
-
-The pipeline graph is the execution-time work representation built after the physical plan is finalized.
+The immutable physical operator tree remains useful for optimizer output, EXPLAIN, and plan validation. The pipeline graph is the execution-time work representation built after the physical plan is finalized.
 
 ## 26.2 Pipeline roles
 
@@ -138,9 +136,7 @@ sinks
 dependencies
 ```
 
-It does not force every physical operator into a recursive row-at-a-time `Next()` chain.
-
-The builder creates execution graph/state references without mutating the semantic meaning of the immutable physical plan.
+It does not force every physical operator into a recursive row-at-a-time `Next()` chain. The builder creates execution graph/state references without mutating the semantic meaning of the immutable physical plan.
 
 ### 26.3.1 Execution lifecycle and completion
 
@@ -517,9 +513,7 @@ Successful sink acceptance alone establishes neither query/statement success,
 Combine/Finalize success, commit, nor client publication. Those remain separate
 owner obligations, including §§31.9–31.10 for result publication.
 
-Exact C++ virtual/template mechanics are implementation-specific.
-
-The semantic state/lifetime separation is not.
+Exact C++ virtual/template mechanics are implementation-specific. The semantic state/lifetime separation is not.
 
 ## 26.5 Global and local state
 
@@ -542,9 +536,7 @@ retained/copied input, buffered output, and continuation storage remain covered
 by live accounted owners under §§24.4–24.5; buffering creates no accounting
 exception.
 
-Global state owns shared/finalized state where the operator requires it.
-
-No operator depends on an implicit process thread-local singleton for query correctness.
+Global state owns shared/finalized state where the operator requires it. No operator depends on an implicit process thread-local singleton for query correctness.
 
 This separation permits worker-local execution without changing operator-state
 ownership or embedding mutable query state in shared plans.
@@ -576,9 +568,7 @@ Pipeline scheduling MUST NOT asynchronously queue a borrowed DataChunk for later
 
 ## 26.7 Query cancellation
 
-`QueryExecutionContext` contains a query-wide cancellation flag/token.
-
-Long loops check cancellation at chunk or reasonable block boundaries.
+`QueryExecutionContext` contains a query-wide cancellation flag/token. Long loops check cancellation at chunk or reasonable block boundaries.
 
 Cancellation unwinds query-owned resources through RAII/ownership:
 
@@ -590,17 +580,11 @@ local/global operator state
 read-epoch guard
 ```
 
-Transaction-owned logical locks are released only through the transaction's normal terminal/abort path.
-
-A query execution layer does not silently release transaction locks independently.
+Transaction-owned logical locks are released only through the transaction's normal terminal/abort path. A query execution layer does not silently release transaction locks independently.
 
 ## 26.8 Pipeline early stop
 
-A streaming operator such as LIMIT may signal `pipeline early stop` when no further upstream rows are semantically needed.
-
-Pipeline early stop is distinct from `query cancellation`.
-
-It stops only the safely unnecessary upstream portion of the execution graph.
+A streaming operator such as LIMIT may signal `pipeline early stop` when no further upstream rows are semantically needed. Pipeline early stop is distinct from `query cancellation`. It stops only the safely unnecessary upstream portion of the execution graph.
 
 It MUST NOT abort the transaction, report QueryCancelled, or prevent required blocking/side-effect work elsewhere in the query from completing.
 

@@ -37,27 +37,11 @@ association does not require each Vector to store duplicate `LogicalSlotId`
 metadata; §22.3 remains the canonical owner of the physical output-schema
 identity mapping.
 
-The standard vector capacity is:
+The standard vector capacity is: `STANDARD_VECTOR_SIZE = 1024`.
 
-```text
-STANDARD_VECTOR_SIZE = 1024
-```
+The constant is centralized and benchmark-configurable; operator code MUST NOT scatter literal `1024`. A DataChunk participating in operator execution MUST satisfy: `1 <= capacity <= 65535` so a uint16 SelectionVector can address every physical position.
 
-The constant is centralized and benchmark-configurable; operator code MUST NOT scatter literal `1024`.
-
-A DataChunk participating in operator execution MUST satisfy:
-
-```text
-1 <= capacity <= 65535
-```
-
-so a uint16 SelectionVector can address every physical position.
-
-Every normal column in one chunk has the same logical cardinality, with:
-
-```text
-0 <= cardinality <= capacity
-```
+Every normal column in one chunk has the same logical cardinality, with: `0 <= cardinality <= capacity`.
 
 A final stream chunk may be partially filled.
 
@@ -108,18 +92,14 @@ validity position `i`.
 
 ### CONSTANT
 
-Represents one scalar value repeated for all logical rows.
-
-The scalar may itself be NULL.
+Represents one scalar value repeated for all logical rows. The scalar may itself be NULL.
 
 Its active logical positions remain `0..cardinality-1`, and each resolves to
 the one scalar payload and repeated validity state at physical position zero.
 
 ### DICTIONARY
 
-References another Vector plus one SelectionVector.
-
-It does not own an independent value array.
+References another Vector plus one SelectionVector. It does not own an independent value array.
 
 The logical row `i` maps through the dictionary selection to an active logical
 position of its immediate child; that child's representation then resolves the
@@ -179,32 +159,18 @@ For a standard 1024-row vector:
 = 128 bytes
 ```
 
-A vector carries `all_valid` as a fast path.
+A vector carries `all_valid` as a fast path. When `all_valid = true`, kernels do not need to read validity words. Bits outside the vector's active physical capacity/cardinality are semantically irrelevant and MUST NOT influence results.
 
-When `all_valid = true`, kernels do not need to read validity words.
-
-Bits outside the vector's active physical capacity/cardinality are semantically irrelevant and MUST NOT influence results.
-
-For a CONSTANT vector, one scalar validity state is logically repeated.
-
-For a DICTIONARY vector, effective validity is the referenced child value's validity after selection composition.
+For a CONSTANT vector, one scalar validity state is logically repeated. For a DICTIONARY vector, effective validity is the referenced child value's validity after selection composition.
 
 ## 23.6 SelectionVector
 
-A standard SelectionVector stores:
-
-```text
-uint16 indices[capacity]
-```
+A standard SelectionVector stores: `uint16 indices[capacity]`.
 
 A selection maps active logical position `i` to logical position `indices[i]`
 of its immediate child vector or child view. It does not make allocated
 capacity part of the child's active logical domain. Every selected index MUST
-satisfy:
-
-```text
-0 <= indices[i] < child logical cardinality
-```
+satisfy: `0 <= indices[i] < child logical cardinality`.
 
 Resolution after that check is representation-specific: FLAT position `j`
 uses initialized physical payload/validity position `j`; every valid CONSTANT
@@ -287,13 +253,7 @@ UnifiedVectorFormat {
 }
 ```
 
-Representation dispatch happens once per input vector/batch.
-
-A kernel therefore does not branch per row on:
-
-```text
-FLAT vs CONSTANT vs DICTIONARY
-```
+Representation dispatch happens once per input vector/batch. A kernel therefore does not branch per row on: `FLAT vs CONSTANT vs DICTIONARY`.
 
 For CONSTANT input, the effective selection maps every logical row to scalar position zero.
 
@@ -316,9 +276,7 @@ StringRef {
 }
 ```
 
-and is naturally 16 bytes on a 64-bit process.
-
-`length` is the exact byte length.
+and is naturally 16 bytes on a 64-bit process. `length` is the exact byte length.
 
 The compact StringRef form exactly represents byte lengths through
 `UINT32_MAX`. A value whose exact byte length exceeds `UINT32_MAX` is outside
@@ -346,9 +304,7 @@ type, cast, corruption, or persistent-format maximum. In particular, the heap
 tuple size limit is not a universal runtime VARCHAR limit, and StringRef does
 not alter tuple, catalog, statistics, spill, or WAL formats.
 
-No trailing NUL is required.
-
-For `length = 0`, `data` need not be dereferenced.
+No trailing NUL is required. For `length = 0`, `data` need not be dereferenced.
 
 ### 23.9.1 Prefix definition
 
@@ -371,11 +327,7 @@ Examples:
 "abcd"  -> 0x61626364
 ```
 
-Bytes are interpreted unsigned.
-
-A differing prefix may be used as a fast binary-order/equality rejection.
-
-An equal prefix is never sufficient proof of full-string equality/order; length/full byte comparison resolves the remaining case.
+Bytes are interpreted unsigned. A differing prefix may be used as a fast binary-order/equality rejection. An equal prefix is never sufficient proof of full-string equality/order; length/full byte comparison resolves the remaining case.
 
 This agrees with Chapter 17's binary VARCHAR collation.
 
@@ -452,9 +404,7 @@ chunk StringHeap
 StringRef in output VARCHAR vector
 ```
 
-This prevents downstream execution from extending heap-page pin lifetime merely to keep a string pointer alive.
-
-The StringHeap may be reset only when no downstream borrowed vector/chunk still references it.
+This prevents downstream execution from extending heap-page pin lifetime merely to keep a string pointer alive. The StringHeap may be reset only when no downstream borrowed vector/chunk still references it.
 
 ## 23.12 Borrowed vectors
 
@@ -485,11 +435,7 @@ PhysicalFilter
 simple column PhysicalProject
 ```
 
-A blocking operator deep-copies retained data.
-
-A result/client boundary also materializes or otherwise safely retains its memory before asynchronous/client-visible lifetime can exceed the producer chunk.
-
-The pipeline executor owns this lifetime guarantee.
+A blocking operator deep-copies retained data. A result/client boundary also materializes or otherwise safely retains its memory before asynchronous/client-visible lifetime can exceed the producer chunk. The pipeline executor owns this lifetime guarantee.
 
 ## 23.13 Chunk/vector reuse
 

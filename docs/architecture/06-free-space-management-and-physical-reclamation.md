@@ -2,17 +2,9 @@
 
 ## 6.1 Scope
 
-Free-space discovery is a distinct storage subsystem.
+Free-space discovery is a distinct storage subsystem. Each heap relation has a separate page-based free-space-map file `table_<table_id>.fsm`.
 
-Each heap relation has a separate page-based free-space-map file:
-
-```text
-table_<table_id>.fsm
-```
-
-The FSM is advisory performance metadata. It is not the source of truth for whether a heap-page insertion can succeed.
-
-The canonical insertion decision is always made from the actual validated heap-page geometry after the candidate page has been fetched and appropriately latched.
+The FSM is advisory performance metadata. It is not the source of truth for whether a heap-page insertion can succeed. The canonical insertion decision is always made from the actual validated heap-page geometry after the candidate page has been fetched and appropriately latched.
 
 This chapter defines:
 
@@ -50,17 +42,11 @@ uint8_t category
 255 = greatest represented insertion capacity
 ```
 
-Larger category values represent greater complete encoded tuple insertion capacity under the mapping.
-
-All byte values `0..255` are valid categories for initialized entries.
+Larger category values represent greater complete encoded tuple insertion capacity under the mapping. All byte values `0..255` are valid categories for initialized entries.
 
 ## 6.3 Free-space category semantics
 
-The category conversion input is the current contiguous free-space gap of a structurally valid heap page:
-
-```text
-free_bytes = upper - lower
-```
+The category conversion input is the current contiguous free-space gap of a structurally valid heap page: `free_bytes = upper - lower`.
 
 For the heap-page layout:
 
@@ -100,11 +86,7 @@ category =
     floor(usable_insertion_bytes * 255 / 8135)
 ```
 
-The conversion uses integer arithmetic only.
-
-Inputs above the physical 8144-byte contiguous-gap maximum are clamped to 8144 before the slot-cost deduction.
-
-The mapping is monotonic.
+The conversion uses integer arithmetic only. Inputs above the physical 8144-byte contiguous-gap maximum are clamped to 8144 before the slot-cost deduction. The mapping is monotonic.
 
 The mapping deliberately reserves the 8-byte new-slot cost even when insertion
 can reuse an architecture-authorized `UNUSED` slot. A reusable slot can
@@ -128,9 +110,7 @@ free_bytes 8143, 8144     -> category 255
 
 ## 6.4 Category lower-bound interpretation
 
-For a persisted category `c`, the inverse helper is an **inclusive lower bound** on represented usable complete encoded tuple bytes.
-
-It is not an upper bound and not a bucket midpoint.
+For a persisted category `c`, the inverse helper is an **inclusive lower bound** on represented usable complete encoded tuple bytes. It is not an upper bound and not a bucket midpoint.
 
 The exact definition is:
 
@@ -156,9 +136,7 @@ category 254 -> 8104
 category 255 -> 8135
 ```
 
-A runtime candidate search MAY use this represented lower bound when locating a category capable of satisfying an insertion request.
-
-The architecture does not prescribe a specific runtime tie-breaker, exact bucket-search algorithm, or in-memory candidate-index representation.
+A runtime candidate search MAY use this represented lower bound when locating a category capable of satisfying an insertion request. The architecture does not prescribe a specific runtime tie-breaker, exact bucket-search algorithm, or in-memory candidate-index representation.
 
 Regardless of candidate-search policy, the selected heap page MUST still be fetched and checked because persisted/runtime FSM information may be stale.
 
@@ -186,9 +164,7 @@ The complete page size is 8192 bytes.
 | `48` | 8144 | one-byte category entries |
 |  | **8192** | **total** |
 
-The FSM-specific header is exactly 16 bytes after the common 32-byte page header.
-
-All multi-byte fields are explicitly little-endian.
+The FSM-specific header is exactly 16 bytes after the common 32-byte page header. All multi-byte fields are explicitly little-endian.
 
 For FSM_DATA v1:
 
@@ -199,23 +175,13 @@ FSM reserved16    = 0
 FSM reserved32    = 0
 ```
 
-Structural decoding/validation MUST reject a nonzero value in any of these unassigned/reserved fields.
-
-The category region contains exactly:
-
-```text
-8144
-```
-
-one-byte entry slots.
+Structural decoding/validation MUST reject a nonzero value in any of these unassigned/reserved fields. The category region contains exactly `8144` one-byte entry slots.
 
 The architecture has no hierarchical FSM level, tree node, persisted pointer, or per-entry metadata.
 
 ## 6.6 Deterministic heap-page-to-FSM-entry mapping
 
-Heap page `0` is the heap-file superblock and has no ordinary FSM category entry.
-
-`INVALID_PAGE_NO` is not a valid FSM target.
+Heap page `0` is the heap-file superblock and has no ordinary FSM category entry. `INVALID_PAGE_NO` is not a valid FSM target.
 
 For ordinary heap data page number `H`:
 
@@ -269,19 +235,7 @@ A represented heap-page range MUST NOT overflow and MUST NOT include `INVALID_PA
 
 ## 6.7 entry_count and initialized-prefix semantics
 
-`entry_count` is the number of initialized category entries in a contiguous prefix of one FSM_DATA page.
-
-Valid initialized indices are:
-
-```text
-[0, entry_count)
-```
-
-with:
-
-```text
-0 <= entry_count <= 8144
-```
+`entry_count` is the number of initialized category entries in a contiguous prefix of one FSM_DATA page. Valid initialized indices are: `[0, entry_count)` with: `0 <= entry_count <= 8144`.
 
 The initialized prefix represents a contiguous range of published heap pages
 beginning at the page's persisted `first_heap_page_no`. It need not cover every
@@ -289,19 +243,9 @@ published heap page; a shorter prefix is structurally valid. The initialized
 range MUST NOT extend beyond the paired heap file's authoritative published
 page bound.
 
-Entries satisfying:
+Entries satisfying: `entry_index >= entry_count` are uninitialized entry storage.
 
-```text
-entry_index >= entry_count
-```
-
-are uninitialized entry storage.
-
-In FSM_DATA v1, every byte in that uninitialized suffix MUST persist as zero.
-
-Structural validation MUST reject a nonzero byte in the uninitialized suffix.
-
-Entry access/update operations MUST reject an index outside the initialized prefix.
+In FSM_DATA v1, every byte in that uninitialized suffix MUST persist as zero. Structural validation MUST reject a nonzero byte in the uninitialized suffix. Entry access/update operations MUST reject an index outside the initialized prefix.
 
 Architecture-authorized FSM maintenance MAY extend or repair the initialized
 prefix as heap pages are published. Entries outside the prefix remain absent
@@ -362,17 +306,11 @@ bucket[1]
 bucket[255]
 ```
 
-Insertion asks the runtime FSM for a candidate category/page capable of satisfying the requested size.
-
-This in-memory accelerator is rebuildable runtime metadata and is **not** part of the persisted `FSM_DATA` format.
-
-The exact runtime data structure, tie-breaking policy, and candidate-search procedure are implementation choices, provided they preserve the persisted FSM semantics and the heap-page revalidation requirement.
+Insertion asks the runtime FSM for a candidate category/page capable of satisfying the requested size. This in-memory accelerator is rebuildable runtime metadata and is **not** part of the persisted `FSM_DATA` format. The exact runtime data structure, tie-breaking policy, and candidate-search procedure are implementation choices, provided they preserve the persisted FSM semantics and the heap-page revalidation requirement.
 
 ## 6.10 Advisory, stale, repairable, and rebuildable semantics
 
-FSM state is a performance optimization.
-
-It is not the sole source of insertion correctness.
+FSM state is a performance optimization. It is not the sole source of insertion correctness.
 
 A candidate path MUST have the form:
 
@@ -392,11 +330,7 @@ A stale category may cause:
 - a usable page to be temporarily overlooked,
 - later FSM repair/rebuild work.
 
-It MUST NOT cause insertion to bypass actual `HeapPage` free-space verification.
-
-Recovery MAY tolerate stale FSM category information.
-
-At startup or during maintenance, the engine MUST be able to repair or rebuild FSM state by scanning heap-page headers.
+It MUST NOT cause insertion to bypass actual `HeapPage` free-space verification. Recovery MAY tolerate stale FSM category information. At startup or during maintenance, the engine MUST be able to repair or rebuild FSM state by scanning heap-page headers.
 
 This allows free-space hint maintenance to remain outside the critical durability path when the recovery contract permits it.
 
@@ -422,11 +356,7 @@ Compaction MUST:
 - retain all non-reclaimed `NORMAL` tuple contents,
 - obey the canonical `DEAD`-slot state rules.
 
-Compaction MAY physically discard tuple bytes only for a slot that is already persistently:
-
-```text
-DEAD
-```
+Compaction MAY physically discard tuple bytes only for a slot that is already persistently `DEAD`.
 
 The page layer does not decide whether a tuple version is globally safe to transition into that state.
 
@@ -447,13 +377,9 @@ slot-directory positions
 SlotId values
 ```
 
-Compaction increases contiguous free space but does not make a `DEAD` slot reusable.
+Compaction increases contiguous free space but does not make a `DEAD` slot reusable. All retained NORMAL and DEAD ranges already satisfy §4.13.3's universal bounds, tuple-decoding, and pairwise non-overlap rules. Compaction revalidates the final local page state before publication.
 
-All retained NORMAL and DEAD ranges already satisfy §4.13.3's universal bounds, tuple-decoding, and pairwise non-overlap rules. Compaction revalidates the final local page state before publication.
-
-Compaction MUST NOT reclaim an MVCC-dead-looking tuple merely from local page evidence.
-
-Only the vacuum/global visibility protocol may decide that a physical version is safe to remove.
+Compaction MUST NOT reclaim an MVCC-dead-looking tuple merely from local page evidence. Only the vacuum/global visibility protocol may decide that a physical version is safe to remove.
 
 ## 6.12 Vacuum physical-reclamation boundary
 
@@ -475,9 +401,7 @@ This sequence defines subsystem responsibilities, not the final crash-safe WAL o
 The exact WAL publication and recovery ordering is owned by §§12.12 and 13.13;
 vacuum reclamation and FSM maintenance are owned by §§14.5–14.12 and 14.16.
 
-A heap page that becomes completely empty remains reusable database space.
-
-The engine is not required to shrink the underlying operating-system file merely because a page becomes empty.
+A heap page that becomes completely empty remains reusable database space. The engine is not required to shrink the underlying operating-system file merely because a page becomes empty.
 
 Physical slot reuse remains subject to the RID-reuse protocol in §§14.5–14.12;
 vacuum eligibility and page compaction alone do not implicitly authorize

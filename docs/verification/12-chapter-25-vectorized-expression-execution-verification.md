@@ -717,7 +717,6 @@ obligations. The two explicit N/A rows delimit unavailable named-function method
 | V25-NA1 | 25.3; 17.9.3 | Actual named-function argument/strictness/volatility execution. | V25-A/C | Closed empty scalar-function registry | Type-System Property Tests registry sweep |
 | V25-NA2 | 25.7.1; 17.9.3 | Malformed function-local state of an otherwise valid named scalar function. | V25-N | Closed empty scalar-function registry | V22-K |
 
-
 Audit Chapter-25-relevant procedures against the ledger for stale eager-demand rules,
 first-physical-error or arbitrary-candidate acceptance, SourceSpan-only ranking, D25-for-DML
 reduction, ordinal/pointer slot identity, payload-count cardinality, dictionary deduplication,
@@ -726,7 +725,6 @@ user-scalar relabeling of malformed states, and partial successful output after 
 A negative example is not a stale rule when its required outcome rejects that behavior.
 Use the matrices above to separate ordinary error invariance from legitimate resource
 feasibility differences.
-
 
 ## Expression Execution Tests
 

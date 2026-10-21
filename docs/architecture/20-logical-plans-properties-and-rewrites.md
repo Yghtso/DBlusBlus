@@ -14,9 +14,7 @@ derived/estimated logical-property placeholder
 debug representation
 ```
 
-Logical operators describe **what relation/result is required**.
-
-They do not encode the physical algorithm used to produce it.
+Logical operators describe **what relation/result is required**. They do not encode the physical algorithm used to produce it.
 
 For example:
 
@@ -42,11 +40,7 @@ multiplicity except as its named contract states.
 
 ## 20.2 Logical output schema and `LogicalSlotId`
 
-Every logical output occurrence has one opaque runtime identity:
-
-```text
-LogicalSlotId
-```
+Every logical output occurrence has one opaque runtime identity `LogicalSlotId`.
 
 The canonical name deliberately distinguishes it from the persisted 16-bit heap `SlotId`.
 
@@ -170,11 +164,7 @@ optional logical predicate set after rewrites
 immutable table/schema descriptor reference
 ```
 
-Its meaning is:
-
-```text
-produce rows of this logical relation
-```
+Its meaning is: `produce rows of this logical relation`.
 
 For each exposed column occurrence under the resolved descriptor,
 `LogicalGet` creates a fresh `LogicalSlotId` and retains lineage equivalent to
@@ -369,9 +359,7 @@ right-local predicates
 residual predicates
 ```
 
-The original semantics remain reconstructible/debuggable.
-
-Outer-join decomposition/pushdown remains constrained by null-extension semantics.
+The original semantics remain reconstructible/debuggable. Outer-join decomposition/pushdown remains constrained by null-extension semantics.
 
 ## 20.9 `LogicalAggregate` and grouping equality
 
@@ -463,9 +451,7 @@ physical class member defines the result representation. This canonicalization
 changes neither the preserved child schema nor its `LogicalSlotId` values.
 `LogicalDistinct` is an explicit exception to the bag multiplicity baseline.
 
-DISTINCT is not hidden as an opaque projection flag.
-
-The optimizer and physical planner must be able to reason about its cost, keys, ordering opportunities, and memory requirements.
+DISTINCT is not hidden as an opaque projection flag. The optimizer and physical planner must be able to reason about its cost, keys, ordering opportunities, and memory requirements.
 
 ## 20.11 `LogicalSort`
 
@@ -557,17 +543,9 @@ semantics defined here.
 
 ### 20.13.1 Hidden system values
 
-Logical plans may carry internal values such as:
+Logical plans may carry internal values such as: `target physical RID`.
 
-```text
-target physical RID
-```
-
-Such slots are marked `system/internal`.
-
-They never appear through `SELECT *` or ordinary user-visible column enumeration.
-
-Projection pruning MUST preserve internal slots required by downstream DML.
+Such slots are marked `system/internal`. They never appear through `SELECT *` or ordinary user-visible column enumeration. Projection pruning MUST preserve internal slots required by downstream DML.
 
 ### 20.13.2 `LogicalInsert`
 
@@ -581,9 +559,7 @@ column coercion/default expressions
 optional RETURNING projection
 ```
 
-Input may be VALUES or SELECT.
-
-Both use the same logical insert contract.
+Input may be VALUES or SELECT. Both use the same logical insert contract.
 
 ### 20.13.3 `LogicalUpdate`
 
@@ -597,9 +573,7 @@ assignment expressions keyed by ColumnId
 optional RETURNING
 ```
 
-The child must preserve the exact target RID needed by Chapter 15's write protocol.
-
-The planner requests old values required to construct the complete new physical tuple version and to evaluate assignments/RETURNING.
+The child must preserve the exact target RID needed by Chapter 15's write protocol. The planner requests old values required to construct the complete new physical tuple version and to evaluate assignments/RETURNING.
 
 ### 20.13.4 `LogicalDelete`
 
@@ -612,11 +586,7 @@ required old values
 optional RETURNING
 ```
 
-DELETE targets one base table.
-
-The child preserves exact row identity through its supported filters/joins.
-
-Physical index cleanup still belongs to vacuum, not LogicalDelete.
+DELETE targets one base table. The child preserves exact row identity through its supported filters/joins. Physical index cleanup still belongs to vacuum, not LogicalDelete.
 
 ### 20.13.5 `LogicalAnalyze`
 
@@ -630,17 +600,9 @@ visible analyzed ColumnIds
 visible analyzed IndexIds
 ```
 
-It has no ordinary relational output requirement in the defined architecture.
+It has no ordinary relational output requirement in the defined architecture. Its semantic meaning is: `collect one new statistics version for this resolved table`.
 
-Its semantic meaning is:
-
-```text
-collect one new statistics version for this resolved table
-```
-
-It does not choose the physical statistics algorithms, mutate catalog descriptors in place, or bypass transaction/catalog visibility.
-
-The resolved descriptor/schema version is fixed at binding/planning time for that statement attempt.
+It does not choose the physical statistics algorithms, mutate catalog descriptors in place, or bypass transaction/catalog visibility. The resolved descriptor/schema version is fixed at binding/planning time for that statement attempt.
 
 ## 20.14 Subquery semantics and support
 
@@ -1292,11 +1254,7 @@ x OR FALSE -> x
 NOT NOT x  -> x
 ```
 
-Rules are expressed in SQL three-valued logic rather than imported from two-valued Boolean algebra.
-
-A rewrite MUST NOT duplicate, drop, or reorder a VOLATILE expression.
-
-The baseline optimizer is conservative around expressions whose evaluation may raise a SQL error; it does not use Boolean algebra merely to hide or newly force such evaluation.
+Rules are expressed in SQL three-valued logic rather than imported from two-valued Boolean algebra. A rewrite MUST NOT duplicate, drop, or reorder a VOLATILE expression. The baseline optimizer is conservative around expressions whose evaluation may raise a SQL error; it does not use Boolean algebra merely to hide or newly force such evaluation.
 
 ### 20.17.3 Predicate pushdown
 
@@ -1423,13 +1381,7 @@ A.x = B.x
 AND A.x = 5
 ```
 
-the optimizer may derive:
-
-```text
-B.x = 5
-```
-
-which may create a new base-access alternative.
+the optimizer may derive: `B.x = 5` which may create a new base-access alternative.
 
 Constraint analysis also detects provable contradictions such as:
 
@@ -1449,9 +1401,7 @@ insensitive.
 
 These are semantic proofs only when they use exact typed constants, Chapter-17 type semantics, and trusted enforced catalog constraints. Statistics-derived min/max, NDV, MCV, histogram, HLL, NULL fraction, row count, or estimated join domains are not constraints and cannot participate in this contradiction proof.
 
-Derived predicates retain ordinary SQL NULL semantics.
-
-No predicate is propagated across nullable outer-join semantics without proof.
+Derived predicates retain ordinary SQL NULL semantics. No predicate is propagated across nullable outer-join semantics without proof.
 
 ### 20.17.9 Trusted key metadata
 
@@ -1591,9 +1541,7 @@ Limit 10
           Get orders
 ```
 
-Debug detail may include `LogicalSlotId`, `TableId`, `BindingId`, types, nullability, lineage, and a provably-empty proof kind distinct from estimated rows.
-
-The logical EXPLAIN representation does not depend on reparsing or pretty-printing the original AST.
+Debug detail may include `LogicalSlotId`, `TableId`, `BindingId`, types, nullability, lineage, and a provably-empty proof kind distinct from estimated rows. The logical EXPLAIN representation does not depend on reparsing or pretty-printing the original AST.
 
 Sections 40.2, 40.5, and 40.8 own EXPLAIN presentation and the relationship
 between logical, selected physical, and execution-analysis information;

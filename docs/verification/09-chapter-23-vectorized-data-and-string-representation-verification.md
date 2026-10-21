@@ -647,7 +647,6 @@ Non-falsifiable Chapter-23 material is accounted for separately:
 | X04 | §23.12 | Filter and simple Project are typical borrowing examples | illustrative navigation; M01–M10 own the actual contract | N/A |
 | X05 | §23.14 | numbered invariants restate detailed §§23.1–23.13 rules | consolidated index; detailed ledger rows are the canonical tests | N/A |
 
-
 The closed-set and stale-language audit for this family requires all of the following:
 
 - no selection oracle uses capacity or vague physical bounds in place of immediate-child

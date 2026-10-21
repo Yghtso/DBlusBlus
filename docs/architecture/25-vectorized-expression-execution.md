@@ -34,11 +34,7 @@ Physical speculation outside semantic demand cannot contribute observable
 values or ordinary errors, including §25.1.1 candidates. Within the demanded
 domain, Chapter-17/20 value, NULL, child-order, and error rules remain exact.
 
-Operator/type/representation dispatch occurs at expression/vector-batch granularity.
-
-The executor does not construct one generic `Value` object per active cell in hot loops.
-
-Physical expression state is query-execution state and does not mutate the immutable bound/logical expression meaning.
+Operator/type/representation dispatch occurs at expression/vector-batch granularity. The executor does not construct one generic `Value` object per active cell in hot loops. Physical expression state is query-execution state and does not mutate the immutable bound/logical expression meaning.
 
 An expression-subquery node dispatches through §20.14.7's occurrence-keyed
 side-plan state rather than recursively running its child once per vector row.
@@ -187,11 +183,7 @@ A fixed-width/vector kernel:
 3. loops over the active logical rows,
 4. writes/references one result Vector.
 
-The effective input index for each active logical row comes from the normalized selection view.
-
-NULL validity is read through the normalized validity view.
-
-Kernels therefore produce representation-independent results for FLAT, CONSTANT, and DICTIONARY inputs.
+The effective input index for each active logical row comes from the normalized selection view. NULL validity is read through the normalized validity view. Kernels therefore produce representation-independent results for FLAT, CONSTANT, and DICTIONARY inputs.
 
 On successful ordinary scalar evaluation, there is exactly one logical result
 occurrence for each demanded input occurrence, with the corresponding mapping,
@@ -216,9 +208,7 @@ else:
     NullableKernel
 ```
 
-Result validity follows Chapter 17's expression semantics.
-
-The kernel uses the resolved physical type directly; it does not switch on SQL type once per row when the batch-level operation is already known.
+Result validity follows Chapter 17's expression semantics. The kernel uses the resolved physical type directly; it does not switch on SQL type once per row when the batch-level operation is already known.
 
 Arithmetic kernels execute the scalar semantics owned by §§17.4.3 and
 17.6.1–17.6.2 over demanded logical occurrences; §§39.3.1–39.3.2 own their
@@ -229,13 +219,9 @@ new type or overload resolution. The closed scalar-function scope remains
 
 ## 25.4 Comparison kernels
 
-Comparison kernels produce SQL BOOLEAN results with nullable validity where ordinary comparison may yield NULL.
+Comparison kernels produce SQL BOOLEAN results with nullable validity where ordinary comparison may yield NULL. For filter contexts, a comparison kernel MAY write matching logical row positions directly to a SelectionVector instead of materializing an intermediate BOOLEAN vector.
 
-For filter contexts, a comparison kernel MAY write matching logical row positions directly to a SelectionVector instead of materializing an intermediate BOOLEAN vector.
-
-VARCHAR comparison uses prefix/length fast rejection where valid and full unsigned byte comparison when required.
-
-FLOAT64 comparison remains compatible with Chapter 17/Chapter 8 semantics.
+VARCHAR comparison uses prefix/length fast rejection where valid and full unsigned byte comparison when required. FLOAT64 comparison remains compatible with Chapter 17/Chapter 8 semantics.
 
 ## 25.5 Vectorized AND short-circuit
 
@@ -275,15 +261,11 @@ A = FALSE or NULL:
     row enters B evaluation subset
 ```
 
-Then combine with SQL three-valued logic.
-
-These selection-based rules preserve the architecture's volatility/error-evaluation boundary: an expression branch that SQL semantics permit to skip is not eagerly executed merely because evaluation is vectorized.
+Then combine with SQL three-valued logic. These selection-based rules preserve the architecture's volatility/error-evaluation boundary: an expression branch that SQL semantics permit to skip is not eagerly executed merely because evaluation is vectorized.
 
 ## 25.7 Result ownership
 
-A computed fixed-width result uses reusable output vector storage owned by the expression/operator state or output chunk.
-
-A computed VARCHAR result owns/copies its bytes into storage whose lifetime covers the returned result vector, normally the output chunk StringHeap for streaming expressions.
+A computed fixed-width result uses reusable output vector storage owned by the expression/operator state or output chunk. A computed VARCHAR result owns/copies its bytes into storage whose lifetime covers the returned result vector, normally the output chunk StringHeap for streaming expressions.
 
 A simple column reference or other exact reference result MAY borrow vector or
 string backing under §§23.10 and 23.12. The borrowed logical view remains

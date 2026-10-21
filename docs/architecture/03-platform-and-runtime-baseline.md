@@ -16,9 +16,7 @@ The Linux-first baseline permits experimentation with facilities such as `io_uri
 
 ## 3.2 Implementation language
 
-The implementation MUST use C++20.
-
-Compiler-specific extensions are not part of the architectural language baseline unless an explicit architecture revision introduces one.
+The implementation MUST use C++20. Compiler-specific extensions are not part of the architectural language baseline unless an explicit architecture revision introduces one.
 
 C++20 was selected because it provides direct control over:
 
@@ -97,11 +95,7 @@ permits independent WAL managers, BufferPools, file registries, recovery
 coordinators, catalog caches, publication owners, or removal owners for that
 root.
 
-The lock object is the existing regular file:
-
-```text
-database_root/database.control
-```
+The lock object is the existing regular file `database_root/database.control`.
 
 An ordinary opener or remover opens the final root with §4.7 no-follow,
 directory-relative rules. A creation-publication owner uses the already

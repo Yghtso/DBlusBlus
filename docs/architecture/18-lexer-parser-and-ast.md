@@ -12,13 +12,7 @@ Parser
 AST
 ```
 
-followed by the separate Binder in Chapter 19.
-
-Parser output represents syntax.
-
-Object lookup, type resolution, and database identity belong to binding.
-
-The front end targets an explicit SQL subset rather than pretending to implement the full SQL standard.
+followed by the separate Binder in Chapter 19. Parser output represents syntax. Object lookup, type resolution, and database identity belong to binding. The front end targets an explicit SQL subset rather than pretending to implement the full SQL standard.
 
 ## 18.2 Token model
 
@@ -62,9 +56,7 @@ optional literal payload
 source offset / diagnostic location
 ```
 
-Token spans use half-open source-byte ranges `[start, end)`.
-
-Line/column information may be cached or derived from byte offsets.
+Token spans use half-open source-byte ranges `[start, end)`. Line/column information may be cached or derived from byte offsets.
 
 ### 18.2.1 Front-end source and payload backing
 
@@ -163,11 +155,7 @@ without prescribing a lexer algorithm.
 
 ## 18.4 Identifier rules
 
-An unquoted identifier has exactly this ASCII grammar:
-
-```text
-[A-Za-z_][A-Za-z0-9_]*
-```
+An unquoted identifier has exactly this ASCII grammar `[A-Za-z_][A-Za-z0-9_]*`.
 
 No non-ASCII byte or NUL is admitted in an unquoted identifier. Canonicalization
 maps each ASCII `A`..`Z` byte to the corresponding `a`..`z` byte and leaves all
@@ -205,11 +193,7 @@ A literal single quote is represented by doubled quote:
 'It''s fine'
 ```
 
-The token payload contains decoded logical bytes while the original source span remains available for diagnostics.
-
-Vendor-specific backslash escape modes are not part of the baseline.
-
-An unterminated string is a source-positioned lexical error.
+The token payload contains decoded logical bytes while the original source span remains available for diagnostics. Vendor-specific backslash escape modes are not part of the baseline. An unterminated string is a source-positioned lexical error.
 
 The exact byte/NUL/no-backslash semantics are the closed §17.5.3 registry.
 
@@ -279,13 +263,7 @@ token separator where required.
 
 ## 18.8 Source locations
 
-Every token and AST source span is the half-open interval:
-
-```text
-SourceSpan = [start_byte_offset, end_byte_offset)
-```
-
-over the original SQL request byte sequence, with:
+Every token and AST source span is the half-open interval: `SourceSpan = [start_byte_offset, end_byte_offset)` over the original SQL request byte sequence, with:
 
 ```text
 0 <= start_byte_offset <= end_byte_offset <= source_byte_length

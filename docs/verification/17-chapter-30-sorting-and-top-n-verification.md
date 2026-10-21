@@ -462,7 +462,6 @@ to their owner row instead of increasing the count.
 | V30-L09 | 30 | Verification preserves container, fan-in, buffer, heap, and run-format freedom. | V30-E–O | alternative-realization audit |
 | V30-L10 | 30, 41 | Every Chapter-30 obligation uses a deterministic independent oracle or exact reuse. | V30-A–O | oracle/reuse audit |
 
-
 ## V30-O — Negative-case and oracle checks
 
 Search all Chapter-30-facing Verification and reject, through the named procedures above:

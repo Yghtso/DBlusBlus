@@ -20,27 +20,11 @@ redo
 loser-transaction status resolution
 ```
 
-Ordinary aborted/crash-loser heap/index bytes may remain physically present.
-
-Correctness is restored through terminal transaction status plus MVCC visibility.
-
-No ordinary user-DML CLR stream is required.
+Ordinary aborted/crash-loser heap/index bytes may remain physically present. Correctness is restored through terminal transaction status plus MVCC visibility. No ordinary user-DML CLR stream is required.
 
 ## 13.2 Database control file
 
-Global recovery/bootstrap metadata lives in exactly:
-
-```text
-database.control
-```
-
-with total size:
-
-```text
-8192 bytes
-```
-
-composed of two alternating 4096-byte slots.
+Global recovery/bootstrap metadata lives in exactly `database.control` with total size: `8192 bytes` composed of two alternating 4096-byte slots.
 
 ### 13.2.1 Control-slot v1 byte layout
 
@@ -66,11 +50,7 @@ Each slot is independently encoded as:
 | `88` | 4008 | reserved bytes, all zero |
 |  | **4096** | **total slot** |
 
-All multi-byte integers are little-endian.
-
-V1 assigns no control flags. Nonzero `flags` or reserved bytes are rejected.
-
-CRC32C is computed over exactly all 4096 slot bytes with bytes `80..83` logically zero.
+All multi-byte integers are little-endian. V1 assigns no control flags. Nonzero `flags` or reserved bytes are rejected. CRC32C is computed over exactly all 4096 slot bytes with bytes `80..83` logically zero.
 
 ### 13.2.2 Initial valid state
 
@@ -123,11 +103,7 @@ latest_checkpoint_end_lsn = 0
 checkpoint_redo_lsn       = 0
 ```
 
-Otherwise all three are nonzero and:
-
-```text
-latest_checkpoint_lsn <= latest_checkpoint_end_lsn
-```
+Otherwise all three are nonzero and: `latest_checkpoint_lsn <= latest_checkpoint_end_lsn`.
 
 During ordinary open, choose the structurally valid slot with the highest `generation`. During crash recovery, a checkpoint-bearing slot is usable only if its referenced checkpoint sequence is still present and validates; candidates may be considered in descending generation order.
 
@@ -135,9 +111,7 @@ Falling back to an older structurally valid slot is legal only when every recove
 
 Lifecycle format dispatch applies before this fallback under §4.14.6. Exact control-family magic with `format_version>1` causes `UNSUPPORTED_DATABASE_FORMAT` and forbids selecting an older v1 slot; v1 cannot validate or compare the future generation/layout. Version zero is an invalid/corrupt slot and remains eligible only for the ordinary independent-slot fallback rules, never as a future format.
 
-Equal-generation valid slots with different contents are corruption.
-
-Generation is uint64 monotonic and MUST NOT wrap. An update when the selected generation is `UINT64_MAX` fails rather than wrapping.
+Equal-generation valid slots with different contents are corruption. Generation is uint64 monotonic and MUST NOT wrap. An update when the selected generation is `UINT64_MAX` fails rather than wrapping.
 
 ### 13.2.4 Alternating update protocol
 
@@ -198,13 +172,7 @@ durably publish new_next
 only then return candidate
 ```
 
-`0` is never assigned by this allocator.
-
-Crash gaps are acceptable.
-
-A catalog-object ID that may have appeared in persistent state is never reused, including after transaction abort.
-
-If increment would overflow uint64 or produce `0`, allocation fails rather than wrapping.
+`0` is never assigned by this allocator. Crash gaps are acceptable. A catalog-object ID that may have appeared in persistent state is never reused, including after transaction abort. If increment would overflow uint64 or produce `0`, allocation fails rather than wrapping.
 
 The exact last candidate is `UINT64_MAX-1`; the carrier maximum remains the
 persisted exhausted `next_catalog_object_id` and is never returned as an object ID.
@@ -220,25 +188,15 @@ persisted exhausted `next_catalog_object_id` and is never returned as an object 
 - successful checkpoint installation,
 - future database-format/global metadata changes.
 
-Ordinary transactions do not rewrite/synchronize the control file.
-
-This keeps commit scalability independent of control-file update latency.
+Ordinary transactions do not rewrite/synchronize the control file. This keeps commit scalability independent of control-file update latency.
 
 ## 13.4 Fuzzy checkpoint goal
 
-A checkpoint does not stop transaction processing merely to force every dirty page.
-
-It captures enough WAL/recovery state to bound later crash recovery while ordinary transactions and page modifications continue.
-
-A completed fuzzy checkpoint does **not** imply that all pages dirtied before it are already in their data files.
+A checkpoint does not stop transaction processing merely to force every dirty page. It captures enough WAL/recovery state to bound later crash recovery while ordinary transactions and page modifications continue. A completed fuzzy checkpoint does **not** imply that all pages dirtied before it are already in their data files.
 
 ## 13.5 Checkpoint identity and capture protocol
 
-A checkpoint is identified persistently by:
-
-```text
-checkpoint_id = CHECKPOINT_BEGIN.lsn
-```
+A checkpoint is identified persistently by: `checkpoint_id = CHECKPOINT_BEGIN.lsn`.
 
 The installed `database.control.latest_checkpoint_lsn` is exactly that BEGIN LSN.
 
@@ -311,17 +269,11 @@ followed by exactly `writer_count` active-writer entries, each 16 bytes:
 8-byte last_wal_lsn
 ```
 
-No internal padding exists between entries.
-
-A DPT snapshot includes every page already dirty before CHECKPOINT_BEGIN that remains dirty when captured, plus any page whose synchronized capture rules require inclusion.
-
-Each `rec_lsn` retains §12.16 semantics and therefore identifies a full recovery image.
+No internal padding exists between entries. A DPT snapshot includes every page already dirty before CHECKPOINT_BEGIN that remains dirty when captured, plus any page whose synchronized capture rules require inclusion. Each `rec_lsn` retains §12.16 semantics and therefore identifies a full recovery image.
 
 BufferPool dirty publication, stable-clean removal, and this capture use the canonical §7.10.5 frame/DPT-transition synchronization. Capture may conservatively retain an entry for a page made durably clean immediately afterward; it MUST NOT miss a clean-to-dirty transition whose recovery image would otherwise precede the installed retention range.
 
-The active-writer table includes every transaction that has produced persistent WAL state and is nonterminal at capture.
-
-A transaction with no persistent writes need not appear.
+The active-writer table includes every transaction that has produced persistent WAL state and is nonterminal at capture. A transaction with no persistent writes need not appear.
 
 ## 13.8 CHECKPOINT_END payload and completeness validation
 
@@ -361,9 +313,7 @@ else:
     checkpoint_redo_lsn = checkpoint_begin_lsn
 ```
 
-Because every dirty interval begins with a full page image, every nonempty DPT `rec_lsn` is itself a reconstructible page-image LSN.
-
-`checkpoint_redo_lsn` may be earlier than `checkpoint_begin_lsn`.
+Because every dirty interval begins with a full page image, every nonempty DPT `rec_lsn` is itself a reconstructible page-image LSN. `checkpoint_redo_lsn` may be earlier than `checkpoint_begin_lsn`.
 
 ## 13.10 WAL recycling
 
@@ -378,13 +328,7 @@ wal_retention_floor = min(
 )
 ```
 
-when a checkpoint is installed.
-
-No WAL segment containing any byte at or after this floor may be recycled.
-
-Also retain every segment containing the installed BEGIN/DATA/END sequence through `latest_checkpoint_end_lsn`.
-
-Because each dirty page's `rec_lsn` identifies a full image, retaining from `checkpoint_redo_lsn` retains a complete reconstructible base for every dirty page captured by the installed checkpoint.
+when a checkpoint is installed. No WAL segment containing any byte at or after this floor may be recycled. Also retain every segment containing the installed BEGIN/DATA/END sequence through `latest_checkpoint_end_lsn`. Because each dirty page's `rec_lsn` identifies a full image, retaining from `checkpoint_redo_lsn` retains a complete reconstructible base for every dirty page captured by the installed checkpoint.
 
 WAL recycling is conservative: retaining too much is permitted; deleting required WAL is corruption.
 
@@ -452,23 +396,13 @@ During the forward analysis scan:
 - later activity updates active/loser writer state,
 - observed TxnIds advance the recovered high-water requirement.
 
-A writer that remains nonterminal at analysis end is a crash loser.
-
-When no checkpoint exists, analysis starts at the oldest retained WAL record required for database creation/recovery.
+A writer that remains nonterminal at analysis end is a crash loser. When no checkpoint exists, analysis starts at the oldest retained WAL record required for database creation/recovery.
 
 ## 13.13 Recovery phase 2: redo
 
-Redo begins at:
+Redo begins at `database.control.checkpoint_redo_lsn` for an installed checkpoint, or the earliest required WAL LSN otherwise.
 
-```text
-database.control.checkpoint_redo_lsn
-```
-
-for an installed checkpoint, or the earliest required WAL LSN otherwise.
-
-This redo scan may therefore begin **before CHECKPOINT_BEGIN**.
-
-That is intentional.
+This redo scan may therefore begin **before CHECKPOINT_BEGIN**. That is intentional.
 
 ### 13.13.1 Page redo
 
@@ -477,9 +411,7 @@ page-record semantics in §§12.8–12.10.3 using §4.8.2's canonical `page_lsn`
 meaning. The WAL-before-data rule in §12.17 remains applicable to any resulting
 dirty-page writeback.
 
-A redo action targeting a TXN_STATUS page wholly below the durable reclaim cutoff is skipped as retired history.
-
-A trusted valid page whose `page_lsn >= record.lsn` skips that page's redo action.
+A redo action targeting a TXN_STATUS page wholly below the durable reclaim cutoff is skipped as retired history. A trusted valid page whose `page_lsn >= record.lsn` skips that page's redo action.
 
 Recovery MUST NOT fail merely because WAL references a missing FileId that is later proven to belong only to uncommitted/private DDL. Redo for an unresolved non-bootstrap FileId may be deferred until catalog ownership is known. It is skipped only when §4.7.6 proves the target unpublished/orphaned; if committed catalog or bootstrap state requires the file, absence is corruption.
 
@@ -491,19 +423,13 @@ When encountered anywhere in the redo scan, including before CHECKPOINT_BEGIN, r
 
 The canonical physical base and ordering are §12.10.5. A retained system `PAGE_INIT`/`PAGE_IMAGE` reconstructs an older, missing, or untrusted status page before a later terminal record is applied. Terminal redo maps the record's TxnId through §9.12, installs exactly `COMMITTED` or `ABORTED`, and sets the status-page `page_lsn` to the terminal-record LSN.
 
-For an intact trusted status page, the same-page serialization rule permits `page_lsn >= terminal_record.lsn` to skip that terminal update. A torn/corrupt page's stored LSN is never used for this decision.
-
-Terminal records below the durable reclaim cutoff are logically retired history and do not recreate punched status pages.
+For an intact trusted status page, the same-page serialization rule permits `page_lsn >= terminal_record.lsn` to skip that terminal update. A torn/corrupt page's stored LSN is never used for this decision. Terminal records below the durable reclaim cutoff are logically retired history and do not recreate punched status pages.
 
 This is required for a retained dirty transaction-status page whose `rec_lsn` predates checkpoint begin and whose terminal status was never forced to the status file.
 
 ### 13.13.3 BTREE_MTR atomicity
 
-A complete valid BTREE_MTR is one committed system mini-transaction for recovery.
-
-For each affected page with older/untrusted state, apply its full image or patches and set `page_lsn = mtr.lsn`.
-
-A torn/incomplete MTR record is not a record and is never partly replayed.
+A complete valid BTREE_MTR is one committed system mini-transaction for recovery. For each affected page with older/untrusted state, apply its full image or patches and set `page_lsn = mtr.lsn`. A torn/incomplete MTR record is not a record and is never partly replayed.
 
 Runtime provisional MTR bytes are irrelevant after crash. If the complete MTR belongs to the valid persisted WAL prefix, redo may reconstruct every affected page/new allocation and root/free-list effect; otherwise recovery retains the pre-MTR durable tree and removes any unpublished appended tail under §4.11.3.
 
@@ -511,11 +437,7 @@ Recovery redo reproduces already-authorized physical heap/index mutations and MU
 
 ## 13.14 Torn/corrupt data pages during redo
 
-If a data-page checksum is invalid during recovery:
-
-```text
-do not trust its stored page_lsn
-```
+If a data-page checksum is invalid during recovery: `do not trust its stored page_lsn`.
 
 Recovery must find an applicable retained complete page image from:
 
@@ -529,19 +451,13 @@ restore that page state, then apply later valid deltas/MTR changes.
 
 For a `TXN_STATUS` page, the applicable retained complete image is the system `PAGE_INIT`/`PAGE_IMAGE` required by §12.10.5; later `TXN_COMMIT`/`TXN_ABORT` records reestablish semantic outcomes. Recovery does not depend on retaining every ancient terminal record that preceded that complete image.
 
-If WAL-retention/checkpoint invariants say the required full image should exist but no valid recoverable image is available, recovery reports unrecoverable corruption.
-
-It MUST NOT guess page contents or trust a torn page's LSN.
+If WAL-retention/checkpoint invariants say the required full image should exist but no valid recoverable image is available, recovery reports unrecoverable corruption. It MUST NOT guess page contents or trust a torn page's LSN.
 
 This reconstruction is the explicit recovery-only exception to ordinary BufferPool load publication in §7.6.4. Recovery may hold untrusted bytes privately while finding a full image, but the complete reconstructed page—or complete atomic B+ MTR result set—must pass §4.13 L0/L1 and applicable L2 validation before ordinary `RESIDENT` publication. Recovery cannot permanently waive a structural invariant.
 
 ## 13.15 Recovery phase 3: loser resolution
 
-For each crash-loser **user** transaction:
-
-```text
-terminal outcome = ABORTED
-```
+For each crash-loser **user** transaction: `terminal outcome = ABORTED`.
 
 No heap/index byte-by-byte undo is performed.
 
@@ -563,11 +479,7 @@ This makes the repaired terminal outcomes durable and avoids repeatedly rediscov
 
 ## 13.16 No ordinary user-DML CLRs
 
-Compensation log records are not required for ordinary user transactions because recovery does not physically undo their heap/index DML.
-
-The architecture must not add CLRs solely to resemble textbook ARIES terminology.
-
-If a future subsystem introduces physical undo that itself must be crash-restartable, that subsystem may introduce an appropriate CLR/undo-progress mechanism.
+Compensation log records are not required for ordinary user transactions because recovery does not physically undo their heap/index DML. The architecture must not add CLRs solely to resemble textbook ARIES terminology. If a future subsystem introduces physical undo that itself must be crash-restartable, that subsystem may introduce an appropriate CLR/undo-progress mechanism.
 
 ## 13.17 Recovery of transaction-status pages
 
@@ -575,13 +487,7 @@ If a future subsystem introduces physical undo that itself must be crash-restart
 
 During recovery, terminal records may repair/update stale transaction-status pages even when their prior data-file image did not include the status change. The physical reconstruction base, record ordering, and FPI/checkpoint behavior are canonical in §12.10.5.
 
-When a terminal status record at LSN `X` is reflected into a status page:
-
-```text
-status_page.page_lsn = X
-```
-
-where appropriate for that page mutation.
+When a terminal status record at LSN `X` is reflected into a status page: `status_page.page_lsn = X` where appropriate for that page mutation.
 
 This is why normal commit does not force the status page itself. Successful acknowledgement still waits for §15.5 C4–C5 runtime terminal publication and coherent cleanup after durable commit WAL.
 
@@ -625,11 +531,7 @@ pending and unowned managed-final files classified for durable orphan cleanup
 
 Pending entries are never required for READY state and may be unlinked before open completes. An unowned final orphan may be removed immediately or queued for the same durable unlink protocol, but it cannot be opened as a committed object. Unknown non-managed directory entries are not removed automatically. Classification must complete before READY; §3.3.3–§3.3.4 define when deletion may remain queued without weakening semantic invisibility.
 
-Only then may database state become:
-
-```text
-READY
-```
+Only then may database state become `READY`.
 
 The `RECOVERING -> READY` publication and normal/background admission
 linearization are §3.3.4; recovery completion alone does not let an individual
@@ -653,11 +555,7 @@ whose outcome is safely represented by the retained status/checkpoint state
 under §§12.10.5.3 and 13.10.
 
 For a user writer reconstructed as nonterminal by §13.12 analysis, if no
-complete `TXN_COMMIT` for that transaction belongs to the valid retained WAL prefix:
-
-```text
-recovery classifies the transaction as a loser/ABORTED
-```
+complete `TXN_COMMIT` for that transaction belongs to the valid retained WAL prefix: `recovery classifies the transaction as a loser/ABORTED`.
 
 If a complete commit record survived in that valid prefix—even though the process had not advanced `durable_lsn` or acknowledged the client—recovery classifies it COMMITTED. This is the crash form of §39.1.5 client outcome uncertainty.
 

@@ -36,13 +36,7 @@ This chapter owns:
 - transaction-status lookup/publication semantics,
 - read-only transaction behavior.
 
-Chapter 10 owns tuple visibility.
-
-Chapter 11 owns logical write/uniqueness conflicts.
-
-WAL record formats and commit flushing are owned by §§12.2–12.15; checkpoints and crash reconstruction are owned by §§13.4–13.19.
-
-A shortcut in one subsystem MUST NOT violate the identity, visibility, durability, conflict, or reclamation rules of another.
+Chapter 10 owns tuple visibility. Chapter 11 owns logical write/uniqueness conflicts. WAL record formats and commit flushing are owned by §§12.2–12.15; checkpoints and crash reconstruction are owned by §§13.4–13.19. A shortcut in one subsystem MUST NOT violate the identity, visibility, durability, conflict, or reclamation rules of another.
 
 ## 9.2 Transaction identifiers
 
@@ -56,11 +50,7 @@ FROZEN_TXN_ID       = 1
 FIRST_NORMAL_TXN_ID = 2
 ```
 
-Normal transaction IDs are monotonically allocated beginning at:
-
-```text
-2
-```
+Normal transaction IDs are monotonically allocated beginning at `2`.
 
 A normal transaction ID MUST NOT be reused after it has entered a durably reserved allocation range, even if a crash occurs before that ID is actually handed to a transaction.
 
@@ -74,9 +64,7 @@ For visibility purposes:
 FROZEN_TXN_ID -> COMMITTED
 ```
 
-The 64-bit space makes numerical wraparound practically irrelevant for the intended system lifetime.
-
-The allocator MUST NOT wrap and reuse old normal transaction IDs.
+The 64-bit space makes numerical wraparound practically irrelevant for the intended system lifetime. The allocator MUST NOT wrap and reuse old normal transaction IDs.
 
 The last normal TxnId the architecture can reserve/allocate is the exact fixed-block value in
 §4.3.2.1; larger uint64 values are not a partial final reservation block.
@@ -85,33 +73,11 @@ Freezing exists to permit eventual transaction-status reclamation, not primarily
 
 ## 9.3 Durable transaction-ID reservation
 
-The transaction allocator reserves normal TxnIds in durable blocks rather than synchronizing durable control metadata for every `BEGIN`.
+The transaction allocator reserves normal TxnIds in durable blocks rather than synchronizing durable control metadata for every `BEGIN`. The reservation block size is exactly: `1,048,576 transaction IDs`.
 
-The reservation block size is exactly:
+Durable global control metadata stores `reserved_txn_id_end`.
 
-```text
-1,048,576 transaction IDs
-```
-
-Durable global control metadata stores:
-
-```text
-reserved_txn_id_end
-```
-
-The architecture defines this value as an **exclusive upper bound**.
-
-At any instant, the durable reserved normal-TxnId space is:
-
-```text
-[FIRST_NORMAL_TXN_ID, reserved_txn_id_end)
-```
-
-and the allocator's current usable in-memory suffix is:
-
-```text
-[next_txn_id, reserved_txn_id_end)
-```
+The architecture defines this value as an **exclusive upper bound**. At any instant, the durable reserved normal-TxnId space is: `[FIRST_NORMAL_TXN_ID, reserved_txn_id_end)` and the allocator's current usable in-memory suffix is: `[next_txn_id, reserved_txn_id_end)`.
 
 A newly initialized database begins with:
 
@@ -122,13 +88,7 @@ reserved_txn_id_end = FIRST_NORMAL_TXN_ID
 
 which means no normal TxnId has yet been durably reserved.
 
-Before the allocator can hand out the first normal TxnId—or any later ID when:
-
-```text
-next_txn_id == reserved_txn_id_end
-```
-
-it performs the block-reservation protocol:
+Before the allocator can hand out the first normal TxnId—or any later ID when: `next_txn_id == reserved_txn_id_end` it performs the block-reservation protocol:
 
 ```text
 old_end = reserved_txn_id_end
@@ -154,11 +114,7 @@ If adding the next exact reservation block would exceed
 `MAX_RESERVED_TXN_ID_END` in §4.3.2.1, beginning a new transaction returns
 `TXN_ID_EXHAUSTED` rather than shrinking the block, wrapping, or reusing an old ID.
 
-After a crash, unused IDs from an already durable reservation MAY be skipped permanently.
-
-An ID that may have appeared in persistent database state MUST never be reused.
-
-The database-control-file physical layout and torn-update protocol are owned by §§13.2.1–13.2.4.
+After a crash, unused IDs from an already durable reservation MAY be skipped permanently. An ID that may have appeared in persistent database state MUST never be reused. The database-control-file physical layout and torn-update protocol are owned by §§13.2.1–13.2.4.
 
 ## 9.4 Transaction object and lifecycle state
 
@@ -233,11 +189,7 @@ ACTIVE -> MUST_ABORT -> ABORTING -> ABORTED
 
 `COMMITTING -> MUST_ABORT` is legal only when commit fails or is canceled before the publication-authorizing `TXN_COMMIT` append. After that append, `COMMITTING` cannot transition to `MUST_ABORT`, `ABORTING`, or `ABORTED`; §39.1 owns completion/failure semantics from that point. State transitions are monotonic.
 
-`COMMITTING` and `ABORTING` are transient lifecycle states.
-
-`COMMITTED` and `ABORTED` are terminal states.
-
-A terminal transaction MUST NOT transition back to an active/transient state.
+`COMMITTING` and `ABORTING` are transient lifecycle states. `COMMITTED` and `ABORTED` are terminal states. A terminal transaction MUST NOT transition back to an active/transient state.
 
 Transaction admission is additionally gated by the database-owner state in
 §3.3: only `READY` may create/admit an ordinary transaction or statement.
@@ -255,21 +207,11 @@ READ COMMITTED
 REPEATABLE READ
 ```
 
-The default is:
+The default is: `READ COMMITTED`.
 
-```text
-READ COMMITTED
-```
+`REPEATABLE READ` implements: `snapshot isolation`.
 
-`REPEATABLE READ` implements:
-
-```text
-snapshot isolation
-```
-
-It is **not** full serializability.
-
-The SQL surface, documentation, diagnostics, and tests MUST NOT describe snapshot isolation as SERIALIZABLE.
+It is **not** full serializability. The SQL surface, documentation, diagnostics, and tests MUST NOT describe snapshot isolation as SERIALIZABLE.
 
 Deferred isolation/concurrency mechanisms include:
 
@@ -282,19 +224,9 @@ key-range locking
 
 ## 9.6 Command IDs
 
-Each SQL statement inside one transaction executes under one:
+Each SQL statement inside one transaction executes under one `CommandId`.
 
-```text
-CommandId
-```
-
-The initial command ID is:
-
-```text
-0
-```
-
-and `CommandId{0}` is a valid command ID.
+The initial command ID is `0` and `CommandId{0}` is a valid command ID.
 
 The command layer assigns the current CommandId once when it admits one nonterminal SQL statement in an `ACTIVE` transaction. Every internal attempt/retry of that same logical statement uses that same CommandId.
 
@@ -339,13 +271,7 @@ xmax =
     next normal transaction ID that has not yet been assigned
 ```
 
-A normal transaction satisfying:
-
-```text
-txn_id >= snapshot.xmax
-```
-
-started too late to be visible to that snapshot.
+A normal transaction satisfying: `txn_id >= snapshot.xmax` started too late to be visible to that snapshot.
 
 ### 9.7.2 active
 
@@ -377,9 +303,7 @@ COMMITTING
 ABORTING
 ```
 
-as applicable at the capture instant.
-
-A transaction represented in `active` remains invisible to this snapshot even if it commits later.
+as applicable at the capture instant. A transaction represented in `active` remains invisible to this snapshot even if it commits later.
 
 The `active` representation is a sorted vector. Membership testing MAY use binary search or another semantically equivalent lookup over that vector; it MUST preserve the captured membership, owner exclusion, snapshot stability, and sorted order used by §9.7.3's `xmin` derivation.
 
@@ -396,27 +320,15 @@ else:
     xmin = xmax
 ```
 
-The owner TxnId does not reduce `xmin`.
-
-This separation is intentional.
-
-For example, a READ COMMITTED transaction that is old but currently executing a statement with no older competing active transaction does not pin the vacuum horizon merely because its own TxnId is small.
+The owner TxnId does not reduce `xmin`. This separation is intentional. For example, a READ COMMITTED transaction that is old but currently executing a statement with no older competing active transaction does not pin the vacuum horizon merely because its own TxnId is small.
 
 The authoritative vacuum horizon remains the registry of active SQL snapshots, not the existence or age of transactions themselves.
 
 ### 9.7.4 owner and command
 
-```text
-owner_txn_id
-```
+`owner_txn_id` identifies the transaction evaluating visibility.
 
-identifies the transaction evaluating visibility.
-
-```text
-command_id
-```
-
-captures the statement-order boundary used by same-transaction `cmin/cmax` visibility.
+`command_id` captures the statement-order boundary used by same-transaction `cmin/cmax` visibility.
 
 ## 9.8 Snapshot capture synchronization
 
@@ -464,9 +376,7 @@ remain §9.7.3. The TxnId is stable once this registration publication assigns i
 below-cutoff candidate is not issued, no assigned TxnId is replaced, and retired status is
 not resurrected.
 
-The snapshot/registry synchronization is held only for capture/registration bookkeeping.
-
-It MUST NOT be held while executing the query or statement.
+The snapshot/registry synchronization is held only for capture/registration bookkeeping. It MUST NOT be held while executing the query or statement.
 
 ## 9.9 READ COMMITTED snapshot lifetime
 
@@ -488,37 +398,19 @@ consume current_command_id
 
 This applies to both `SUCCESS` and `FAILED_TRANSACTION_REMAINS_ACTIVE`. The next READ COMMITTED statement captures a fresh statement snapshot and receives the next CommandId; it never reuses the failed statement's snapshot or CommandId.
 
-Two statements in the same READ COMMITTED transaction may therefore observe different committed database states.
-
-If an internal retry is permitted by the exact §15.7 boundary, the abandoned attempt unregisters its old statement snapshot and the retry captures a fresh READ COMMITTED statement snapshot.
+Two statements in the same READ COMMITTED transaction may therefore observe different committed database states. If an internal retry is permitted by the exact §15.7 boundary, the abandoned attempt unregisters its old statement snapshot and the retry captures a fresh READ COMMITTED statement snapshot.
 
 If the conflict occurs after the attempt has installed a persistent statement write, §15.7 requires transaction abort rather than same-transaction statement restart.
 
 ## 9.10 REPEATABLE READ snapshot lifetime
 
-For REPEATABLE READ, capture the transaction snapshot at the beginning of the first ordinary statement.
+For REPEATABLE READ, capture the transaction snapshot at the beginning of the first ordinary statement. Reuse that snapshot for later statements. The fixed transaction snapshot retains its transaction-ID visibility horizon, while `snapshot.command_id` is updated for each statement so same-transaction command visibility remains correct.
 
-Reuse that snapshot for later statements.
-
-The fixed transaction snapshot retains its transaction-ID visibility horizon, while:
-
-```text
-snapshot.command_id
-```
-
-is updated for each statement so same-transaction command visibility remains correct.
-
-The transaction snapshot remains registered until transaction end.
-
-A long-running REPEATABLE READ transaction may therefore pin the global vacuum horizon.
+The transaction snapshot remains registered until transaction end. A long-running REPEATABLE READ transaction may therefore pin the global vacuum horizon.
 
 ## 9.11 Transaction-status store
 
-Persistent transaction outcome metadata lives in:
-
-```text
-txn_status.dat
-```
+Persistent transaction outcome metadata lives in `txn_status.dat`.
 
 The file is page based:
 
@@ -527,19 +419,9 @@ page 0       FileSuperblock with FileKind::TXN_STATUS
 page 1..N    TXN_STATUS pages
 ```
 
-The persisted file-kind code is:
+The persisted file-kind code is: `FileKind::TXN_STATUS = 5`.
 
-```text
-FileKind::TXN_STATUS = 5
-```
-
-`FileSuperblock.object_id` is:
-
-```text
-0
-```
-
-for this singleton database-wide file.
+`FileSuperblock.object_id` is `0` for this singleton database-wide file.
 
 The persistent two-bit status codes are:
 
@@ -554,17 +436,9 @@ The persistent two-bit status codes are:
 
 ### 9.11.1 RESERVED semantics
 
-`RESERVED` is a legal decoded bit pattern but is **not emitted by the normal transaction-begin path**.
+`RESERVED` is a legal decoded bit pattern but is **not emitted by the normal transaction-begin path**. All four two-bit patterns are KNOWN under §4.14.4. `RESERVED` is therefore interpreted with this subsection's nonterminal semantics, not rejected as an unknown future enum and not confused with REDIRECT_RESERVED.
 
-All four two-bit patterns are KNOWN under §4.14.4. `RESERVED` is therefore interpreted with this subsection's nonterminal semantics, not rejected as an unknown future enum and not confused with REDIRECT_RESERVED.
-
-The normal execution path uses:
-
-```text
-active registry
-```
-
-for in-progress transactions and writes a terminal status only when COMMITTED/ABORTED is published.
+The normal execution path uses: `active registry` for in-progress transactions and writes a terminal status only when COMMITTED/ABORTED is published.
 
 Therefore correctness does not require materializing one `RESERVED` status for every TxnId covered by the durable block reservation.
 
@@ -590,11 +464,7 @@ common reserved16 = 0
 page_no           = actual status-file PageNo
 ```
 
-The persisted page-type code is:
-
-```text
-PageType::TXN_STATUS = 7
-```
+The persisted page-type code is: `PageType::TXN_STATUS = 7`.
 
 Therefore:
 
@@ -604,13 +474,7 @@ status payload bytes =
     = 8160
 ```
 
-At:
-
-```text
-4 two-bit status entries per byte
-```
-
-one status page represents exactly:
+At: `4 two-bit status entries per byte` one status page represents exactly:
 
 ```text
 8160 * 4
@@ -626,13 +490,7 @@ Reserved TxnIds:
 
 do **not** consume ordinary status entries.
 
-For a normal TxnId:
-
-```text
-txn_id >= FIRST_NORMAL_TXN_ID
-```
-
-define:
+For a normal TxnId: `txn_id >= FIRST_NORMAL_TXN_ID` define:
 
 ```text
 ordinal =
@@ -657,11 +515,7 @@ bit_shift =
     2 * two_bit_index
 ```
 
-The two-bit field is packed LSB-first within the payload byte:
-
-```text
-mask = 0x3 << bit_shift
-```
+The two-bit field is packed LSB-first within the payload byte: `mask = 0x3 << bit_shift`.
 
 Extraction is:
 
@@ -670,15 +524,7 @@ code =
     (page[page_byte_offset] >> bit_shift) & 0x3
 ```
 
-Updating one entry replaces only those two bits.
-
-All mapping arithmetic MUST be checked before physical page access.
-
-A freshly initialized TXN_STATUS page is zero-filled, so every unmodified status slot begins canonically as:
-
-```text
-INVALID = 00
-```
+Updating one entry replaces only those two bits. All mapping arithmetic MUST be checked before physical page access. A freshly initialized TXN_STATUS page is zero-filled, so every unmodified status slot begins canonically as: `INVALID = 00`.
 
 A TXN_STATUS decoder MUST reject:
 
@@ -735,9 +581,7 @@ INVALID
 RESERVED
 ```
 
-are nonterminal results and MUST NOT be promoted to committed/aborted by guesswork.
-
-`SELF`, `IN_PROGRESS`, and `RETIRED` are lookup results, not additional persisted two-bit codes.
+are nonterminal results and MUST NOT be promoted to committed/aborted by guesswork. `SELF`, `IN_PROGRESS`, and `RETIRED` are lookup results, not additional persisted two-bit codes.
 
 A persistent tuple field or other correctness object whose interpretation requires
 the status of a normal TxnId which is:
@@ -748,9 +592,7 @@ not terminal
 and not legally replaceable by FROZEN_TXN_ID under the retained-status cutoff
 ```
 
-after completed recovery indicates corruption or an invariant failure.
-
-The engine MUST NOT silently treat unknown or retired history as committed.
+after completed recovery indicates corruption or an invariant failure. The engine MUST NOT silently treat unknown or retired history as committed.
 
 This rule applies to a field whose interpretation still requires `Status(txn_id)`.
 It does not turn every persisted numeric TxnId into a status-retention reference.
@@ -801,13 +643,7 @@ Thus another writer observes either:
 nonterminal transaction + its logical locks still protect the conflict
 ```
 
-or:
-
-```text
-terminal transaction outcome
-```
-
-never `IN_PROGRESS` after the conflicting transaction's locks have been released.
+or: `terminal transaction outcome` never `IN_PROGRESS` after the conflicting transaction's locks have been released.
 
 ### 9.14.2 Commit
 
@@ -815,23 +651,15 @@ The integrated COMMIT sequence is canonical in §15.5.
 
 This chapter owns the transaction-lifecycle requirement that terminal COMMITTED state is published through §9.14.1's linearization point only after the required durable commit WAL exists. The transaction-status page remains NO-FORCE; durable commit WAL is authoritative after crash.
 
-The physical transaction-status page mutation follows the full-image/terminal-record protocol in §12.10.5. Installing the status bits in a resident page is not the runtime terminal-publication linearization point.
-
-Durable `TXN_COMMIT` is nevertheless already the irreversible semantic outcome. Failure before §9.14.1 completes cannot publish ABORTED; it follows §39.1.5's committed-but-runtime-noncontinuable/client-uncertain rule.
+The physical transaction-status page mutation follows the full-image/terminal-record protocol in §12.10.5. Installing the status bits in a resident page is not the runtime terminal-publication linearization point. Durable `TXN_COMMIT` is nevertheless already the irreversible semantic outcome. Failure before §9.14.1 completes cannot publish ABORTED; it follows §39.1.5's committed-but-runtime-noncontinuable/client-uncertain rule.
 
 ### 9.14.3 Abort
 
-The integrated ABORT sequence is canonical in §15.6.
+The integrated ABORT sequence is canonical in §15.6. This chapter owns the transaction-lifecycle requirement that ABORTED publication uses §9.14.1's terminal linearization point before transaction-lifetime locks are released.
 
-This chapter owns the transaction-lifecycle requirement that ABORTED publication uses §9.14.1's terminal linearization point before transaction-lifetime locks are released.
+An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort. If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again. The physical transaction-status page mutation follows §12.10.5 even when the terminal record is a recovery-generated `TXN_ABORT`.
 
-An ordinary abort does not require immediate abort-WAL `fdatasync` merely to acknowledge abort. If abort WAL is lost in a crash, recovery treats the transaction as a loser and establishes ABORTED again.
-
-The physical transaction-status page mutation follows §12.10.5 even when the terminal record is a recovery-generated `TXN_ABORT`.
-
-Ordinary user abort does not physically restore heap/index bytes.
-
-Known/uncertain abort-publication failures and mandatory cleanup from `MUST_ABORT` follow §39.1.6; no abort failure restores commit eligibility or permits early lock release.
+Ordinary user abort does not physically restore heap/index bytes. Known/uncertain abort-publication failures and mandatory cleanup from `MUST_ABORT` follow §39.1.6; no abort failure restores commit eligibility or permits early lock release.
 
 ## 9.15 Read-only transactions
 

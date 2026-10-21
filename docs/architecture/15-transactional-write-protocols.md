@@ -2,19 +2,13 @@
 
 ## 15.1 Scope and ownership
 
-This chapter integrates the component contracts from heap/tuple storage, FSM, BufferPool, B+ tree, transactions/snapshots, LockManager, WAL/CommitCoordinator, and vacuum.
+This chapter integrates the component contracts from heap/tuple storage, FSM, BufferPool, B+ tree, transactions/snapshots, LockManager, WAL/CommitCoordinator, and vacuum. It defines cross-subsystem ordering for user DML and transaction completion.
 
-It defines cross-subsystem ordering for user DML and transaction completion.
-
-The owning subsystem chapters remain authoritative for their local byte formats, visibility algorithms, lock semantics, WAL codecs, and recovery rules.
-
-These responsibilities MUST NOT collapse into one monolithic “transaction engine” abstraction that hides ownership/lifetime boundaries.
+The owning subsystem chapters remain authoritative for their local byte formats, visibility algorithms, lock semantics, WAL codecs, and recovery rules. These responsibilities MUST NOT collapse into one monolithic “transaction engine” abstraction that hides ownership/lifetime boundaries.
 
 ### 15.1.1 DDL writer-gate integration
 
-Before the first persistent write to target table `T`, a DML transaction acquires the shared `TableWriterGate(T)` defined by §21.2.1 and holds it until terminal transaction publication.
-
-The gate is acquired before TUPLE_WRITE/UNIQUE_KEY locks and before any heap/B+ latch that could be retained across a wait.
+Before the first persistent write to target table `T`, a DML transaction acquires the shared `TableWriterGate(T)` defined by §21.2.1 and holds it until terminal transaction publication. The gate is acquired before TUPLE_WRITE/UNIQUE_KEY locks and before any heap/B+ latch that could be retained across a wait.
 
 Ordinary DML transactions may hold shared gates for multiple target tables; shared gates do not conflict with one another.
 
@@ -349,9 +343,7 @@ authoritative target:
 3. hold logical locks through terminal transaction publication
 ```
 
-Commit makes the version dead to sufficiently new snapshots.
-
-Abort makes the `xmax` ineffective.
+Commit makes the version dead to sufficiently new snapshots. Abort makes the `xmax` ineffective.
 
 The retained old-key lock ensures another transaction cannot treat this delete as freeing the key before COMMITTED publication. If DELETE aborts, a waiter rechecks after ABORTED publication and observes the old owner through §11.10.
 
@@ -444,11 +436,7 @@ A4. only then acknowledge explicit ROLLBACK or return the transaction-fatal
     statement's original error with transaction outcome ABORTED
 ```
 
-Ordinary abort performs no write-set scan to restore old heap/index bytes.
-
-Aborted physical versions and index entries remain vacuum input.
-
-A transaction whose COMMIT is already durable is no longer eligible to transition to ABORTED.
+Ordinary abort performs no write-set scan to restore old heap/index bytes. Aborted physical versions and index entries remain vacuum input. A transaction whose COMMIT is already durable is no longer eligible to transition to ABORTED.
 
 Ordinary ABORT does not wait for `abort_lsn` durability before runtime ABORTED publication, but §12.17 prevents its dirty status page from reaching disk before WAL is durable through that page's current `page_lsn`. If the abort record is lost in a crash, loser resolution repeats the canonical ABORT protocol.
 
@@ -458,25 +446,13 @@ An abort-path failure never restores commit eligibility. The exact retry, noncon
 
 ## 15.7 READ COMMITTED retry boundary
 
-The architecture does **not** provide statement-level physical undo, savepoints, or subtransaction outcome IDs.
-
-Therefore one statement attempt tracks process-local:
-
-```text
-current_statement_has_published_write
-```
+The architecture does **not** provide statement-level physical undo, savepoints, or subtransaction outcome IDs. Therefore one statement attempt tracks process-local `current_statement_has_published_write`.
 
 Its exact transition is §39.1.2: it becomes true at the first transaction-owned WAL-backed database mutation publication, not at LSN reservation or provisional mutation.
 
 ### 15.7.1 Retry before the first persistent write
 
-If a READ COMMITTED conflict requires fresh-snapshot restart while:
-
-```text
-current_statement_has_published_write == false
-```
-
-then the engine may:
+If a READ COMMITTED conflict requires fresh-snapshot restart while: `current_statement_has_published_write == false` then the engine may:
 
 ```text
 release attempt-local resources
@@ -496,13 +472,7 @@ Chapter 11, but neither retained resource carries an affected-row contribution f
 
 ### 15.7.2 Conflict after a persistent statement write
 
-If a conflict requiring statement restart is discovered after:
-
-```text
-current_statement_has_published_write == true
-```
-
-the architecture MUST NOT restart that statement inside the same transaction.
+If a conflict requiring statement restart is discovered after: `current_statement_has_published_write == true` the architecture MUST NOT restart that statement inside the same transaction.
 
 Instead:
 
@@ -517,17 +487,11 @@ conflict after ABORT; the client/application may submit a new request, which rec
 **new TxnId**. The architecture does not define an explicit opt-in whole-request retry
 policy, and no separate request may reuse this transaction identity.
 
-An explicit user transaction is terminally aborted by this failure and the client/application decides whether to begin a new transaction and retry.
-
-This is necessary because writes from the abandoned statement attempt would otherwise become visible if the same transaction later advanced `CommandId`.
+An explicit user transaction is terminally aborted by this failure and the client/application decides whether to begin a new transaction and retry. This is necessary because writes from the abandoned statement attempt would otherwise become visible if the same transaction later advanced `CommandId`.
 
 ### 15.7.3 External output
 
-Even a pre-write-retryable statement MUST NOT expose irreversible external rows/side effects before its retry-safe point.
-
-`RETURNING` output is buffered until the attempt can no longer internally restart.
-
-Physical DML applies the stronger §31.9 publication rule: no partial RETURNING prefix is exposed from a statement that later fails, so external emission begins only after successful statement completion.
+Even a pre-write-retryable statement MUST NOT expose irreversible external rows/side effects before its retry-safe point. `RETURNING` output is buffered until the attempt can no longer internally restart. Physical DML applies the stronger §31.9 publication rule: no partial RETURNING prefix is exposed from a statement that later fails, so external emission begins only after successful statement completion.
 
 For DML, successful completion becomes externally authoritative only through
 §31.9's atomic result-publication boundary `R`. Before `R`, result state remains

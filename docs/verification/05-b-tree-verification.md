@@ -779,7 +779,6 @@ owner. Cross-owner references are dependencies, not duplicate ownership.
 | 166 (M10) | Delete-safe and delete-unsafe children release or retain ancestors according to propagation risk | §8.19.2 | Latching, write crabbing, and cursor lifetime | Deterministic fixture/oracle |
 | 167 (M11) | Optimistic ancestor release is followed by required structural revalidation or restart | §8.19.2 | Latching, write crabbing, and cursor lifetime | Deterministic fixture/oracle |
 
-
 ---
 
 ## B+ Tree Benchmarks

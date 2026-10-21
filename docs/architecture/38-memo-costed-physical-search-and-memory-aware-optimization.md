@@ -20,9 +20,7 @@ or
 FIRST_K_ROWS(K)
 ```
 
-and is not itself a physical property.
-
-When a finite required-rows objective is semantically propagated into a subproblem, it participates in memo/search identity because a low-startup plan may be preferable to the full-result cheapest plan.
+and is not itself a physical property. When a finite required-rows objective is semantically propagated into a subproblem, it participates in memo/search identity because a low-startup plan may be preferable to the full-result cheapest plan.
 
 For join enumeration, the common memo identity is conceptually:
 
@@ -36,11 +34,7 @@ required/interesting OrderingProperty class
 propagated RequiredRowsObjective class
 ```
 
-When required slots are uniquely derived for the RelationSet and no finite row objective is propagated, this reduces to the traditional:
-
-```text
-RelationSet + OrderingProperty
-```
+When required slots are uniquely derived for the RelationSet and no finite row objective is propagated, this reduces to the traditional: `RelationSet + OrderingProperty`.
 
 System-R-style key.
 
@@ -63,9 +57,7 @@ capability/feasibility state
 canonical structural tie key
 ```
 
-Plan prototypes are optimizer/query-planning-arena objects.
-
-They contain no execution-time mutable operator state.
+Plan prototypes are optimizer/query-planning-arena objects. They contain no execution-time mutable operator state.
 
 ## 38.3 Dominance
 
@@ -79,15 +71,9 @@ A is no worse under the active cost objective
 A has no relevant feasibility disadvantage
 ```
 
-For full-result optimization, the main objective is total cost.
+For full-result optimization, the main objective is total cost. For a propagated `FIRST_K_ROWS` objective, startup/partial-run cost participates in the comparison. A cheaper unordered plan therefore does **not** dominate a slightly more expensive interesting-order plan that can avoid a downstream sort.
 
-For a propagated `FIRST_K_ROWS` objective, startup/partial-run cost participates in the comparison.
-
-A cheaper unordered plan therefore does **not** dominate a slightly more expensive interesting-order plan that can avoid a downstream sort.
-
-Likewise, a lower-total-cost high-startup plan does not automatically dominate a low-startup alternative when the memo key carries a finite required-rows objective.
-
-Dominated alternatives are discarded promptly.
+Likewise, a lower-total-cost high-startup plan does not automatically dominate a low-startup alternative when the memo key carries a finite required-rows objective. Dominated alternatives are discarded promptly.
 
 ## 38.4 Cost ties and deterministic choice
 
@@ -101,11 +87,7 @@ nonnegative
 `cost_tie_relative_epsilon` is a mandatory finite binary64 optimizer-search
 configuration value in the half-open interval `[0, 1)`. Zero is valid and
 means that only exactly equal objective costs share the minimum-cost tie
-window. Its default is:
-
-```text
-cost_tie_relative_epsilon = 1e-9
-```
+window. Its default is: `cost_tie_relative_epsilon = 1e-9`.
 
 The value is validated with the other Chapter-33 optimizer configuration before
 physical alternative comparison and is retained unchanged for one optimizer
@@ -217,13 +199,7 @@ inside one optimizer build/configuration. Distinct physical plans must differ
 in at least one authoritative field; changing construction, allocator, or
 unordered-container iteration order does not change the resulting key.
 
-A debug:
-
-```text
-PlanFingerprint
-```
-
-may additionally hash a canonical serialization of this full key with FNV-1a-64 for compact display/regression tracking.
+A debug `PlanFingerprint` may additionally hash a canonical serialization of this full key with FNV-1a-64 for compact display/regression tracking.
 
 The hash alone never defines semantic or memo identity, merges alternatives,
 decides correctness or tie order, or bypasses slots/properties/validation,
@@ -244,9 +220,7 @@ For every base relation occurrence:
 
 If the logical base subtree is not semantically proven empty, these runtime alternatives remain eligible even when its shared estimated cardinality is zero. Dominance and zero cost cannot reinterpret that estimate as an empty-result rewrite.
 
-The same logical base cardinality is shared by all physical access alternatives.
-
-A scan method never receives a different SQL row estimate merely to make its cost more attractive.
+The same logical base cardinality is shared by all physical access alternatives. A scan method never receives a different SQL row estimate merely to make its cost more attractive.
 
 ## 38.7 Join-DP transition
 
@@ -264,13 +238,7 @@ for each legal deterministic partition S = A ∪ B:
     insert if non-dominated
 ```
 
-Cardinality is cached by logical relation/predicate identity when possible.
-
-Physical costs/properties remain alternative-specific.
-
-The transition does not mutate the logical plan or statistics snapshot.
-
-A zero logical join-cardinality estimate affects cost only. It does not skip construction of a semantically required join or create semantic proof in the memo.
+Cardinality is cached by logical relation/predicate identity when possible. Physical costs/properties remain alternative-specific. The transition does not mutate the logical plan or statistics snapshot. A zero logical join-cardinality estimate affects cost only. It does not skip construction of a semantically required join or create semantic proof in the memo.
 
 ## 38.8 Hash-join cost
 
@@ -291,13 +259,7 @@ residual predicate CPU
 estimated memory/spill cost
 ```
 
-Build payload width is the pruned width from §38.18 rather than the full base-row width.
-
-Hash-table setup has nonzero startup cost.
-
-For INNER joins, both supported build orientations are costed.
-
-For LEFT joins, only the supported preserved/probe orientation is enumerated.
+Build payload width is the pruned width from §38.18 rather than the full base-row width. Hash-table setup has nonzero startup cost. For INNER joins, both supported build orientations are costed. For LEFT joins, only the supported preserved/probe orientation is enumerated.
 
 ## 38.9 Hash-join memory and spill
 
@@ -364,17 +326,9 @@ load factor prevents division by zero. A zero estimated build cardinality may
 produce zero estimated row-dependent memory, but it is not semantic-empty
 proof and does not remove the executable build.
 
-When usable join-key NDV exists, implementations may refine directory-entry count separately from duplicate-row storage, but must not undercount the actual retained build payload.
+When usable join-key NDV exists, implementations may refine directory-entry count separately from duplicate-row storage, but must not undercount the actual retained build payload. Compare estimated required memory with the planner-assigned operator memory target.
 
-Compare estimated required memory with the planner-assigned operator memory target.
-
-If required memory exceeds the target:
-
-```text
-spill expected
-```
-
-and add:
+If required memory exceeds the target: `spill expected` and add:
 
 ```text
 partition write(build + probe bytes)
@@ -422,9 +376,7 @@ outer_rows * inner_rows * predicate CPU
 output/materialization CPU
 ```
 
-This can beat hash join for very small inner inputs because hash construction has real startup/memory cost.
-
-Materializing/copying the inner side is never free.
+This can beat hash join for very small inner inputs because hash construction has real startup/memory cost. Materializing/copying the inner side is never free.
 
 ## 38.11 Index nested-loop cost and repeated-key locality
 
@@ -460,9 +412,7 @@ outer_key_NDV
 index/heap correlation
 ```
 
-but never assumes every lookup is fully cold or fully free.
-
-INLJ is attractive when the outer input is small and the indexed inner lookup is selective.
+but never assumes every lookup is fully cold or fully free. INLJ is attractive when the outer input is small and the indexed inner lookup is selective.
 
 ## 38.12 Merge-join cost and properties
 
@@ -480,21 +430,11 @@ linear merge CPU
 duplicate-group handling
 ```
 
-If an input lacks the required ordering, add the applicable `PhysicalSort` enforcement cost.
-
-Merge join may win even with similar raw join cost when its provided order is interesting downstream.
-
-Its advertised output ordering is only the ordering guaranteed by the enabled runtime implementation.
+If an input lacks the required ordering, add the applicable `PhysicalSort` enforcement cost. Merge join may win even with similar raw join cost when its provided order is interesting downstream. Its advertised output ordering is only the ordering guaranteed by the enabled runtime implementation.
 
 ## 38.13 Sort and Top-N cost
 
-For full sort, approximate in-memory CPU as:
-
-```text
-N * log2(max(N, 2)) * comparison_cost
-```
-
-adjusted by key type/width.
+For full sort, approximate in-memory CPU as: `N * log2(max(N, 2)) * comparison_cost` adjusted by key type/width.
 
 Memory includes:
 
@@ -519,23 +459,7 @@ For:
 ORDER BY ... LIMIT N OFFSET O
 ```
 
-the Top-N retention target is the checked:
-
-```text
-K = N + O
-```
-
-and approximate heap maintenance is:
-
-```text
-input_rows * log2(max(K, 2))
-```
-
-with memory roughly proportional to:
-
-```text
-K * retained row width
-```
+the Top-N retention target is the checked: `K = N + O` and approximate heap maintenance is: `input_rows * log2(max(K, 2))` with memory roughly proportional to: `K * retained row width`.
 
 Top-N is selected by total objective cost when `K` is materially smaller than the full input; SQL syntax alone does not force it.
 
@@ -601,13 +525,7 @@ against hash aggregation.
 
 ### DISTINCT
 
-When implementations exist, compare:
-
-```text
-hash PhysicalDistinct
-```
-
-with:
+When implementations exist, compare: `hash PhysicalDistinct` with:
 
 ```text
 ordered input / Sort
@@ -619,40 +537,16 @@ and retain any useful resulting ordering.
 
 ## 38.15 Ordering enforcement and final ORDER BY
 
-If an alternative does not naturally satisfy a required ordering:
+If an alternative does not naturally satisfy a required ordering: `insert PhysicalSort` and include its startup, CPU, memory, and spill cost.
 
-```text
-insert PhysicalSort
-```
-
-and include its startup, CPU, memory, and spill cost.
-
-When the root requirement is:
-
-```text
-ORDER BY + finite LIMIT/OFFSET
-```
-
-the planner also considers `PhysicalTopN` only where it is semantically
+When the root requirement is: `ORDER BY + finite LIMIT/OFFSET` the planner also considers `PhysicalTopN` only where it is semantically
 equivalent, its runtime capability applies, and the selected implementation can
 represent and honor the exact mathematical K from §30.7. Otherwise Top-N is
 not a legal alternative, and search retains an exact ordering provider followed
 by `PhysicalLimit`, inserting `PhysicalSort` when no existing provider
 satisfies the required order.
 
-For final ORDER BY compare:
-
-```text
-cheapest unordered plan + enforcement
-```
-
-against:
-
-```text
-possibly more expensive naturally ordered plan
-```
-
-such as an ordered IndexScan or capability-enabled MergeJoin/ordered aggregate.
+For final ORDER BY compare: `cheapest unordered plan + enforcement` against: `possibly more expensive naturally ordered plan` such as an ordered IndexScan or capability-enabled MergeJoin/ordered aggregate.
 
 The lowest active objective cost wins among legal alternatives. Cost, search
 order, and optional capability availability cannot turn valid LIMIT/OFFSET SQL
@@ -670,17 +564,9 @@ run_cost
 total_cost
 ```
 
-where:
+where: `total_cost = startup_cost + run_cost`.
 
-```text
-total_cost = startup_cost + run_cost
-```
-
-For full-result planning:
-
-```text
-objective = total_cost
-```
+For full-result planning: `objective = total_cost`.
 
 The following quantities are distinct:
 
@@ -749,9 +635,7 @@ Join:
     unless a specific physical algorithm proves a safe rule
 ```
 
-Finite `required_rows` affects cost/search only.
-
-It never changes result semantics or becomes an executor row cap in a location where SQL does not permit one.
+Finite `required_rows` affects cost/search only. It never changes result semantics or becomes an executor row cap in a location where SQL does not permit one.
 
 It also never proves relation emptiness or cardinality, uniqueness,
 scalar-subquery cardinality, safe expression pruning, or safe early
@@ -772,11 +656,7 @@ IMMUTABLE scalar function descriptor/default cost
 subquery                   separately costed
 ```
 
-The optimizer may rank non-executable predicate metadata by a metric such as:
-
-```text
-evaluation_cost / rejection_probability
-```
+The optimizer may rank non-executable predicate metadata by a metric such as: `evaluation_cost / rejection_probability`.
 
 Such ranking is a cost/search aid, not permission to change executable child
 order. Executable conjunctions retain §20.17.5's source-derived child order,
@@ -817,20 +697,12 @@ sort keys
 downstream-required payload
 ```
 
-or a stable compact row handle where the execution lifetime contract permits it.
-
-HashAggregate uses exact aggregate state sizes/alignment.
-
-Projection pruning therefore directly changes physical memory/spill cost.
+or a stable compact row handle where the execution lifetime contract permits it. HashAggregate uses exact aggregate state sizes/alignment. Projection pruning therefore directly changes physical memory/spill cost.
 
 ## 38.19 Memory target assignment and pipeline-aware peak
 
 The retained Chapter-24 per-query soft execution-memory budget, exposed to the
-optimizer through §33.3, is named conceptually:
-
-```text
-query_execution_memory_budget_bytes
-```
+optimizer through §33.3, is named conceptually `query_execution_memory_budget_bytes`.
 
 It is a representable unsigned byte count. Zero is valid and predicts zero-byte
 targets for spill-capable blockers; it does not waive minimum runtime state or
@@ -860,11 +732,7 @@ tree rather than an address or enumeration order.
 Operator memory formulas produce a finite nonnegative raw byte estimate
 `raw_need[i]`, which may be fractional because cardinalities and average widths
 are fractional. Each raw estimate is converted to whole bytes exactly once, at
-this allocation boundary, by rounding upward:
-
-```text
-need[i] = saturating_ceil_to_byte_count(raw_need[i])
-```
+this allocation boundary, by rounding upward: `need[i] = saturating_ceil_to_byte_count(raw_need[i])`.
 
 The conversion uses the same checked finite arithmetic as §36.2.1: a valid raw
 estimate above the byte-count representation's finite maximum saturates to that
@@ -945,9 +813,7 @@ temporary serialization
 spill block formatting/checksum work
 ```
 
-Comparison among NestedLoop materialization, HashJoin build, Sort, aggregate, and DML spool therefore never treats retained data as free.
-
-The cost model may be inaccurate; it may not bypass a runtime memory hard limit.
+Comparison among NestedLoop materialization, HashJoin build, Sort, aggregate, and DML spool therefore never treats retained data as free. The cost model may be inaccurate; it may not bypass a runtime memory hard limit.
 
 ## 38.21 Planning time and memory budget
 
@@ -965,11 +831,7 @@ peak planning-arena bytes
 ```
 
 The optimizer uses a dedicated planning arena separate from execution memory.
-Its existing configurable upper bound is named conceptually:
-
-```text
-optimizer_planning_arena_budget_bytes
-```
+Its existing configurable upper bound is named conceptually `optimizer_planning_arena_budget_bytes`.
 
 It is a mandatory representable unsigned byte count supplied by the retained
 Chapter-33 planning/search configuration. Zero is valid; a nontrivial plan may
@@ -1027,17 +889,11 @@ heuristic, or after it has begun. If bounded search completes, its selected plan
 still obeys all ordinary predicate, Cartesian, property, capability, objective,
 tie, and validation rules.
 
-If even bounded planning cannot fit within the configured planning resource limit, planning fails with a controlled `OptimizerResourceLimit` error rather than arbitrary process OOM.
-
-Optimizer resource fallback never changes SQL semantics.
+If even bounded planning cannot fit within the configured planning resource limit, planning fails with a controlled `OptimizerResourceLimit` error rather than arbitrary process OOM. Optimizer resource fallback never changes SQL semantics.
 
 ## 38.22 Missing/stale statistics in search
 
-Search consumes one immutable statistics snapshot for the entire optimization.
-
-Missing estimates use §35.25's centralized fallback configuration.
-
-Confidence/provenance from §35.26 is retained on estimates and exposed to diagnostics.
+Search consumes one immutable statistics snapshot for the entire optimization. Missing estimates use §35.25's centralized fallback configuration. Confidence/provenance from §35.26 is retained on estimates and exposed to diagnostics.
 
 Statistics staleness may reduce diagnostic confidence and influence explicitly configured cost heuristics, but the architecture does not automatically reject a plan or rewrite statistics because one query later observes a different actual row count.
 
@@ -1067,17 +923,9 @@ canonical plan fingerprint
 planning time/memory counters
 ```
 
-A SQL/debug surface may expose this as:
+A SQL/debug surface may expose this as: `EXPLAIN (OPTIMIZER TRACE)` or an equivalent internal hook.
 
-```text
-EXPLAIN (OPTIMIZER TRACE)
-```
-
-or an equivalent internal hook.
-
-The exact textual presentation may evolve.
-
-The trace is diagnostic output, not a stable persistent format.
+The exact textual presentation may evolve. The trace is diagnostic output, not a stable persistent format.
 
 ## 38.24 Final physical-plan validation
 
@@ -1111,9 +959,7 @@ overflow or a new SQL count-domain restriction. Correct physical search avoids
 constructing or selecting that node and retains a conforming alternative under
 §38.15.
 
-A cost mistake may choose a slow valid plan.
-
-A rewrite/legality mistake that changes results is a correctness failure.
+A cost mistake may choose a slow valid plan. A rewrite/legality mistake that changes results is a correctness failure.
 
 ## 38.25 Memo/search invariants
 

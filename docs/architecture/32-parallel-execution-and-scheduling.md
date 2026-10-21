@@ -2,13 +2,7 @@
 
 ## 32.1 Worker model
 
-Execution uses a fixed worker pool.
-
-The database does not create an arbitrary OS thread per query or per pipeline.
-
-Worker count is configuration.
-
-The worker/task model supports one-worker and multi-worker execution without changing its ownership or completion semantics.
+Execution uses a fixed worker pool. The database does not create an arbitrary OS thread per query or per pipeline. Worker count is configuration. The worker/task model supports one-worker and multi-worker execution without changing its ownership or completion semantics.
 
 ## 32.2 Morsels
 
@@ -81,17 +75,9 @@ mid-attempt replay protocol. An implementation may reassign failed work only
 where an existing canonical owner provides an attempt-isolated, exact retry
 protocol; no generic automatic requeue is implied here.
 
-A heap-scan morsel target may be configured around:
+A heap-scan morsel target may be configured around: `64–256 heap pages per morsel` and is tunable performance guidance, not a semantic partition size.
 
-```text
-64–256 heap pages per morsel
-```
-
-and is tunable performance guidance, not a semantic partition size.
-
-B+ ordered range scans are not freely partitioned in the baseline and may remain a single source until explicit range partitioning exists.
-
-Morsel boundaries are also natural cancellation/fairness points.
+B+ ordered range scans are not freely partitioned in the baseline and may remain a single source until explicit range partitioning exists. Morsel boundaries are also natural cancellation/fairness points.
 
 ## 32.3 Worker-local state
 
@@ -107,11 +93,7 @@ join probe continuation
 local profiling counters
 ```
 
-Workers do not contend on one shared mutable state object for every chunk when the operator can instead Combine/Finalize local state at a boundary.
-
-Immutable plan state remains shared.
-
-Global execution state contains only the coordination/shared structures that genuinely require it.
+Workers do not contend on one shared mutable state object for every chunk when the operator can instead Combine/Finalize local state at a boundary. Immutable plan state remains shared. Global execution state contains only the coordination/shared structures that genuinely require it.
 
 ## 32.4 Parallel sequential scan
 
@@ -135,11 +117,7 @@ produces independent chunks
 
 The transaction/snapshot/CommandId view consumed by parallel read tasks is immutable for the lifetime of those tasks. Transaction terminal-state transitions and DML mutation are not performed concurrently by arbitrary read workers.
 
-Without a required ordering property, worker output may interleave arbitrarily.
-
-If ordered output is required, the selected physical plan must include/order-preserve through an operator capable of that property.
-
-Parallel SeqScan itself still advertises no SQL ordering.
+Without a required ordering property, worker output may interleave arbitrarily. If ordered output is required, the selected physical plan must include/order-preserve through an operator capable of that property. Parallel SeqScan itself still advertises no SQL ordering.
 
 ## 32.5 Parallel hash join
 
@@ -157,15 +135,11 @@ build input barrier
 construct/finalize directory partitions in parallel
 ```
 
-Local build storage is combined/referenced through query-local handles without invalidating retained varlen ownership.
-
-The dependent probe phase starts only after every build partition it needs is finalized.
+Local build storage is combined/referenced through query-local handles without invalidating retained varlen ownership. The dependent probe phase starts only after every build partition it needs is finalized.
 
 ### Probe
 
-After finalization, the hash directory/partitions are immutable.
-
-Probe workers execute concurrently without hash-directory mutation latches.
+After finalization, the hash directory/partitions are immutable. Probe workers execute concurrently without hash-directory mutation latches.
 
 Each owns:
 
@@ -191,11 +165,7 @@ Combine / Finalize
 result groups
 ```
 
-Do not serialize every aggregate update through one global lock.
-
-For global aggregation, each worker may maintain one local aggregate state block and combine those states at finalize.
-
-Aggregate descriptors' `Combine` contract is therefore mandatory for aggregates that participate in parallel execution.
+Do not serialize every aggregate update through one global lock. For global aggregation, each worker may maintain one local aggregate state block and combine those states at finalize. Aggregate descriptors' `Combine` contract is therefore mandatory for aggregates that participate in parallel execution.
 
 Every local state and Combine implements §29.3's applicable semantic state.
 COUNT, integer SUM/AVG, and MIN/MAX remain invariant to worker count, partition
@@ -220,11 +190,7 @@ merge tree / k-way merge
 ordered output source
 ```
 
-There is no shared comparison-sort critical section.
-
-In-memory and spilled local runs enter the same merge architecture.
-
-When an ordering property is required, final emission occurs through the merge/order-preserving source rather than arbitrary worker interleaving.
+There is no shared comparison-sort critical section. In-memory and spilled local runs enter the same merge architecture. When an ordering property is required, final emission occurs through the merge/order-preserving source rather than arbitrary worker interleaving.
 
 ## 32.8 Task scheduler and dependencies
 
@@ -248,18 +214,14 @@ Chapter 20. This is a morsel-coverage precondition, not a second Finalize
 authority: Chapter 26 continues to own dependency transitions, readiness, and
 quiescence.
 
-Query cancellation prevents new unnecessary tasks from being scheduled and causes running tasks to stop at normal cancellation points.
-
-The baseline intentionally does not require lock-free work stealing.
+Query cancellation prevents new unnecessary tasks from being scheduled and causes running tasks to stop at normal cancellation points. The baseline intentionally does not require lock-free work stealing.
 
 Per-worker work-stealing deques are a compatible optional optimization when
 ready-queue contention warrants them.
 
 ## 32.9 Fairness
 
-A long query should not monopolize a worker indefinitely without yield/cancellation boundaries.
-
-Morsel/task granularity provides those boundaries.
+A long query should not monopolize a worker indefinitely without yield/cancellation boundaries. Morsel/task granularity provides those boundaries.
 
 A multi-query scheduler may cap:
 

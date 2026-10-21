@@ -4,19 +4,11 @@
 
 This chapter owns the upper semantic integration for schema-changing DDL, transactional catalog visibility, catalog-object identity publication, offline index construction, DROP/object retirement, DML binding/planning, default semantics, RETURNING, and SQL scope.
 
-Storage mutation ordering remains Chapter 15's responsibility.
-
-Logical operator semantics remain Chapter 20's responsibility.
+Storage mutation ordering remains Chapter 15's responsibility. Logical operator semantics remain Chapter 20's responsibility.
 
 ## 21.2 Conservative DDL concurrency model
 
-The architecture serializes schema-changing DDL with one database-wide:
-
-```text
-SchemaLock
-```
-
-or equivalent exclusive catalog-DDL mutex.
+The architecture serializes schema-changing DDL with one database-wide `SchemaLock` or equivalent exclusive catalog-DDL mutex.
 
 It is a transaction-owned gate with the exact mode, reentrancy, wait-for
 membership, and release rules in §11.13. It is not table-scoped. A transaction
@@ -30,29 +22,11 @@ Ordinary read-only queries do not hold this lock for their execution lifetime.
 
 ### 21.2.1 Target-table writer gate
 
-DDL that must observe or retire a stable physical table state additionally uses a per-table writer gate.
+DDL that must observe or retire a stable physical table state additionally uses a per-table writer gate. DML that performs persistent writes to table `T` acquires: `TableWriterGate(T) shared` before the first persistent write to `T` and holds it until transaction end.
 
-DML that performs persistent writes to table `T` acquires:
+CREATE INDEX / DROP TABLE / DROP INDEX on `T` acquire: `TableWriterGate(T) exclusive` and wait for existing table writers to reach terminal outcome before proceeding.
 
-```text
-TableWriterGate(T) shared
-```
-
-before the first persistent write to `T` and holds it until transaction end.
-
-CREATE INDEX / DROP TABLE / DROP INDEX on `T` acquire:
-
-```text
-TableWriterGate(T) exclusive
-```
-
-and wait for existing table writers to reach terminal outcome before proceeding.
-
-Reads do not require this writer gate.
-
-The gate is a DDL coordination mechanism, not a replacement for tuple-write/unique-key locking.
-
-No SchemaLock/TableWriterGate wait occurs while holding heap/B+ page latches.
+Reads do not require this writer gate. The gate is a DDL coordination mechanism, not a replacement for tuple-write/unique-key locking. No SchemaLock/TableWriterGate wait occurs while holding heap/B+ page latches.
 
 DDL lock order is:
 
@@ -100,9 +74,7 @@ terminal outcome, so the dropping transaction cannot assign the name to a
 replacement object. The reservation applies within the existing §16.5 name
 class: table and named-index names remain separate classes.
 
-The catalog cache cannot override this rule.
-
-A cached descriptor is usable only if it is visible to the binding snapshot.
+The catalog cache cannot override this rule. A cached descriptor is usable only if it is visible to the binding snapshot.
 
 ## 21.4 Durable catalog-object IDs
 
@@ -116,9 +88,7 @@ IndexId
 ConstraintId
 ```
 
-Allocation occurs during DDL execution, not during syntax parsing or side-effect-free binding.
-
-Binding may create an immutable/provisional descriptor specification, but it does not perform durable identity allocation or file creation merely to resolve a statement.
+Allocation occurs during DDL execution, not during syntax parsing or side-effect-free binding. Binding may create an immutable/provisional descriptor specification, but it does not perform durable identity allocation or file creation merely to resolve a statement.
 
 The allocation sequence is:
 
@@ -129,11 +99,7 @@ receive object ID
 only then place that ID in persistent catalog/file state
 ```
 
-Crash gaps and IDs consumed by aborted DDL are acceptable.
-
-Reuse is forbidden.
-
-ColumnIds follow the table-local rule in §16.3.
+Crash gaps and IDs consumed by aborted DDL are acceptable. Reuse is forbidden. ColumnIds follow the table-local rule in §16.3.
 
 ## 21.5 DDL private physical resources
 
@@ -151,9 +117,7 @@ allocated object IDs/FileIds remain consumed
 private or final-uncommitted physical files become orphan-retirement candidates
 ```
 
-The architecture need not physically undo their bytes. Orphan classification and durable unlink use §4.7.6–§4.7.7 only after no live in-process owner can reference the file.
-
-An object file is never considered committed merely because it exists on disk.
+The architecture need not physically undo their bytes. Orphan classification and durable unlink use §4.7.6–§4.7.7 only after no live in-process owner can reference the file. An object file is never considered committed merely because it exists on disk.
 
 Consumed nonreusable TableId/IndexId/ConstraintId/FileId values, private-file initialization/build WAL, and durable private/final namespace entries remain allocator/DDL-cleanup artifacts rather than transaction-owned logical statement writes until catalog mutation publishes. A recoverable failure before that catalog boundary may leave the explicit transaction `ACTIVE` only after every survivor has deterministic orphan-cleanup ownership and attempt-only DDL locks are released. IDs remain consumed. Publishing a CREATE catalog row or DROP/catalog deletion marker crosses §39.1.2's boundary; any later statement failure mandates ABORT.
 
@@ -207,9 +171,7 @@ later CREATE INDEX on that transaction-local table without a lock upgrade:
 the exclusive gate subsumes the DML shared request and is reused by the index
 build. Its terminal-lifetime rule remains §21.2.1.
 
-The created table's tuple schema version is `1`.
-
-If the transaction aborts, its catalog rows remain invisible and created files become orphan-retirement candidates.
+The created table's tuple schema version is `1`. If the transaction aborts, its catalog rows remain invisible and created files become orphan-retirement candidates.
 
 In autocommit mode the statement-owning transaction normally reaches COMMIT immediately after successful statement completion. In an explicit transaction, the object remains transaction-local until the later user COMMIT and the conservative SchemaLock remains held for that interval.
 
@@ -223,11 +185,7 @@ UNIQUE
 NOT NULL for every key column
 ```
 
-The catalog records the semantic primary-key constraint as its own `ConstraintId`.
-
-The architecture also creates a unique B+ index implementing key lookup/enforcement.
-
-Its normalized catalog representation and exact UNIQUE/PRIMARY KEY/NOT NULL authorities are §16.5.4–§16.5.6.
+The catalog records the semantic primary-key constraint as its own `ConstraintId`. The architecture also creates a unique B+ index implementing key lookup/enforcement. Its normalized catalog representation and exact UNIQUE/PRIMARY KEY/NOT NULL authorities are §16.5.4–§16.5.6.
 
 The physical index and semantic primary-key constraint remain distinct catalog objects.
 
@@ -259,9 +217,7 @@ publication gate. An ANALYZE that has already authorized row publication makes
 CREATE INDEX wait through that ANALYZE transaction's terminal outcome; an index
 manifest published first makes ANALYZE's final revalidation fail.
 
-Persistent IndexId/FileId allocation occurs only during execution.
-
-A unique index uses Chapter 11's transactional uniqueness semantics. Its key equality and NULL rule are §11.10.2; UNIQUE constraints are immediate and non-deferrable.
+Persistent IndexId/FileId allocation occurs only during execution. A unique index uses Chapter 11's transactional uniqueness semantics. Its key equality and NULL rule are §11.10.2; UNIQUE constraints are immediate and non-deferrable.
 
 The persistent index row and zero-based ordered key-column rows are exactly §16.5.4–§16.5.5; a standalone unique index is distinct from a constraint-owned backing index as specified there.
 
@@ -326,9 +282,7 @@ owner rules, while any-NULL keys do not conflict. The exclusive writer gate
 permits any conforming complete duplicate check; neither build-row order nor a
 physical scan algorithm is semantic.
 
-Readers may continue while the index is built because the private index is not visible to their catalog snapshots.
-
-New target-table writers are blocked until the index commit/abort boundary, preventing missing entries.
+Readers may continue while the index is built because the private index is not visible to their catalog snapshots. New target-table writers are blocked until the index commit/abort boundary, preventing missing entries.
 
 At committed catalog publication, every current logical owner belonging to the
 DDL transaction's committed target-table state MUST have its required entry in
@@ -336,9 +290,7 @@ the index. In particular, CREATE TABLE, INSERT, and CREATE INDEX in successive
 commands of one transaction cannot commit an index that omits the inserted
 rows.
 
-A half-built index is never visible to planning.
-
-If build/transaction aborts, the private or final-uncommitted index file becomes an orphan-retirement candidate.
+A half-built index is never visible to planning. If build/transaction aborts, the private or final-uncommitted index file becomes an orphan-retirement candidate.
 
 ## 21.9 DROP and physical object retirement
 
@@ -382,9 +334,7 @@ file lifecycle. It reports the existing `CatalogError` family at the DROP INDEX
 target-name construct. DROP TABLE remains one semantic operation that retires
 its table, dependent constraints, and backing indexes.
 
-On abort, the deletion `xmax` is ineffective and the object remains.
-
-On commit, new catalog snapshots no longer resolve the object, while older snapshots/descriptors may still legally reference it.
+On abort, the deletion `xmax` is ineffective and the object remains. On commit, new catalog snapshots no longer resolve the object, while older snapshots/descriptors may still legally reference it.
 
 Once a DROP statement has successfully made its catalog deletion visible to
 its owning transaction, that transaction retains a reservation for the
@@ -414,9 +364,7 @@ no BufferPool/page/file owner still requires it
 
 The no-new-fetch/pin and frame-drain boundary is §7.12.5. Only after that drain may the managed file be unlinked through §4.7.7. Physical retirement is durable only after `fsync(database_root)` succeeds. If unlink or directory synchronization fails, semantic DROP remains committed and cleanup remains pending/retryable.
 
-This retirement rule applies to table heap/FSM files and index B+ files.
-
-`DROP TABLE` also retires dependent indexes/constraints as one DDL semantic operation.
+This retirement rule applies to table heap/FSM files and index B+ files. `DROP TABLE` also retires dependent indexes/constraints as one DDL semantic operation.
 
 ## 21.10 Catalog cache publication
 
@@ -489,9 +437,7 @@ Because every permitted default is closed and IMMUTABLE, DDL binding evaluates/c
 The result is then coerced by §17.8.5's assignment matrix to the target column
 type before encoding.
 
-If folding, casting, or constraint validation fails, the DDL statement fails rather than storing a partially resolved expression.
-
-Execution of INSERT therefore consumes one persisted typed constant default and does not reopen/re-resolve an operator/function tree.
+If folding, casting, or constraint validation fails, the DDL statement fails rather than storing a partially resolved expression. Execution of INSERT therefore consumes one persisted typed constant default and does not reopen/re-resolve an operator/function tree.
 
 This keeps the persistent default format small and stable while preserving the semantics of immutable default expressions.
 
@@ -509,25 +455,9 @@ The persisted default value is a byte sequence with this 24-byte header:
 | `20` | 4 | reserved32 = `0` |
 | `24` | variable | one §17.13 PersistedScalarV1 |
 
-All multi-byte integers are little-endian.
+All multi-byte integers are little-endian. `total_length` is exactly: `24 + encoded PersistedScalarV1 length` with no bytes after the encoded scalar inside the blob.
 
-`total_length` is exactly:
-
-```text
-24 + encoded PersistedScalarV1 length
-```
-
-with no bytes after the encoded scalar inside the blob.
-
-CRC32C is computed over exactly `total_length` bytes with bytes `16..19` logically zero.
-
-The default representation imposes:
-
-```text
-MAX_DEFAULT_VALUE_BLOB = 4096 bytes
-```
-
-so default metadata remains bounded and can fit the ordinary system-catalog storage path without introducing a separate large-object subsystem.
+CRC32C is computed over exactly `total_length` bytes with bytes `16..19` logically zero. The default representation imposes: `MAX_DEFAULT_VALUE_BLOB = 4096 bytes` so default metadata remains bounded and can fit the ordinary system-catalog storage path without introducing a separate large-object subsystem.
 
 A larger default value is rejected as unsupported in the defined architecture.
 
@@ -570,9 +500,7 @@ Each assignment becomes:
 ColumnId -> typed bound expression
 ```
 
-Unmentioned columns retain their old values.
-
-Logical planning requests target RID, old values needed by assignment expressions, old values needed to construct the complete new physical tuple, and values needed by RETURNING.
+Unmentioned columns retain their old values. Logical planning requests target RID, old values needed by assignment expressions, old values needed to construct the complete new physical tuple, and values needed by RETURNING.
 
 For every distinct finalized UPDATE target, the operation uses this semantic
 sequence:
@@ -620,15 +548,9 @@ DELETE planning consumes the fully bound target, optional BOOLEAN WHERE
 predicate, and RETURNING metadata from §§19.4.3 and 19.20. Chapter 21 performs
 no target, predicate, or RETURNING name/type resolution.
 
-DELETE WHERE and RETURNING may use only §20.14's supported uncorrelated forms.
+DELETE WHERE and RETURNING may use only §20.14's supported uncorrelated forms. The logical child produces target RID plus old values needed by RETURNING or semantic evaluation. DELETE does not physically erase index entries.
 
-The logical child produces target RID plus old values needed by RETURNING or semantic evaluation.
-
-DELETE does not physically erase index entries.
-
-Vacuum remains the index-garbage owner.
-
-DELETE targets one base table.
+Vacuum remains the index-garbage owner. DELETE targets one base table.
 
 ## 21.15 RETURNING
 
@@ -705,9 +627,7 @@ UnsupportedFeature
 CardinalityError
 ```
 
-Where source syntax exists, the error carries the smallest useful source span and a human-readable message.
-
-Storage/transaction errors retain their lower-layer category and may be mapped to SQLSTATE-like surface codes.
+Where source syntax exists, the error carries the smallest useful source span and a human-readable message. Storage/transaction errors retain their lower-layer category and may be mapped to SQLSTATE-like surface codes.
 
 ### 21.16.1 Ordinary multi-row DML runtime-error precedence
 
@@ -852,11 +772,7 @@ REPEATABLE READ:
     transaction snapshot + current command boundary
 ```
 
-Concurrent DML may make the completed statistics immediately approximate/stale; it does not invalidate query correctness.
-
-ANALYZE writes its `sys_statistics` rows through the ordinary transaction/catalog MVCC path.
-
-The newly built `StatsDescriptor` remains transaction-local until the owning transaction commits.
+Concurrent DML may make the completed statistics immediately approximate/stale; it does not invalidate query correctness. ANALYZE writes its `sys_statistics` rows through the ordinary transaction/catalog MVCC path. The newly built `StatsDescriptor` remains transaction-local until the owning transaction commits.
 
 For an explicit transaction:
 

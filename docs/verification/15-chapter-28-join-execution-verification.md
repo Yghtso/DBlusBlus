@@ -680,7 +680,6 @@ completion cannot establish global readiness or completion. No schedule is teste
 | V28-T09 | 28.3–28.12 | Pointer/runtime ordinals have no semantic role. | V28-T/S | AF | V25-P |
 | V28-T10 | 28.1 | Eligible algorithm choice preserves both-successful semantics. | V28-T/M | AS | V22-D |
 
-
 ### V28 negative-case and oracle checks
 
 Search Chapter-28-relevant Verification and reject these stale rules: chronology-bound join

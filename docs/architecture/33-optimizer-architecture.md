@@ -2,9 +2,7 @@
 
 ## 33.1 Role
 
-The optimizer converts a typed logical relational plan into one immutable physical plan.
-
-Cost-based relational optimization applies to ordinary query/DML relational subplans.
+The optimizer converts a typed logical relational plan into one immutable physical plan. Cost-based relational optimization applies to ordinary query/DML relational subplans.
 
 Resolved control/maintenance statements such as:
 
@@ -150,25 +148,13 @@ Ordinary planning MUST NOT inspect mutable heap/B+ page contents or exact moment
 
 ## 33.4 Stable catalog/statistics view
 
-The optimizer holds immutable catalog/statistics descriptors for the duration of one planning invocation.
+The optimizer holds immutable catalog/statistics descriptors for the duration of one planning invocation. A concurrently committed ANALYZE may publish a newer statistics descriptor for later planners, but one plan is never built from a mixture of old and new versions of the same statistics object.
 
-A concurrently committed ANALYZE may publish a newer statistics descriptor for later planners, but one plan is never built from a mixture of old and new versions of the same statistics object.
-
-Likewise, schema/index descriptors obey the caller's catalog snapshot from Chapters 16 and 21.
-
-Statistics are performance metadata and do not change semantic visibility or query correctness.
-
-Semantic-emptiness metadata is derived independently under §§20.17.10 and 35.2. The optimizer MUST NOT infer it from `estimated rows == 0`, a zero TRUE fraction, or any statistics descriptor.
+Likewise, schema/index descriptors obey the caller's catalog snapshot from Chapters 16 and 21. Statistics are performance metadata and do not change semantic visibility or query correctness. Semantic-emptiness metadata is derived independently under §§20.17.10 and 35.2. The optimizer MUST NOT infer it from `estimated rows == 0`, a zero TRUE fraction, or any statistics descriptor.
 
 ## 33.5 PhysicalPlan output
 
-The optimizer returns one immutable:
-
-```text
-PhysicalPlan
-```
-
-containing or making inspectable at every relevant node:
+The optimizer returns one immutable `PhysicalPlan` containing or making inspectable at every relevant node:
 
 ```text
 chosen physical operator
@@ -186,9 +172,7 @@ estimated spill behavior
 provided physical properties
 ```
 
-The executor receives these decisions already made.
-
-The executor may collect actual runtime metrics, but it does not reinterpret the logical query or silently choose a different ordinary algorithm in the defined architecture.
+The executor receives these decisions already made. The executor may collect actual runtime metrics, but it does not reinterpret the logical query or silently choose a different ordinary algorithm in the defined architecture.
 
 ## 33.6 Cost-based choice rule
 

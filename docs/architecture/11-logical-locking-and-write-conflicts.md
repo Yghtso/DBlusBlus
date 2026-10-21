@@ -30,11 +30,7 @@ deadlock visibility.
 
 ## 11.2 Tuple-write lock identity
 
-A tuple write lock is keyed by:
-
-```text
-(TableId, physical target RID)
-```
+A tuple write lock is keyed by: `(TableId, physical target RID)`.
 
 The target RID is the currently visible physical tuple version that the transaction intends to:
 
@@ -44,9 +40,7 @@ or
 DELETE
 ```
 
-Two writers that begin from the same visible physical version therefore contend on the same logical lock.
-
-Because UPDATE creates a new RID, a writer that waits for the old version's logical lock MUST re-fetch and revalidate the target after lock acquisition.
+Two writers that begin from the same visible physical version therefore contend on the same logical lock. Because UPDATE creates a new RID, a writer that waits for the old version's logical lock MUST re-fetch and revalidate the target after lock acquisition.
 
 Every live request for `TUPLE_WRITE(TableId,RID)` is also a runtime physical
 RID-retention claim for that exact key. A request is live while it is queued and still
@@ -109,19 +103,11 @@ For a candidate visible physical tuple version `R`:
 
 ### 11.4.1 No competing xmax
 
-If:
-
-```text
-xmax == INVALID_TXN_ID
-```
-
-the write may proceed subject to its other constraints.
+If: `xmax == INVALID_TXN_ID` the write may proceed subject to its other constraints.
 
 ### 11.4.2 xmax belongs to self
 
-Handle the target through same-transaction command semantics.
-
-The transaction MUST NOT treat this as a second independent competing writer.
+Handle the target through same-transaction command semantics. The transaction MUST NOT treat this as a second independent competing writer.
 
 ### 11.4.3 xmax belongs to an aborted transaction
 
@@ -157,17 +143,11 @@ the blocking interval, and both still perform the required post-wake target reva
 
 ### 11.4.5 xmax belongs to a committed competing updater
 
-The response is isolation-level-specific.
-
-READ COMMITTED follows §11.5.
-
-REPEATABLE READ follows §11.6.
+The response is isolation-level-specific. READ COMMITTED follows §11.5. REPEATABLE READ follows §11.6.
 
 ## 11.5 READ COMMITTED write conflict
 
-If a READ COMMITTED writer waited and then discovers that another transaction committed an UPDATE/DELETE of its original target, it MUST NOT blindly modify the stale physical version.
-
-Apply the §15.7 retry boundary.
+If a READ COMMITTED writer waited and then discovers that another transaction committed an UPDATE/DELETE of its original target, it MUST NOT blindly modify the stale physical version. Apply the §15.7 retry boundary.
 
 Before the statement attempt has installed any persistent write, the engine may:
 
@@ -176,23 +156,15 @@ restart the affected candidate search
 using a fresh READ COMMITTED statement snapshot
 ```
 
-and re-evaluate the current row version, predicates, index conditions, and generated values.
-
-After the attempt has installed any persistent write, the architecture MUST abort the transaction instead of restarting that statement inside the same TxnId.
+and re-evaluate the current row version, predicates, index conditions, and generated values. After the attempt has installed any persistent write, the architecture MUST abort the transaction instead of restarting that statement inside the same TxnId.
 
 This distinction is required because the architecture deliberately has no statement-level physical undo/subtransaction state.
 
 ## 11.6 REPEATABLE READ write conflict
 
-Under REPEATABLE READ / snapshot isolation, if another transaction committed a change to the target after the current transaction's fixed snapshot:
+Under REPEATABLE READ / snapshot isolation, if another transaction committed a change to the target after the current transaction's fixed snapshot: `abort with a serialization/write-conflict error`.
 
-```text
-abort with a serialization/write-conflict error
-```
-
-This is first-updater-wins behavior.
-
-The writer MUST NOT silently follow a newer version that its fixed transaction snapshot could not see.
+This is first-updater-wins behavior. The writer MUST NOT silently follow a newer version that its fixed transaction snapshot could not see.
 
 ## 11.7 Lost-update prevention
 
@@ -208,11 +180,7 @@ READ COMMITTED statement restart
 REPEATABLE READ serialization/write-conflict abort
 ```
 
-This combination MUST prevent two concurrent writers from silently overwriting each other's work on one logical target version.
-
-Snapshot-isolation write skew across different rows remains possible.
-
-That behavior is one reason full SERIALIZABLE isolation is deferred to SSI/predicate/key-range mechanisms.
+This combination MUST prevent two concurrent writers from silently overwriting each other's work on one logical target version. Snapshot-isolation write skew across different rows remains possible. That behavior is one reason full SERIALIZABLE isolation is deferred to SSI/predicate/key-range mechanisms.
 
 ## 11.8 Unique-key lock identity
 
@@ -223,13 +191,7 @@ UniqueLockKey =
     (IndexId, full encoded user-key bytes)
 ```
 
-The encoded user-key bytes are the canonical B+ user-key representation from Chapter 8.
-
-A hash MAY select the LockManager shard/bucket.
-
-Hash collisions MUST be resolved by comparison of the complete lock key.
-
-Uniqueness MUST NOT depend on a 64-bit hash alone.
+The encoded user-key bytes are the canonical B+ user-key representation from Chapter 8. A hash MAY select the LockManager shard/bucket. Hash collisions MUST be resolved by comparison of the complete lock key. Uniqueness MUST NOT depend on a 64-bit hash alone.
 
 The user-key bytes exclude RID. They encode every key component in catalog order through the exact Chapter-8 `IndexKeyCodec`, so lock equality and index user-key equality are identical for:
 
@@ -248,11 +210,7 @@ Two semantically equal fully non-NULL keys for one `IndexId` MUST therefore name
 
 ## 11.9 Unique-key lock protocol
 
-Any DML operation that may create or remove a **fully non-NULL** unique key acquires the corresponding exclusive:
-
-```text
-UNIQUE_KEY(IndexId, encoded user-key)
-```
+Any DML operation that may create or remove a **fully non-NULL** unique key acquires the corresponding exclusive: `UNIQUE_KEY(IndexId, encoded user-key)`.
 
 Examples include:
 
@@ -262,19 +220,9 @@ UPDATE old K -> new K
 DELETE unique K
 ```
 
-Unique-key locks remain held through transaction terminal publication.
+Unique-key locks remain held through transaction terminal publication. When an UPDATE needs both old and new unique-key locks and both keys are known before waiting, acquire them in the deterministic total order below to reduce deadlock probability.
 
-When an UPDATE needs both old and new unique-key locks and both keys are known before waiting, acquire them in the deterministic total order below to reduce deadlock probability.
-
-The deadlock detector remains the correctness fallback.
-
-For SQL UNIQUE semantics, if **any** indexed key component is NULL:
-
-```text
-duplicate rejection is skipped
-```
-
-and no duplicate-prevention unique-key lock is required for that NULL-containing key merely to enforce SQL uniqueness.
+The deadlock detector remains the correctness fallback. For SQL UNIQUE semantics, if **any** indexed key component is NULL: `duplicate rejection is skipped` and no duplicate-prevention unique-key lock is required for that NULL-containing key merely to enforce SQL uniqueness.
 
 The physical B+ entries still exist and remain ordered normally.
 
@@ -306,11 +254,7 @@ Probing before lock acquisition is only an advisory optimization. It never autho
 For one user-DML statement attempt, §§15.1.3 and 21.16.1 require the complete
 finite set of UNIQUE_KEY locks needed by the staged candidate domain to be
 known and acquired before the statement's first persistent user-DML write.
-The locks are acquired in the total order:
-
-```text
-(IndexId, lexicographic encoded user-key bytes)
-```
+The locks are acquired in the total order: `(IndexId, lexicographic encoded user-key bytes)`.
 
 An UPDATE includes both old and new fully non-NULL keys when they differ;
 DELETE includes the old key. Candidate evaluation may discover those keys in
@@ -827,11 +771,7 @@ and an uncontended grant requires the same check as a commit that wakes a waiter
 
 Adding or replacing wait edges performs synchronous cycle detection before the
 new waiter sleeps. Conceptually, for every cyclic strongly connected component
-in the resulting finite transaction graph, the victim is:
-
-```text
-the highest normal TxnId in that cyclic component
-```
+in the resulting finite transaction graph, the victim is: `the highest normal TxnId in that cyclic component`.
 
 This deterministic victim policy applies uniformly across every registered
 resource family. The graph algorithm/data structure is not fixed,
@@ -972,11 +912,7 @@ LockManager locks:
     transaction-lifetime logical conflict protection
 ```
 
-Page latches MUST NOT be represented as LockManager locks.
-
-Tuple logical locks MUST NOT be used to protect B+ page structure.
-
-Unique-key logical locks MUST NOT replace B+ structural latching.
+Page latches MUST NOT be represented as LockManager locks. Tuple logical locks MUST NOT be used to protect B+ page structure. Unique-key logical locks MUST NOT replace B+ structural latching.
 
 Unified transaction wait-for-graph edges are transaction-conflict edges, not
 page-latch dependency edges.

@@ -43,11 +43,7 @@ variable payload in row/block-owned storage
 operator-owned optional metadata
 ```
 
-Examples of operator-owned metadata include hash, duplicate-chain link, and partition/run identifier.
-
-A temporary row never carries persistent heap MVCC headers merely for query execution.
-
-Variable-length descriptors use offsets/lengths into row/block-owned storage rather than assuming a stable raw pointer inside a movable/serializable row image.
+Examples of operator-owned metadata include hash, duplicate-chain link, and partition/run identifier. A temporary row never carries persistent heap MVCC headers merely for query execution. Variable-length descriptors use offsets/lengths into row/block-owned storage rather than assuming a stable raw pointer inside a movable/serializable row image.
 
 Every Chapter-24 size, count, offset, capacity, extent, reservation total, and
 count-derived byte calculation denotes an exact mathematical nonnegative value.
@@ -67,13 +63,7 @@ concrete integer type is required.
 
 ## 24.2 RowCollection
 
-`RowCollection` stores temporary rows in append-oriented blocks.
-
-Ordinary `RowCollection` blocks use a target size of:
-
-```text
-256 KiB
-```
+`RowCollection` stores temporary rows in append-oriented blocks. Ordinary `RowCollection` blocks use a target size of: `256 KiB`.
 
 This target is configuration/tuning state, not persistent format.
 
@@ -110,11 +100,7 @@ minimal per-row allocation
 associated varlen blocks where required
 ```
 
-A row handle is query-local.
-
-It is never a persistent RID.
-
-If data is spilled and later reconstructed, the spill representation/handle is separate from an in-memory row handle.
+A row handle is query-local. It is never a persistent RID. If data is spilled and later reconstructed, the spill representation/handle is separate from an in-memory row handle.
 
 ## 24.3 QueryArena
 
@@ -288,11 +274,7 @@ ownership idiom, or concrete reservation state representation is required.
 
 ## 24.6 Soft and hard pressure
 
-The per-query soft budget is a pressure signal.
-
-Crossing it may request spill/reduction even when the hard limit is not yet reached.
-
-The hard query/global limit is an allocation gate.
+The per-query soft budget is a pressure signal. Crossing it may request spill/reduction even when the hard limit is not yet reached. The hard query/global limit is an allocation gate.
 
 When a requested growth grant cannot be made, an owner whose execution contract
 provides an exact spill/reclaim action MUST attempt an applicable action. Such an
@@ -414,9 +396,7 @@ CRC32C
 payload
 ```
 
-Integer serialization is explicit rather than native C++ object dumping.
-
-The CRC32C validates the encoded block metadata/payload according to the block format used by that operator.
+Integer serialization is explicit rather than native C++ object dumping. The CRC32C validates the encoded block metadata/payload according to the block format used by that operator.
 
 Spill payload lengths, record/header-plus-payload extents, row/block/run counts,
 offsets, and file offset plus I/O length obey the exact-before-use rule in §24.1.
@@ -444,9 +424,7 @@ a `SpillIOError`, not persistent database corruption. A self-generated in-memory
 state that violates an already-established construction invariant remains an
 internal defect.
 
-Because spill data is query-temporary and never crash-recovered, the architecture does not assign it a long-lived database persistent-format compatibility promise.
-
-Specialized join, aggregate, and sort spill payloads are defined by their owning operator contracts in Chapters 28–30.
+Because spill data is query-temporary and never crash-recovered, the architecture does not assign it a long-lived database persistent-format compatibility promise. Specialized join, aggregate, and sort spill payloads are defined by their owning operator contracts in Chapters 28–30.
 
 ## 24.9 Spill I/O
 
@@ -457,17 +435,9 @@ large sequential writes
 large sequential reads
 ```
 
-The operator-level I/O target is:
+The operator-level I/O target is: `~1 MiB I/O blocks`.
 
-```text
-~1 MiB I/O blocks
-```
-
-This target is configurable.
-
-Operators buffer enough serialized rows/blocks to avoid issuing one tiny write per row.
-
-Spill buffers themselves remain query-memory accounted.
+This target is configurable. Operators buffer enough serialized rows/blocks to avoid issuing one tiny write per row. Spill buffers themselves remain query-memory accounted.
 
 ## 24.10 Error and cleanup boundary
 

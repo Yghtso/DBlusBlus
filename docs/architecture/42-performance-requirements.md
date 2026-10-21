@@ -39,7 +39,6 @@ Storage benchmarks SHOULD distinguish cache/residency conditions and resource pr
 
 Performance-sensitive architecture changes SHOULD be supported by benchmark evidence rather than a single noisy measurement or intuition alone.
 
-
 ## 42.1 B+ tree performance measurements
 
 B+ tree measurement should cover at least:
@@ -109,9 +108,7 @@ front-end allocation calls and bytes
 optimizer planning-arena allocations and bytes
 ```
 
-Representative parser/AST memory cases include a wide SELECT, large VALUES insert, deep Boolean expression, and multi-join query.
-
-Front-end allocation should limit avoidable per-node general-purpose heap-allocation churn without prescribing the AST representation; benchmark evidence—not guesswork—drives further optimization.
+Representative parser/AST memory cases include a wide SELECT, large VALUES insert, deep Boolean expression, and multi-join query. Front-end allocation should limit avoidable per-node general-purpose heap-allocation churn without prescribing the AST representation; benchmark evidence—not guesswork—drives further optimization.
 
 ## 42.4 Execution measurements and hot-path constraints
 
@@ -128,11 +125,7 @@ external sort MB/sec
 allocator calls/chunk allocations/temporary bytes per query
 ```
 
-Benchmarks include NULL-free and NULL-heavy data.
-
-The vector-size study includes representative chunk sizes below, at, and above the default on representative workloads.
-
-The architecture default remains 1024 until measurements justify changing it.
+Benchmarks include NULL-free and NULL-heavy data. The vector-size study includes representative chunk sizes below, at, and above the default on representative workloads. The architecture default remains 1024 until measurements justify changing it.
 
 End-to-end workloads include point/index-range lookup, full scan, filter/project, small and large joins, group aggregation, ORDER BY, ORDER BY LIMIT, index-driven UPDATE, bulk INSERT, and concurrent read/write.
 
@@ -193,9 +186,7 @@ VARCHAR width
 dead-version fraction
 ```
 
-The required demonstration is that the same query shape may select SeqScan or IndexScan as these measured conditions change, without an explicit hard-coded selectivity cutoff.
-
-Cardinality-estimation benchmark suites report error distributions, not only average error, and include skew/MCV/NULL/correlation-limitation workloads.
+The required demonstration is that the same query shape may select SeqScan or IndexScan as these measured conditions change, without an explicit hard-coded selectivity cutoff. Cardinality-estimation benchmark suites report error distributions, not only average error, and include skew/MCV/NULL/correlation-limitation workloads.
 
 ## 42.6 Optimizer search and cost-model measurements
 
@@ -227,13 +218,9 @@ peak planning memory
 heuristic/local-improvement work
 ```
 
-They must demonstrate the transition from exhaustive bushy search to bounded heuristic behavior.
+They must demonstrate the transition from exhaustive bushy search to bounded heuristic behavior. Interesting-order tests demonstrate cases where a locally more expensive ordered plan wins globally by avoiding Sort or enabling another capability-enabled ordered operator.
 
-Interesting-order tests demonstrate cases where a locally more expensive ordered plan wins globally by avoiding Sort or enabling another capability-enabled ordered operator.
-
-Memory-aware tests hold logical statistics constant while changing the query planning/execution memory budget and verify that estimated spill and plan choice can change where appropriate.
-
-A synthetic star-schema workload is a recommended stress case for many joins, selective dimensions, a large fact relation, and aggregation.
+Memory-aware tests hold logical statistics constant while changing the query planning/execution memory budget and verify that estimated spill and plan choice can change where appropriate. A synthetic star-schema workload is a recommended stress case for many joins, selective dimensions, a large fact relation, and aggregation.
 
 Benchmark-specific query text/table names MUST NOT be hard-coded into optimizer decisions.
 

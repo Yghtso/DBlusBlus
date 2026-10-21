@@ -10,11 +10,7 @@ required ColumnIds / output LogicalSlotIds
 eligible planner-assigned pushed predicates
 ```
 
-Runtime scan state obtains its effective snapshot/read epoch through the QueryExecutionContext.
-
-The scan walks heap pages in ascending physical PageNo order and slots in physical slot order.
-
-This physical traversal does **not** establish a SQL ordering property.
+Runtime scan state obtains its effective snapshot/read epoch through the QueryExecutionContext. The scan walks heap pages in ascending physical PageNo order and slots in physical slot order. This physical traversal does **not** establish a SQL ordering property.
 
 For each heap page:
 
@@ -29,17 +25,7 @@ For each heap page:
 8. release guard when the page is no longer needed
 ```
 
-The scan does not decode every table column merely because the table contains it.
-
-Predicate dependency columns may be decoded before output-only columns so rejected rows avoid unnecessary decoding.
-
-When a tuple's persisted `schema_version` requires historical interpretation, scan decoding uses Chapter 16's:
-
-```text
-ResolveSchema(TableId, tuple.schema_version)
-```
-
-contract.
+The scan does not decode every table column merely because the table contains it. Predicate dependency columns may be decoded before output-only columns so rejected rows avoid unnecessary decoding. When a tuple's persisted `schema_version` requires historical interpretation, scan decoding uses Chapter 16's: `ResolveSchema(TableId, tuple.schema_version)` contract.
 
 ## 27.2 Scan page and string lifetime
 
@@ -56,23 +42,13 @@ VARCHAR tuple bytes
     -> StringRef points into chunk-owned memory
 ```
 
-The heap page may then be unpinned as the scan advances.
-
-This prevents long pipelines from pinning pages solely for downstream string lifetime.
+The heap page may then be unpinned as the scan advances. This prevents long pipelines from pinning pages solely for downstream string lifetime.
 
 ## 27.3 Scan predicate pushdown boundary
 
-The physical planner may assign predicates to a scan only after their semantic pushdown safety has been established.
+The physical planner may assign predicates to a scan only after their semantic pushdown safety has been established. The scan executes those assigned predicates. It does **not** discover additional SQL rewrite opportunities at runtime.
 
-The scan executes those assigned predicates.
-
-It does **not** discover additional SQL rewrite opportunities at runtime.
-
-A scan-local predicate may reduce tuple decoding, output cardinality, and memory traffic.
-
-General predicate semantics remain representable by PhysicalFilter.
-
-The scan requests/decode dependencies needed by pushed predicates even when those columns are not final outputs.
+A scan-local predicate may reduce tuple decoding, output cardinality, and memory traffic. General predicate semantics remain representable by PhysicalFilter. The scan requests/decode dependencies needed by pushed predicates even when those columns are not final outputs.
 
 ## 27.4 Physical index scan
 
@@ -104,21 +80,11 @@ decode required columns
 output DataChunk
 ```
 
-An index entry is only a candidate.
-
-It is never proof of SQL row visibility.
-
-The QueryExecutionContext's read-epoch guard protects candidate physical RIDs from reuse while execution may retain them.
+An index entry is only a candidate. It is never proof of SQL row visibility. The QueryExecutionContext's read-epoch guard protects candidate physical RIDs from reuse while execution may retain them.
 
 ## 27.5 RID batching
 
-Index scan collects a small batch of candidate RIDs rather than performing one candidate/one returned row iterator step.
-
-The ordinary RID-batch tuning target is:
-
-```text
-up to one DataChunk capacity
-```
+Index scan collects a small batch of candidate RIDs rather than performing one candidate/one returned row iterator step. The ordinary RID-batch tuning target is: `up to one DataChunk capacity`.
 
 A RID-batching strategy preserves B+ cursor order while fetching candidates when the
 PhysicalIndexScan advertises or must satisfy the original index ordering.
@@ -148,11 +114,7 @@ ASC
 NULLS FIRST
 ```
 
-is the natural index property.
-
-MVCC filtering may remove rows but does not reorder the surviving candidate sequence.
-
-Native reverse scan remains deferred by Chapter 8, so DESC ordering is not claimed by the baseline PhysicalIndexScan merely by walking forward.
+is the natural index property. MVCC filtering may remove rows but does not reorder the surviving candidate sequence. Native reverse scan remains deferred by Chapter 8, so DESC ordering is not claimed by the baseline PhysicalIndexScan merely by walking forward.
 
 Physical planning—not executor guesswork—decides whether this property satisfies ORDER BY.
 
@@ -168,31 +130,13 @@ reduced cardinality
 DICTIONARY/reference vectors over the input
 ```
 
-rather than copying every surviving value.
-
-Filter preserves logical row order.
-
-If no row survives, `output cardinality = 0`, which is an empty batch, not end-of-stream.
-
-If downstream lifetime exceeds the input owner's lifetime, materialization occurs at the appropriate retaining boundary.
+rather than copying every surviving value. Filter preserves logical row order. If no row survives, `output cardinality = 0`, which is an empty batch, not end-of-stream. If downstream lifetime exceeds the input owner's lifetime, materialization occurs at the appropriate retaining boundary.
 
 ## 27.8 PhysicalProject
 
-PhysicalProject evaluates projection expressions vectorized.
+PhysicalProject evaluates projection expressions vectorized. For a direct input slot: `reference/borrow input vector` when lifetime permits.
 
-For a direct input slot:
-
-```text
-reference/borrow input vector
-```
-
-when lifetime permits.
-
-For a computed fixed-width expression:
-
-```text
-write/reuse flat output vector
-```
+For a computed fixed-width expression: `write/reuse flat output vector`.
 
 For a computed VARCHAR:
 
@@ -215,31 +159,19 @@ rows_skipped
 rows_emitted
 ```
 
-OFFSET is applied before LIMIT.
-
-The operator may use selection/slicing instead of cell copying.
-
-Once the limit is satisfied, it requests `pipeline early stop` through §26.8 when no further upstream rows are required.
-
-It does not turn ordinary LIMIT completion into whole-query cancellation.
+OFFSET is applied before LIMIT. The operator may use selection/slicing instead of cell copying. Once the limit is satisfied, it requests `pipeline early stop` through §26.8 when no further upstream rows are required. It does not turn ordinary LIMIT completion into whole-query cancellation.
 
 With no finite LIMIT, only OFFSET accounting applies.
 
 ## 27.10 PhysicalValues
 
-PhysicalValues is a source over already bound/typed literal rows.
-
-It produces DataChunks up to standard capacity.
-
-Constant scalar/string payload owned by the immutable plan may be referenced only when its lifetime safely exceeds every execution consumer; otherwise values are copied into the output chunk.
+PhysicalValues is a source over already bound/typed literal rows. It produces DataChunks up to standard capacity. Constant scalar/string payload owned by the immutable plan may be referenced only when its lifetime safely exceeds every execution consumer; otherwise values are copied into the output chunk.
 
 PhysicalValues performs no SQL parsing/type resolution.
 
 ## 27.11 PhysicalResultSink foundation
 
-A result sink consumes final DataChunks synchronously or materializes/retains result memory according to the client/result-interface contract in Chapter 31.
-
-It MUST NOT expose a borrowed producer chunk beyond the producer/owner lifetime.
+A result sink consumes final DataChunks synchronously or materializes/retains result memory according to the client/result-interface contract in Chapter 31. It MUST NOT expose a borrowed producer chunk beyond the producer/owner lifetime.
 
 The detailed cursor/client result interface and DML RETURNING spool are defined in Chapter 31.
 

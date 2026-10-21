@@ -29,11 +29,7 @@ A full sequential heap scan visits:
 1. heap data pages in ascending `page_no`,
 2. slots within each page in ascending `SlotId`.
 
-The executor applies MVCC visibility after obtaining physical tuple versions.
-
-Physical heap scan order is **not** SQL result ordering.
-
-Without an explicit `ORDER BY`, SQL result ordering remains semantically unspecified even if a particular execution happens to follow physical page/slot order.
+The executor applies MVCC visibility after obtaining physical tuple versions. Physical heap scan order is **not** SQL result ordering. Without an explicit `ORDER BY`, SQL result ordering remains semantically unspecified even if a particular execution happens to follow physical page/slot order.
 
 ## 5.3 HEAP_DATA page format v1
 
@@ -49,13 +45,7 @@ common flags       = 0
 common reserved16  = 0
 ```
 
-The persisted common-header `page_no` MUST equal the logical `PageId.page_no` of the page being interpreted.
-
-The total heap-page header is exactly:
-
-```text
-48 bytes
-```
+The persisted common-header `page_no` MUST equal the logical `PageId.page_no` of the page being interpreted. The total heap-page header is exactly: `48 bytes`.
 
 ### 5.3.1 Heap-specific header layout
 
@@ -69,39 +59,13 @@ The total heap-page header is exactly:
 | `44` | 4 | heap `reserved` |
 |  | **16** | **heap-specific header** |
 
-All multi-byte fields are little-endian.
+All multi-byte fields are little-endian. `lower` is the first byte after the heap header and slot directory. `upper` is the first byte of the tuple-data region. The current contiguous free-space interval is: `[lower, upper)` with size: `free_bytes = upper - lower`.
 
-`lower` is the first byte after the heap header and slot directory.
+Because every slot entry is 8 bytes: `lower = 48 + slot_count * 8`.
 
-`upper` is the first byte of the tuple-data region.
+Valid page geometry requires: `48 <= lower <= upper <= PAGE_SIZE`.
 
-The current contiguous free-space interval is:
-
-```text
-[lower, upper)
-```
-
-with size:
-
-```text
-free_bytes = upper - lower
-```
-
-Because every slot entry is 8 bytes:
-
-```text
-lower = 48 + slot_count * 8
-```
-
-Valid page geometry requires:
-
-```text
-48 <= lower <= upper <= PAGE_SIZE
-```
-
-Slot entries grow upward from the fixed heap header.
-
-Tuple bytes grow downward from the end of the page.
+Slot entries grow upward from the fixed heap header. Tuple bytes grow downward from the end of the page.
 
 ### 5.3.2 Free-slot-list field
 
@@ -141,11 +105,7 @@ Every SlotId reachable from `free_slot_head` MUST:
 - have zero tuple coordinates,
 - appear at most once in the free list.
 
-Every safely reusable `UNUSED` slot MUST appear exactly once in this list.
-
-`DEAD` slots are never linked into the free-slot list.
-
-The existence of `free_slot_head` therefore does not authorize immediate `DEAD` reuse; Chapter 14 controls the only transition that can add a retired slot to this list.
+Every safely reusable `UNUSED` slot MUST appear exactly once in this list. `DEAD` slots are never linked into the free-slot list. The existence of `free_slot_head` therefore does not authorize immediate `DEAD` reuse; Chapter 14 controls the only transition that can add a retired slot to this list.
 
 ### 5.3.3 Reserved and hint fields
 
@@ -157,11 +117,7 @@ common reserved16 = 0
 heap reserved     = 0
 ```
 
-Structural decoding/validation MUST reject a nonzero value in any of these unassigned/reserved fields.
-
-Assigning semantics to either reserved field requires compatible version handling.
-
-`prune_hint` is initialized to zero.
+Structural decoding/validation MUST reject a nonzero value in any of these unassigned/reserved fields. Assigning semantics to either reserved field requires compatible version handling. `prune_hint` is initialized to zero.
 
 Its operational vacuum/pruning semantics are deferred until explicitly defined; this chapter does not assign a correctness meaning to a nonzero hint.
 
@@ -188,25 +144,13 @@ In the heap-page format, the 16-bit field at slot offset `4` is interpreted usin
 | `2` | `DEAD` |
 | `3` | `REDIRECT_RESERVED` |
 
-These numeric codes are persistent-format values.
-
-Existing codes MUST NOT be renumbered because of source-language enum order. Future states require new explicit numeric codes or an explicit compatible format revision.
-
-A persisted slot-state value outside this set is structurally invalid in the heap-page format.
+These numeric codes are persistent-format values. Existing codes MUST NOT be renumbered because of source-language enum order. Future states require new explicit numeric codes or an explicit compatible format revision. A persisted slot-state value outside this set is structurally invalid in the heap-page format.
 
 ### 5.4.1 NORMAL slots
 
-A newly created `NORMAL` slot MUST persist:
+A newly created `NORMAL` slot MUST persist: `aux = 0`.
 
-```text
-aux = 0
-```
-
-The baseline insertion path assigns no other meaning to `aux` for `NORMAL` slots.
-
-Giving `aux` operational meaning for `NORMAL` slots requires an explicitly compatible rule or coordinated page-format revision.
-
-A `NORMAL` slot MUST reference tuple bytes wholly inside the tuple-data region and inside the page.
+The baseline insertion path assigns no other meaning to `aux` for `NORMAL` slots. Giving `aux` operational meaning for `NORMAL` slots requires an explicitly compatible rule or coordinated page-format revision. A `NORMAL` slot MUST reference tuple bytes wholly inside the tuple-data region and inside the page.
 
 ### 5.4.2 UNUSED and REDIRECT_RESERVED slots
 
@@ -236,25 +180,13 @@ state        = DEAD
 aux          = 0
 ```
 
-Clearing the coordinates prevents the reclaimed `DEAD` slot from pointing into newly free space or bytes moved for another tuple.
-
-Compaction alone does **not** change `DEAD` to `UNUSED` and does not link the slot into the free list.
+Clearing the coordinates prevents the reclaimed `DEAD` slot from pointing into newly free space or bytes moved for another tuple. Compaction alone does **not** change `DEAD` to `UNUSED` and does not link the slot into the free list.
 
 Only the Chapter-14 grace-complete reclamation protocol may atomically convert the canonical zero-coordinate `DEAD` slot to `UNUSED` and install the free-list link.
 
 ### 5.4.4 Stable SlotId
 
-Heap-page compaction MAY change:
-
-```text
-slot.tuple_offset
-```
-
-but MUST NOT change:
-
-```text
-SlotId
-```
+Heap-page compaction MAY change `slot.tuple_offset` but MUST NOT change `SlotId`.
 
 Therefore a physical RID remains stable across ordinary page compaction.
 
@@ -303,19 +235,13 @@ install new tuple coordinates/state NORMAL
 slot.aux = 0
 ```
 
-Popping the free-slot list and installing the new NORMAL slot occur in the same page mutation/WAL unit.
+Popping the free-slot list and installing the new NORMAL slot occur in the same page mutation/WAL unit. Page compaction MAY be used when total reclaimable space is sufficient but the current contiguous free-space interval is not.
 
-Page compaction MAY be used when total reclaimable space is sufficient but the current contiguous free-space interval is not.
-
-Compaction MUST preserve stable SlotId values and the canonical DEAD-slot rules in §5.4.3.
-
-Compaction may discard payload bytes for a `DEAD` slot before its final transition to `UNUSED`; it does not independently decide that the RID reuse grace period has completed.
+Compaction MUST preserve stable SlotId values and the canonical DEAD-slot rules in §5.4.3. Compaction may discard payload bytes for a `DEAD` slot before its final transition to `UNUSED`; it does not independently decide that the RID reuse grace period has completed.
 
 ## 5.6 Maximum inline tuple size
 
-Tuple storage is inline-only: one tuple must fit entirely inside one heap page.
-
-Overflow/TOAST-style tuple storage is not part of the heap format.
+Tuple storage is inline-only: one tuple must fit entirely inside one heap page. Overflow/TOAST-style tuple storage is not part of the heap format.
 
 For the page geometry:
 
@@ -325,29 +251,13 @@ heap total header = 48
 slot entry        = 8
 ```
 
-the maximum accepted complete encoded tuple length is:
+the maximum accepted complete encoded tuple length is: `8135 bytes`.
 
-```text
-8135 bytes
-```
+The bound is intentionally strict. A complete encoded tuple length of: `8136 bytes`.
 
-The bound is intentionally strict.
+MUST be rejected even though that size would make the slot directory and tuple region meet exactly with zero bytes remaining. The 8135-byte bound is a complete encoded tuple length limit for heap-page storage. It is not a promise that every byte string up to that size is a semantically valid encoded SQL tuple.
 
-A complete encoded tuple length of:
-
-```text
-8136 bytes
-```
-
-MUST be rejected even though that size would make the slot directory and tuple region meet exactly with zero bytes remaining.
-
-The 8135-byte bound is a complete encoded tuple length limit for heap-page storage. It is not a promise that every byte string up to that size is a semantically valid encoded SQL tuple.
-
-Schema-directed tuple encoding/validation may reject values for independent tuple-format reasons.
-
-An oversized tuple insertion MUST produce `ROW_TOO_LARGE` rather than truncating or corrupting the page.
-
-Overflow/large-object storage is deferred from the architecture baseline.
+Schema-directed tuple encoding/validation may reject values for independent tuple-format reasons. An oversized tuple insertion MUST produce `ROW_TOO_LARGE` rather than truncating or corrupting the page. Overflow/large-object storage is deferred from the architecture baseline.
 
 ## 5.7 Tuple header v1
 
@@ -377,11 +287,7 @@ header_bytes = 48
 reserved     = 0
 ```
 
-`header_bytes` covers only the fixed 48-byte tuple-header prefix. It does not include the null bitmap.
-
-Tuple-header bytes `44..47` MUST be written as zero and MUST be zero when decoding the tuple header.
-
-Assigning them semantics requires a coordinated format revision.
+`header_bytes` covers only the fixed 48-byte tuple-header prefix. It does not include the null bitmap. Tuple-header bytes `44..47` MUST be written as zero and MUST be zero when decoding the tuple header. Assigning them semantics requires a coordinated format revision.
 
 ### 5.7.1 xmin
 
@@ -389,27 +295,11 @@ Assigning them semantics requires a coordinated format revision.
 
 ### 5.7.2 xmax
 
-`xmax` identifies the transaction that invalidated, deleted, or superseded the physical tuple version.
-
-The representation for no invalidating transaction is:
-
-```text
-xmax = INVALID_TXN_ID = 0
-```
+`xmax` identifies the transaction that invalidated, deleted, or superseded the physical tuple version. The representation for no invalidating transaction is: `xmax = INVALID_TXN_ID = 0`.
 
 ### 5.7.3 cmin and cmax
 
-`cmin` and `cmax` are command identifiers within a transaction.
-
-They exist because transaction identity and statement/command visibility are distinct concepts.
-
-`CommandId` value:
-
-```text
-0
-```
-
-is valid and MUST NOT be interpreted as an invalid sentinel.
+`cmin` and `cmax` are command identifiers within a transaction. They exist because transaction identity and statement/command visibility are distinct concepts. `CommandId` value `0` is valid and MUST NOT be interpreted as an invalid sentinel.
 
 For every persisted tuple header, the canonical no-deleter representation is:
 
@@ -434,13 +324,7 @@ The exact visibility interpretation of `xmin`, `xmax`, `cmin`, and `cmax` is def
 
 ### 5.7.4 Previous-version pointer
 
-The pair:
-
-```text
-(prev_page_no, prev_slot)
-```
-
-points to the immediately preceding physical tuple version in the **same heap file**.
+The pair: `(prev_page_no, prev_slot)` points to the immediately preceding physical tuple version in the **same heap file**.
 
 No `FileId` is persisted in the tuple-version link.
 
@@ -463,11 +347,7 @@ previous version exists:
     prev_slot    != INVALID_SLOT_ID
 ```
 
-A mixed sentinel/non-sentinel pair is structurally invalid.
-
-The pointer creates a backward physical version chain.
-
-That chain supports vacuum and version-history inspection without placing relation `FileId` into every tuple header. HOT-style optimization remains outside the supported scope.
+A mixed sentinel/non-sentinel pair is structurally invalid. The pointer creates a backward physical version chain. That chain supports vacuum and version-history inspection without placing relation `FileId` into every tuple header. HOT-style optimization remains outside the supported scope.
 
 ## 5.8 Tuple flags v1
 
@@ -480,15 +360,9 @@ Tuple-header v1 assigns these bits:
 | `0x0001` | `HAS_NULLS` |
 | `0x0002` | `HAS_VARLEN` |
 
-The known mask is:
+The known mask is `0x0003`.
 
-```text
-0x0003
-```
-
-Every other bit is invalid in tuple-header v1.
-
-Encoding and decoding MUST reject unknown bits rather than silently preserving them.
+Every other bit is invalid in tuple-header v1. Encoding and decoding MUST reject unknown bits rather than silently preserving them.
 
 Existing bit assignments MUST NOT be renumbered. Future flags require a new explicitly compatible owning tuple grammar/version under §4.14; compaction/vacuum never clears an unknown bit and rewrites the tuple as known state.
 
@@ -502,9 +376,7 @@ HAS_VARLEN is set
 the interpreting physical schema contains at least one VARCHAR column
 ```
 
-This is a property of the tuple's physical schema/layout.
-
-It does not depend on the number of variable payload bytes in a particular tuple.
+This is a property of the tuple's physical schema/layout. It does not depend on the number of variable payload bytes in a particular tuple.
 
 Therefore:
 
@@ -524,9 +396,7 @@ CHAIN_ROOT
 CHAIN_MEMBER
 ```
 
-They MUST NOT be persisted as ad-hoc substitutes for transaction status.
-
-A future physical tuple flag requires well-defined physical, recovery, and visibility semantics before it becomes part of the persisted format.
+They MUST NOT be persisted as ad-hoc substitutes for transaction status. A future physical tuple flag requires well-defined physical, recovery, and visibility semantics before it becomes part of the persisted format.
 
 ## 5.9 Canonical tuple body layout
 
@@ -546,9 +416,7 @@ After the fixed tuple header, tuple format v1 is:
 └────────────────────────────┘
 ```
 
-The interpreting schema owns a precomputed physical layout description.
-
-For tuple format v1, that physical layout is derived deterministically from the physical schema.
+The interpreting schema owns a precomputed physical layout description. For tuple format v1, that physical layout is derived deterministically from the physical schema.
 
 Let:
 
@@ -582,17 +450,9 @@ MinimumTupleSize() =
     VarlenPayloadOffset()
 ```
 
-There is no alignment padding and no gap between fixed fields/descriptors.
+There is no alignment padding and no gap between fixed fields/descriptors. Every fixed offset is tuple-relative. The same physical schema therefore derives the same fixed offsets independently of compiler ABI or host alignment.
 
-Every fixed offset is tuple-relative.
-
-The same physical schema therefore derives the same fixed offsets independently of compiler ABI or host alignment.
-
-Execution SHOULD NOT rediscover one column's physical offset by repeatedly walking all preceding columns.
-
-The persisted layout is compact and MAY contain fields that are not naturally aligned for the host machine.
-
-Serialization/deserialization MUST use unaligned-safe byte operations such as explicit endian helpers and `memcpy`-style bit transfer rather than undefined-behavior pointer casts.
+Execution SHOULD NOT rediscover one column's physical offset by repeatedly walking all preceding columns. The persisted layout is compact and MAY contain fields that are not naturally aligned for the host machine. Serialization/deserialization MUST use unaligned-safe byte operations such as explicit endian helpers and `memcpy`-style bit transfer rather than undefined-behavior pointer casts.
 
 The execution engine MAY decode persisted values into naturally aligned vectors. Persisted storage layout and execution layout are intentionally distinct representations.
 
@@ -606,27 +466,11 @@ tuple_size =
     + sum(payload_length of each non-NULL VARCHAR)
 ```
 
-No unreferenced trailing bytes are permitted.
-
-Schema-directed validation MUST finish with the canonical varlen payload cursor exactly equal to the supplied tuple byte length.
-
-This rule also applies to fixed-only schemas: a fixed-only tuple has exactly:
-
-```text
-MinimumTupleSize()
-```
-
-bytes.
+No unreferenced trailing bytes are permitted. Schema-directed validation MUST finish with the canonical varlen payload cursor exactly equal to the supplied tuple byte length. This rule also applies to fixed-only schemas: a fixed-only tuple has exactly `MinimumTupleSize()` bytes.
 
 ## 5.10 Null bitmap
 
-Tuple format v1 allocates exactly one null bit for **every physical schema column**, including a column declared `NOT NULL`.
-
-For physical column index `i`:
-
-```text
-null_bit_index(i) = i
-```
+Tuple format v1 allocates exactly one null bit for **every physical schema column**, including a column declared `NOT NULL`. For physical column index `i`: `null_bit_index(i) = i`.
 
 The byte count is:
 
@@ -636,19 +480,9 @@ null_bitmap_bytes =
     + (column_count % 8 != 0 ? 1 : 0)
 ```
 
-equivalently:
+equivalently: `ceil(column_count / 8)`.
 
-```text
-ceil(column_count / 8)
-```
-
-The resulting byte count MUST fit the persisted 16-bit `null_bitmap_bytes` tuple-header field.
-
-A zero-column physical schema has:
-
-```text
-null_bitmap_bytes = 0
-```
+The resulting byte count MUST fit the persisted 16-bit `null_bitmap_bytes` tuple-header field. A zero-column physical schema has: `null_bitmap_bytes = 0`.
 
 ### 5.10.1 Persisted bit meaning
 
@@ -682,21 +516,13 @@ This ordering is persistent-format behavior and MUST NOT depend on source-langua
 
 ### 5.10.3 Nullability metadata
 
-Bitmap allocation is independent of whether a column is declared nullable.
-
-A `NOT NULL` column still owns a physical null bit.
-
-Low-level bitmap primitives do not enforce SQL `NOT NULL` constraints.
-
-Schema-directed tuple validation MUST reject a persisted NULL bit for a column declared `NOT NULL` in the schema version interpreting that tuple.
+Bitmap allocation is independent of whether a column is declared nullable. A `NOT NULL` column still owns a physical null bit. Low-level bitmap primitives do not enforce SQL `NOT NULL` constraints. Schema-directed tuple validation MUST reject a persisted NULL bit for a column declared `NOT NULL` in the schema version interpreting that tuple.
 
 Such a supported-v1 tuple is malformed heap data and MUST be classified as `CORRUPT_HEAP`.
 
 ### 5.10.4 Unused bitmap bits
 
-Unused high bits in the final bitmap byte MUST be zero.
-
-Schema-directed validation MUST reject nonzero unused high bits.
+Unused high bits in the final bitmap byte MUST be zero. Schema-directed validation MUST reject nonzero unused high bits.
 
 ### 5.10.5 HAS_NULLS
 
@@ -719,11 +545,7 @@ A nullable declaration alone does not cause `HAS_NULLS` to be set.
 
 ### 5.10.6 Fixed-area bytes beneath NULL
 
-A v1 writer MUST deterministically write zero into the fixed-area bytes reserved for a NULL fixed-width column.
-
-While the null bit is set, those bytes are semantically unread.
-
-A v1 reader is **not** required to reject nonzero bytes beneath a NULL bit.
+A v1 writer MUST deterministically write zero into the fixed-area bytes reserved for a NULL fixed-width column. While the null bit is set, those bytes are semantically unread. A v1 reader is **not** required to reject nonzero bytes beneath a NULL bit.
 
 This distinguishes canonical writer output from the minimum reader-validity contract.
 
@@ -740,9 +562,7 @@ The scalar widths are:
 | `DATE` | 4 bytes | signed physical scalar |
 | `TIMESTAMP` | 8 bytes | signed physical scalar |
 
-Multi-byte values are encoded little-endian.
-
-Persistent scalar encoding MUST NOT depend on native C++ object layout or alignment.
+Multi-byte values are encoded little-endian. Persistent scalar encoding MUST NOT depend on native C++ object layout or alignment.
 
 ### 5.11.1 BOOLEAN
 
@@ -757,11 +577,7 @@ Any other byte is invalid BOOLEAN data in tuple format v1.
 
 ### 5.11.2 Signed scalar representations
 
-`INT32`, `INT64`, `DATE`, and `TIMESTAMP` persist their fixed-width signed two's-complement bit patterns and then encode those bits little-endian.
-
-`DATE` is physically a signed 32-bit scalar.
-
-`TIMESTAMP` is physically a signed 64-bit scalar.
+`INT32`, `INT64`, `DATE`, and `TIMESTAMP` persist their fixed-width signed two's-complement bit patterns and then encode those bits little-endian. `DATE` is physically a signed 32-bit scalar. `TIMESTAMP` is physically a signed 64-bit scalar.
 
 Their SQL-level epoch, unit, precision, calendar, and time-zone semantics are not defined by the storage codec and remain owned by the SQL type layer.
 
@@ -777,9 +593,7 @@ The storage codec MUST preserve all 64 payload bits, including:
 - quiet/signaling state,
 - NaN payload bits.
 
-Tuple format v1 does not canonicalize NaNs.
-
-Bit-preserving conversion plus explicit integer-endian encoding is appropriate; raw ABI-dependent floating-point object serialization is not.
+Tuple format v1 does not canonicalize NaNs. Bit-preserving conversion plus explicit integer-endian encoding is appropriate; raw ABI-dependent floating-point object serialization is not.
 
 ## 5.12 VARCHAR representation
 
@@ -790,25 +604,9 @@ Every physical VARCHAR column owns an 8-byte descriptor in the tuple fixed area:
 | `0` | 4 | `payload_offset` |
 | `4` | 4 | `payload_length` |
 
-Both fields are unsigned 32-bit little-endian integers.
+Both fields are unsigned 32-bit little-endian integers. `payload_offset` is absolute relative to tuple byte `0`. VARCHAR payload bytes are stored inline in the same tuple. No terminator byte is stored; length is explicit.
 
-`payload_offset` is absolute relative to tuple byte `0`.
-
-VARCHAR payload bytes are stored inline in the same tuple.
-
-No terminator byte is stored; length is explicit.
-
-For every non-NULL VARCHAR, the descriptor MUST point at or after:
-
-```text
-VarlenPayloadOffset()
-```
-
-and checked evaluation of:
-
-```text
-payload_offset + payload_length
-```
+For every non-NULL VARCHAR, the descriptor MUST point at or after `VarlenPayloadOffset()` and checked evaluation of: `payload_offset + payload_length`.
 
 MUST remain within the exact physical tuple length.
 
@@ -821,17 +619,11 @@ payload_offset = 0
 payload_length = 0
 ```
 
-Schema-directed validation MUST reject any other descriptor under a set NULL bit.
-
-A NULL VARCHAR contributes zero payload bytes.
+Schema-directed validation MUST reject any other descriptor under a set NULL bit. A NULL VARCHAR contributes zero payload bytes.
 
 ### 5.12.2 Present VARCHAR packing
 
-Present VARCHAR payloads are packed consecutively in physical schema-column order beginning at:
-
-```text
-VarlenPayloadOffset()
-```
+Present VARCHAR payloads are packed consecutively in physical schema-column order beginning at `VarlenPayloadOffset()`.
 
 Validation maintains an expected payload cursor.
 
@@ -877,17 +669,11 @@ The storage format does not define:
 - `VARCHAR(n)` semantics,
 - a terminator convention.
 
-Those semantics belong to higher layers.
-
-Large/overflow values remain deferred; the complete tuple must satisfy the inline tuple-size limit.
+Those semantics belong to higher layers. Large/overflow values remain deferred; the complete tuple must satisfy the inline tuple-size limit.
 
 ## 5.13 Schema versioning
 
-Every physical tuple version stores:
-
-```text
-schema_version
-```
+Every physical tuple version stores `schema_version`.
 
 Tuple interpretation uses the catalog contract:
 
@@ -896,11 +682,7 @@ ResolveSchema(TableId, tuple.schema_version)
     -> immutable SchemaDescriptor
 ```
 
-defined in Chapter 16.
-
-Tuple writers emit `SchemaVer{1}`, and `SchemaVer{0}` is invalid. Any persisted schema version that may still occur in tuple storage MUST remain historically resolvable.
-
-The field is present in tuple format v1 so an explicit architecture revision can define schema evolution without silently changing the tuple representation.
+defined in Chapter 16. Tuple writers emit `SchemaVer{1}`, and `SchemaVer{0}` is invalid. Any persisted schema version that may still occur in tuple storage MUST remain historically resolvable. The field is present in tuple format v1 so an explicit architecture revision can define schema evolution without silently changing the tuple representation.
 
 Schema-changing ALTER and version translation/tuple rewriting are deferred from the architecture baseline. Producing additional SchemaVer values requires an explicit architecture revision.
 
@@ -926,11 +708,7 @@ The conceptual heap INSERT path is:
 14. create index entries
 ```
 
-The FSM is advisory.
-
-A stale FSM candidate MUST NOT make insertion incorrect; actual heap-page free space is checked after fetching/latching the page.
-
-The exact ordering of WAL creation, page mutation, dirty-state publication, and page-LSN updates is defined by §§7.10.1, 12.11–12.12, and 15.2. This chapter does not preempt that ordering.
+The FSM is advisory. A stale FSM candidate MUST NOT make insertion incorrect; actual heap-page free space is checked after fetching/latching the page. The exact ordering of WAL creation, page mutation, dirty-state publication, and page-LSN updates is defined by §§7.10.1, 12.11–12.12, and 15.2. This chapter does not preempt that ordering.
 
 ## 5.15 UPDATE protocol boundary
 
@@ -950,35 +728,19 @@ Conceptually:
 9. retain old tuple/index entries until vacuum
 ```
 
-User-visible tuple bytes are not updated in place in the defined architecture.
+User-visible tuple bytes are not updated in place in the defined architecture. The old version MUST remain physically available while a legal snapshot may still require it. The heap layer MAY prefer placing the new version on the same page when sufficient space exists.
 
-The old version MUST remain physically available while a legal snapshot may still require it.
-
-The heap layer MAY prefer placing the new version on the same page when sufficient space exists.
-
-Same-page placement is a locality optimization, not an invariant.
-
-The detailed transaction visibility, command-ID handling, locking, WAL, and abort behavior is defined by §§9.6, 10.2–10.4, 12.12, 15.3, 15.6, and 39.1.
+Same-page placement is a locality optimization, not an invariant. The detailed transaction visibility, command-ID handling, locking, WAL, and abort behavior is defined by §§9.6, 10.2–10.4, 12.12, 15.3, 15.6, and 39.1.
 
 ## 5.16 DELETE protocol boundary
 
-The baseline DELETE operation is logical before physical reclamation.
+The baseline DELETE operation is logical before physical reclamation. Conceptually: `set the visible tuple version's xmax`.
 
-Conceptually:
-
-```text
-set the visible tuple version's xmax
-```
-
-The tuple bytes and corresponding physical index entries remain present.
-
-Physical reclamation occurs during vacuum only after the global visibility/reclamation rules determine that no legal snapshot can require the version.
+The tuple bytes and corresponding physical index entries remain present. Physical reclamation occurs during vacuum only after the global visibility/reclamation rules determine that no legal snapshot can require the version.
 
 ## 5.17 MVCC visibility boundary
 
-`HeapPage` does **not** decide SQL visibility.
-
-`HeapPage` exposes physical tuple versions and their physical metadata.
+`HeapPage` does **not** decide SQL visibility. `HeapPage` exposes physical tuple versions and their physical metadata.
 
 A transaction/MVCC visibility component interprets:
 
@@ -1008,9 +770,7 @@ Visibility depends on global transaction state, not on heap-page bytes alone.
 
 ## 5.18 HeapPage representation boundary
 
-`HeapPage` is a lightweight page-format view over caller-owned page bytes.
-
-It MUST NOT independently own another 8192-byte page allocation merely to interpret a page already resident in the BufferPool.
+`HeapPage` is a lightweight page-format view over caller-owned page bytes. It MUST NOT independently own another 8192-byte page allocation merely to interpret a page already resident in the BufferPool.
 
 Architecturally, `HeapPage` provides responsibilities equivalent to:
 
@@ -1023,11 +783,7 @@ Architecturally, `HeapPage` provides responsibilities equivalent to:
 - reporting contiguous/reclaimable page-local space,
 - iterating physical slots.
 
-The exact C++ method names and signatures are not part of the persistent or subsystem contract.
-
-Page-format algorithms operate on caller-owned resident bytes.
-
-When those bytes come from BufferPool, every `HeapPage`/tuple/VARCHAR view remains borrowed under the guard-lifetime contract in §7.7.2.
+The exact C++ method names and signatures are not part of the persistent or subsystem contract. Page-format algorithms operate on caller-owned resident bytes. When those bytes come from BufferPool, every `HeapPage`/tuple/VARCHAR view remains borrowed under the guard-lifetime contract in §7.7.2.
 
 ## 5.19 TupleCodec boundary
 
@@ -1055,15 +811,11 @@ TupleCodec / typed accessors
 execution vectors or planning/runtime values
 ```
 
-`HeapPage` MUST NOT need to know that a particular physical column is, for example, a VARCHAR.
-
-Schema-directed tuple interpretation belongs to the tuple codec/layout layer.
+`HeapPage` MUST NOT need to know that a particular physical column is, for example, a VARCHAR. Schema-directed tuple interpretation belongs to the tuple codec/layout layer.
 
 ## 5.20 Tuple views and execution decoding
 
-Storage code SHOULD avoid unnecessary copies by exposing immutable tuple views into resident page bytes when lifetime safety can be maintained.
-
-A tuple view into BufferPool-backed storage MUST NOT outlive the page guard/pin that keeps its backing frame resident.
+Storage code SHOULD avoid unnecessary copies by exposing immutable tuple views into resident page bytes when lifetime safety can be maintained. A tuple view into BufferPool-backed storage MUST NOT outlive the page guard/pin that keeps its backing frame resident.
 
 The execution layer MAY decode or copy selected columns into naturally aligned typed vectors.
 

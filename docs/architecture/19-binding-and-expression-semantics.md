@@ -219,9 +219,7 @@ cleanup remain §21.9 and storage-layer responsibilities.
 
 ## 19.5 Wildcards and output names
 
-`SELECT *` expands during binding into explicit bound column references in visible FROM-relation order and each relation's logical presentation order.
-
-`SELECT u.*` expands one relation binding.
+`SELECT *` expands during binding into explicit bound column references in visible FROM-relation order and each relation's logical presentation order. `SELECT u.*` expands one relation binding.
 
 Unqualified `*` requires at least one visible FROM relation; in a no-FROM
 query block it is a bind error rather than an empty expansion. Qualified
@@ -353,9 +351,7 @@ IN / NOT IN subquery -> conservatively nullable BOOLEAN
 
 ## 19.7 Expression immutability and ownership
 
-Bound expressions are immutable after construction.
-
-A rewrite creates a new expression or structurally shares immutable children; it does not change the meaning of an expression object that other plans may already reference.
+Bound expressions are immutable after construction. A rewrite creates a new expression or structurally shares immutable children; it does not change the meaning of an expression object that other plans may already reference.
 
 Expression lifetime is query/plan scoped.
 
@@ -421,9 +417,7 @@ null-handling rule
 implementation ID
 ```
 
-`implementation ID` is a process/runtime dispatch identity unless another architecture contract explicitly assigns a stable persistent code.
-
-Catalog defaults do **not** persist this implementation ID: permitted closed immutable default expressions are evaluated to one typed scalar before persistence as defined in §21.12.
+`implementation ID` is a process/runtime dispatch identity unless another architecture contract explicitly assigns a stable persistent code. Catalog defaults do **not** persist this implementation ID: permitted closed immutable default expressions are evaluated to one typed scalar before persistence as defined in §21.12.
 
 Volatility classes are:
 
@@ -437,9 +431,7 @@ Only an IMMUTABLE function with constant arguments is eligible for ordinary
 compile/bind-time constant folding. The empty registry admits no such
 named scalar call.
 
-VOLATILE expressions are never constant-folded as though their result were stable.
-
-Bound function nodes retain the resolved semantic implementation identity rather than requiring executor-time name lookup.
+VOLATILE expressions are never constant-folded as though their result were stable. Bound function nodes retain the resolved semantic implementation identity rather than requiring executor-time name lookup.
 
 ## 19.10 Aggregate expressions
 
@@ -524,9 +516,7 @@ Thus a query with `GROUP BY a` may project `a+1`, while a query with
 `GROUP BY a+1` may not project `a` merely because `a` is a subexpression of
 the grouping key.
 
-The architecture uses strict SQL-style grouping validation.
-
-Arbitrary selection of non-grouped columns is rejected.
+The architecture uses strict SQL-style grouping validation. Arbitrary selection of non-grouped columns is rejected.
 
 ## 19.12 HAVING
 
@@ -549,9 +539,7 @@ presence or by an aggregate occurrence in SELECT, HAVING, or ORDER BY. HAVING
 with no GROUP BY and no such aggregate produces `BindError`; HAVING alone does
 not create a global group.
 
-The architecture does **not** make SELECT aliases visible inside HAVING.
-
-HAVING predicates must type-check as BOOLEAN.
+The architecture does **not** make SELECT aliases visible inside HAVING. HAVING predicates must type-check as BOOLEAN.
 
 ## 19.13 ORDER BY resolution
 

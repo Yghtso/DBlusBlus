@@ -479,7 +479,6 @@ statement by itself is not counted as verification.
 | 100 | BEGIN / REGISTRATION | Ordinary BEGIN uses runtime registration and does not require persisted RESERVED/IN_PROGRESS status | §§9.8, 9.11, 9.11.1 | BEGIN event-log/status-absence fixture |
 | 101 | TRANSACTION STATE | Required transaction-local semantic resources remain observable through their owning lifetime and cleanup | §9.4 | Harness resource log plus Statement, COMMIT, ABORT, and Lifecycle Tests |
 
-
 ---
 
 ## WAL Persistent Codec, Append, and Recovery Verification
@@ -1216,7 +1215,6 @@ deterministic oracle, not merely that Architecture states the requirement.
 | 116 L | user abort does not physically reverse an authorized system BTREE_MTR | §§12.10.2–12.10.4, 13.13.3 | BTREE_MTR codec and nested-entry rejection / B+ Tree Verification | diagnostic owner abort plus recovery/reopen |
 | 117 N | active-registry state dominates resident status bits before runtime terminal publication | §§9.13–9.14, 12.10.5.2 | TXN_STATUS image/terminal crash prefixes / Transaction identity, snapshot, and status verification | pause after status-bit install before C3/C4 |
 
-
 ## Crash Injection Framework
 
 Add deterministic process-termination points around:
@@ -1907,11 +1905,7 @@ A production encode/decode round trip is useful additional coverage but is never
 or semantic oracle because both directions may share the same offset or endian defect.
 
 The CRC oracle uses an independent CRC32C implementation or independently generated fixed
-vectors. First require the standard check value:
-
-```text
-CRC32C("123456789") = 0xE3069283
-```
+vectors. First require the standard check value: `CRC32C("123456789") = 0xE3069283`.
 
 Then compute over all 4096 slot bytes while supplying logical zero for offsets `80..83`,
 regardless of the stored checksum bytes, and store the result little-endian at offset 80.
@@ -2232,7 +2226,6 @@ independent deterministic procedure, not merely that Architecture states the rul
 | 81 O | short/long file or slot framing cannot be salvaged | §§13.2–13.2.1 | independent byte oracle | exact 4095/4097 and 8191/8193 fixtures |
 | 82 O | corrupt supported-format state, unsupported future format, and checkpoint-unusable state remain distinct | §§4.14, 13.2.3 | classification and selection matrices | three isolated pair/file fixtures |
 
-
 #### Required recovery inputs
 
 Separately remove, replace, truncate, or corrupt each architecture-required recovery input:
@@ -2470,11 +2463,7 @@ redirect it to ABORT. Repeated group-commit flush failure must leave every trans
 a valid commit record in the architecture-defined COMMITTING/noncontinuable handling, not
 selectively abort unacknowledged waiters.
 
-At and after C3, assert the invariant directly:
-
-```text
-durable TXN_COMMIT => semantic outcome COMMITTED forever
-```
+At and after C3, assert the invariant directly: `durable TXN_COMMIT => semantic outcome COMMITTED forever`.
 
 Post-durable runtime publication, cache, cleanup, lock-release, shutdown, and transport
 failures may change database health or client knowledge, but must never create or report
@@ -2518,11 +2507,7 @@ For random transaction workloads:
 3. reopen/recover,
 4. compare logical committed contents against a model that includes only transactions whose commit records became durable.
 
-Repeat across many seeds.
-
-Physical garbage is allowed.
-
-Logical committed results must match.
+Repeat across many seeds. Physical garbage is allowed. Logical committed results must match.
 
 ---
 
@@ -3538,7 +3523,6 @@ text alone is not counted as coverage.
 | 155 | FAILURE PROPAGATION | UniqueViolation is emitted only for a valid logical owner | §§11.10.3–11.10.4, 39.1 | UNIQUE error-versus-violation assertions |
 | 156 | OTHER | Implementation remains parallel-ready without container-specific expectations | §§11.12, 11.15 | Concurrency semantics across alternate harness scheduling |
 
-
 ---
 
 ## Vacuum and Reclamation Tests
@@ -4276,7 +4260,6 @@ deterministic fixture and independent oracle.
 | 162 | AE | No new old TxnId can be introduced below cutoff | §§9.4, 14.14 | Post-cutoff write-admission fixture |
 | 163 | AE | Maintenance scheduling correctness is trigger-independent | §§14.16–14.17 | Trigger-equivalence fixture |
 | 164 | AE | Verification uses semantic events, not implementation containers | §§14.6, 14.17.1 | Harness implementation-freedom assertions |
-
 
 ---
 

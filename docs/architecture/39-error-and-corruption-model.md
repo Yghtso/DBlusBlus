@@ -8,9 +8,7 @@ The system distinguishes at least:
 - persistent corruption,
 - internal invariant failures.
 
-Persistent corruption and impossible storage states MUST NOT be silently accepted.
-
-Errors that can arise from valid external input, I/O behavior, concurrent transactions, or corrupted persistent bytes require explicit runtime handling; debug assertions alone are insufficient for such cases.
+Persistent corruption and impossible storage states MUST NOT be silently accepted. Errors that can arise from valid external input, I/O behavior, concurrent transactions, or corrupted persistent bytes require explicit runtime handling; debug assertions alone are insufficient for such cases.
 
 Internal invariant failures SHOULD fail loudly in debug/test configurations.
 
@@ -76,11 +74,7 @@ The command outcome, transaction semantic state, database-continuation state, an
 
 ### 39.1.2 First persistent statement write and the no-undo rule
 
-Each admitted statement begins with:
-
-```text
-current_statement_has_published_write = false
-```
+Each admitted statement begins with: `current_statement_has_published_write = false`.
 
 It becomes true exactly when an effect logically owned by that transaction and statement reaches §12.12's publication point as a valid ordinary WAL-backed database mutation understood by crash recovery and transaction visibility. The same event sets the transaction-wide `has_persistent_writes = true`, which never resets before transaction end. `has_persistent_writes` is intentionally broader: a user-transaction-chained empty-page allocation or other structural record may require later terminal WAL and set the transaction-wide bit without setting the per-statement logical-effect bit. Examples that set both include:
 
@@ -576,13 +570,9 @@ ConstraintViolation  -> may contain UniqueViolation
 TransactionConflict  -> may contain SerializationFailure / DeadlockVictim
 ```
 
-RAII/lifetime ownership unwinds query-owned chunks, row collections, reservations, spill files, pipeline tasks, and operator state.
+RAII/lifetime ownership unwinds query-owned chunks, row collections, reservations, spill files, pipeline tasks, and operator state. Execution failure does not independently release transaction-owned logical locks; the command/transaction layer drives the required abort/terminal path.
 
-Execution failure does not independently release transaction-owned logical locks; the command/transaction layer drives the required abort/terminal path.
-
-That command-layer decision is exactly §39.1's statement-write matrix; an execution operator does not choose statement-only versus transaction-fatal behavior independently.
-
-No partially active pipeline/task graph remains runnable after a terminal query execution failure.
+That command-layer decision is exactly §39.1's statement-write matrix; an execution operator does not choose statement-only versus transaction-fatal behavior independently. No partially active pipeline/task graph remains runnable after a terminal query execution failure.
 
 Scalar-subquery `CardinalityViolation` and every subquery child/build error use
 §20.14.12's observable precedence and this same §39.1 statement-write matrix.
@@ -634,9 +624,7 @@ finite nonzero / ±0.0 -> signed infinity
 infinity / infinity   -> NaN
 ```
 
-NaN/zero comparison/grouping/index semantics remain those defined in Chapters 8, 17, 20, and 29.
-
-Compiler modes that silently replace these semantics are not allowed.
+NaN/zero comparison/grouping/index semantics remain those defined in Chapters 8, 17, 20, and 29. Compiler modes that silently replace these semantics are not allowed.
 
 ## 39.4 Optimizer errors
 
@@ -647,10 +635,6 @@ OptimizerError
 OptimizerResourceLimit
 ```
 
-`OptimizerResourceLimit` means the configured planning-time/memory bound prevented completion even after the bounded heuristic fallback.
-
-It is not an out-of-process arbitrary allocation crash.
-
-A cost-model mistake that merely selects a slower semantically valid plan is **not** an optimizer runtime error.
+`OptimizerResourceLimit` means the configured planning-time/memory bound prevented completion even after the bounded heuristic fallback. It is not an out-of-process arbitrary allocation crash. A cost-model mistake that merely selects a slower semantically valid plan is **not** an optimizer runtime error.
 
 A final-plan semantic/property-validation failure is an internal invariant failure and MUST NOT be executed.

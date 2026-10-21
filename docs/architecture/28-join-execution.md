@@ -27,9 +27,7 @@ MergeJoin:
     capability-conditional ordered-input algorithm when predicates and physical properties permit
 ```
 
-Physical planning selects one capability-valid join algorithm before execution.
-
-No join implementation may reinterpret SQL join semantics merely because a different physical algorithm is selected.
+Physical planning selects one capability-valid join algorithm before execution. No join implementation may reinterpret SQL join semantics merely because a different physical algorithm is selected.
 
 ## 28.2 Central query-local hash semantics
 
@@ -42,11 +40,7 @@ if the relevant SQL equality mode says A and B are equal
 then Hash(A) == Hash(B)
 ```
 
-Hash values are query/process-local execution values.
-
-They are not persistent database format and need not remain stable across database versions.
-
-The architecture does not use `std::hash` as a semantic contract.
+Hash values are query/process-local execution values. They are not persistent database format and need not remain stable across database versions. The architecture does not use `std::hash` as a semantic contract.
 
 ### 28.2.1 Equality modes
 
@@ -61,11 +55,7 @@ For ordinary equi-join equality:
 NULL in any key component -> non-matchable key
 ```
 
-For GROUP BY / DISTINCT equality:
-
-```text
-NULL == NULL for grouping identity
-```
+For GROUP BY / DISTINCT equality: `NULL == NULL for grouping identity`.
 
 The modes share the same concrete type semantics for non-NULL values.
 
@@ -99,9 +89,7 @@ LEFT
 CROSS
 ```
 
-The materialized right side uses query-owned row storage and deep-copies retained variable-length values.
-
-A probe row may emit across multiple output chunks; the runtime keeps continuation state rather than requiring one full cross product to fit in memory.
+The materialized right side uses query-owned row storage and deep-copies retained variable-length values. A probe row may emit across multiple output chunks; the runtime keeps continuation state rather than requiring one full cross product to fit in memory.
 
 Nested-loop join is a costed physical alternative, not a universal large equi-join fallback.
 
@@ -160,9 +148,7 @@ logical right side -> build
 logical left side  -> probe / preserved side
 ```
 
-The optimizer MUST NOT arbitrarily swap that orientation merely to make the build smaller unless a separate semantic transformation proves an equivalent physical plan.
-
-This keeps unmatched-row production local and unambiguous.
+The optimizer MUST NOT arbitrarily swap that orientation merely to make the build smaller unless a separate semantic transformation proves an equivalent physical plan. This keeps unmatched-row production local and unambiguous.
 
 ## 28.6 Hash-join build storage and directory
 
@@ -175,9 +161,7 @@ optional cached 64-bit hash
 duplicate-chain metadata
 ```
 
-Variable-length build values are deep-copied into build-owned storage.
-
-The hash directory is power-of-two open addressing.
+Variable-length build values are deep-copied into build-owned storage. The hash directory is power-of-two open addressing.
 
 Each occupied directory entry contains conceptually:
 
@@ -202,17 +186,9 @@ same hash but different key:
     continue open-addressing probe sequence
 ```
 
-Thus different SQL keys with the same 64-bit hash remain distinct entries, while many build rows with the same key share one compact duplicate chain.
+Thus different SQL keys with the same 64-bit hash remain distinct entries, while many build rows with the same key share one compact duplicate chain. The ordinary maximum directory load-factor tuning target is approximately `0.70`.
 
-The ordinary maximum directory load-factor tuning target is approximately:
-
-```text
-0.70
-```
-
-Resize before probe lengths become pathological.
-
-Directory/row memory is charged to the join's memory reservation.
+Resize before probe lengths become pathological. Directory/row memory is charged to the join's memory reservation.
 
 ## 28.7 Hash-build pipeline and finalization
 
@@ -249,11 +225,7 @@ discard the pair solely from the hash-key result. When the moved/decomposed
 evaluation is proven total and error-free over the complete omitted pair
 domain, NULL-key pruning remains valid and produces no match.
 
-`Finalize` completes/resizes/compacts the directory and publishes immutable probe state.
-
-The probe pipeline cannot begin until successful build Finalize.
-
-After Finalize, ordinary probe workers do not mutate the hash directory.
+`Finalize` completes/resizes/compacts the directory and publishes immutable probe state. The probe pipeline cannot begin until successful build Finalize. After Finalize, ordinary probe workers do not mutate the hash directory.
 
 ## 28.8 Probe continuation and residual predicates
 
@@ -303,9 +275,7 @@ if no candidate survives:
     emit one NULL-extended right/build row
 ```
 
-A hash collision or an equi-key match whose residual later fails does not count as a successful LEFT JOIN match.
-
-The output right/build slots have the nullable metadata required by the logical LEFT JOIN contract.
+A hash collision or an equi-key match whose residual later fails does not count as a successful LEFT JOIN match. The output right/build slots have the nullable metadata required by the logical LEFT JOIN contract.
 
 ## 28.10 Grace hash-join spill
 
@@ -327,9 +297,7 @@ for each partition pair:
     probe corresponding probe partition
 ```
 
-Partition count is a power of two chosen from measured/estimated pressure and available reservation.
-
-Spill blocks use the query-temporary SpillManager contract from Chapter 24.
+Partition count is a power of two chosen from measured/estimated pressure and available reservation. Spill blocks use the query-temporary SpillManager contract from Chapter 24.
 
 For LEFT JOIN, probe rows with non-matchable NULL keys may be emitted as
 unmatched without entering a hash partition only when the same demand-safe
@@ -343,17 +311,9 @@ Hash join never promises output ordering, so partition processing order may chan
 
 ## 28.11 Recursive repartition and skew fallback
 
-If a build partition is still too large:
+If a build partition is still too large: `repartition with additional hash bits` up to a bounded recursion depth.
 
-```text
-repartition with additional hash bits
-```
-
-up to a bounded recursion depth.
-
-The runtime records skew/repartition statistics.
-
-If a pathological partition still cannot fit, execution uses a controlled correctness fallback such as chunked nested processing for that partition rather than recursing indefinitely or exceeding the hard memory limit.
+The runtime records skew/repartition statistics. If a pathological partition still cannot fit, execution uses a controlled correctness fallback such as chunked nested processing for that partition rather than recursing indefinitely or exceeding the hard memory limit.
 
 The fallback remains memory-accounted.
 
@@ -363,21 +323,9 @@ The fallback remains memory-accounted.
 ordering and admitted predicate semantics satisfy the physical-planning rules in Chapters
 22, 37, and 38.
 
-It is useful when compatible ordering already exists or when ordered output has downstream value.
+It is useful when compatible ordering already exists or when ordered output has downstream value. The `PhysicalMergeJoin` contract admits equality merge joins. Ordinary equality retains ordinary NULL semantics: `NULL does not match NULL`.
 
-The `PhysicalMergeJoin` contract admits equality merge joins.
-
-Ordinary equality retains ordinary NULL semantics:
-
-```text
-NULL does not match NULL
-```
-
-Duplicate key groups are processed incrementally.
-
-The operator MUST NOT materialize the complete cross product of two large duplicate groups merely to produce one output chunk.
-
-For LEFT semantics, unmatched logical-left rows are emitted exactly once.
+Duplicate key groups are processed incrementally. The operator MUST NOT materialize the complete cross product of two large duplicate groups merely to produce one output chunk. For LEFT semantics, unmatched logical-left rows are emitted exactly once.
 
 Range-style merge joins are outside the Chapter-28 execution contract; every admitted
 merge-join form requires explicit predicate semantics rather than treating inequalities as
