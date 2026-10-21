@@ -36,6 +36,13 @@ vgcore.*
 .idea/
 .vscode/
 
+# clangd index cache
+.cache/
+
+# Python bytecode (docs/tools scripts)
+__pycache__/
+*.pyc
+
 # OS metadata
 .DS_Store
 
