@@ -226,6 +226,24 @@ clang-format major version reports differences, treat that as a tool-version
 compatibility finding and review it before reformatting files. Do not mix
 repository-wide formatting with unrelated implementation work.
 
+### Documentation book
+
+The documents under `docs/` build as an [mdBook](https://rust-lang.github.io/mdBook/)
+(0.4.40, plus Python 3 for the preprocessor in `docs/tools/`). The architecture and
+verification guides are split into one file per chapter under `docs/architecture/` and
+`docs/verification/`; `docs/SUMMARY.md` is the table of contents. When rendering, the
+preprocessor links each `§` reference to its architecture section and draws ` ```mermaid `
+diagrams.
+
+```sh
+mdbook build docs                              # writes build/book/
+python3 docs/tools/check_links.py build/book   # internal links and anchors
+python3 docs/tools/check_links.py --markdown README.md AGENTS.md devlog/*.md \
+    docs/*.md docs/architecture/*.md docs/verification/*.md
+```
+
+CI runs the same three commands. A new chapter file must be added to `docs/SUMMARY.md`.
+
 ### Warnings as errors
 
 Warnings are enabled for project targets by default. To additionally promote them to

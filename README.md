@@ -44,7 +44,7 @@ already implemented. See [`PROJECT_STATE.md`](docs/PROJECT_STATE.md) for impleme
 capabilities, limitations, and active development boundaries.
 
 The architecture uses this high-level coordination and representation flow
-([Architecture §2.1](docs/ARCHITECTURE.md#21-layered-system-model)):
+([Architecture §2.1](docs/architecture/02-system-architecture-and-dependency-model.md#21-layered-system-model)):
 
 ```text
 SQL / Parser

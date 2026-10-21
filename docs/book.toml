@@ -1,0 +1,24 @@
+[book]
+title = "DBlusBlus"
+description = "Architecture, verification and development documentation for DBlusBlus."
+language = "en"
+src = "."
+
+[build]
+build-dir = "../build/book"
+create-missing = false
+
+# Links § references to architecture sections and prepares Mermaid diagrams.
+[preprocessor.dblusblus]
+# mdBook versions differ in which directory they run preprocessors from, so resolve the path
+# from the repository root.
+command = "sh -c 'cd \"$(git rev-parse --show-toplevel)\" && exec python3 docs/tools/mdbook_preprocessor.py \"$@\"' preprocessor"
+
+[output.html]
+additional-js = ["theme/mermaid-init.js"]
+git-repository-url = "https://github.com/Yghtso/DBlusBlus"
+edit-url-template = "https://github.com/Yghtso/DBlusBlus/edit/main/docs/{path}"
+no-section-label = true
+
+[output.html.search]
+limit-results = 40
