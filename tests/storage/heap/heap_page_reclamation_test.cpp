@@ -85,18 +85,18 @@ TEST(HeapPageDeadTransitionTest, MarksNormalSlotDeadWithoutReclaimingBytesOrIden
     HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     const auto tuple = MakeTestTuple(64, std::byte{0x41});
     const auto insertion = heap_page.Insert(tuple);
-    if (!insertion.rid.has_value()) {
+    if (!insertion.Ok()) {
         ADD_FAILURE() << "tuple insertion did not return a RID";
         return;
     }
-    const Rid original_rid = *insertion.rid;
+    const Rid original_rid = *insertion;
 
     const auto original_slot = DecodeHeapSlotEntry(SlotBytes(page, original_rid.slot));
-    if (!original_slot.entry.has_value()) {
+    if (!original_slot.Ok()) {
         ADD_FAILURE() << "inserted slot did not decode";
         return;
     }
-    const HeapSlotEntry expected_preserved_slot = *original_slot.entry;
+    const HeapSlotEntry expected_preserved_slot = *original_slot;
 
     const auto original_header = heap_page.Header();
     if (!original_header.has_value()) {
@@ -113,18 +113,18 @@ TEST(HeapPageDeadTransitionTest, MarksNormalSlotDeadWithoutReclaimingBytesOrIden
 
     const auto result = heap_page.MarkDead(original_rid.slot);
     EXPECT_TRUE(result);
-    EXPECT_EQ(result.error, HeapPageMarkDeadError::NONE);
+    EXPECT_TRUE(result);
     EXPECT_TRUE(heap_page.Validate());
 
     const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(page, original_rid.slot));
-    if (!dead_slot.entry.has_value()) {
+    if (!dead_slot.Ok()) {
         ADD_FAILURE() << "DEAD slot did not decode";
         return;
     }
-    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
-    EXPECT_EQ(dead_slot.entry->tuple_offset, expected_preserved_slot.tuple_offset);
-    EXPECT_EQ(dead_slot.entry->tuple_length, expected_preserved_slot.tuple_length);
-    EXPECT_EQ(dead_slot.entry->aux, std::uint16_t{0});
+    EXPECT_EQ(dead_slot->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot->tuple_offset, expected_preserved_slot.tuple_offset);
+    EXPECT_EQ(dead_slot->tuple_length, expected_preserved_slot.tuple_length);
+    EXPECT_EQ(dead_slot->aux, std::uint16_t{0});
 
     const auto current_header = heap_page.Header();
     if (!current_header.has_value()) {
@@ -136,7 +136,7 @@ TEST(HeapPageDeadTransitionTest, MarksNormalSlotDeadWithoutReclaimingBytesOrIden
     EXPECT_EQ(original_rid, (Rid{.page = page.Id(), .slot = 0}));
     EXPECT_FALSE(heap_page.TupleBytes(original_rid.slot).has_value());
     EXPECT_TRUE(std::ranges::equal(
-        page.Bytes().subspan(dead_slot.entry->tuple_offset, dead_slot.entry->tuple_length), tuple));
+        page.Bytes().subspan(dead_slot->tuple_offset, dead_slot->tuple_length), tuple));
 
     const auto after = CopyPageBytes(page);
     const std::size_t state_byte_offset = HEAP_PAGE_SLOT_DIRECTORY_OFFSET + HEAP_SLOT_FLAGS_OFFSET;
@@ -158,19 +158,17 @@ TEST(HeapPageDeadTransitionTest, LeavesNeighboringNormalSlotsAndRidsUnchanged) {
     const auto first_insert = heap_page.Insert(first);
     const auto second_insert = heap_page.Insert(second);
     const auto third_insert = heap_page.Insert(third);
-    if (!first_insert.rid.has_value() || !second_insert.rid.has_value() ||
-        !third_insert.rid.has_value()) {
+    if (!first_insert.Ok() || !second_insert.Ok() || !third_insert.Ok()) {
         ADD_FAILURE() << "sequential insertion failed";
         return;
     }
-    const Rid first_rid = *first_insert.rid;
-    const Rid second_rid = *second_insert.rid;
-    const Rid third_rid = *third_insert.rid;
+    const Rid first_rid = *first_insert;
+    const Rid second_rid = *second_insert;
+    const Rid third_rid = *third_insert;
     const auto first_slot_before = DecodeHeapSlotEntry(SlotBytes(page, first_rid.slot));
     const auto second_slot_before = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
     const auto third_slot_before = DecodeHeapSlotEntry(SlotBytes(page, third_rid.slot));
-    if (!first_slot_before.entry.has_value() || !second_slot_before.entry.has_value() ||
-        !third_slot_before.entry.has_value()) {
+    if (!first_slot_before.Ok() || !second_slot_before.Ok() || !third_slot_before.Ok()) {
         ADD_FAILURE() << "one of the inserted slots did not decode";
         return;
     }
@@ -180,17 +178,16 @@ TEST(HeapPageDeadTransitionTest, LeavesNeighboringNormalSlotsAndRidsUnchanged) {
     const auto first_slot_after = DecodeHeapSlotEntry(SlotBytes(page, first_rid.slot));
     const auto second_slot_after = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
     const auto third_slot_after = DecodeHeapSlotEntry(SlotBytes(page, third_rid.slot));
-    if (!first_slot_after.entry.has_value() || !second_slot_after.entry.has_value() ||
-        !third_slot_after.entry.has_value()) {
+    if (!first_slot_after.Ok() || !second_slot_after.Ok() || !third_slot_after.Ok()) {
         ADD_FAILURE() << "one of the transitioned slots did not decode";
         return;
     }
-    EXPECT_EQ(*first_slot_after.entry, *first_slot_before.entry);
-    EXPECT_EQ(*third_slot_after.entry, *third_slot_before.entry);
-    EXPECT_EQ(second_slot_after.entry->tuple_offset, second_slot_before.entry->tuple_offset);
-    EXPECT_EQ(second_slot_after.entry->tuple_length, second_slot_before.entry->tuple_length);
-    EXPECT_EQ(second_slot_after.entry->aux, second_slot_before.entry->aux);
-    EXPECT_EQ(second_slot_after.entry->state, HeapSlotState::DEAD);
+    EXPECT_EQ(*first_slot_after, *first_slot_before);
+    EXPECT_EQ(*third_slot_after, *third_slot_before);
+    EXPECT_EQ(second_slot_after->tuple_offset, second_slot_before->tuple_offset);
+    EXPECT_EQ(second_slot_after->tuple_length, second_slot_before->tuple_length);
+    EXPECT_EQ(second_slot_after->aux, second_slot_before->aux);
+    EXPECT_EQ(second_slot_after->state, HeapSlotState::DEAD);
 
     const auto stored_first = heap_page.TupleBytes(first_rid.slot);
     const auto stored_third = heap_page.TupleBytes(third_rid.slot);
@@ -215,8 +212,8 @@ TEST(HeapPageDeadTransitionTest, RejectsDisallowedTransitionsWithoutMutation) {
         const auto before = CopyPageBytes(page);
         const auto result = heap_test::TestHeapPage(page).MarkDead(slot_id);
         EXPECT_FALSE(result);
-        EXPECT_EQ(result.error, expected_error);
-        EXPECT_EQ(result.page_error, expected_page_error);
+        EXPECT_EQ(result.Error().code, expected_error);
+        EXPECT_EQ(result.Error().page_error, expected_page_error);
         EXPECT_EQ(CopyPageBytes(page), before);
     };
 
@@ -283,14 +280,13 @@ TEST(HeapPageCompactionTest, ReclaimsDeadPayloadAndPreservesStableRids) {
     const auto first_insert = heap_page.Insert(first);
     const auto second_insert = heap_page.Insert(second);
     const auto third_insert = heap_page.Insert(third);
-    if (!first_insert.rid.has_value() || !second_insert.rid.has_value() ||
-        !third_insert.rid.has_value()) {
+    if (!first_insert.Ok() || !second_insert.Ok() || !third_insert.Ok()) {
         ADD_FAILURE() << "sequential insertion failed";
         return;
     }
-    const Rid first_rid = *first_insert.rid;
-    const Rid second_rid = *second_insert.rid;
-    const Rid third_rid = *third_insert.rid;
+    const Rid first_rid = *first_insert;
+    const Rid second_rid = *second_insert;
+    const Rid third_rid = *third_insert;
     ASSERT_TRUE(heap_page.MarkDead(second_rid.slot));
 
     const auto original_header = heap_page.Header();
@@ -306,7 +302,7 @@ TEST(HeapPageCompactionTest, ReclaimsDeadPayloadAndPreservesStableRids) {
 
     const auto result = heap_page.Compact();
     EXPECT_TRUE(result);
-    EXPECT_EQ(result.error, HeapPageCompactError::NONE);
+    EXPECT_TRUE(result);
     ASSERT_TRUE(heap_page.Validate());
 
     const auto compacted_header = heap_page.Header();
@@ -330,14 +326,13 @@ TEST(HeapPageCompactionTest, ReclaimsDeadPayloadAndPreservesStableRids) {
     const auto first_slot = DecodeHeapSlotEntry(SlotBytes(page, first_rid.slot));
     const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(page, second_rid.slot));
     const auto third_slot = DecodeHeapSlotEntry(SlotBytes(page, third_rid.slot));
-    if (!first_slot.entry.has_value() || !dead_slot.entry.has_value() ||
-        !third_slot.entry.has_value()) {
+    if (!first_slot.Ok() || !dead_slot.Ok() || !third_slot.Ok()) {
         ADD_FAILURE() << "compacted slot did not decode";
         return;
     }
-    EXPECT_EQ(first_slot.entry->tuple_offset, PAGE_SIZE - first.size());
-    EXPECT_EQ(third_slot.entry->tuple_offset, PAGE_SIZE - first.size() - third.size());
-    EXPECT_EQ(*dead_slot.entry,
+    EXPECT_EQ(first_slot->tuple_offset, PAGE_SIZE - first.size());
+    EXPECT_EQ(third_slot->tuple_offset, PAGE_SIZE - first.size() - third.size());
+    EXPECT_EQ(*dead_slot,
               (HeapSlotEntry{
                   .tuple_offset = 0, .tuple_length = 0, .state = HeapSlotState::DEAD, .aux = 0}));
 
@@ -393,21 +388,21 @@ TEST(HeapPageCompactionTest, HandlesDeadTupleAtEveryPhysicalPositionDeterministi
         for (std::size_t slot_index = 0; slot_index < payloads.size(); ++slot_index) {
             const auto slot_id = static_cast<SlotId>(slot_index);
             const auto slot = DecodeHeapSlotEntry(SlotBytes(page, slot_id));
-            if (!slot.entry.has_value()) {
+            if (!slot.Ok()) {
                 ADD_FAILURE() << "positional slot did not decode";
                 continue;
             }
             if (slot_id == dead_slot_id) {
-                EXPECT_EQ(slot.entry->state, HeapSlotState::DEAD);
-                EXPECT_EQ(slot.entry->tuple_offset, std::uint16_t{0});
-                EXPECT_EQ(slot.entry->tuple_length, std::uint16_t{0});
+                EXPECT_EQ(slot->state, HeapSlotState::DEAD);
+                EXPECT_EQ(slot->tuple_offset, std::uint16_t{0});
+                EXPECT_EQ(slot->tuple_length, std::uint16_t{0});
                 EXPECT_FALSE(heap_page.TupleBytes(slot_id).has_value());
                 continue;
             }
 
             expected_offset -= payloads[slot_index].size();
-            EXPECT_EQ(slot.entry->state, HeapSlotState::NORMAL);
-            EXPECT_EQ(slot.entry->tuple_offset, expected_offset);
+            EXPECT_EQ(slot->state, HeapSlotState::NORMAL);
+            EXPECT_EQ(slot->tuple_offset, expected_offset);
             const auto stored = heap_page.TupleBytes(slot_id);
             if (!stored.has_value()) {
                 ADD_FAILURE() << "positional live tuple was not retrievable";
@@ -480,13 +475,13 @@ TEST(HeapPageCompactionTest, AllDeadRetainsSlotsAndRestoresTupleRegionToPageEnd)
     EXPECT_EQ(header->free_slot_head, INVALID_SLOT_ID);
     for (SlotId slot_id = 0; slot_id < header->slot_count; ++slot_id) {
         const auto slot = DecodeHeapSlotEntry(SlotBytes(page, slot_id));
-        if (!slot.entry.has_value()) {
+        if (!slot.Ok()) {
             ADD_FAILURE() << "all-DEAD slot did not decode";
             continue;
         }
-        EXPECT_EQ(slot.entry->state, HeapSlotState::DEAD);
-        EXPECT_EQ(slot.entry->tuple_offset, std::uint16_t{0});
-        EXPECT_EQ(slot.entry->tuple_length, std::uint16_t{0});
+        EXPECT_EQ(slot->state, HeapSlotState::DEAD);
+        EXPECT_EQ(slot->tuple_offset, std::uint16_t{0});
+        EXPECT_EQ(slot->tuple_length, std::uint16_t{0});
         EXPECT_FALSE(heap_page.TupleBytes(slot_id).has_value());
     }
     EXPECT_TRUE(heap_page.Validate());
@@ -554,8 +549,8 @@ TEST(HeapPageCompactionTest, RejectsUnsafeLayoutsWithoutMutation) {
         const auto before = CopyPageBytes(page);
         const auto result = heap_test::TestHeapPage(page).Compact();
         EXPECT_FALSE(result);
-        EXPECT_EQ(result.error, expected_error);
-        EXPECT_EQ(result.page_error, expected_page_error);
+        EXPECT_EQ(result.Error().code, expected_error);
+        EXPECT_EQ(result.Error().page_error, expected_page_error);
         EXPECT_EQ(CopyPageBytes(page), before);
     };
 
@@ -590,13 +585,13 @@ TEST(HeapPageCompactionTest, RejectsUnsafeLayoutsWithoutMutation) {
     ConfigureOneNormalSlot(invalid_dead_range);
     ASSERT_TRUE(heap_test::TestHeapPage(invalid_dead_range).MarkDead(0));
     auto dead_slot = DecodeHeapSlotEntry(SlotBytes(invalid_dead_range, 0));
-    if (!dead_slot.entry.has_value()) {
+    if (!dead_slot.Ok()) {
         ADD_FAILURE() << "DEAD slot did not decode for range corruption";
         return;
     }
-    dead_slot.entry->tuple_offset = 0;
-    dead_slot.entry->tuple_length = 1;
-    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(invalid_dead_range, 0), *dead_slot.entry));
+    dead_slot->tuple_offset = 0;
+    dead_slot->tuple_length = 1;
+    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(invalid_dead_range, 0), *dead_slot));
     expect_unchanged(invalid_dead_range,
                      HeapPageCompactError::PAGE_INVALID,
                      HeapPageValidationError::NONCANONICAL_DEAD_SLOT);
@@ -606,12 +601,12 @@ TEST(HeapPageCompactionTest, RejectsUnsafeLayoutsWithoutMutation) {
     ASSERT_TRUE(heap_test::TestHeapPage(overlapping).Insert(tuple));
     ASSERT_TRUE(heap_test::TestHeapPage(overlapping).Insert(tuple));
     auto overlapping_slot = DecodeHeapSlotEntry(SlotBytes(overlapping, 1));
-    if (!overlapping_slot.entry.has_value()) {
+    if (!overlapping_slot.Ok()) {
         ADD_FAILURE() << "overlapping slot did not decode";
         return;
     }
-    overlapping_slot.entry->tuple_offset = static_cast<std::uint16_t>(PAGE_SIZE - tuple.size());
-    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(overlapping, 1), *overlapping_slot.entry));
+    overlapping_slot->tuple_offset = static_cast<std::uint16_t>(PAGE_SIZE - tuple.size());
+    ASSERT_TRUE(EncodeHeapSlotEntry(SlotBytes(overlapping, 1), *overlapping_slot));
     expect_unchanged(overlapping,
                      HeapPageCompactError::PAGE_INVALID,
                      HeapPageValidationError::OVERLAPPING_TUPLE_RANGES);
@@ -652,24 +647,24 @@ TEST(HeapPageCompactionTest, ReclaimedSpaceSupportsAppendOnlyInsertionWithoutSlo
     const auto before_failed_insert = CopyPageBytes(page);
     const auto failed_insert = heap_page.Insert(replacement);
     EXPECT_FALSE(failed_insert);
-    EXPECT_EQ(failed_insert.error, HeapPageInsertError::INSUFFICIENT_SPACE);
+    EXPECT_EQ(failed_insert.Error().code, HeapPageInsertError::INSUFFICIENT_SPACE);
     EXPECT_EQ(CopyPageBytes(page), before_failed_insert);
 
     ASSERT_TRUE(heap_page.Compact());
     const auto replacement_insert = heap_page.Insert(replacement);
-    if (!replacement_insert.rid.has_value()) {
+    if (!replacement_insert.Ok()) {
         ADD_FAILURE() << "post-compaction insertion failed";
         return;
     }
-    EXPECT_EQ(replacement_insert.rid->slot, SlotId{2});
+    EXPECT_EQ(replacement_insert->slot, SlotId{2});
     const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(page, 1));
-    if (!dead_slot.entry.has_value()) {
+    if (!dead_slot.Ok()) {
         ADD_FAILURE() << "DEAD slot did not decode after append-only insertion";
         return;
     }
-    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
-    EXPECT_EQ(dead_slot.entry->tuple_offset, std::uint16_t{0});
-    EXPECT_EQ(dead_slot.entry->tuple_length, std::uint16_t{0});
+    EXPECT_EQ(dead_slot->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot->tuple_offset, std::uint16_t{0});
+    EXPECT_EQ(dead_slot->tuple_length, std::uint16_t{0});
     const auto header = heap_page.Header();
     if (!header.has_value()) {
         ADD_FAILURE() << "heap header did not decode after append-only insertion";

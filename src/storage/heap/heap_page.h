@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/heap/heap_page_format.h"
 #include "storage/page/page.h"
@@ -49,10 +50,17 @@ enum class HeapPageValidationError : std::uint8_t {
     FREE_SLOT_MEMBERSHIP_MISMATCH,
 };
 
-struct HeapPageValidationResult {
-    std::optional<CommonPageHeader> common_header;
-    std::optional<HeapPageHeader> heap_header;
-    HeapPageValidationError error{HeapPageValidationError::NONE};
+// The decoded headers of a valid heap page.
+struct HeapPageHeaders {
+    CommonPageHeader common;
+    HeapPageHeader heap;
+
+    bool operator==(const HeapPageHeaders&) const = default;
+};
+
+struct HeapPageValidationFailure {
+    HeapPageValidationError code{HeapPageValidationError::NONE};
+    // The slot the failure concerns, for slot-specific codes.
     SlotId slot_id{INVALID_SLOT_ID};
     // The earlier-starting retained range for OVERLAPPING_TUPLE_RANGES.
     SlotId other_slot_id{INVALID_SLOT_ID};
@@ -60,10 +68,10 @@ struct HeapPageValidationResult {
     TupleCodecError tuple_error{TupleCodecError::NONE};
     TupleHeaderDecodeError tuple_header_error{TupleHeaderDecodeError::NONE};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == HeapPageValidationError::NONE;
-    }
+    bool operator==(const HeapPageValidationFailure&) const = default;
 };
+
+using HeapPageValidationResult = Result<HeapPageHeaders, HeapPageValidationFailure>;
 
 // Immutable historical tuple layouts of one heap relation, resolved by tuple schema_version.
 // HeapPage uses it only to hand each retained tuple to the tuple codec for schema-directed
@@ -81,7 +89,6 @@ class HeapTupleSchemaHistory {
 };
 
 enum class HeapPageInsertError : std::uint8_t {
-    NONE,
     PAGE_INVALID,
     TUPLE_TOO_LARGE,
     INVALID_TUPLE,
@@ -89,49 +96,55 @@ enum class HeapPageInsertError : std::uint8_t {
     SLOT_ID_EXHAUSTED,
 };
 
-struct HeapPageInsertResult {
-    std::optional<Rid> rid;
-    HeapPageInsertError error{HeapPageInsertError::NONE};
+struct HeapPageInsertFailure {
+    HeapPageInsertError code{HeapPageInsertError::PAGE_INVALID};
+    // Why the page itself was rejected, for PAGE_INVALID.
     HeapPageValidationError page_error{HeapPageValidationError::NONE};
-    // Why the new tuple bytes were rejected for INVALID_TUPLE.
+    // Why the new tuple bytes were rejected, for INVALID_TUPLE.
     HeapPageValidationError tuple_error{HeapPageValidationError::NONE};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return rid.has_value();
-    }
+    bool operator==(const HeapPageInsertFailure&) const = default;
 };
 
+using HeapPageInsertResult = Result<Rid, HeapPageInsertFailure>;
+
 enum class HeapPageMarkDeadError : std::uint8_t {
-    NONE,
     PAGE_INVALID,
     SLOT_OUT_OF_RANGE,
     INVALID_SLOT_STATE,
     ALREADY_DEAD,
 };
 
-struct HeapPageMarkDeadResult {
-    HeapPageMarkDeadError error{HeapPageMarkDeadError::NONE};
+struct HeapPageMarkDeadFailure {
+    HeapPageMarkDeadError code{HeapPageMarkDeadError::PAGE_INVALID};
+    // Why the page itself was rejected, for PAGE_INVALID.
     HeapPageValidationError page_error{HeapPageValidationError::NONE};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == HeapPageMarkDeadError::NONE;
-    }
+    bool operator==(const HeapPageMarkDeadFailure&) const = default;
 };
 
+using HeapPageMarkDeadResult = Status<HeapPageMarkDeadFailure>;
+
 enum class HeapPageCompactError : std::uint8_t {
-    NONE,
     PAGE_INVALID,
     UNSUPPORTED_SLOT_STATE,
 };
 
-struct HeapPageCompactResult {
-    HeapPageCompactError error{HeapPageCompactError::NONE};
+struct HeapPageCompactFailure {
+    HeapPageCompactError code{HeapPageCompactError::PAGE_INVALID};
+    // Why the page itself was rejected, for PAGE_INVALID.
     HeapPageValidationError page_error{HeapPageValidationError::NONE};
+    // The slot that blocked compaction, for UNSUPPORTED_SLOT_STATE.
     SlotId slot_id{INVALID_SLOT_ID};
 
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return error == HeapPageCompactError::NONE;
-    }
+    bool operator==(const HeapPageCompactFailure&) const = default;
+};
+
+using HeapPageCompactResult = Status<HeapPageCompactFailure>;
+
+enum class HeapPageInitializeError : std::uint8_t {
+    // Page 0 is the file superblock, and INVALID_PAGE_NO is a sentinel.
+    INVALID_PAGE_NUMBER,
 };
 
 // Every operation first applies the complete page-local (L1) owner validation of
@@ -140,7 +153,7 @@ class HeapPage {
   public:
     HeapPage(Page& page, HeapTupleSchemaHistory schema_history) noexcept;
 
-    [[nodiscard]] bool Initialize(Lsn page_lsn = INVALID_LSN) noexcept;
+    [[nodiscard]] Status<HeapPageInitializeError> Initialize(Lsn page_lsn = INVALID_LSN) noexcept;
     [[nodiscard]] std::optional<HeapPageHeader> Header() const noexcept;
     [[nodiscard]] HeapPageValidationResult Validate() const noexcept;
     [[nodiscard]] HeapPageInsertResult Insert(std::span<const std::byte> tuple) noexcept;

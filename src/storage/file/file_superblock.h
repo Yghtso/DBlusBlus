@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/page/page_header.h"
 
@@ -61,10 +62,7 @@ enum class FileSuperblockDecodeError : std::uint8_t {
     NONZERO_RESERVED_BYTES,
 };
 
-struct FileSuperblockDecodeResult {
-    std::optional<FileSuperblock> superblock;
-    FileSuperblockDecodeError error;
-};
+using FileSuperblockDecodeResult = Result<FileSuperblock, FileSuperblockDecodeError>;
 
 // This common-prefix codec supports the generic 72-byte HEAP, FSM, and CATALOG superblocks.
 // BTREE requires its architecture-defined 128-byte specialized codec and is rejected here.

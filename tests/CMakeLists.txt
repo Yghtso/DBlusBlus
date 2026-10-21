@@ -9,6 +9,7 @@ target_sources(
     PRIVATE
         common/crc32c_test.cpp
         common/encoding_test.cpp
+        common/result_test.cpp
         common/types_test.cpp
         smoke_test.cpp
         storage/buffer/buffer_pool_concurrency_test.cpp
@@ -27,6 +28,7 @@ target_sources(
         storage/heap/heap_page_validation_test.cpp
         storage/heap/heap_test_support.h
         storage/heap/heap_test_tuples.h
+        support/require.h
         support/temporary_directory.h
         storage/page/page_checksum_test.cpp
         storage/page/page_header_test.cpp

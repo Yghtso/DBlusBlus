@@ -3,9 +3,12 @@ add_library(dblusblus_core STATIC)
 target_sources(
     dblusblus_core
     PRIVATE
+        common/assert.cpp
+        common/assert.h
         common/crc32c.cpp
         common/crc32c.h
         common/encoding.h
+        common/result.h
         common/types.h
         storage/buffer/buffer_error.h
         storage/buffer/buffer_frame.h

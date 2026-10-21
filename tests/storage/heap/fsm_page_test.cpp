@@ -5,6 +5,7 @@
 #include "storage/heap/fsm_page.h"
 #include "storage/page/page.h"
 #include "storage/page/page_header.h"
+#include "support/require.h"
 #include "support/temporary_directory.h"
 
 #include <algorithm>
@@ -25,6 +26,8 @@
 namespace dblusblus {
 namespace {
 
+using test::RequireValue;
+
 static_assert(FSM_PAGE_HEADER_OFFSET == 32);
 static_assert(FSM_PAGE_HEADER_ENCODED_SIZE == 16);
 static_assert(FSM_PAGE_TOTAL_HEADER_SIZE == 48);
@@ -32,25 +35,6 @@ static_assert(FSM_PAGE_ENTRIES_OFFSET == 48);
 static_assert(FSM_PAGE_ENTRY_CAPACITY == 8144);
 static_assert(FSM_MAX_CONTIGUOUS_FREE_BYTES == 8144);
 static_assert(FSM_MAX_USABLE_INSERTION_BYTES == 8135);
-
-template <typename Value>
-[[nodiscard]] const Value* RequireOptional(const std::optional<Value>& optional,
-                                           std::string_view description) {
-    if (!optional.has_value()) {
-        ADD_FAILURE() << description << " unexpectedly missing";
-        return nullptr;
-    }
-    return std::addressof(*optional);
-}
-
-template <typename Value>
-[[nodiscard]] Value* RequireOptional(std::optional<Value>& optional, std::string_view description) {
-    if (!optional.has_value()) {
-        ADD_FAILURE() << description << " unexpectedly missing";
-        return nullptr;
-    }
-    return std::addressof(*optional);
-}
 
 using test::TemporaryDirectory;
 
@@ -64,7 +48,7 @@ using test::TemporaryDirectory;
 }
 
 void WriteCommonHeader(Page& page, const CommonPageHeader& header) {
-    ASSERT_TRUE(page.WriteHeader(header));
+    page.WriteHeader(header);
 }
 
 void WriteFsmHeader(Page& page, const FsmPageHeader& header) {
@@ -156,23 +140,23 @@ TEST(FsmPageMappingTest, PinsFlatPageAndEntryBoundaries) {
 
     for (const auto& test_case : cases) {
         const auto mapping = FsmLocationForHeapPage(test_case.heap_page_no);
-        const auto* location = RequireOptional(mapping.location, "FSM entry location");
+        const auto* location = RequireValue(mapping, "FSM entry location");
         if (location == nullptr) {
             continue;
         }
-        EXPECT_EQ(mapping.error, FsmPageMappingError::NONE);
+        EXPECT_TRUE(mapping);
         EXPECT_EQ(*location, test_case.expected);
     }
 }
 
 TEST(FsmPageMappingTest, RejectsNonDataPagesAndHandlesPageNumberLimitSafely) {
-    EXPECT_EQ(FsmLocationForHeapPage(0).error, FsmPageMappingError::INVALID_HEAP_PAGE_NUMBER);
-    EXPECT_EQ(FsmLocationForHeapPage(INVALID_PAGE_NO).error,
+    EXPECT_EQ(FsmLocationForHeapPage(0).Error(), FsmPageMappingError::INVALID_HEAP_PAGE_NUMBER);
+    EXPECT_EQ(FsmLocationForHeapPage(INVALID_PAGE_NO).Error(),
               FsmPageMappingError::INVALID_HEAP_PAGE_NUMBER);
 
     constexpr PageNo maximum_valid_heap_page = std::numeric_limits<PageNo>::max() - 1U;
     const auto mapping = FsmLocationForHeapPage(maximum_valid_heap_page);
-    const auto* location = RequireOptional(mapping.location, "maximum heap page FSM location");
+    const auto* location = RequireValue(mapping, "maximum heap page FSM location");
     if (location == nullptr) {
         return;
     }
@@ -210,7 +194,7 @@ TEST(FsmPageHeaderCodecTest, EmitsExactSixteenByteLittleEndianLayout) {
     ASSERT_TRUE(EncodeFsmPageHeader(encoded, header));
     EXPECT_EQ(encoded, expected);
     const auto decoded = DecodeFsmPageHeader(encoded);
-    const auto* decoded_header = RequireOptional(decoded, "FSM-specific header");
+    const auto* decoded_header = RequireValue(decoded, "FSM-specific header");
     if (decoded_header == nullptr) {
         return;
     }
@@ -248,7 +232,7 @@ TEST(FsmPageTest, InitializesDeterministicBlankPageAndDerivesRangeMetadata) {
         .page_lsn = Lsn{27},
     }));
     const auto common_header = page.DecodeHeader();
-    const auto* common = RequireOptional(common_header, "initialized FSM common header");
+    const auto* common = RequireValue(common_header, "initialized FSM common header");
     if (common == nullptr) {
         return;
     }
@@ -262,7 +246,7 @@ TEST(FsmPageTest, InitializesDeterministicBlankPageAndDerivesRangeMetadata) {
     EXPECT_EQ(common->page_no, PageNo{2});
 
     const auto header = fsm_page.Header();
-    const auto* decoded_header = RequireOptional(header, "initialized FSM header");
+    const auto* decoded_header = RequireValue(header, "initialized FSM header");
     if (decoded_header == nullptr) {
         return;
     }
@@ -290,13 +274,13 @@ TEST(FsmPageTest, ReadsAndUpdatesOnlyInitializedOneByteEntries) {
             EXPECT_EQ(page.Bytes()[index], before[index]);
         }
     }
-    EXPECT_EQ(fsm_page.GetCategory(0).category, std::optional<std::uint8_t>{0});
-    EXPECT_EQ(fsm_page.GetCategory(1).category, std::optional<std::uint8_t>{127});
-    EXPECT_EQ(fsm_page.GetCategory(2).category, std::optional<std::uint8_t>{255});
+    EXPECT_EQ(fsm_page.Category(0).AsOptional(), std::optional<std::uint8_t>{0});
+    EXPECT_EQ(fsm_page.Category(1).AsOptional(), std::optional<std::uint8_t>{127});
+    EXPECT_EQ(fsm_page.Category(2).AsOptional(), std::optional<std::uint8_t>{255});
 
     const Page::ByteStorage valid_bytes = CopyPageBytes(page);
-    EXPECT_EQ(fsm_page.GetCategory(3).error, FsmPageEntryError::ENTRY_OUT_OF_RANGE);
-    EXPECT_EQ(fsm_page.SetCategory(3, 1).error, FsmPageEntryError::ENTRY_OUT_OF_RANGE);
+    EXPECT_EQ(fsm_page.Category(3).Error().code, FsmPageEntryError::ENTRY_OUT_OF_RANGE);
+    EXPECT_EQ(fsm_page.SetCategory(3, 1).Error().code, FsmPageEntryError::ENTRY_OUT_OF_RANGE);
     EXPECT_TRUE(std::ranges::equal(page.Bytes(), valid_bytes));
 }
 
@@ -311,7 +295,7 @@ TEST(FsmPageTest, InitializationFailuresLeavePageUnchanged) {
     std::ranges::fill(page_zero.Bytes(), std::byte{0xA5});
     FsmPage page_zero_fsm{page_zero};
     const auto page_zero_result = page_zero_fsm.Initialize();
-    EXPECT_EQ(page_zero_result.error, FsmPageInitializeError::INVALID_FSM_PAGE_NUMBER);
+    EXPECT_EQ(page_zero_result.Error(), FsmPageInitializeError::INVALID_FSM_PAGE_NUMBER);
     expect_unchanged(page_zero, page_zero_result);
 
     Page oversized_count{PageId{.file_id = 23, .page_no = 1}};
@@ -320,14 +304,14 @@ TEST(FsmPageTest, InitializationFailuresLeavePageUnchanged) {
     const auto count_result = oversized_count_fsm.Initialize({
         .entry_count = static_cast<std::uint16_t>(FSM_PAGE_ENTRY_CAPACITY + 1U),
     });
-    EXPECT_EQ(count_result.error, FsmPageInitializeError::ENTRY_COUNT_OUT_OF_RANGE);
+    EXPECT_EQ(count_result.Error(), FsmPageInitializeError::ENTRY_COUNT_OUT_OF_RANGE);
     expect_unchanged(oversized_count, count_result);
 
     Page overflow{PageId{.file_id = 23, .page_no = std::numeric_limits<PageNo>::max() - 1U}};
     std::ranges::fill(overflow.Bytes(), std::byte{0xA5});
     FsmPage overflow_fsm{overflow};
     const auto overflow_result = overflow_fsm.Initialize();
-    EXPECT_EQ(overflow_result.error, FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW);
+    EXPECT_EQ(overflow_result.Error(), FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW);
     expect_unchanged(overflow, overflow_result);
 }
 
@@ -337,28 +321,28 @@ TEST(FsmPageValidationTest, RejectsCommonAndSpecificHeaderCorruption) {
         auto header = RequireCommonHeader(page);
         header.page_type = PageType::HEAP_DATA;
         WriteCommonHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::WRONG_PAGE_TYPE);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code, FsmPageValidationError::WRONG_PAGE_TYPE);
     }
     {
         Page page = InitializedFsmPage();
         auto header = RequireCommonHeader(page);
         header.page_no = 9;
         WriteCommonHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::WRONG_PAGE_NUMBER);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code, FsmPageValidationError::WRONG_PAGE_NUMBER);
     }
     {
         Page page = InitializedFsmPage();
         auto header = RequireCommonHeader(page);
         header.header_size = FSM_PAGE_TOTAL_HEADER_SIZE + 1U;
         WriteCommonHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::WRONG_HEADER_SIZE);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code, FsmPageValidationError::WRONG_HEADER_SIZE);
     }
     {
         Page page = InitializedFsmPage();
         auto header = RequireCommonHeader(page);
         header.format_version = FSM_PAGE_FORMAT_VERSION + 1U;
         WriteCommonHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error,
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code,
                   FsmPageValidationError::UNSUPPORTED_FORMAT_VERSION);
     }
     {
@@ -366,28 +350,32 @@ TEST(FsmPageValidationTest, RejectsCommonAndSpecificHeaderCorruption) {
         auto header = RequireCommonHeader(page);
         header.reserved16 = 1;
         WriteCommonHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::NONZERO_COMMON_RESERVED);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code,
+                  FsmPageValidationError::NONZERO_COMMON_RESERVED);
     }
     {
         Page page = InitializedFsmPage();
         auto header = RequireFsmHeader(page);
         header.first_heap_page_no = 2;
         WriteFsmHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::FIRST_HEAP_PAGE_MISMATCH);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code,
+                  FsmPageValidationError::FIRST_HEAP_PAGE_MISMATCH);
     }
     {
         Page page = InitializedFsmPage();
         auto header = RequireFsmHeader(page);
         header.entry_count = static_cast<std::uint16_t>(FSM_PAGE_ENTRY_CAPACITY + 1U);
         WriteFsmHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::ENTRY_COUNT_OUT_OF_RANGE);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code,
+                  FsmPageValidationError::ENTRY_COUNT_OUT_OF_RANGE);
     }
     {
         Page page = InitializedFsmPage();
         auto header = RequireFsmHeader(page);
         header.reserved32 = 1;
         WriteFsmHeader(page, header);
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::NONZERO_FSM_RESERVED);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code,
+                  FsmPageValidationError::NONZERO_FSM_RESERVED);
     }
 }
 
@@ -400,7 +388,8 @@ TEST(FsmPageValidationTest, RejectsNonzeroCommonFlags) {
         header.flags = flags;
         WriteCommonHeader(page, header);
 
-        EXPECT_EQ(FsmPage{page}.Validate().error, FsmPageValidationError::NONZERO_COMMON_FLAGS);
+        EXPECT_EQ(FsmPage{page}.Validate().Error().code,
+                  FsmPageValidationError::NONZERO_COMMON_FLAGS);
     }
 }
 
@@ -410,20 +399,20 @@ TEST(FsmPageValidationTest, RequiresUninitializedEntrySuffixToRemainZero) {
     FsmPage fsm_page{page};
 
     const auto validation = fsm_page.Validate();
-    EXPECT_EQ(validation.error, FsmPageValidationError::NONZERO_UNINITIALIZED_ENTRY);
-    EXPECT_EQ(validation.entry_index, 3U);
+    EXPECT_EQ(validation.Error().code, FsmPageValidationError::NONZERO_UNINITIALIZED_ENTRY);
+    EXPECT_EQ(validation.Error().entry_index, 3U);
 
     const Page::ByteStorage corrupt_bytes = CopyPageBytes(page);
     const auto update = fsm_page.SetCategory(0, 7);
-    EXPECT_EQ(update.error, FsmPageEntryError::PAGE_INVALID);
-    EXPECT_EQ(update.page_error, FsmPageValidationError::NONZERO_UNINITIALIZED_ENTRY);
+    EXPECT_EQ(update.Error().code, FsmPageEntryError::PAGE_INVALID);
+    EXPECT_EQ(update.Error().page_error, FsmPageValidationError::NONZERO_UNINITIALIZED_ENTRY);
     EXPECT_TRUE(std::ranges::equal(page.Bytes(), corrupt_bytes));
 }
 
 TEST(FsmPageValidationTest, EnforcesRepresentableHeapRangeAtPageNumberLimit) {
     constexpr PageNo maximum_valid_heap_page = std::numeric_limits<PageNo>::max() - 1U;
     const auto mapping = FsmLocationForHeapPage(maximum_valid_heap_page);
-    const auto* location = RequireOptional(mapping.location, "last FSM page location");
+    const auto* location = RequireValue(mapping, "last FSM page location");
     if (location == nullptr) {
         return;
     }
@@ -437,7 +426,7 @@ TEST(FsmPageValidationTest, EnforcesRepresentableHeapRangeAtPageNumberLimit) {
     std::ranges::fill(overflow_page.Bytes(), std::byte{0xA5});
     FsmPage overflow_fsm_page{overflow_page};
     const auto overflow = overflow_fsm_page.Initialize({.entry_count = 5391});
-    EXPECT_EQ(overflow.error, FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW);
+    EXPECT_EQ(overflow.Error(), FsmPageInitializeError::HEAP_PAGE_RANGE_OVERFLOW);
     EXPECT_TRUE(std::ranges::all_of(overflow_page.Bytes(),
                                     [](std::byte value) { return value == std::byte{0xA5}; }));
 }
@@ -459,12 +448,12 @@ TEST(FsmPagePersistenceTest, SurvivesPageFileWriteReopenAndValidation) {
     PageId fsm_page_id{};
     {
         auto created = PageFile::Create(manager, path, superblock);
-        auto* page_file = RequireOptional(created.page_file, "created FSM PageFile");
+        auto* page_file = RequireValue(created, "created FSM PageFile");
         if (page_file == nullptr) {
             return;
         }
         const auto allocation = page_file->AllocatePage();
-        const auto* allocated_page = RequireOptional(allocation.page_id, "allocated FSM page");
+        const auto* allocated_page = RequireValue(allocation, "allocated FSM page");
         if (allocated_page == nullptr) {
             return;
         }
@@ -482,14 +471,14 @@ TEST(FsmPagePersistenceTest, SurvivesPageFileWriteReopenAndValidation) {
     }
 
     auto reopened = PageFile::Open(manager, path, file_id, FileKind::FSM, table_id);
-    ASSERT_TRUE(reopened.page_file.has_value());
+    ASSERT_TRUE(reopened.Ok());
     Page page{fsm_page_id};
     ASSERT_TRUE(manager.ReadPage(page.Id(), page.Bytes()));
     FsmPage fsm_page{page};
     EXPECT_TRUE(fsm_page.Validate());
-    EXPECT_EQ(fsm_page.GetCategory(0).category, std::optional<std::uint8_t>{0});
-    EXPECT_EQ(fsm_page.GetCategory(1).category, std::optional<std::uint8_t>{127});
-    EXPECT_EQ(fsm_page.GetCategory(2).category, std::optional<std::uint8_t>{255});
+    EXPECT_EQ(fsm_page.Category(0).AsOptional(), std::optional<std::uint8_t>{0});
+    EXPECT_EQ(fsm_page.Category(1).AsOptional(), std::optional<std::uint8_t>{127});
+    EXPECT_EQ(fsm_page.Category(2).AsOptional(), std::optional<std::uint8_t>{255});
 }
 
 } // namespace

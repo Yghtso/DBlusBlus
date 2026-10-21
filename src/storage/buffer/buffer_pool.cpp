@@ -1,11 +1,11 @@
 #include "storage/buffer/buffer_pool.h"
 
+#include "common/assert.h"
 #include "storage/page/page_checksum.h"
 #include "storage/page/page_header.h"
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <limits>
 #include <shared_mutex>
 #include <string>
@@ -28,13 +28,13 @@ using PageImage = std::array<std::byte, PAGE_SIZE>;
             .message = std::move(message)};
 }
 
-template <typename Value>
-[[nodiscard]] BufferResult<Value> Failure(const BufferError& error) {
-    return {.value = std::nullopt, .error = error};
+template <typename T>
+[[nodiscard]] BufferResult<T> Failure(const BufferError& error) {
+    return Unexpected{error};
 }
 
 [[nodiscard]] BufferStatus FailureStatus(BufferError error) {
-    return {.error = std::move(error)};
+    return Unexpected{std::move(error)};
 }
 
 [[nodiscard]] BufferErrorCode ReadErrorCode(const DiskError& error) noexcept {
@@ -58,7 +58,7 @@ BufferPool::BufferPool(PageIo* page_io, std::unique_ptr<PageIo> owned_io, Buffer
       frame_count_(std::max<std::size_t>(options.frame_count, 1U)),
       max_pin_count_(std::max<std::uint32_t>(options.max_pin_count, 1U)),
       observer_(options.observer), frames_(frame_count_), replacer_(frame_count_) {
-    assert(options.frame_count > 0U);
+    DBLUS_CHECK(options.frame_count > 0U, "buffer pool needs at least one frame");
     free_list_.reserve(frame_count_);
     // Pop from the back, so frame 0 is handed out first.
     for (std::size_t index = frame_count_; index > 0U; --index) {
@@ -70,7 +70,7 @@ BufferPool::~BufferPool() {
 #ifndef NDEBUG
     const std::scoped_lock lock{mutex_};
     for (std::size_t index = 0; index < frame_count_; ++index) {
-        assert(frames_[index].pin_count == 0U && "BufferPool destroyed with outstanding pins");
+        DBLUS_ASSERT(frames_[index].pin_count == 0U, "BufferPool destroyed with outstanding pins");
     }
 #endif
 }
@@ -86,19 +86,15 @@ BufferStatus BufferPool::RegisterFile(FileId file_id, PageValidator validator) {
                                        file_page,
                                        "invalid FileId"));
     }
-    if (!validator) {
-        return FailureStatus(MakeError(BufferErrorCode::INTERNAL_INVARIANT_FAILURE,
-                                       BufferOperation::REGISTER_FILE,
-                                       file_page,
-                                       "an owner page validator is required"));
-    }
+    // A missing validator is a bug in the calling code, not a runtime condition.
+    DBLUS_CHECK(static_cast<bool>(validator), "an owner page validator is required");
     const auto page_count = io_->PageCount(file_id);
     if (!page_count) {
-        return FailureStatus(MakeError(ReadErrorCode(page_count.error),
+        return FailureStatus(MakeError(ReadErrorCode(page_count.Error()),
                                        BufferOperation::REGISTER_FILE,
                                        file_page,
                                        "cannot determine the file's page count",
-                                       page_count.error));
+                                       page_count.Error()));
     }
 
     const std::scoped_lock lock{mutex_};
@@ -117,7 +113,7 @@ BufferStatus BufferPool::RegisterFile(FileId file_id, PageValidator validator) {
     files_.emplace(file_id,
                    FileEntry{.state = FileState::ACTIVE,
                              .validator = std::move(validator),
-                             .published_page_count = page_count.value,
+                             .published_page_count = page_count.Value(),
                              .new_page_in_progress = false});
     return {};
 }
@@ -191,18 +187,18 @@ BufferStatus BufferPool::RetireFile(FileId file_id, RetireDisposition dispositio
 
 BufferResult<ReadPageGuard> BufferPool::FetchRead(PageId page_id) {
     auto pinned = PinPage(page_id);
-    if (!pinned.value.has_value()) {
-        return Failure<ReadPageGuard>(pinned.error);
+    if (!pinned.Ok()) {
+        return Failure<ReadPageGuard>(pinned.Error());
     }
-    return MakeGuard<ReadPageGuard>(*pinned.value, LatchMode::SHARED);
+    return MakeGuard<ReadPageGuard>(*pinned, LatchMode::SHARED);
 }
 
 BufferResult<WritePageGuard> BufferPool::FetchWrite(PageId page_id) {
     auto pinned = PinPage(page_id);
-    if (!pinned.value.has_value()) {
-        return Failure<WritePageGuard>(pinned.error);
+    if (!pinned.Ok()) {
+        return Failure<WritePageGuard>(pinned.Error());
     }
-    return MakeGuard<WritePageGuard>(*pinned.value, LatchMode::EXCLUSIVE);
+    return MakeGuard<WritePageGuard>(*pinned, LatchMode::EXCLUSIVE);
 }
 
 template <typename Guard>
@@ -215,7 +211,7 @@ BufferResult<Guard> BufferPool::MakeGuard(FrameId frame_id, LatchMode mode) {
         frame.latch.lock();
     }
     // binding_epoch only changes while pin_count == 0, so the pinned value is stable.
-    return {.value = Guard{*this, frame_id, frame.page, frame.binding_epoch}, .error = {}};
+    return Guard{*this, frame_id, frame.page, frame.binding_epoch};
 }
 
 BufferResult<FrameId> BufferPool::PinPage(PageId page_id) {
@@ -276,7 +272,7 @@ BufferResult<FrameId> BufferPool::PinPage(PageId page_id) {
             // Resident-hit linearization point.
             ++frame.pin_count;
             replacer_.SetReferenced(frame_id);
-            return {.value = frame_id, .error = {}};
+            return frame_id;
         }
         case PageTableEntryState::EVICTING:
             // The old frame cannot be pinned. Wait for eviction to finish or fail, then retry.
@@ -300,9 +296,9 @@ BufferResult<FrameId> BufferPool::PinPage(PageId page_id) {
             }
             ++load->claims;
             state_changed_.wait(lock, [&] { return load->done; });
-            if (load->frame_id.has_value()) {
+            if (const std::optional<FrameId> frame_id = load->frame_id; frame_id.has_value()) {
                 // Publication already converted this claim into one pin.
-                return {.value = load->frame_id, .error = {}};
+                return *frame_id;
             }
             return Failure<FrameId>(load->error);
         }
@@ -335,10 +331,10 @@ BufferResult<FrameId> BufferPool::LoadPage(std::unique_lock<std::mutex>& lock, P
     };
 
     auto acquired = AcquireFrame(lock, page_id, BufferOperation::FETCH_PAGE);
-    if (!acquired.value.has_value()) {
-        return fail(std::move(acquired.error));
+    if (!acquired.Ok()) {
+        return fail(std::move(acquired).Error());
     }
-    const FrameId frame_id = *acquired.value;
+    const FrameId frame_id = *acquired;
     BufferFrame& frame = frames_[frame_id];
 
     // FREE -> LOADING + READ_IN_PROGRESS, bound to the sole intent before the read starts.
@@ -364,11 +360,11 @@ BufferResult<FrameId> BufferPool::LoadPage(std::unique_lock<std::mutex>& lock, P
 
     std::optional<BufferError> error;
     if (!read) {
-        error = MakeError(ReadErrorCode(read.error),
+        error = MakeError(ReadErrorCode(read.Error()),
                           BufferOperation::FETCH_PAGE,
                           page_id,
                           "page read failed",
-                          read.error);
+                          read.Error());
     } else if (outcome == PageValidationOutcome::CORRUPT) {
         error = MakeError(BufferErrorCode::CORRUPT_PAGE,
                           BufferOperation::FETCH_PAGE,
@@ -405,7 +401,7 @@ BufferResult<FrameId> BufferPool::LoadPage(std::unique_lock<std::mutex>& lock, P
     state_changed_.notify_all();
     Notify(lock,
            {.type = BufferPoolEventType::LOAD_PUBLISHED, .page_id = page_id, .frame_id = frame_id});
-    return {.value = frame_id, .error = {}};
+    return frame_id;
 }
 
 PageValidationOutcome BufferPool::ValidateLoadedPage(BufferFrame& frame,
@@ -446,7 +442,7 @@ BufferResult<FrameId> BufferPool::AcquireFrame(std::unique_lock<std::mutex>& loc
         if (!free_list_.empty()) {
             const FrameId frame_id = free_list_.back();
             free_list_.pop_back();
-            return {.value = frame_id, .error = {}};
+            return frame_id;
         }
 
         const auto candidate = replacer_.FindCandidate(
@@ -503,8 +499,9 @@ BufferResult<FrameId> BufferPool::AcquireFrame(std::unique_lock<std::mutex>& loc
                 frame.state = FrameState::RESIDENT;
                 page_table_.at(victim).state = PageTableEntryState::RESIDENT;
                 state_changed_.notify_all();
-                written.error.message = "eviction writeback failed: " + written.error.message;
-                return Failure<FrameId>(written.error);
+                BufferError error = std::move(written).Error();
+                error.message = "eviction writeback failed: " + error.message;
+                return Failure<FrameId>(error);
             }
         }
 
@@ -513,7 +510,7 @@ BufferResult<FrameId> BufferPool::AcquireFrame(std::unique_lock<std::mutex>& loc
         page_table_.erase(victim);
         ResetFrame(frame_id);
         state_changed_.notify_all();
-        return {.value = frame_id, .error = {}};
+        return frame_id;
     }
 }
 
@@ -533,7 +530,7 @@ void BufferPool::ResetFrame(FrameId frame_id) {
 }
 
 void BufferPool::ReleaseFrameToFreeList(FrameId frame_id) {
-    assert(frames_[frame_id].state == FrameState::FREE);
+    DBLUS_ASSERT(frames_[frame_id].state == FrameState::FREE, "only a free frame can be claimed");
     free_list_.push_back(frame_id);
 }
 
@@ -580,12 +577,13 @@ BufferResult<WritePageGuard> BufferPool::NewPage(FileId file_id,
 
     // Reserve the frame before extending, so a full pool never grows the file.
     auto acquired = AcquireFrame(lock, page_id, BufferOperation::NEW_PAGE);
-    if (!acquired.value.has_value()) {
+    if (!acquired.Ok()) {
         finish();
-        acquired.error.operation = BufferOperation::NEW_PAGE;
-        return Failure<WritePageGuard>(acquired.error);
+        BufferError error = std::move(acquired).Error();
+        error.operation = BufferOperation::NEW_PAGE;
+        return Failure<WritePageGuard>(error);
     }
-    const FrameId frame_id = *acquired.value;
+    const FrameId frame_id = *acquired;
     BufferFrame& frame = frames_[frame_id];
 
     // A physical page beyond the published bound was left by an earlier failed creation. It was
@@ -595,15 +593,15 @@ BufferResult<WritePageGuard> BufferPool::NewPage(FileId file_id,
     std::optional<DiskError> io_error;
     const auto physical = io_->PageCount(file_id);
     if (!physical) {
-        io_error = physical.error;
-    } else if (physical.value > published) {
+        io_error = physical.Error();
+    } else if (physical.Value() > published) {
         page_id.page_no = published;
     } else {
         const auto extended = io_->ExtendFile(file_id);
         if (extended) {
-            page_id.page_no = extended.value;
+            page_id.page_no = extended.Value();
         } else {
-            io_error = extended.error;
+            io_error = extended.Error();
         }
     }
     lock.lock();
@@ -694,7 +692,7 @@ BufferStatus BufferPool::WriteStableImage(PageId page_id,
                                        operation,
                                        page_id,
                                        "page write failed",
-                                       written.error));
+                                       written.Error()));
     }
     NotifyUnlocked({.type = BufferPoolEventType::WRITEBACK_SYNC_STARTED,
                     .page_id = page_id,
@@ -706,7 +704,7 @@ BufferStatus BufferPool::WriteStableImage(PageId page_id,
                                        operation,
                                        page_id,
                                        "page file synchronization failed",
-                                       synced.error));
+                                       synced.Error()));
     }
     NotifyUnlocked({.type = BufferPoolEventType::WRITEBACK_RECONCILE_STARTED,
                     .page_id = page_id,
@@ -718,8 +716,9 @@ BufferStatus BufferPool::WritebackResident(std::unique_lock<std::mutex>& lock,
                                            FrameId frame_id,
                                            BufferOperation operation) {
     BufferFrame& frame = frames_[frame_id];
-    assert(frame.state == FrameState::RESIDENT &&
-           frame.io_state == FrameIoState::WRITEBACK_IN_PROGRESS);
+    DBLUS_ASSERT(frame.state == FrameState::RESIDENT &&
+                     frame.io_state == FrameIoState::WRITEBACK_IN_PROGRESS,
+                 "writeback needs a resident frame with writeback in progress");
     const PageId page_id = frame.page.Id();
     const std::uint64_t binding_epoch = frame.binding_epoch;
 
@@ -853,7 +852,7 @@ BufferStatus BufferPool::Shutdown() {
 void BufferPool::Unpin(FrameId frame_id) noexcept {
     const std::scoped_lock lock{mutex_};
     BufferFrame& frame = frames_[frame_id];
-    assert(frame.pin_count > 0U && "unpin without a pin");
+    DBLUS_ASSERT(frame.pin_count > 0U, "unpin without a pin");
     if (frame.pin_count == 0U) {
         return;
     }
@@ -866,10 +865,12 @@ void BufferPool::Unpin(FrameId frame_id) noexcept {
 void BufferPool::PublishMutation(FrameId frame_id) noexcept {
     const std::scoped_lock lock{mutex_};
     BufferFrame& frame = frames_[frame_id];
-    assert(frame.state == FrameState::RESIDENT && frame.pin_count > 0U);
+    DBLUS_ASSERT(frame.state == FrameState::RESIDENT && frame.pin_count > 0U,
+                 "only a pinned resident frame can be marked dirty");
     // A 64-bit generation advanced once per mutation cannot wrap in practice; treat it as an
     // invariant rather than silently repeating a token.
-    assert(frame.modification_generation != std::numeric_limits<std::uint64_t>::max());
+    DBLUS_ASSERT(frame.modification_generation != std::numeric_limits<std::uint64_t>::max(),
+                 "modification generation overflow");
     ++frame.modification_generation;
     frame.dirty = true;
 }

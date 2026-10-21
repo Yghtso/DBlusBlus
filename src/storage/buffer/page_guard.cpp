@@ -1,9 +1,9 @@
 #include "storage/buffer/page_guard.h"
 
+#include "common/assert.h"
 #include "storage/buffer/buffer_pool.h"
 #include "storage/page/page_checksum.h"
 
-#include <cassert>
 #include <cstdlib>
 #include <utility>
 
@@ -38,17 +38,17 @@ ReadPageGuard& ReadPageGuard::operator=(ReadPageGuard&& other) noexcept {
 }
 
 PageId ReadPageGuard::Id() const noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     return page_->Id();
 }
 
 const Page& ReadPageGuard::GetPage() const noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     return *page_;
 }
 
 std::span<const std::byte, PAGE_SIZE> ReadPageGuard::Bytes() const noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     return std::as_const(*page_).Bytes();
 }
 
@@ -104,22 +104,22 @@ WritePageGuard& WritePageGuard::operator=(WritePageGuard&& other) noexcept {
 }
 
 PageId WritePageGuard::Id() const noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     return page_->Id();
 }
 
 const Page& WritePageGuard::GetPage() const noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     return *page_;
 }
 
 std::span<const std::byte, PAGE_SIZE> WritePageGuard::Bytes() const noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     return std::as_const(*page_).Bytes();
 }
 
 Page& WritePageGuard::MutablePage() noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
 #ifndef NDEBUG
     if (!mutable_accessed_) {
         mutable_accessed_ = true;
@@ -134,7 +134,7 @@ std::span<std::byte, PAGE_SIZE> WritePageGuard::MutableBytes() noexcept {
 }
 
 void WritePageGuard::MarkDirty() noexcept {
-    assert(Valid());
+    DBLUS_ASSERT(Valid(), "page guard used after release");
     pool_->PublishMutation(frame_id_);
 #ifndef NDEBUG
     mutable_accessed_ = true;

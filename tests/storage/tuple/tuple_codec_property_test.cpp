@@ -1,5 +1,6 @@
 #include "storage/heap/heap_page.h"
 #include "storage/tuple/tuple_codec.h"
+#include "support/require.h"
 
 #include <array>
 #include <bit>
@@ -10,12 +11,19 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
 
 namespace dblusblus {
 namespace {
+
+using test::RequireValue;
+
+[[nodiscard]] std::string AtIteration(std::string_view description, std::size_t iteration) {
+    return std::string{description} + " at iteration " + std::to_string(iteration);
+}
 
 constexpr std::array ALL_PHYSICAL_TYPES{
     PhysicalType::BOOLEAN,
@@ -26,17 +34,6 @@ constexpr std::array ALL_PHYSICAL_TYPES{
     PhysicalType::TIMESTAMP,
     PhysicalType::VARCHAR,
 };
-
-template <typename Value>
-[[nodiscard]] const Value* RequireOptional(const std::optional<Value>& optional,
-                                           std::size_t iteration,
-                                           std::string_view description) {
-    if (!optional.has_value()) {
-        ADD_FAILURE() << description << " unexpectedly missing at iteration " << iteration;
-        return nullptr;
-    }
-    return std::addressof(*optional);
-}
 
 [[nodiscard]] TupleValue RandomFixedValue(PhysicalType type, std::mt19937_64& random) {
     switch (type) {
@@ -106,7 +103,7 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
 
         const auto schema_version = static_cast<SchemaVer>(random());
         const auto built = BuildTuplePhysicalLayout(columns, schema_version);
-        const auto* layout = RequireOptional(built.layout, iteration, "physical layout");
+        const auto* layout = RequireValue(built, AtIteration("physical layout", iteration));
         ASSERT_NE(layout, nullptr);
 
         const bool has_previous = (random() & 1U) != 0;
@@ -128,13 +125,13 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
         };
 
         const auto encoded = EncodeTuple(*layout, metadata, expected_values);
-        const auto* tuple = RequireOptional(encoded.tuple, iteration, "encoded tuple");
+        const auto* tuple = RequireValue(encoded, AtIteration("encoded tuple", iteration));
         ASSERT_NE(tuple, nullptr);
         EXPECT_LE(tuple->size(), HEAP_PAGE_MAX_RAW_TUPLE_SIZE) << "iteration " << iteration;
 
         const auto validation = ValidateTuple(*layout, *tuple);
         ASSERT_TRUE(validation) << "iteration " << iteration;
-        const auto* header = RequireOptional(validation.header, iteration, "validated header");
+        const auto* header = RequireValue(validation, AtIteration("validated header", iteration));
         ASSERT_NE(header, nullptr);
         EXPECT_EQ(header->schema_version, schema_version) << "iteration " << iteration;
 
@@ -143,7 +140,7 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
         for (std::size_t column_index = 0; column_index < column_count; ++column_index) {
             const auto decoded = DecodeTupleValue(*layout, *tuple, column_index);
             const auto* decoded_value =
-                RequireOptional(decoded.value, iteration, "decoded tuple value");
+                RequireValue(decoded, AtIteration("decoded tuple value", iteration));
             ASSERT_NE(decoded_value, nullptr) << "column " << column_index;
             EXPECT_EQ(*decoded_value, expected_values[column_index])
                 << "iteration " << iteration << ", column " << column_index;
@@ -152,7 +149,7 @@ TEST(TupleCodecPropertyTest, RandomizedMixedSchemasRoundTripCanonicalBytes) {
 
         const auto reencoded = EncodeTuple(*layout, metadata, decoded_values);
         const auto* reencoded_tuple =
-            RequireOptional(reencoded.tuple, iteration, "re-encoded tuple");
+            RequireValue(reencoded, AtIteration("re-encoded tuple", iteration));
         ASSERT_NE(reencoded_tuple, nullptr);
         EXPECT_EQ(*reencoded_tuple, *tuple) << "iteration " << iteration;
     }

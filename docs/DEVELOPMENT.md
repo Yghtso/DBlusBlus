@@ -571,8 +571,10 @@ The raw-storage foundation uses ownership-oriented modules:
 ```text
 src/
   common/
+    assert.*
     crc32c.*
     encoding.h
+    result.h
     types.h
 
   storage/
@@ -601,6 +603,18 @@ src/
 
 Tests should mirror these responsibility groups under `tests/common/` and `tests/storage/`,
 with cross-project smoke coverage at the test root.
+
+#### Error handling
+
+Runtime failures (I/O errors, corrupt persistent bytes, bad caller input) are returned, never
+thrown. A function that produces a value returns `Result<T, E>`; one that only succeeds or fails
+returns `Status<E>`. Both live in `src/common/result.h` and follow `std::expected` without
+depending on C++23. Error types do not carry a `NONE` code: success is the absence of an error.
+A failure that needs more than a code is a small struct, for example `HeapPageInsertFailure`.
+
+Bugs in DBlusBlus itself use `DBLUS_CHECK` (always on) or `DBLUS_ASSERT` (debug only) from
+`src/common/assert.h`, not `assert`. Use `DBLUS_CHECK` where continuing could damage persistent
+data or hide the bug.
 
 #### Subsystem expansion guidance
 

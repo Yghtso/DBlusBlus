@@ -3,6 +3,7 @@
 #include "storage/heap/heap_page.h"
 #include "storage/page/page_checksum.h"
 #include "storage/page/page_header.h"
+#include "support/require.h"
 
 #include <array>
 #include <atomic>
@@ -26,6 +27,7 @@ using buffer_test::Pid;
 using buffer_test::ValidateHeap;
 using buffer_test::WaitFor;
 using buffer_test::WriteFault;
+using test::ErrorCodeOf;
 
 class BufferPoolTest : public ::testing::Test {
   protected:
@@ -71,20 +73,24 @@ TEST_F(BufferPoolTest, RejectsSuperblockUnpublishedAndUnregisteredPages) {
     AppendRawPages(1);
     MakePool(3);
 
-    EXPECT_EQ(pool_->FetchRead(Pid(0)).error.code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
-    EXPECT_EQ(pool_->FetchRead(Pid(2)).error.code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
-    EXPECT_EQ(pool_->FetchRead(PageId{.file_id = 99, .page_no = 1}).error.code,
+    EXPECT_EQ(pool_->FetchRead(Pid(0)).Error().code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
+    EXPECT_EQ(pool_->FetchRead(Pid(2)).Error().code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
+    EXPECT_EQ(pool_->FetchRead(PageId{.file_id = 99, .page_no = 1}).Error().code,
               BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
     EXPECT_EQ(file_.Io().ReadCount(), 0U);
     EXPECT_FALSE(pool_->InspectPage(Pid(2)).has_value());
 }
 
-TEST_F(BufferPoolTest, RegistrationRequiresAValidatorAndRejectsDuplicates) {
+TEST_F(BufferPoolTest, RegistrationRejectsDuplicates) {
     MakePool(3);
-    EXPECT_EQ(pool_->RegisterFile(file_.TestFileId(), ValidateHeap).error.code,
+    EXPECT_EQ(pool_->RegisterFile(file_.TestFileId(), ValidateHeap).Error().code,
               BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
-    EXPECT_EQ(pool_->RegisterFile(55, PageValidator{}).error.code,
-              BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
+}
+
+TEST_F(BufferPoolTest, RegistrationWithoutAValidatorIsAnInternalCheckFailure) {
+    MakePool(3);
+    EXPECT_DEATH(static_cast<void>(pool_->RegisterFile(55, PageValidator{})),
+                 "an owner page validator is required");
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -133,7 +139,7 @@ TEST_P(BufferPoolCorruptionTest, MalformedPagesNeverBecomeResidentAndRetrySuccee
 
     const auto failed = pool_->FetchRead(page_id);
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, GetParam().expected);
+    EXPECT_EQ(failed.Error().code, GetParam().expected);
     EXPECT_FALSE(pool_->InspectPage(page_id).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 3U);
 
@@ -155,7 +161,7 @@ INSTANTIATE_TEST_SUITE_P(
                                      [](Page& page) {
                                          auto header = page.DecodeHeader();
                                          header->page_no = 9;
-                                         ASSERT_TRUE(page.WriteHeader(*header));
+                                         page.WriteHeader(*header);
                                          FinalizePageChecksum(page.Bytes());
                                      },
                                      BufferErrorCode::CORRUPT_PAGE},
@@ -163,7 +169,7 @@ INSTANTIATE_TEST_SUITE_P(
                                      [](Page& page) {
                                          auto header = page.DecodeHeader();
                                          header->page_type = PageType::FSM_DATA;
-                                         ASSERT_TRUE(page.WriteHeader(*header));
+                                         page.WriteHeader(*header);
                                          FinalizePageChecksum(page.Bytes());
                                      },
                                      BufferErrorCode::CORRUPT_PAGE},
@@ -178,7 +184,7 @@ TEST_F(BufferPoolTest, UnsupportedFormatOutcomeIsDistinctFromCorruption) {
     pool_ = std::make_unique<BufferPool>(file_.Io(), BufferPoolOptions{.frame_count = 2});
     ASSERT_TRUE(pool_->RegisterFile(
         file_.TestFileId(), [](Page&) { return PageValidationOutcome::UNSUPPORTED_FORMAT; }));
-    EXPECT_EQ(pool_->FetchRead(Pid(1)).error.code, BufferErrorCode::UNSUPPORTED_PAGE_FORMAT);
+    EXPECT_EQ(pool_->FetchRead(Pid(1)).Error().code, BufferErrorCode::UNSUPPORTED_PAGE_FORMAT);
 }
 
 TEST_F(BufferPoolTest, ReadFailureIsReportedWithContextAndRetried) {
@@ -188,10 +194,10 @@ TEST_F(BufferPoolTest, ReadFailureIsReportedWithContextAndRetried) {
 
     const auto failed = pool_->FetchRead(Pid(1));
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::RAW_IO_FAILURE);
-    EXPECT_EQ(failed.error.page_id, Pid(1));
-    ASSERT_TRUE(failed.error.disk_error.has_value());
-    EXPECT_EQ(failed.error.disk_error.value_or(DiskError{}).operation, DiskOperation::READ_PAGE);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::RAW_IO_FAILURE);
+    EXPECT_EQ(failed.Error().page_id, Pid(1));
+    ASSERT_TRUE(failed.Error().disk_error.has_value());
+    EXPECT_EQ(failed.Error().disk_error.value_or(DiskError{}).operation, DiskOperation::READ_PAGE);
     EXPECT_EQ(pool_->FreeFrameCount(), 3U);
 
     EXPECT_TRUE(pool_->FetchRead(Pid(1)));
@@ -212,7 +218,7 @@ TEST_F(BufferPoolTest, PinCountIsCheckedAtItsMaximumWithoutChangingState) {
 
     const auto overflow = pool_->FetchRead(Pid(1));
     ASSERT_FALSE(overflow);
-    EXPECT_EQ(overflow.error.code, BufferErrorCode::PIN_COUNT_OVERFLOW);
+    EXPECT_EQ(overflow.Error().code, BufferErrorCode::PIN_COUNT_OVERFLOW);
     EXPECT_EQ(Frame(Pid(1)).pin_count, 2U);
     EXPECT_EQ(Frame(Pid(1)).page_id, Pid(1));
 
@@ -318,7 +324,7 @@ TEST_F(BufferPoolTest, NewPageWithNoReplaceableFrameDoesNotExtendTheFile) {
 
     const auto failed = pool_->NewPage(file_.TestFileId(), InitializeHeap);
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::NO_REPLACEABLE_FRAME);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::NO_REPLACEABLE_FRAME);
     EXPECT_EQ(file_.Io().ExtendCount(), extends);
 }
 
@@ -327,23 +333,23 @@ TEST_F(BufferPoolTest, InvalidInitializerAndExtensionFailureLeaveNoMappingOrFram
 
     file_.Io().FailNextExtend();
     const auto extend_failed = pool_->NewPage(file_.TestFileId(), InitializeHeap);
-    EXPECT_EQ(extend_failed.error.code, BufferErrorCode::RAW_IO_FAILURE);
+    EXPECT_EQ(extend_failed.Error().code, BufferErrorCode::RAW_IO_FAILURE);
     EXPECT_EQ(pool_->FreeFrameCount(), 2U);
 
     const auto invalid = pool_->NewPage(file_.TestFileId(), [](Page&) { return true; });
     ASSERT_FALSE(invalid);
-    EXPECT_EQ(invalid.error.code, BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
-    EXPECT_FALSE(pool_->InspectPage(invalid.error.page_id).has_value());
+    EXPECT_EQ(invalid.Error().code, BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
+    EXPECT_FALSE(pool_->InspectPage(invalid.Error().page_id).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 2U);
     // The unpublished page is not fetchable.
-    EXPECT_EQ(pool_->FetchRead(invalid.error.page_id).error.code,
+    EXPECT_EQ(pool_->FetchRead(invalid.Error().page_id).Error().code,
               BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
 
     // The unpublished tail PageNo is reused rather than extending again.
     const auto extends = file_.Io().ExtendCount();
     auto created = Must(pool_->NewPage(file_.TestFileId(), InitializeHeap));
     ASSERT_TRUE(created.Valid());
-    EXPECT_EQ(created.Id(), invalid.error.page_id);
+    EXPECT_EQ(created.Id(), invalid.Error().page_id);
     EXPECT_EQ(file_.Io().ExtendCount(), extends);
 }
 
@@ -413,7 +419,7 @@ TEST_P(BufferPoolFlushFaultTest, FailedWritebackKeepsTheFrameDirtyAndRetryable) 
 
     const auto failed = pool_->FlushPage(Pid(1));
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::RAW_IO_FAILURE);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::RAW_IO_FAILURE);
     const auto after = Frame(Pid(1));
     EXPECT_TRUE(after.dirty);
     EXPECT_EQ(after.modification_generation, before.modification_generation);
@@ -497,7 +503,7 @@ TEST_F(BufferPoolTest, FailedEvictionWritebackRestoresTheOldPageAndFailsTheReque
 
     const auto failed = pool_->NewPage(file_.TestFileId(), InitializeHeap);
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::RAW_IO_FAILURE);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::RAW_IO_FAILURE);
 
     const auto restored = EntryOf(*pool_, Pid(1));
     EXPECT_EQ(restored.state, PageTableEntryState::RESIDENT);
@@ -523,7 +529,7 @@ TEST_F(BufferPoolTest, OneUnsuccessfulClockPassReturnsNoReplaceableFrame) {
 
     const auto failed = pool_->FetchRead(Pid(4));
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::NO_REPLACEABLE_FRAME);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::NO_REPLACEABLE_FRAME);
     EXPECT_EQ(pool_->LastClockPassVisits(), 6U);
     EXPECT_FALSE(pool_->InspectPage(Pid(4)).has_value());
     for (PageNo page_no = 1; page_no <= 3; ++page_no) {
@@ -583,7 +589,7 @@ TEST_F(BufferPoolTest, RetirementFlushesDirtyPagesAndClosesTheRegistration) {
     EXPECT_EQ(file_.Io().WriteCount(), 1U);
     EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 3U);
-    EXPECT_EQ(pool_->FetchRead(Pid(1)).error.code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
+    EXPECT_EQ(pool_->FetchRead(Pid(1)).Error().code, BufferErrorCode::FILE_OR_PAGE_NOT_FOUND);
 #ifndef NDEBUG
     // Reset frames carry the debug poison pattern.
     EXPECT_EQ(pool_->InspectFrame(0).state, FrameState::FREE);
@@ -614,9 +620,9 @@ TEST_F(BufferPoolTest, RetirementWaitsForExistingGuardsAndRejectsNewClaims) {
     }};
     // Wait until the gate is visible: a new claim is rejected.
     WaitFor([&] {
-        return pool_->FetchRead(Pid(2)).error.code == BufferErrorCode::FILE_RETIRED_OR_CLOSING;
+        return ErrorCodeOf(pool_->FetchRead(Pid(2))) == BufferErrorCode::FILE_RETIRED_OR_CLOSING;
     });
-    EXPECT_EQ(pool_->NewPage(file_.TestFileId(), InitializeHeap).error.code,
+    EXPECT_EQ(pool_->NewPage(file_.TestFileId(), InitializeHeap).Error().code,
               BufferErrorCode::FILE_RETIRED_OR_CLOSING);
     // The existing guard is still valid while retirement drains.
     EXPECT_FALSE(retired.load());
@@ -637,9 +643,9 @@ TEST_F(BufferPoolTest, FailedRetirementFlushLeavesTheFileRetiringAndRetryable) {
     file_.Io().FailNextWrite(WriteFault::FAIL);
     const auto failed = pool_->RetireFile(file_.TestFileId(), RetireDisposition::FLUSH_DIRTY);
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::RAW_IO_FAILURE);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::RAW_IO_FAILURE);
     EXPECT_TRUE(Frame(Pid(1)).dirty);
-    EXPECT_EQ(pool_->FetchRead(Pid(1)).error.code, BufferErrorCode::FILE_RETIRED_OR_CLOSING);
+    EXPECT_EQ(pool_->FetchRead(Pid(1)).Error().code, BufferErrorCode::FILE_RETIRED_OR_CLOSING);
 
     ASSERT_TRUE(pool_->RetireFile(file_.TestFileId(), RetireDisposition::FLUSH_DIRTY));
     EXPECT_FALSE(pool_->InspectPage(Pid(1)).has_value());
@@ -662,9 +668,9 @@ TEST_F(BufferPoolTest, ShutdownDrainsGuardsFlushesDirtyPagesAndRejectsNewWork) {
         finished = true;
     }};
     WaitFor([&] {
-        return pool_->FetchRead(Pid(1)).error.code == BufferErrorCode::BUFFERPOOL_QUIESCING;
+        return ErrorCodeOf(pool_->FetchRead(Pid(1))) == BufferErrorCode::BUFFERPOOL_QUIESCING;
     });
-    EXPECT_EQ(pool_->NewPage(file_.TestFileId(), InitializeHeap).error.code,
+    EXPECT_EQ(pool_->NewPage(file_.TestFileId(), InitializeHeap).Error().code,
               BufferErrorCode::BUFFERPOOL_QUIESCING);
     EXPECT_FALSE(finished.load());
 
@@ -684,7 +690,7 @@ TEST_F(BufferPoolTest, ShutdownFlushFailureIsReported) {
     file_.Io().FailNextSync();
     const auto failed = pool_->Shutdown();
     ASSERT_FALSE(failed);
-    EXPECT_EQ(failed.error.code, BufferErrorCode::RAW_IO_FAILURE);
+    EXPECT_EQ(failed.Error().code, BufferErrorCode::RAW_IO_FAILURE);
     EXPECT_TRUE(Frame(Pid(1)).dirty);
 }
 

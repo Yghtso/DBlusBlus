@@ -60,18 +60,18 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
                 auto guard = Must(pool.FetchWrite(current));
                 ASSERT_TRUE(guard.Valid());
                 const auto result = heap_test::TestHeapPage(guard.MutablePage()).Insert(tuple);
-                if (result.rid.has_value()) {
+                if (result.Ok()) {
                     guard.MarkDirty();
-                    rids.push_back(result.rid.value_or(Rid{}));
+                    rids.push_back(result.AsOptional().value_or(Rid{}));
                     continue;
                 }
             }
             auto created = Must(pool.NewPage(FILE_ID, InitializeHeap));
             ASSERT_TRUE(created.Valid());
             const auto result = heap_test::TestHeapPage(created.MutablePage()).Insert(tuple);
-            ASSERT_TRUE(result.rid.has_value());
+            ASSERT_TRUE(result.Ok());
             created.MarkDirty();
-            rids.push_back(result.rid.value_or(Rid{}));
+            rids.push_back(result.AsOptional().value_or(Rid{}));
             current = created.Id();
         }
         ASSERT_GT(current.page_no, 10U);

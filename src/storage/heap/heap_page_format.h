@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 #include "storage/page/page_header.h"
 
@@ -61,15 +62,11 @@ struct HeapSlotEntry {
 };
 
 enum class HeapSlotEntryDecodeError : std::uint8_t {
-    NONE,
     BUFFER_TOO_SMALL,
     INVALID_SLOT_STATE,
 };
 
-struct HeapSlotEntryDecodeResult {
-    std::optional<HeapSlotEntry> entry;
-    HeapSlotEntryDecodeError error{HeapSlotEntryDecodeError::NONE};
-};
+using HeapSlotEntryDecodeResult = Result<HeapSlotEntry, HeapSlotEntryDecodeError>;
 
 [[nodiscard]] bool EncodeHeapPageHeader(std::span<std::byte> destination,
                                         const HeapPageHeader& header) noexcept;

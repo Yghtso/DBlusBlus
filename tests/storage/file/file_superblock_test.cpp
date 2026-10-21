@@ -46,8 +46,8 @@ void ReplaceFieldAndRefreshChecksum(std::span<std::byte> page, std::size_t offse
 
 void ExpectDecodeError(std::span<const std::byte> page, FileSuperblockDecodeError expected) {
     const auto result = DecodeFileSuperblock(page);
-    EXPECT_FALSE(result.superblock.has_value());
-    EXPECT_EQ(result.error, expected);
+    EXPECT_FALSE(result.Ok());
+    EXPECT_EQ(result.Error(), expected);
 }
 
 void ExpectRoundTrip(const FileSuperblock& expected) {
@@ -55,12 +55,12 @@ void ExpectRoundTrip(const FileSuperblock& expected) {
     ASSERT_TRUE(EncodeFileSuperblock(page, expected));
 
     const auto result = DecodeFileSuperblock(page);
-    if (!result.superblock.has_value()) {
+    if (!result.Ok()) {
         ADD_FAILURE() << "superblock decode unexpectedly failed";
         return;
     }
-    EXPECT_EQ(result.error, FileSuperblockDecodeError::NONE);
-    EXPECT_EQ(*result.superblock, expected);
+    EXPECT_TRUE(result);
+    EXPECT_EQ(*result, expected);
 }
 
 TEST(FileSuperblockTest, UsesExplicitFormatConstantsAndFileKindCodes) {

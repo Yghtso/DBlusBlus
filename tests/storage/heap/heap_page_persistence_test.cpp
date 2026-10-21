@@ -46,16 +46,16 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
                                               .object_id = object_id,
                                               .creation_epoch = 9002,
                                           });
-        if (!page_file.page_file.has_value()) {
+        if (!page_file.Ok()) {
             ADD_FAILURE() << "heap page file creation failed";
             return;
         }
-        const auto allocation = page_file.page_file->AllocatePage();
-        if (!allocation.page_id.has_value()) {
+        const auto allocation = page_file->AllocatePage();
+        if (!allocation.Ok()) {
             ADD_FAILURE() << "heap page allocation failed";
             return;
         }
-        page_id = *allocation.page_id;
+        page_id = *allocation;
 
         Page page{page_id};
         HeapPage heap_page{page, heap_test::TestSchemaHistory()};
@@ -70,7 +70,7 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
 
     DiskManager reopened_manager;
     auto reopened = PageFile::Open(reopened_manager, path, file_id, FileKind::HEAP, object_id);
-    if (!reopened.page_file.has_value()) {
+    if (!reopened.Ok()) {
         ADD_FAILURE() << "heap page file reopen failed";
         return;
     }
@@ -80,16 +80,16 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
     ASSERT_TRUE(read_heap_page.Validate());
 
     const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(read, 1));
-    if (!dead_slot.entry.has_value()) {
+    if (!dead_slot.Ok()) {
         ADD_FAILURE() << "persisted DEAD slot did not decode";
         return;
     }
-    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot->state, HeapSlotState::DEAD);
     EXPECT_FALSE(read_heap_page.TupleBytes(1).has_value());
     const auto expected_dead_bytes = MakeTestTuple(61, std::byte{0x10});
-    EXPECT_TRUE(std::ranges::equal(
-        read.Bytes().subspan(dead_slot.entry->tuple_offset, dead_slot.entry->tuple_length),
-        expected_dead_bytes));
+    EXPECT_TRUE(
+        std::ranges::equal(read.Bytes().subspan(dead_slot->tuple_offset, dead_slot->tuple_length),
+                           expected_dead_bytes));
 
     const auto first = read_heap_page.TupleBytes(0);
     const auto third = read_heap_page.TupleBytes(2);
@@ -121,16 +121,16 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
                                               .object_id = object_id,
                                               .creation_epoch = 9003,
                                           });
-        if (!page_file.page_file.has_value()) {
+        if (!page_file.Ok()) {
             ADD_FAILURE() << "heap page file creation failed";
             return;
         }
-        const auto allocation = page_file.page_file->AllocatePage();
-        if (!allocation.page_id.has_value()) {
+        const auto allocation = page_file->AllocatePage();
+        if (!allocation.Ok()) {
             ADD_FAILURE() << "heap page allocation failed";
             return;
         }
-        page_id = *allocation.page_id;
+        page_id = *allocation;
 
         Page page{page_id};
         HeapPage heap_page{page, heap_test::TestSchemaHistory()};
@@ -146,7 +146,7 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
 
     DiskManager reopened_manager;
     auto reopened = PageFile::Open(reopened_manager, path, file_id, FileKind::HEAP, object_id);
-    if (!reopened.page_file.has_value()) {
+    if (!reopened.Ok()) {
         ADD_FAILURE() << "heap page file reopen failed";
         return;
     }
@@ -168,16 +168,15 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
     const auto first_slot = DecodeHeapSlotEntry(SlotBytes(read, 0));
     const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(read, 1));
     const auto third_slot = DecodeHeapSlotEntry(SlotBytes(read, 2));
-    if (!first_slot.entry.has_value() || !dead_slot.entry.has_value() ||
-        !third_slot.entry.has_value()) {
+    if (!first_slot.Ok() || !dead_slot.Ok() || !third_slot.Ok()) {
         ADD_FAILURE() << "persisted compacted slot did not decode";
         return;
     }
-    EXPECT_EQ(first_slot.entry->tuple_offset, PAGE_SIZE - 70);
-    EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
-    EXPECT_EQ(dead_slot.entry->tuple_offset, std::uint16_t{0});
-    EXPECT_EQ(dead_slot.entry->tuple_length, std::uint16_t{0});
-    EXPECT_EQ(third_slot.entry->tuple_offset, PAGE_SIZE - 70 - 90);
+    EXPECT_EQ(first_slot->tuple_offset, PAGE_SIZE - 70);
+    EXPECT_EQ(dead_slot->state, HeapSlotState::DEAD);
+    EXPECT_EQ(dead_slot->tuple_offset, std::uint16_t{0});
+    EXPECT_EQ(dead_slot->tuple_length, std::uint16_t{0});
+    EXPECT_EQ(third_slot->tuple_offset, PAGE_SIZE - 70 - 90);
     EXPECT_FALSE(heap_page.TupleBytes(1).has_value());
 
     const auto first = heap_page.TupleBytes(0);
@@ -206,17 +205,17 @@ TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) 
                                           .object_id = 7001,
                                           .creation_epoch = 9001,
                                       });
-    if (!page_file.page_file.has_value()) {
+    if (!page_file.Ok()) {
         ADD_FAILURE() << "heap page file creation unexpectedly failed";
         return;
     }
-    const auto allocation = page_file.page_file->AllocatePage();
-    if (!allocation.page_id.has_value()) {
+    const auto allocation = page_file->AllocatePage();
+    if (!allocation.Ok()) {
         ADD_FAILURE() << "heap page allocation unexpectedly failed";
         return;
     }
 
-    Page written{*allocation.page_id};
+    Page written{*allocation};
     HeapPage written_heap_page{written, heap_test::TestSchemaHistory()};
     ASSERT_TRUE(written_heap_page.Initialize());
     const auto first = MakeTestTuple(64, std::byte{0xFF});
@@ -225,7 +224,7 @@ TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) 
     ASSERT_TRUE(written_heap_page.Insert(second));
     ASSERT_TRUE(manager.WritePage(written.Id(), written.Bytes()));
 
-    Page read{*allocation.page_id};
+    Page read{*allocation};
     ASSERT_TRUE(manager.ReadPage(read.Id(), read.Bytes()));
     HeapPage read_heap_page{read, heap_test::TestSchemaHistory()};
     const auto validation = read_heap_page.Validate();

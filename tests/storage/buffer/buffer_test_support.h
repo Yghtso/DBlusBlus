@@ -122,7 +122,7 @@ class FaultInjectingPageIo final : public PageIo {
         if (TakeFlag(fail_next_extend_)) {
             const auto status = Injected(PageId{.file_id = file_id, .page_no = INVALID_PAGE_NO},
                                          DiskOperation::EXTEND_FILE);
-            return {.success = false, .value = 0, .error = status.error};
+            return Unexpected{status.Error()};
         }
         return inner_.ExtendFile(file_id);
     }
@@ -134,14 +134,13 @@ class FaultInjectingPageIo final : public PageIo {
     }
 
     [[nodiscard]] static DiskStatus Injected(PageId page_id, DiskOperation operation) {
-        return {.success = false,
-                .error = DiskError{.code = DiskErrorCode::SYSTEM_ERROR,
-                                   .operation = operation,
-                                   .file_id = page_id.file_id,
-                                   .page_no = page_id.page_no,
-                                   .path = {},
-                                   .system_error = EIO,
-                                   .message = "injected fault"}};
+        return Unexpected{DiskError{.code = DiskErrorCode::SYSTEM_ERROR,
+                                    .operation = operation,
+                                    .file_id = page_id.file_id,
+                                    .page_no = page_id.page_no,
+                                    .path = {},
+                                    .system_error = EIO,
+                                    .message = "injected fault"}};
     }
 
     DiskPageIo inner_;
@@ -227,7 +226,7 @@ inline PageValidationOutcome ValidateHeap(Page& page) {
 }
 
 inline bool InitializeHeap(Page& page) {
-    return heap_test::TestHeapPage(page).Initialize();
+    return heap_test::TestHeapPage(page).Initialize().Ok();
 }
 
 // Spin (yielding) until a predicate over observable pool state holds. State-based, not
@@ -258,10 +257,10 @@ class HeapFileFixture {
                                                        .page_lsn = INVALID_LSN,
                                                        .object_id = 1,
                                                        .creation_epoch = 1});
-        if (!created.page_file.has_value()) {
+        if (!created.Ok()) {
             return false;
         }
-        page_file_.emplace(std::move(*created.page_file));
+        page_file_.emplace(std::move(*created));
         file_id_ = file_id;
         return true;
     }
@@ -274,10 +273,10 @@ class HeapFileFixture {
             return std::nullopt;
         }
         const auto allocated = page_file_->AllocatePage();
-        if (!allocated.page_id.has_value()) {
+        if (!allocated.Ok()) {
             return std::nullopt;
         }
-        Page page{*allocated.page_id};
+        Page page{*allocated};
         if (!heap_test::TestHeapPage(page).Initialize()) {
             return std::nullopt;
         }
@@ -362,11 +361,11 @@ class HeapFileFixture {
 // Unwraps a successful fetch; records a failure and returns an inert guard otherwise.
 template <typename Guard>
 [[nodiscard]] Guard Must(BufferResult<Guard>&& result) {
-    if (!result.value.has_value()) {
-        ADD_FAILURE() << "BufferPool operation failed: " << result.error.message;
+    if (!result.Ok()) {
+        ADD_FAILURE() << "BufferPool operation failed: " << result.Error().message;
         return Guard{};
     }
-    return std::move(*result.value);
+    return std::move(*result);
 }
 
 [[nodiscard]] inline PageId Pid(PageNo page_no) {

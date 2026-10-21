@@ -26,18 +26,18 @@ struct BitmapAccess {
     std::size_t column_index;
 };
 
-[[nodiscard]] NullBitmapError ValidateBitmapAccess(BitmapAccess access) noexcept {
+[[nodiscard]] Status<NullBitmapError> ValidateBitmapAccess(BitmapAccess access) noexcept {
     const auto required_bytes = NullBitmapBytes(access.column_count);
     if (!required_bytes.has_value()) {
-        return NullBitmapError::COLUMN_COUNT_TOO_LARGE;
+        return Unexpected{NullBitmapError::COLUMN_COUNT_TOO_LARGE};
     }
     if (access.column_index >= access.column_count) {
-        return NullBitmapError::COLUMN_OUT_OF_RANGE;
+        return Unexpected{NullBitmapError::COLUMN_OUT_OF_RANGE};
     }
     if (access.bitmap_size < *required_bytes) {
-        return NullBitmapError::BITMAP_TOO_SMALL;
+        return Unexpected{NullBitmapError::BITMAP_TOO_SMALL};
     }
-    return NullBitmapError::NONE;
+    return {};
 }
 
 [[nodiscard]] constexpr std::uint8_t NullBitMask(std::size_t column_index) noexcept {
@@ -78,56 +78,53 @@ std::optional<std::uint16_t> NullBitmapBytes(std::size_t column_count) noexcept 
 NullBitmapReadResult IsNull(std::span<const std::byte> bitmap,
                             std::size_t column_count,
                             std::size_t column_index) noexcept {
-    const auto error = ValidateBitmapAccess({
+    const auto access = ValidateBitmapAccess({
         .bitmap_size = bitmap.size(),
         .column_count = column_count,
         .column_index = column_index,
     });
-    if (error != NullBitmapError::NONE) {
-        return {.is_null = false, .error = error};
+    if (!access) {
+        return Unexpected{access.Error()};
     }
 
     const auto byte_value = std::to_integer<std::uint8_t>(bitmap[column_index / 8U]);
-    return {
-        .is_null = (byte_value & NullBitMask(column_index)) != 0,
-        .error = NullBitmapError::NONE,
-    };
+    return (byte_value & NullBitMask(column_index)) != 0;
 }
 
-NullBitmapError
+Status<NullBitmapError>
 SetNull(std::span<std::byte> bitmap, std::size_t column_count, std::size_t column_index) noexcept {
-    const auto error = ValidateBitmapAccess({
+    const auto access = ValidateBitmapAccess({
         .bitmap_size = bitmap.size(),
         .column_count = column_count,
         .column_index = column_index,
     });
-    if (error != NullBitmapError::NONE) {
-        return error;
+    if (!access) {
+        return access;
     }
 
     const std::size_t byte_index = column_index / 8U;
     const auto byte_value = std::to_integer<std::uint8_t>(bitmap[byte_index]);
     bitmap[byte_index] = static_cast<std::byte>(byte_value | NullBitMask(column_index));
-    return NullBitmapError::NONE;
+    return {};
 }
 
-NullBitmapError ClearNull(std::span<std::byte> bitmap,
-                          std::size_t column_count,
-                          std::size_t column_index) noexcept {
-    const auto error = ValidateBitmapAccess({
+Status<NullBitmapError> ClearNull(std::span<std::byte> bitmap,
+                                  std::size_t column_count,
+                                  std::size_t column_index) noexcept {
+    const auto access = ValidateBitmapAccess({
         .bitmap_size = bitmap.size(),
         .column_count = column_count,
         .column_index = column_index,
     });
-    if (error != NullBitmapError::NONE) {
-        return error;
+    if (!access) {
+        return access;
     }
 
     const std::size_t byte_index = column_index / 8U;
     const auto byte_value = std::to_integer<std::uint8_t>(bitmap[byte_index]);
     const auto inverse_mask = static_cast<std::uint8_t>(~NullBitMask(column_index));
     bitmap[byte_index] = static_cast<std::byte>(byte_value & inverse_mask);
-    return NullBitmapError::NONE;
+    return {};
 }
 
 SchemaVer TuplePhysicalLayout::SchemaVersion() const noexcept {
@@ -184,10 +181,7 @@ bool TuplePhysicalLayout::HasVarlenColumns() const noexcept {
 TupleSizePlanningResult
 TuplePhysicalLayout::PlanTupleSize(std::span<const VarlenValueSize> varlen_values) const noexcept {
     if (varlen_values.size() != varlen_column_count_) {
-        return {
-            .plan = std::nullopt,
-            .error = TupleSizePlanningError::VARLEN_VALUE_COUNT_MISMATCH,
-        };
+        return Unexpected{TupleSizePlanningError::VARLEN_VALUE_COUNT_MISMATCH};
     }
 
     std::size_t payload_size = 0;
@@ -197,49 +191,31 @@ TuplePhysicalLayout::PlanTupleSize(std::span<const VarlenValueSize> varlen_value
             continue;
         }
         if (value.length > std::numeric_limits<std::uint32_t>::max()) {
-            return {
-                .plan = std::nullopt,
-                .error = TupleSizePlanningError::VARCHAR_LENGTH_TOO_LARGE,
-                .varlen_index = index,
-            };
+            return Unexpected{TupleSizePlanningFailure{
+                .code = TupleSizePlanningError::VARCHAR_LENGTH_TOO_LARGE, .varlen_index = index}};
         }
         if (!CheckedAdd(payload_size, value.length, payload_size)) {
-            return {
-                .plan = std::nullopt,
-                .error = TupleSizePlanningError::SIZE_OVERFLOW,
-                .varlen_index = index,
-            };
+            return Unexpected{TupleSizePlanningFailure{
+                .code = TupleSizePlanningError::SIZE_OVERFLOW, .varlen_index = index}};
         }
     }
 
     std::size_t total_size = 0;
     if (!CheckedAdd(varlen_payload_offset_, payload_size, total_size)) {
-        return {
-            .plan = std::nullopt,
-            .error = TupleSizePlanningError::SIZE_OVERFLOW,
-        };
+        return Unexpected{TupleSizePlanningError::SIZE_OVERFLOW};
     }
     if (total_size > HEAP_PAGE_MAX_RAW_TUPLE_SIZE) {
-        return {
-            .plan = std::nullopt,
-            .error = TupleSizePlanningError::TUPLE_TOO_LARGE,
-        };
+        return Unexpected{TupleSizePlanningError::TUPLE_TOO_LARGE};
     }
 
-    return {
-        .plan = TupleSizePlan{.varlen_payload_size = payload_size, .total_size = total_size},
-        .error = TupleSizePlanningError::NONE,
-    };
+    return TupleSizePlan{.varlen_payload_size = payload_size, .total_size = total_size};
 }
 
 TuplePhysicalLayoutBuildResult BuildTuplePhysicalLayout(std::span<const PhysicalColumnSpec> columns,
                                                         SchemaVer schema_version) {
     const auto bitmap_bytes = NullBitmapBytes(columns.size());
     if (!bitmap_bytes.has_value()) {
-        return {
-            .layout = std::nullopt,
-            .error = TuplePhysicalLayoutBuildError::NULL_BITMAP_TOO_LARGE,
-        };
+        return Unexpected{TuplePhysicalLayoutBuildError::NULL_BITMAP_TOO_LARGE};
     }
 
     TuplePhysicalLayout layout;
@@ -247,31 +223,23 @@ TuplePhysicalLayoutBuildResult BuildTuplePhysicalLayout(std::span<const Physical
     layout.null_bitmap_bytes_ = *bitmap_bytes;
     if (!CheckedAdd(
             TUPLE_HEADER_ENCODED_SIZE, layout.null_bitmap_bytes_, layout.fixed_area_offset_)) {
-        return {
-            .layout = std::nullopt,
-            .error = TuplePhysicalLayoutBuildError::SIZE_OVERFLOW,
-        };
+        return Unexpected{TuplePhysicalLayoutBuildError::SIZE_OVERFLOW};
     }
     layout.columns_.reserve(columns.size());
 
     for (std::size_t index = 0; index < columns.size(); ++index) {
         const auto width = PhysicalTypeWidth(columns[index].type);
         if (!width.has_value()) {
-            return {
-                .layout = std::nullopt,
-                .error = TuplePhysicalLayoutBuildError::INVALID_PHYSICAL_TYPE,
-                .column_index = index,
-            };
+            return Unexpected{TuplePhysicalLayoutBuildFailure{
+                .code = TuplePhysicalLayoutBuildError::INVALID_PHYSICAL_TYPE,
+                .column_index = index}};
         }
 
         std::size_t fixed_offset = 0;
         if (!CheckedAdd(layout.fixed_area_offset_, layout.fixed_area_size_, fixed_offset) ||
             !CheckedAdd(layout.fixed_area_size_, *width, layout.fixed_area_size_)) {
-            return {
-                .layout = std::nullopt,
-                .error = TuplePhysicalLayoutBuildError::SIZE_OVERFLOW,
-                .column_index = index,
-            };
+            return Unexpected{TuplePhysicalLayoutBuildFailure{
+                .code = TuplePhysicalLayoutBuildError::SIZE_OVERFLOW, .column_index = index}};
         }
 
         layout.columns_.push_back(PhysicalColumnLayout{
@@ -289,22 +257,13 @@ TuplePhysicalLayoutBuildResult BuildTuplePhysicalLayout(std::span<const Physical
 
     if (!CheckedAdd(
             layout.fixed_area_offset_, layout.fixed_area_size_, layout.varlen_payload_offset_)) {
-        return {
-            .layout = std::nullopt,
-            .error = TuplePhysicalLayoutBuildError::SIZE_OVERFLOW,
-        };
+        return Unexpected{TuplePhysicalLayoutBuildError::SIZE_OVERFLOW};
     }
     if (layout.varlen_payload_offset_ > HEAP_PAGE_MAX_RAW_TUPLE_SIZE) {
-        return {
-            .layout = std::nullopt,
-            .error = TuplePhysicalLayoutBuildError::TUPLE_TOO_LARGE,
-        };
+        return Unexpected{TuplePhysicalLayoutBuildError::TUPLE_TOO_LARGE};
     }
 
-    return {
-        .layout = std::move(layout),
-        .error = TuplePhysicalLayoutBuildError::NONE,
-    };
+    return layout;
 }
 
 } // namespace dblusblus

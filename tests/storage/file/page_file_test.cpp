@@ -52,28 +52,28 @@ TEST(PageFileTest, CreatesOnePageFileWithValidDurableSuperblock) {
     DiskManager manager;
 
     auto created = PageFile::Create(manager, path, expected);
-    if (!created.page_file.has_value()) {
+    if (!created.Ok()) {
         ADD_FAILURE() << "page file creation unexpectedly failed";
         return;
     }
 
-    EXPECT_EQ(created.page_file->Superblock(), expected);
+    EXPECT_EQ(created->Superblock(), expected);
     const auto page_count = manager.PageCount(expected.file_id);
     const auto file_size = manager.FileSize(expected.file_id);
     ASSERT_TRUE(page_count);
     ASSERT_TRUE(file_size);
-    EXPECT_EQ(page_count.value, PageNo{1});
-    EXPECT_EQ(file_size.value, PAGE_SIZE);
+    EXPECT_EQ(page_count.Value(), PageNo{1});
+    EXPECT_EQ(file_size.Value(), PAGE_SIZE);
     EXPECT_EQ(std::filesystem::file_size(path), PAGE_SIZE);
 
     Page page_zero{PageId{.file_id = expected.file_id, .page_no = 0}};
     ASSERT_TRUE(manager.ReadPage(page_zero.Id(), page_zero.Bytes()));
     const auto decoded = DecodeFileSuperblock(page_zero.Bytes());
-    if (!decoded.superblock.has_value()) {
+    if (!decoded.Ok()) {
         ADD_FAILURE() << "created superblock did not validate";
         return;
     }
-    EXPECT_EQ(*decoded.superblock, expected);
+    EXPECT_EQ(*decoded, expected);
 
     const auto common_header = page_zero.DecodeHeader();
     if (!common_header.has_value()) {
@@ -96,24 +96,24 @@ TEST(PageFileTest, ReopensValidatedFileAndRetainsPageCountAfterAllocations) {
 
     {
         auto created = PageFile::Create(manager, path, expected);
-        if (!created.page_file.has_value()) {
+        if (!created.Ok()) {
             ADD_FAILURE() << "page file creation unexpectedly failed";
             return;
         }
-        ASSERT_TRUE(created.page_file->AllocatePage());
-        ASSERT_TRUE(created.page_file->AllocatePage());
+        ASSERT_TRUE(created->AllocatePage());
+        ASSERT_TRUE(created->AllocatePage());
     }
 
     auto opened =
         PageFile::Open(manager, path, expected.file_id, expected.file_kind, expected.object_id);
-    if (!opened.page_file.has_value()) {
+    if (!opened.Ok()) {
         ADD_FAILURE() << "page file reopen unexpectedly failed";
         return;
     }
-    EXPECT_EQ(opened.page_file->Superblock(), expected);
+    EXPECT_EQ(opened->Superblock(), expected);
     const auto page_count = manager.PageCount(expected.file_id);
     ASSERT_TRUE(page_count);
-    EXPECT_EQ(page_count.value, PageNo{3});
+    EXPECT_EQ(page_count.Value(), PageNo{3});
 }
 
 TEST(PageFileTest, RejectsIdentityMismatchesWithExpectedAndActualContext) {
@@ -130,25 +130,25 @@ TEST(PageFileTest, RejectsIdentityMismatchesWithExpectedAndActualContext) {
     const auto wrong_file_id =
         PageFile::Open(manager, path, FileId{203}, expected.file_kind, expected.object_id);
     EXPECT_FALSE(wrong_file_id);
-    EXPECT_EQ(wrong_file_id.error.code, PageFileErrorCode::FILE_ID_MISMATCH);
-    EXPECT_EQ(wrong_file_id.error.expected_file_id, FileId{203});
-    EXPECT_EQ(wrong_file_id.error.actual_file_id, expected.file_id);
+    EXPECT_EQ(wrong_file_id.Error().code, PageFileErrorCode::FILE_ID_MISMATCH);
+    EXPECT_EQ(wrong_file_id.Error().expected_file_id, FileId{203});
+    EXPECT_EQ(wrong_file_id.Error().actual_file_id, expected.file_id);
     ASSERT_TRUE(manager.OpenFile(FileId{203}, path));
     ASSERT_TRUE(manager.CloseFile(FileId{203}));
 
     const auto wrong_kind =
         PageFile::Open(manager, path, expected.file_id, FileKind::HEAP, expected.object_id);
     EXPECT_FALSE(wrong_kind);
-    EXPECT_EQ(wrong_kind.error.code, PageFileErrorCode::FILE_KIND_MISMATCH);
-    EXPECT_EQ(wrong_kind.error.expected_file_kind, FileKind::HEAP);
-    EXPECT_EQ(wrong_kind.error.actual_file_kind, expected.file_kind);
+    EXPECT_EQ(wrong_kind.Error().code, PageFileErrorCode::FILE_KIND_MISMATCH);
+    EXPECT_EQ(wrong_kind.Error().expected_file_kind, FileKind::HEAP);
+    EXPECT_EQ(wrong_kind.Error().actual_file_kind, expected.file_kind);
 
     const auto wrong_object =
         PageFile::Open(manager, path, expected.file_id, expected.file_kind, 9999);
     EXPECT_FALSE(wrong_object);
-    EXPECT_EQ(wrong_object.error.code, PageFileErrorCode::OBJECT_ID_MISMATCH);
-    EXPECT_EQ(wrong_object.error.expected_object_id, std::uint64_t{9999});
-    EXPECT_EQ(wrong_object.error.actual_object_id, expected.object_id);
+    EXPECT_EQ(wrong_object.Error().code, PageFileErrorCode::OBJECT_ID_MISMATCH);
+    EXPECT_EQ(wrong_object.Error().expected_object_id, std::uint64_t{9999});
+    EXPECT_EQ(wrong_object.Error().actual_object_id, expected.object_id);
 
     auto unchecked_object = PageFile::Open(manager, path, expected.file_id, expected.file_kind);
     EXPECT_TRUE(unchecked_object);
@@ -176,8 +176,8 @@ TEST(PageFileTest, RejectsCorruptAndMissingSuperblocksAndCleansRegistration) {
     const auto corrupt =
         PageFile::Open(manager, corrupt_path, expected.file_id, expected.file_kind);
     EXPECT_FALSE(corrupt);
-    EXPECT_EQ(corrupt.error.code, PageFileErrorCode::SUPERBLOCK_INVALID);
-    EXPECT_EQ(corrupt.error.superblock_error, FileSuperblockDecodeError::CHECKSUM_MISMATCH);
+    EXPECT_EQ(corrupt.Error().code, PageFileErrorCode::SUPERBLOCK_INVALID);
+    EXPECT_EQ(corrupt.Error().superblock_error, FileSuperblockDecodeError::CHECKSUM_MISMATCH);
     ASSERT_TRUE(manager.OpenFile(expected.file_id, corrupt_path));
     ASSERT_TRUE(manager.CloseFile(expected.file_id));
 
@@ -185,8 +185,8 @@ TEST(PageFileTest, RejectsCorruptAndMissingSuperblocksAndCleansRegistration) {
     ASSERT_TRUE(manager.CloseFile(FileId{105}));
     const auto empty = PageFile::Open(manager, empty_path, FileId{105}, FileKind::HEAP);
     EXPECT_FALSE(empty);
-    EXPECT_EQ(empty.error.code, PageFileErrorCode::MISSING_SUPERBLOCK);
-    EXPECT_EQ(empty.error.actual_page_count, PageNo{0});
+    EXPECT_EQ(empty.Error().code, PageFileErrorCode::MISSING_SUPERBLOCK);
+    EXPECT_EQ(empty.Error().actual_page_count, PageNo{0});
     ASSERT_TRUE(manager.OpenFile(FileId{105}, empty_path));
     EXPECT_TRUE(manager.CloseFile(FileId{105}));
 }
@@ -202,10 +202,10 @@ TEST(PageFileTest, PropagatesMisalignedFileErrorFromDiskManager) {
 
     const auto opened = PageFile::Open(manager, path, FileId{106}, FileKind::HEAP);
     EXPECT_FALSE(opened);
-    EXPECT_EQ(opened.error.code, PageFileErrorCode::DISK_ERROR);
-    EXPECT_EQ(opened.error.operation, PageFileOperation::OPEN);
-    EXPECT_EQ(opened.error.disk_error.code, DiskErrorCode::FILE_SIZE_NOT_PAGE_ALIGNED);
-    EXPECT_EQ(opened.error.disk_error.path, path);
+    EXPECT_EQ(opened.Error().code, PageFileErrorCode::DISK_ERROR);
+    EXPECT_EQ(opened.Error().operation, PageFileOperation::OPEN);
+    EXPECT_EQ(opened.Error().disk_error.code, DiskErrorCode::FILE_SIZE_NOT_PAGE_ALIGNED);
+    EXPECT_EQ(opened.Error().disk_error.path, path);
 }
 
 TEST(PageFileTest, AllocatesAppendOnlyZeroedPagesBeginningAtOne) {
@@ -215,26 +215,26 @@ TEST(PageFileTest, AllocatesAppendOnlyZeroedPagesBeginningAtOne) {
     const auto superblock = MakeSuperblock(FileId{107}, FileKind::HEAP, 7107, 9107);
     DiskManager manager;
     auto created = PageFile::Create(manager, path, superblock);
-    if (!created.page_file.has_value()) {
+    if (!created.Ok()) {
         ADD_FAILURE() << "page file creation unexpectedly failed";
         return;
     }
 
     for (PageNo expected_page_no = 1; expected_page_no <= 3; ++expected_page_no) {
-        const auto allocation = created.page_file->AllocatePage();
-        if (!allocation.page_id.has_value()) {
+        const auto allocation = created->AllocatePage();
+        if (!allocation.Ok()) {
             ADD_FAILURE() << "ordinary page allocation unexpectedly failed";
             return;
         }
-        EXPECT_EQ(*allocation.page_id,
+        EXPECT_EQ(*allocation,
                   (PageId{.file_id = superblock.file_id, .page_no = expected_page_no}));
 
         const auto page_count = manager.PageCount(superblock.file_id);
         ASSERT_TRUE(page_count);
-        EXPECT_EQ(page_count.value, expected_page_no + 1U);
+        EXPECT_EQ(page_count.Value(), expected_page_no + 1U);
         EXPECT_EQ(std::filesystem::file_size(path), (expected_page_no + 1U) * PAGE_SIZE);
 
-        Page allocated_page{*allocation.page_id};
+        Page allocated_page{*allocation};
         ASSERT_TRUE(manager.ReadPage(allocated_page.Id(), allocated_page.Bytes()));
         EXPECT_TRUE(std::ranges::all_of(allocated_page.Bytes(),
                                         [](std::byte value) { return value == std::byte{0}; }));
@@ -248,16 +248,16 @@ TEST(PageFileTest, NeverReturnsPageZeroAsAnOrdinaryAllocation) {
     const auto superblock = MakeSuperblock(FileId{108}, FileKind::HEAP, 7108, 9108);
     DiskManager manager;
     auto created = PageFile::Create(manager, path, superblock);
-    if (!created.page_file.has_value()) {
+    if (!created.Ok()) {
         ADD_FAILURE() << "page file creation unexpectedly failed";
         return;
     }
     ASSERT_TRUE(TruncatePath(path, 0));
 
-    const auto allocation = created.page_file->AllocatePage();
+    const auto allocation = created->AllocatePage();
     EXPECT_FALSE(allocation);
-    EXPECT_EQ(allocation.error.code, PageFileErrorCode::DATA_PAGE_ZERO_ALLOCATED);
-    EXPECT_EQ(allocation.error.actual_page_no, PageNo{0});
+    EXPECT_EQ(allocation.Error().code, PageFileErrorCode::DATA_PAGE_ZERO_ALLOCATED);
+    EXPECT_EQ(allocation.Error().actual_page_no, PageNo{0});
 }
 
 TEST(PageFileTest, KeepsIndependentFileAllocationSequences) {
@@ -270,22 +270,21 @@ TEST(PageFileTest, KeepsIndependentFileAllocationSequences) {
     auto second = PageFile::Create(manager,
                                    temporary_directory.File("second.pages"),
                                    MakeSuperblock(FileId{110}, FileKind::FSM, 7110, 9110));
-    if (!first.page_file.has_value() || !second.page_file.has_value()) {
+    if (!first.Ok() || !second.Ok()) {
         ADD_FAILURE() << "independent page file creation unexpectedly failed";
         return;
     }
 
-    const auto first_page_one = first.page_file->AllocatePage();
-    const auto second_page_one = second.page_file->AllocatePage();
-    const auto first_page_two = first.page_file->AllocatePage();
-    if (!first_page_one.page_id.has_value() || !second_page_one.page_id.has_value() ||
-        !first_page_two.page_id.has_value()) {
+    const auto first_page_one = first->AllocatePage();
+    const auto second_page_one = second->AllocatePage();
+    const auto first_page_two = first->AllocatePage();
+    if (!first_page_one.Ok() || !second_page_one.Ok() || !first_page_two.Ok()) {
         ADD_FAILURE() << "independent page allocation unexpectedly failed";
         return;
     }
-    EXPECT_EQ(*first_page_one.page_id, (PageId{.file_id = 109, .page_no = 1}));
-    EXPECT_EQ(*second_page_one.page_id, (PageId{.file_id = 110, .page_no = 1}));
-    EXPECT_EQ(*first_page_two.page_id, (PageId{.file_id = 109, .page_no = 2}));
+    EXPECT_EQ(*first_page_one, (PageId{.file_id = 109, .page_no = 1}));
+    EXPECT_EQ(*second_page_one, (PageId{.file_id = 110, .page_no = 1}));
+    EXPECT_EQ(*first_page_two, (PageId{.file_id = 109, .page_no = 2}));
 }
 
 TEST(PageFileTest, SupportsEveryGenericSuperblockFileKind) {
@@ -322,7 +321,7 @@ TEST(PageFileTest, RejectsBtreeCreationThroughGenericSuperblockCodec) {
 
     const auto created = PageFile::Create(manager, path, superblock);
     EXPECT_FALSE(created);
-    EXPECT_EQ(created.error.code, PageFileErrorCode::SUPERBLOCK_ENCODING_FAILED);
+    EXPECT_EQ(created.Error().code, PageFileErrorCode::SUPERBLOCK_ENCODING_FAILED);
     EXPECT_TRUE(std::filesystem::exists(path));
     EXPECT_EQ(std::filesystem::file_size(path), PAGE_SIZE);
 
@@ -342,7 +341,7 @@ TEST(PageFileTest, PreservesDiskCreationFailuresWithoutTruncatingOrConflicting) 
     DiskManager manager;
     auto first = PageFile::Create(
         manager, first_path, MakeSuperblock(FileId{130}, FileKind::HEAP, 7130, 9130));
-    if (!first.page_file.has_value()) {
+    if (!first.Ok()) {
         ADD_FAILURE() << "initial page file creation unexpectedly failed";
         return;
     }
@@ -350,16 +349,16 @@ TEST(PageFileTest, PreservesDiskCreationFailuresWithoutTruncatingOrConflicting) 
     const auto duplicate = PageFile::Create(
         manager, duplicate_path, MakeSuperblock(FileId{130}, FileKind::FSM, 8130, 9131));
     EXPECT_FALSE(duplicate);
-    EXPECT_EQ(duplicate.error.code, PageFileErrorCode::DISK_ERROR);
-    EXPECT_EQ(duplicate.error.disk_error.code, DiskErrorCode::DUPLICATE_FILE_ID);
+    EXPECT_EQ(duplicate.Error().code, PageFileErrorCode::DISK_ERROR);
+    EXPECT_EQ(duplicate.Error().disk_error.code, DiskErrorCode::DUPLICATE_FILE_ID);
     EXPECT_FALSE(std::filesystem::exists(duplicate_path));
 
     const auto existing = PageFile::Create(
         manager, first_path, MakeSuperblock(FileId{131}, FileKind::HEAP, 7131, 9131));
     EXPECT_FALSE(existing);
-    EXPECT_EQ(existing.error.code, PageFileErrorCode::DISK_ERROR);
-    EXPECT_EQ(existing.error.disk_error.code, DiskErrorCode::SYSTEM_ERROR);
-    EXPECT_EQ(existing.error.disk_error.system_error, EEXIST);
+    EXPECT_EQ(existing.Error().code, PageFileErrorCode::DISK_ERROR);
+    EXPECT_EQ(existing.Error().disk_error.code, DiskErrorCode::SYSTEM_ERROR);
+    EXPECT_EQ(existing.Error().disk_error.system_error, EEXIST);
     EXPECT_EQ(std::filesystem::file_size(first_path), PAGE_SIZE);
 }
 
@@ -373,7 +372,7 @@ TEST(PageFileTest, LeavesFailedPostCreationFileButCleansRegistration) {
 
     const auto created = PageFile::Create(manager, path, invalid);
     EXPECT_FALSE(created);
-    EXPECT_EQ(created.error.code, PageFileErrorCode::SUPERBLOCK_ENCODING_FAILED);
+    EXPECT_EQ(created.Error().code, PageFileErrorCode::SUPERBLOCK_ENCODING_FAILED);
     EXPECT_TRUE(std::filesystem::exists(path));
     EXPECT_EQ(std::filesystem::file_size(path), PAGE_SIZE);
 

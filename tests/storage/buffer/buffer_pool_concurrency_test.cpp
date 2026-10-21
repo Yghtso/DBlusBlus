@@ -1,6 +1,7 @@
 #include "buffer_test_support.h"
 #include "storage/buffer/buffer_pool.h"
 #include "storage/heap/heap_page.h"
+#include "support/require.h"
 
 #include <array>
 #include <atomic>
@@ -17,6 +18,8 @@
 
 namespace dblusblus {
 namespace {
+
+using test::ErrorCodeOf;
 
 using buffer_test::EntryOf;
 using buffer_test::FrameOf;
@@ -101,10 +104,10 @@ TEST_F(BufferPoolConcurrencyTest, LoadFailureReachesEveryJoinerAndIsNotCached) {
     file_.Io().FailNextRead();
     observer_.PauseAt(BufferPoolEventType::FRAME_BOUND_LOADING, Pid(1));
 
-    std::array<BufferErrorCode, 2> codes{};
-    std::thread loader{[&] { codes[0] = pool_->FetchRead(Pid(1)).error.code; }};
+    std::array<std::optional<BufferErrorCode>, 2> codes{};
+    std::thread loader{[&] { codes[0] = ErrorCodeOf(pool_->FetchRead(Pid(1))); }};
     observer_.WaitUntilPaused();
-    std::thread joiner{[&] { codes[1] = pool_->FetchRead(Pid(1)).error.code; }};
+    std::thread joiner{[&] { codes[1] = ErrorCodeOf(pool_->FetchRead(Pid(1))); }};
     WaitFor([&] { return EntryOf(*pool_, Pid(1)).pending_claims == 2U; });
     observer_.Resume();
     loader.join();
@@ -124,8 +127,8 @@ TEST_F(BufferPoolConcurrencyTest, FetchThatPinsFirstMakesTheVictimReservationFai
     ASSERT_TRUE(pool_->FetchRead(Pid(1))); // resident, unpinned, evictable
     observer_.PauseAt(BufferPoolEventType::VICTIM_CANDIDATE_OBSERVED, Pid(1));
 
-    BufferErrorCode evictor_code = BufferErrorCode::NONE;
-    std::thread evictor{[&] { evictor_code = pool_->FetchRead(Pid(2)).error.code; }};
+    std::optional<BufferErrorCode> evictor_code;
+    std::thread evictor{[&] { evictor_code = ErrorCodeOf(pool_->FetchRead(Pid(2))); }};
     observer_.WaitUntilPaused();
 
     // The hit wins the race before the final reservation.
@@ -169,10 +172,10 @@ TEST_F(BufferPoolConcurrencyTest, FetchAfterVictimReservationWaitsAndReloads) {
     std::optional<BufferErrorCode> fetched_code;
     std::thread fetcher{[&] {
         auto result = pool_->FetchRead(Pid(1));
-        fetched_code = result.error.code;
+        fetched_code = ErrorCodeOf(result);
         if (result) {
             EXPECT_TRUE(
-                heap_test::TestHeapPage(const_cast<Page&>(result.value->GetPage())).TupleBytes(0));
+                heap_test::TestHeapPage(const_cast<Page&>(result->GetPage())).TupleBytes(0));
         }
     }};
     observer_.Resume();
@@ -181,8 +184,7 @@ TEST_F(BufferPoolConcurrencyTest, FetchAfterVictimReservationWaitsAndReloads) {
 
     // Either the fetcher reloaded A after the eviction, or it found no frame while B was still
     // pinned. It never pinned the reserved victim.
-    const auto code = fetched_code.value_or(BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
-    EXPECT_TRUE(code == BufferErrorCode::NONE || code == BufferErrorCode::NO_REPLACEABLE_FRAME);
+    EXPECT_TRUE(!fetched_code.has_value() || fetched_code == BufferErrorCode::NO_REPLACEABLE_FRAME);
     EXPECT_EQ(file_.Io().WriteCount(), 1U);
 }
 
@@ -239,7 +241,7 @@ TEST_F(BufferPoolConcurrencyTest, GuardIsNotEvictableBetweenLatchReleaseAndUnpin
     }};
     observer_.WaitUntilPaused();
     EXPECT_EQ(FrameOf(*pool_, Pid(1)).pin_count, 1U);
-    EXPECT_EQ(pool_->FetchRead(Pid(2)).error.code, BufferErrorCode::NO_REPLACEABLE_FRAME);
+    EXPECT_EQ(pool_->FetchRead(Pid(2)).Error().code, BufferErrorCode::NO_REPLACEABLE_FRAME);
     observer_.Resume();
     releaser.join();
     EXPECT_TRUE(pool_->FetchRead(Pid(2)));
@@ -304,26 +306,26 @@ TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
                     auto guard = pool.FetchWrite(page_id);
                     if (!guard) {
                         // Every frame may be pinned by the other workers at this instant.
-                        ASSERT_EQ(guard.error.code, BufferErrorCode::NO_REPLACEABLE_FRAME);
+                        ASSERT_EQ(guard.Error().code, BufferErrorCode::NO_REPLACEABLE_FRAME);
                         continue;
                     }
-                    HeapPage heap{guard.value->MutablePage(), heap_test::TestSchemaHistory()};
+                    HeapPage heap{guard->MutablePage(), heap_test::TestSchemaHistory()};
                     auto tuple = heap.TupleBytes(0);
                     ASSERT_TRUE(tuple.has_value());
-                    auto bytes = guard.value->MutableBytes().subspan(
-                        static_cast<std::size_t>(tuple->data() - guard.value->Bytes().data()) +
+                    auto bytes = guard->MutableBytes().subspan(
+                        static_cast<std::size_t>(tuple->data() - guard->Bytes().data()) +
                             heap_test::TEST_TUPLE_MIN_SIZE,
                         sizeof(std::uint64_t));
                     std::uint64_t value = 0;
                     std::memcpy(&value, bytes.data(), sizeof(value));
                     ++value;
                     std::memcpy(bytes.data(), &value, sizeof(value));
-                    guard.value->MarkDirty();
+                    guard->MarkDirty();
                     ++expected[page_id.page_no - 1U];
                 } else if (choice < 9) {
                     auto guard = pool.FetchRead(page_id);
                     if (!guard) {
-                        ASSERT_EQ(guard.error.code, BufferErrorCode::NO_REPLACEABLE_FRAME);
+                        ASSERT_EQ(guard.Error().code, BufferErrorCode::NO_REPLACEABLE_FRAME);
                     }
                 } else {
                     ASSERT_TRUE(pool.FlushPage(page_id));

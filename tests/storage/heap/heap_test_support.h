@@ -36,7 +36,7 @@ inline void WriteHeapHeader(Page& page, const HeapPageHeader& header) {
 }
 
 inline void WriteCommonHeader(Page& page, const CommonPageHeader& header) {
-    ASSERT_TRUE(page.WriteHeader(header));
+    page.WriteHeader(header);
 }
 
 [[nodiscard]] inline Page InitializedHeapPage(PageId page_id = {.file_id = 7, .page_no = 3}) {

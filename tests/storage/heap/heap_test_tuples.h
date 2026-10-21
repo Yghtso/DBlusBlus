@@ -29,11 +29,11 @@ inline constexpr std::size_t TEST_TUPLE_MIN_SIZE = 57;
             PhysicalColumnSpec{.type = PhysicalType::VARCHAR, .nullable = false},
         };
         auto built = BuildTuplePhysicalLayout(columns, TEST_SCHEMA_VERSION);
-        if (!built.layout.has_value()) {
+        if (!built.Ok()) {
             ADD_FAILURE() << "test tuple layout unexpectedly failed to build";
             return std::vector<TuplePhysicalLayout>{};
         }
-        return std::vector<TuplePhysicalLayout>{*built.layout};
+        return std::vector<TuplePhysicalLayout>{*built};
     }();
     return layouts;
 }
@@ -62,11 +62,11 @@ MakeTestTuple(std::size_t size,
     const std::vector<std::byte> payload(size - TEST_TUPLE_MIN_SIZE, fill);
     const std::array values{TupleValue{VarcharValue{.bytes = payload}}};
     auto encoded = EncodeTuple(TestTupleLayouts().front(), metadata, values);
-    if (!encoded.tuple.has_value() || encoded.tuple->size() != size) {
+    if (!encoded.Ok() || encoded->size() != size) {
         ADD_FAILURE() << "test tuple encoding unexpectedly failed";
         return {};
     }
-    return std::move(*encoded.tuple);
+    return std::move(*encoded);
 }
 
 // Writes a valid test tuple of `size` bytes at `offset` without touching the slot directory.

@@ -67,7 +67,7 @@ static_assert(CREATION_EPOCH_OFFSET + sizeof(std::uint64_t) == FILE_SUPERBLOCK_H
 }
 
 [[nodiscard]] FileSuperblockDecodeResult DecodeFailure(FileSuperblockDecodeError error) noexcept {
-    return FileSuperblockDecodeResult{.superblock = std::nullopt, .error = error};
+    return Unexpected{error};
 }
 
 } // namespace
@@ -213,16 +213,12 @@ FileSuperblockDecodeResult DecodeFileSuperblock(std::span<const std::byte> sourc
         return DecodeFailure(FileSuperblockDecodeError::BUFFER_TOO_SMALL);
     }
 
-    return FileSuperblockDecodeResult{
-        .superblock =
-            FileSuperblock{
-                .file_kind = file_kind,
-                .file_id = *file_id,
-                .page_lsn = common_header->page_lsn,
-                .object_id = *object_id,
-                .creation_epoch = *creation_epoch,
-            },
-        .error = FileSuperblockDecodeError::NONE,
+    return FileSuperblock{
+        .file_kind = file_kind,
+        .file_id = *file_id,
+        .page_lsn = common_header->page_lsn,
+        .object_id = *object_id,
+        .creation_epoch = *creation_epoch,
     };
 }
 

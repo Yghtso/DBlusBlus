@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/result.h"
 #include "common/types.h"
 
 #include <cstddef>
@@ -53,14 +54,7 @@ enum class TupleHeaderDecodeError : std::uint8_t {
     NONZERO_RESERVED,
 };
 
-struct TupleHeaderDecodeResult {
-    std::optional<TupleHeader> header;
-    TupleHeaderDecodeError error{TupleHeaderDecodeError::NONE};
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return header.has_value();
-    }
-};
+using TupleHeaderDecodeResult = Result<TupleHeader, TupleHeaderDecodeError>;
 
 [[nodiscard]] bool EncodeTupleHeader(std::span<std::byte> destination,
                                      const TupleHeader& header) noexcept;
