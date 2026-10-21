@@ -54,8 +54,8 @@ class BufferPoolTest : public ::testing::Test {
 
     // Inserts one tuple through a write guard and publishes the mutation.
     static void InsertTuple(WritePageGuard& guard, std::byte value) {
-        const std::array tuple{value, value, value};
-        HeapPage heap{guard.MutablePage()};
+        const auto tuple = heap_test::MakeTestTuple(heap_test::TEST_TUPLE_MIN_SIZE + 3, value);
+        HeapPage heap{guard.MutablePage(), heap_test::TestSchemaHistory()};
         ASSERT_TRUE(heap.Insert(tuple));
         guard.MarkDirty();
     }
@@ -97,7 +97,7 @@ TEST_F(BufferPoolTest, LoadsValidatedPageAsResidentWithOnePin) {
     auto guard = Must(pool_->FetchRead(Pid(1)));
     ASSERT_TRUE(guard.Valid());
     EXPECT_EQ(guard.Id(), Pid(1));
-    EXPECT_TRUE(HeapPage{const_cast<Page&>(guard.GetPage())}.Validate());
+    EXPECT_TRUE(heap_test::TestHeapPage(const_cast<Page&>(guard.GetPage())).Validate());
 
     const auto entry = EntryOf(*pool_, Pid(1));
     EXPECT_EQ(entry.state, PageTableEntryState::RESIDENT);
@@ -139,7 +139,7 @@ TEST_P(BufferPoolCorruptionTest, MalformedPagesNeverBecomeResidentAndRetrySuccee
 
     // Not poison-cached: repair the fixture and fetch again.
     Page repaired{page_id};
-    ASSERT_TRUE(HeapPage{repaired}.Initialize());
+    ASSERT_TRUE(heap_test::TestHeapPage(repaired).Initialize());
     FinalizePageChecksum(repaired.Bytes());
     ASSERT_TRUE(file_.OverwriteRawPage(repaired));
     EXPECT_TRUE(pool_->FetchRead(page_id));
@@ -306,7 +306,8 @@ TEST_F(BufferPoolTest, NewPageIsConstructedWithoutReadingAndPublishedWithOneCrea
 
     auto fetched = Must(pool_->FetchRead(Pid(1)));
     ASSERT_TRUE(fetched.Valid());
-    EXPECT_TRUE(HeapPage{const_cast<Page&>(fetched.GetPage())}.TupleBytes(0).has_value());
+    EXPECT_TRUE(
+        heap_test::TestHeapPage(const_cast<Page&>(fetched.GetPage())).TupleBytes(0).has_value());
 }
 
 TEST_F(BufferPoolTest, NewPageWithNoReplaceableFrameDoesNotExtendTheFile) {
@@ -619,7 +620,7 @@ TEST_F(BufferPoolTest, RetirementWaitsForExistingGuardsAndRejectsNewClaims) {
               BufferErrorCode::FILE_RETIRED_OR_CLOSING);
     // The existing guard is still valid while retirement drains.
     EXPECT_FALSE(retired.load());
-    EXPECT_TRUE(HeapPage{const_cast<Page&>(held.GetPage())}.Validate());
+    EXPECT_TRUE(heap_test::TestHeapPage(const_cast<Page&>(held.GetPage())).Validate());
 
     held.Release();
     retirer.join();

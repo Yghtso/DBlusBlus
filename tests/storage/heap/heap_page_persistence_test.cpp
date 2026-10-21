@@ -2,6 +2,7 @@
 #include "storage/file/file_superblock.h"
 #include "storage/file/page_file.h"
 #include "storage/heap/heap_page.h"
+#include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
 
 #include <algorithm>
@@ -51,6 +52,8 @@ class TemporaryDirectory {
     std::filesystem::path path_;
 };
 
+using heap_test::MakeTestTuple;
+
 [[nodiscard]] std::span<std::byte> SlotBytes(Page& page, SlotId slot_id) {
     return page.Bytes().subspan(
         HEAP_PAGE_SLOT_DIRECTORY_OFFSET +
@@ -88,14 +91,11 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
         page_id = *allocation.page_id;
 
         Page page{page_id};
-        HeapPage heap_page{page};
+        HeapPage heap_page{page, heap_test::TestSchemaHistory()};
         ASSERT_TRUE(heap_page.Initialize());
-        constexpr std::array first{std::byte{0x01}, std::byte{0x02}};
-        constexpr std::array second{std::byte{0x10}, std::byte{0x00}, std::byte{0xFF}};
-        constexpr std::array third{std::byte{0x20}};
-        ASSERT_TRUE(heap_page.Insert(first));
-        ASSERT_TRUE(heap_page.Insert(second));
-        ASSERT_TRUE(heap_page.Insert(third));
+        ASSERT_TRUE(heap_page.Insert(MakeTestTuple(60, std::byte{0x01})));
+        ASSERT_TRUE(heap_page.Insert(MakeTestTuple(61, std::byte{0x10})));
+        ASSERT_TRUE(heap_page.Insert(MakeTestTuple(62, std::byte{0x20})));
         ASSERT_TRUE(heap_page.MarkDead(1));
         ASSERT_TRUE(manager.WritePage(page_id, page.Bytes()));
         ASSERT_TRUE(manager.SyncFile(file_id));
@@ -109,7 +109,7 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
     }
     Page read{page_id};
     ASSERT_TRUE(reopened_manager.ReadPage(page_id, read.Bytes()));
-    HeapPage read_heap_page{read};
+    HeapPage read_heap_page{read, heap_test::TestSchemaHistory()};
     ASSERT_TRUE(read_heap_page.Validate());
 
     const auto dead_slot = DecodeHeapSlotEntry(SlotBytes(read, 1));
@@ -119,7 +119,7 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
     }
     EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
     EXPECT_FALSE(read_heap_page.TupleBytes(1).has_value());
-    constexpr std::array expected_dead_bytes{std::byte{0x10}, std::byte{0x00}, std::byte{0xFF}};
+    const auto expected_dead_bytes = MakeTestTuple(61, std::byte{0x10});
     EXPECT_TRUE(std::ranges::equal(
         read.Bytes().subspan(dead_slot.entry->tuple_offset, dead_slot.entry->tuple_length),
         expected_dead_bytes));
@@ -130,8 +130,8 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
         ADD_FAILURE() << "unaffected persisted NORMAL tuple was not retrievable";
         return;
     }
-    constexpr std::array expected_first{std::byte{0x01}, std::byte{0x02}};
-    constexpr std::array expected_third{std::byte{0x20}};
+    const auto expected_first = MakeTestTuple(60, std::byte{0x01});
+    const auto expected_third = MakeTestTuple(62, std::byte{0x20});
     EXPECT_TRUE(std::ranges::equal(*first, expected_first));
     EXPECT_TRUE(std::ranges::equal(*third, expected_third));
 }
@@ -166,15 +166,11 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
         page_id = *allocation.page_id;
 
         Page page{page_id};
-        HeapPage heap_page{page};
+        HeapPage heap_page{page, heap_test::TestSchemaHistory()};
         ASSERT_TRUE(heap_page.Initialize());
-        constexpr std::array first{std::byte{0x01}, std::byte{0x02}};
-        constexpr std::array second{
-            std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13}};
-        constexpr std::array third{std::byte{0x20}, std::byte{0x21}, std::byte{0x22}};
-        ASSERT_TRUE(heap_page.Insert(first));
-        ASSERT_TRUE(heap_page.Insert(second));
-        ASSERT_TRUE(heap_page.Insert(third));
+        ASSERT_TRUE(heap_page.Insert(MakeTestTuple(70, std::byte{0x01})));
+        ASSERT_TRUE(heap_page.Insert(MakeTestTuple(80, std::byte{0x10})));
+        ASSERT_TRUE(heap_page.Insert(MakeTestTuple(90, std::byte{0x20})));
         ASSERT_TRUE(heap_page.MarkDead(1));
         ASSERT_TRUE(heap_page.Compact());
         ASSERT_TRUE(manager.WritePage(page_id, page.Bytes()));
@@ -189,7 +185,7 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
     }
     Page read{page_id};
     ASSERT_TRUE(reopened_manager.ReadPage(page_id, read.Bytes()));
-    HeapPage heap_page{read};
+    HeapPage heap_page{read, heap_test::TestSchemaHistory()};
     ASSERT_TRUE(heap_page.Validate());
 
     const auto header = heap_page.Header();
@@ -199,7 +195,7 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
     }
     EXPECT_EQ(header->slot_count, std::uint16_t{3});
     EXPECT_EQ(header->lower, HEAP_PAGE_TOTAL_HEADER_SIZE + (3 * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE));
-    EXPECT_EQ(header->upper, PAGE_SIZE - 5);
+    EXPECT_EQ(header->upper, PAGE_SIZE - 70 - 90);
     EXPECT_EQ(header->free_slot_head, INVALID_SLOT_ID);
 
     const auto first_slot = DecodeHeapSlotEntry(SlotBytes(read, 0));
@@ -210,11 +206,11 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
         ADD_FAILURE() << "persisted compacted slot did not decode";
         return;
     }
-    EXPECT_EQ(first_slot.entry->tuple_offset, PAGE_SIZE - 2);
+    EXPECT_EQ(first_slot.entry->tuple_offset, PAGE_SIZE - 70);
     EXPECT_EQ(dead_slot.entry->state, HeapSlotState::DEAD);
     EXPECT_EQ(dead_slot.entry->tuple_offset, std::uint16_t{0});
     EXPECT_EQ(dead_slot.entry->tuple_length, std::uint16_t{0});
-    EXPECT_EQ(third_slot.entry->tuple_offset, PAGE_SIZE - 5);
+    EXPECT_EQ(third_slot.entry->tuple_offset, PAGE_SIZE - 70 - 90);
     EXPECT_FALSE(heap_page.TupleBytes(1).has_value());
 
     const auto first = heap_page.TupleBytes(0);
@@ -223,8 +219,8 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
         ADD_FAILURE() << "persisted live tuple was not retrievable";
         return;
     }
-    constexpr std::array expected_first{std::byte{0x01}, std::byte{0x02}};
-    constexpr std::array expected_third{std::byte{0x20}, std::byte{0x21}, std::byte{0x22}};
+    const auto expected_first = MakeTestTuple(70, std::byte{0x01});
+    const auto expected_third = MakeTestTuple(90, std::byte{0x20});
     EXPECT_TRUE(std::ranges::equal(*first, expected_first));
     EXPECT_TRUE(std::ranges::equal(*third, expected_third));
 }
@@ -254,17 +250,17 @@ TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) 
     }
 
     Page written{*allocation.page_id};
-    HeapPage written_heap_page{written};
+    HeapPage written_heap_page{written, heap_test::TestSchemaHistory()};
     ASSERT_TRUE(written_heap_page.Initialize());
-    constexpr std::array first{std::byte{0x01}, std::byte{0x00}, std::byte{0xFF}};
-    constexpr std::array second{std::byte{0x10}, std::byte{0x20}};
+    const auto first = MakeTestTuple(64, std::byte{0xFF});
+    const auto second = MakeTestTuple(65, std::byte{0x10});
     ASSERT_TRUE(written_heap_page.Insert(first));
     ASSERT_TRUE(written_heap_page.Insert(second));
     ASSERT_TRUE(manager.WritePage(written.Id(), written.Bytes()));
 
     Page read{*allocation.page_id};
     ASSERT_TRUE(manager.ReadPage(read.Id(), read.Bytes()));
-    HeapPage read_heap_page{read};
+    HeapPage read_heap_page{read, heap_test::TestSchemaHistory()};
     const auto validation = read_heap_page.Validate();
     EXPECT_TRUE(validation);
     EXPECT_TRUE(std::ranges::equal(read.Bytes(), written.Bytes()));

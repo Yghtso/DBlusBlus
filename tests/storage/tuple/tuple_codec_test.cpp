@@ -659,7 +659,7 @@ TEST(FixedTupleCodecTest, RejectsMalformedBooleanInOtherwiseValidTuple) {
     EXPECT_EQ(DecodeTupleValue(layout, malformed, 0).error, TupleCodecError::INVALID_BOOLEAN);
 }
 
-TEST(FixedTupleCodecTest, ComposesWithHeapPageOpaqueInsertionAndRetrieval) {
+TEST(FixedTupleCodecTest, ComposesWithHeapPageValidatedInsertionAndRetrieval) {
     constexpr std::array columns{
         PhysicalColumnSpec{.type = PhysicalType::BOOLEAN, .nullable = false},
         PhysicalColumnSpec{.type = PhysicalType::INT32, .nullable = true},
@@ -685,7 +685,7 @@ TEST(FixedTupleCodecTest, ComposesWithHeapPageOpaqueInsertionAndRetrieval) {
 
     const PageId page_id{.file_id = FileId{2}, .page_no = PageNo{5}};
     Page page{page_id};
-    HeapPage heap_page{page};
+    HeapPage heap_page{page, HeapTupleSchemaHistory{std::span{&layout, 1}}};
     ASSERT_TRUE(heap_page.Initialize());
     const auto inserted = heap_page.Insert(*tuple);
     const auto* rid = RequireOptional(inserted.rid, "inserted tuple RID");

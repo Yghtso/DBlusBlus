@@ -7,6 +7,7 @@
 #include "storage/file/file_superblock.h"
 #include "storage/file/page_file.h"
 #include "storage/heap/heap_page.h"
+#include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
 #include "storage/page/page_checksum.h"
 
@@ -251,12 +252,12 @@ class PausingObserver final : public BufferPoolObserver {
 };
 
 inline PageValidationOutcome ValidateHeap(Page& page) {
-    return HeapPage{page}.Validate() ? PageValidationOutcome::VALID
-                                     : PageValidationOutcome::CORRUPT;
+    return heap_test::TestHeapPage(page).Validate() ? PageValidationOutcome::VALID
+                                                    : PageValidationOutcome::CORRUPT;
 }
 
 inline bool InitializeHeap(Page& page) {
-    return HeapPage{page}.Initialize();
+    return heap_test::TestHeapPage(page).Initialize();
 }
 
 // Spin (yielding) until a predicate over observable pool state holds. State-based, not
@@ -284,7 +285,6 @@ class HeapFileFixture {
                                         path_,
                                         FileSuperblock{.file_kind = FileKind::HEAP,
                                                        .file_id = file_id,
-                                                       .flags = 0,
                                                        .page_lsn = INVALID_LSN,
                                                        .object_id = 1,
                                                        .creation_epoch = 1});
@@ -308,7 +308,7 @@ class HeapFileFixture {
             return std::nullopt;
         }
         Page page{*allocated.page_id};
-        if (!HeapPage{page}.Initialize()) {
+        if (!heap_test::TestHeapPage(page).Initialize()) {
             return std::nullopt;
         }
         FinalizePageChecksum(page.Bytes());
@@ -378,14 +378,15 @@ class HeapFileFixture {
     return *entry.frame;
 }
 
-// First byte of a heap tuple, or nullopt-equivalent 0xFF sentinel with a recorded failure.
+// Fill byte of a heap test tuple's payload (see heap_test::MakeTestTuple), or a 0xFF sentinel
+// with a recorded failure.
 [[nodiscard]] inline std::byte FirstTupleByte(const Page& page, SlotId slot = 0) {
-    const auto tuple = HeapPage{const_cast<Page&>(page)}.TupleBytes(slot);
+    const auto tuple = heap_test::TestHeapPage(const_cast<Page&>(page)).TupleBytes(slot);
     if (!tuple.has_value() || tuple->empty()) {
         ADD_FAILURE() << "slot " << slot << " holds no tuple";
         return std::byte{0xFF};
     }
-    return tuple->front();
+    return tuple->back();
 }
 
 // Unwraps a successful fetch; records a failure and returns an inert guard otherwise.

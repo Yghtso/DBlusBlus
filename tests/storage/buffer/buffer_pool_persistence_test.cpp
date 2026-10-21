@@ -2,6 +2,7 @@
 #include "storage/buffer/buffer_pool.h"
 #include "storage/file/page_file.h"
 #include "storage/heap/heap_page.h"
+#include "storage/heap/heap_test_tuples.h"
 
 #include <array>
 #include <cstddef>
@@ -20,9 +21,10 @@ using buffer_test::ValidateHeap;
 
 constexpr FileId FILE_ID = 11;
 
-[[nodiscard]] std::array<std::byte, 200> TupleFor(std::uint32_t key) {
-    std::array<std::byte, 200> tuple{};
-    for (std::size_t index = 0; index < tuple.size(); ++index) {
+// A valid 200-byte heap test tuple whose VARCHAR payload bytes are a key-specific pattern.
+[[nodiscard]] std::vector<std::byte> TupleFor(std::uint32_t key) {
+    auto tuple = heap_test::MakeTestTuple(200);
+    for (std::size_t index = heap_test::TEST_TUPLE_MIN_SIZE; index < tuple.size(); ++index) {
         tuple[index] =
             static_cast<std::byte>((static_cast<std::size_t>(key) * 31U + index) & 0xFFU);
     }
@@ -44,7 +46,6 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
                                      path,
                                      FileSuperblock{.file_kind = FileKind::HEAP,
                                                     .file_id = FILE_ID,
-                                                    .flags = 0,
                                                     .page_lsn = INVALID_LSN,
                                                     .object_id = 3,
                                                     .creation_epoch = 1});
@@ -58,7 +59,7 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
             if (current.file_id != INVALID_FILE_ID) {
                 auto guard = Must(pool.FetchWrite(current));
                 ASSERT_TRUE(guard.Valid());
-                const auto result = HeapPage{guard.MutablePage()}.Insert(tuple);
+                const auto result = heap_test::TestHeapPage(guard.MutablePage()).Insert(tuple);
                 if (result.rid.has_value()) {
                     guard.MarkDirty();
                     rids.push_back(result.rid.value_or(Rid{}));
@@ -67,7 +68,7 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
             }
             auto created = Must(pool.NewPage(FILE_ID, InitializeHeap));
             ASSERT_TRUE(created.Valid());
-            const auto result = HeapPage{created.MutablePage()}.Insert(tuple);
+            const auto result = heap_test::TestHeapPage(created.MutablePage()).Insert(tuple);
             ASSERT_TRUE(result.rid.has_value());
             created.MarkDirty();
             rids.push_back(result.rid.value_or(Rid{}));
@@ -87,9 +88,9 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
         const Rid rid = rids[key];
         auto guard = Must(pool.FetchRead(rid.page));
         ASSERT_TRUE(guard.Valid()) << "page " << rid.page.page_no;
-        const auto bytes =
-            HeapPage{const_cast<Page&>(guard.GetPage())}.TupleBytes(rid.slot).value_or(
-                std::span<const std::byte>{});
+        const auto bytes = heap_test::TestHeapPage(const_cast<Page&>(guard.GetPage()))
+                               .TupleBytes(rid.slot)
+                               .value_or(std::span<const std::byte>{});
         const auto expected = TupleFor(key);
         ASSERT_TRUE(std::ranges::equal(bytes, expected)) << "key " << key;
     }

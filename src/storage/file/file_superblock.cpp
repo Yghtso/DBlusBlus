@@ -94,7 +94,7 @@ bool EncodeFileSuperblock(std::span<std::byte> destination,
     const CommonPageHeader common_header{
         .page_type = PageType::SUPERBLOCK,
         .format_version = FILE_SUPERBLOCK_FORMAT_VERSION,
-        .flags = superblock.flags,
+        .flags = 0,
         .page_lsn = superblock.page_lsn,
         .checksum_crc32c = 0,
         .header_size = FILE_SUPERBLOCK_HEADER_SIZE,
@@ -194,6 +194,9 @@ FileSuperblockDecodeResult DecodeFileSuperblock(std::span<const std::byte> sourc
         return DecodeFailure(FileSuperblockDecodeError::WRONG_PAGE_SIZE);
     }
 
+    if (common_header->flags != 0) {
+        return DecodeFailure(FileSuperblockDecodeError::NONZERO_FLAGS);
+    }
     if (common_header->reserved16 != 0 ||
         ContainsNonzeroByte(page.subspan(RESERVED16_OFFSET, sizeof(std::uint16_t))) ||
         ContainsNonzeroByte(page.subspan(RESERVED32_OFFSET, sizeof(std::uint32_t))) ||
@@ -215,7 +218,6 @@ FileSuperblockDecodeResult DecodeFileSuperblock(std::span<const std::byte> sourc
             FileSuperblock{
                 .file_kind = file_kind,
                 .file_id = *file_id,
-                .flags = common_header->flags,
                 .page_lsn = common_header->page_lsn,
                 .object_id = *object_id,
                 .creation_epoch = *creation_epoch,

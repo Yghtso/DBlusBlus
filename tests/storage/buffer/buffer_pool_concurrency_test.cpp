@@ -147,8 +147,9 @@ TEST_F(BufferPoolConcurrencyTest, FetchAfterVictimReservationWaitsAndReloads) {
     {
         auto guard = Must(pool_->FetchWrite(Pid(1)));
         ASSERT_TRUE(guard.Valid());
-        const std::array tuple{std::byte{1}};
-        ASSERT_TRUE(HeapPage{guard.MutablePage()}.Insert(tuple));
+        const auto tuple =
+            heap_test::MakeTestTuple(heap_test::TEST_TUPLE_MIN_SIZE + 1, std::byte{1});
+        ASSERT_TRUE(heap_test::TestHeapPage(guard.MutablePage()).Insert(tuple));
         guard.MarkDirty();
     }
     observer_.PauseAt(BufferPoolEventType::WRITEBACK_WRITE_STARTED, Pid(1));
@@ -170,7 +171,8 @@ TEST_F(BufferPoolConcurrencyTest, FetchAfterVictimReservationWaitsAndReloads) {
         auto result = pool_->FetchRead(Pid(1));
         fetched_code = result.error.code;
         if (result) {
-            EXPECT_TRUE(HeapPage{const_cast<Page&>(result.value->GetPage())}.TupleBytes(0));
+            EXPECT_TRUE(
+                heap_test::TestHeapPage(const_cast<Page&>(result.value->GetPage())).TupleBytes(0));
         }
     }};
     observer_.Resume();
@@ -208,8 +210,9 @@ TEST_F(BufferPoolConcurrencyTest, MutationDuringWritebackKeepsTheNewerGeneration
     {
         auto guard = Must(pool_->FetchWrite(Pid(1)));
         ASSERT_TRUE(guard.Valid());
-        const std::array tuple{std::byte{0x77}};
-        ASSERT_TRUE(HeapPage{guard.MutablePage()}.Insert(tuple));
+        const auto tuple =
+            heap_test::MakeTestTuple(heap_test::TEST_TUPLE_MIN_SIZE + 1, std::byte{0x77});
+        ASSERT_TRUE(heap_test::TestHeapPage(guard.MutablePage()).Insert(tuple));
         guard.MarkDirty();
     }
     EXPECT_EQ(FrameOf(*pool_, Pid(1)).modification_generation, copied_generation + 1U);
@@ -273,14 +276,17 @@ TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
     constexpr std::size_t PAGE_COUNT = 12;
     constexpr std::size_t THREAD_COUNT = 4;
     constexpr std::size_t OPERATIONS_PER_THREAD = 300;
+    constexpr std::size_t COUNTER_TUPLE_SIZE =
+        heap_test::TEST_TUPLE_MIN_SIZE + sizeof(std::uint64_t);
 
     BufferPool pool{file.io(), BufferPoolOptions{.frame_count = 4}};
     ASSERT_TRUE(pool.RegisterFile(file.file_id(), ValidateHeap));
     for (std::size_t index = 0; index < PAGE_COUNT; ++index) {
         auto created = Must(pool.NewPage(file.file_id(), InitializeHeap));
         ASSERT_TRUE(created.Valid());
-        const std::array<std::byte, 8> zero{};
-        ASSERT_TRUE(HeapPage{created.MutablePage()}.Insert(zero));
+        // The counter is the tuple's 8-byte VARCHAR payload, which ends the tuple.
+        const auto zero = heap_test::MakeTestTuple(COUNTER_TUPLE_SIZE, std::byte{0});
+        ASSERT_TRUE(heap_test::TestHeapPage(created.MutablePage()).Insert(zero));
         created.MarkDirty();
     }
 
@@ -301,11 +307,13 @@ TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
                         ASSERT_EQ(guard.error.code, BufferErrorCode::NO_REPLACEABLE_FRAME);
                         continue;
                     }
-                    HeapPage heap{guard.value->MutablePage()};
+                    HeapPage heap{guard.value->MutablePage(), heap_test::TestSchemaHistory()};
                     auto tuple = heap.TupleBytes(0);
                     ASSERT_TRUE(tuple.has_value());
                     auto bytes = guard.value->MutableBytes().subspan(
-                        static_cast<std::size_t>(tuple->data() - guard.value->Bytes().data()), 8);
+                        static_cast<std::size_t>(tuple->data() - guard.value->Bytes().data()) +
+                            heap_test::TEST_TUPLE_MIN_SIZE,
+                        sizeof(std::uint64_t));
                     std::uint64_t value = 0;
                     std::memcpy(&value, bytes.data(), sizeof(value));
                     ++value;
@@ -330,10 +338,11 @@ TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
 
     for (std::size_t index = 0; index < PAGE_COUNT; ++index) {
         auto on_disk = file.ReadRawPage(Pid(index + 1U));
-        const auto tuple = HeapPage{on_disk}.TupleBytes(0).value_or(std::span<const std::byte>{});
-        ASSERT_EQ(tuple.size(), sizeof(std::uint64_t));
+        const auto tuple =
+            heap_test::TestHeapPage(on_disk).TupleBytes(0).value_or(std::span<const std::byte>{});
+        ASSERT_EQ(tuple.size(), COUNTER_TUPLE_SIZE);
         std::uint64_t value = 0;
-        std::memcpy(&value, tuple.data(), sizeof(value));
+        std::memcpy(&value, tuple.last(sizeof(value)).data(), sizeof(value));
         EXPECT_EQ(value, expected[index].load()) << "page " << index + 1U;
     }
 }

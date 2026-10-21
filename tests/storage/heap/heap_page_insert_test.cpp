@@ -1,7 +1,10 @@
 #include "common/encoding.h"
 #include "storage/heap/heap_page.h"
+#include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
 #include "storage/page/page_header.h"
+#include "storage/tuple/tuple_codec.h"
+#include "storage/tuple/tuple_header.h"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <span>
+#include <vector>
 
 namespace dblusblus {
 namespace {
@@ -41,7 +45,7 @@ void WriteCommonHeader(Page& page, const CommonPageHeader& header) {
 
 [[nodiscard]] Page InitializedHeapPage(PageId page_id = {.file_id = 7, .page_no = 3}) {
     Page page{page_id};
-    HeapPage heap_page{page};
+    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
     if (!heap_page.Initialize()) {
         ADD_FAILURE() << "heap page initialization unexpectedly failed";
     }
@@ -67,12 +71,15 @@ void ConfigureOneNormalSlot(Page& page,
                                         .state = HeapSlotState::NORMAL,
                                         .aux = 0,
                                     }));
+    heap_test::WriteTestTuple(page, tuple_offset, tuple_length);
 }
 
-TEST(HeapPageInsertionTest, InsertsOpaqueBytesAndReturnsStableRid) {
+using heap_test::MakeTestTuple;
+
+TEST(HeapPageInsertionTest, InsertsValidTupleAndReturnsStableRid) {
     Page page = InitializedHeapPage(PageId{.file_id = 17, .page_no = 23});
-    HeapPage heap_page{page};
-    constexpr std::array tuple{std::byte{0x00}, std::byte{0x7F}, std::byte{0x80}, std::byte{0xFF}};
+    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
+    const auto tuple = MakeTestTuple(64, std::byte{0x7F});
 
     const auto result = heap_page.Insert(tuple);
     ASSERT_TRUE(result);
@@ -92,7 +99,7 @@ TEST(HeapPageInsertionTest, InsertsOpaqueBytesAndReturnsStableRid) {
     EXPECT_EQ(validation.heap_header->slot_count, std::uint16_t{1});
     EXPECT_EQ(validation.heap_header->free_slot_head, INVALID_SLOT_ID);
     EXPECT_EQ(validation.heap_header->lower, std::uint16_t{56});
-    EXPECT_EQ(validation.heap_header->upper, std::uint16_t{PAGE_SIZE - tuple.size()});
+    EXPECT_EQ(validation.heap_header->upper, static_cast<std::uint16_t>(PAGE_SIZE - tuple.size()));
 
     const auto slot = DecodeHeapSlotEntry(SlotBytes(page, 0));
     if (!slot.entry.has_value()) {
@@ -120,10 +127,10 @@ TEST(HeapPageInsertionTest, InsertsOpaqueBytesAndReturnsStableRid) {
 
 TEST(HeapPageInsertionTest, MultipleInsertsGrowTowardEachOtherWithoutMovingPriorTuples) {
     Page page = InitializedHeapPage();
-    HeapPage heap_page{page};
-    constexpr std::array first{std::byte{0x10}, std::byte{0x11}};
-    constexpr std::array second{std::byte{0x20}, std::byte{0x21}, std::byte{0x22}};
-    constexpr std::array third{std::byte{0x30}};
+    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
+    const auto first = MakeTestTuple(60, std::byte{0x10});
+    const auto second = MakeTestTuple(61, std::byte{0x20});
+    const auto third = MakeTestTuple(heap_test::TEST_TUPLE_MIN_SIZE);
 
     const auto first_result = heap_page.Insert(first);
     const auto second_result = heap_page.Insert(second);
@@ -173,9 +180,8 @@ TEST(HeapPageInsertionTest, MultipleInsertsGrowTowardEachOtherWithoutMovingPrior
 
 TEST(HeapPageInsertionTest, EnforcesInlineLimitAndContiguousFreeSpaceAtomically) {
     Page page = InitializedHeapPage();
-    HeapPage heap_page{page};
-    std::array<std::byte, HEAP_PAGE_MAX_RAW_TUPLE_SIZE> maximum_tuple{};
-    std::ranges::fill(maximum_tuple, std::byte{0x5A});
+    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
+    const auto maximum_tuple = MakeTestTuple(HEAP_PAGE_MAX_RAW_TUPLE_SIZE);
 
     const auto maximum_result = heap_page.Insert(maximum_tuple);
     ASSERT_TRUE(maximum_result);
@@ -188,13 +194,13 @@ TEST(HeapPageInsertionTest, EnforcesInlineLimitAndContiguousFreeSpaceAtomically)
     EXPECT_EQ(header->upper, std::uint16_t{57});
 
     const auto before_no_space = CopyPageBytes(page);
-    const auto no_space = heap_page.Insert(std::span<const std::byte>{});
+    const auto no_space = heap_page.Insert(MakeTestTuple(heap_test::TEST_TUPLE_MIN_SIZE));
     EXPECT_FALSE(no_space);
     EXPECT_EQ(no_space.error, HeapPageInsertError::INSUFFICIENT_SPACE);
     EXPECT_EQ(CopyPageBytes(page), before_no_space);
 
     Page oversized_page = InitializedHeapPage();
-    HeapPage oversized_heap_page{oversized_page};
+    HeapPage oversized_heap_page{oversized_page, heap_test::TestSchemaHistory()};
     std::array<std::byte, HEAP_PAGE_MAX_RAW_TUPLE_SIZE + 1> oversized_tuple{};
     const auto before_oversized = CopyPageBytes(oversized_page);
     const auto oversized = oversized_heap_page.Insert(oversized_tuple);
@@ -203,47 +209,71 @@ TEST(HeapPageInsertionTest, EnforcesInlineLimitAndContiguousFreeSpaceAtomically)
     EXPECT_EQ(CopyPageBytes(oversized_page), before_oversized);
 }
 
-TEST(HeapPageInsertionTest, AcceptsZeroLengthOpaqueTuple) {
-    Page page = InitializedHeapPage();
-    HeapPage heap_page{page};
+TEST(HeapPageInsertionTest, RejectsTuplesThatWouldFailOwnerValidationWithoutMutation) {
+    const auto expect_rejected = [](Page& page,
+                                    std::span<const std::byte> tuple,
+                                    HeapPageValidationError expected_tuple_error) {
+        const auto before = CopyPageBytes(page);
+        const auto result = heap_test::TestHeapPage(page).Insert(tuple);
+        EXPECT_FALSE(result);
+        EXPECT_EQ(result.error, HeapPageInsertError::INVALID_TUPLE);
+        EXPECT_EQ(result.page_error, HeapPageValidationError::NONE);
+        EXPECT_EQ(result.tuple_error, expected_tuple_error);
+        EXPECT_EQ(CopyPageBytes(page), before);
+    };
 
-    const auto result = heap_page.Insert(std::span<const std::byte>{});
+    // The page under test is page 3, and the first insertion would occupy slot 0.
+    Page page = InitializedHeapPage({.file_id = 7, .page_no = 3});
+    expect_rejected(page, {}, HeapPageValidationError::INVALID_TUPLE);
+    const std::vector<std::byte> garbage(64, std::byte{0x42});
+    expect_rejected(page, garbage, HeapPageValidationError::INVALID_TUPLE);
+
+    auto unknown_schema = MakeTestTuple(64);
+    ASSERT_TRUE(EncodeLittleEndian(
+        std::span{unknown_schema}.subspan(TUPLE_HEADER_SCHEMA_VERSION_OFFSET, sizeof(SchemaVer)),
+        SchemaVer{9}));
+    expect_rejected(page, unknown_schema, HeapPageValidationError::UNRESOLVED_SCHEMA_VERSION);
+
+    expect_rejected(page,
+                    MakeTestTuple(64, std::byte{0x5A}, TupleVersionMetadata{}),
+                    HeapPageValidationError::INVALID_TUPLE_TRANSACTION_FIELDS);
+
+    auto self_reference = heap_test::TestTupleMetadata();
+    self_reference.prev_page_no = 3;
+    self_reference.prev_slot = 0;
+    expect_rejected(page,
+                    MakeTestTuple(64, std::byte{0x5A}, self_reference),
+                    HeapPageValidationError::INVALID_PREVIOUS_VERSION_POINTER);
+
+    auto beyond_new_slot = self_reference;
+    beyond_new_slot.prev_slot = 1;
+    expect_rejected(page,
+                    MakeTestTuple(64, std::byte{0x5A}, beyond_new_slot),
+                    HeapPageValidationError::INVALID_PREVIOUS_VERSION_POINTER);
+}
+
+TEST(HeapPageInsertionTest, AcceptsSamePagePreviousVersionOfExistingSlot) {
+    Page page = InitializedHeapPage({.file_id = 7, .page_no = 3});
+    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
+    ASSERT_TRUE(heap_page.Insert(MakeTestTuple(64)));
+
+    auto metadata = heap_test::TestTupleMetadata();
+    metadata.prev_page_no = 3;
+    metadata.prev_slot = 0;
+    const auto result = heap_page.Insert(MakeTestTuple(64, std::byte{0x5A}, metadata));
     if (!result.rid.has_value()) {
-        ADD_FAILURE() << "zero-length tuple insertion did not return a RID";
+        ADD_FAILURE() << "same-page successor insertion failed";
         return;
     }
-    EXPECT_EQ(result.rid->slot, SlotId{0});
-    const auto header = heap_page.Header();
-    if (!header.has_value()) {
-        ADD_FAILURE() << "heap header did not decode after zero-length insertion";
-        return;
-    }
-    EXPECT_EQ(header->slot_count, std::uint16_t{1});
-    EXPECT_EQ(header->lower, std::uint16_t{56});
-    EXPECT_EQ(header->upper, std::uint16_t{PAGE_SIZE});
-
-    const auto slot = DecodeHeapSlotEntry(SlotBytes(page, 0));
-    if (!slot.entry.has_value()) {
-        ADD_FAILURE() << "zero-length tuple slot did not decode";
-        return;
-    }
-    EXPECT_EQ(slot.entry->tuple_offset, std::uint16_t{PAGE_SIZE});
-    EXPECT_EQ(slot.entry->tuple_length, std::uint16_t{0});
-    EXPECT_EQ(slot.entry->state, HeapSlotState::NORMAL);
-    EXPECT_EQ(slot.entry->aux, std::uint16_t{0});
-    const auto stored = heap_page.TupleBytes(0);
-    if (!stored.has_value()) {
-        ADD_FAILURE() << "zero-length tuple was not retrievable";
-        return;
-    }
-    EXPECT_TRUE(stored->empty());
+    EXPECT_EQ(result.rid->slot, SlotId{1});
+    EXPECT_TRUE(heap_page.Validate());
 }
 
 TEST(HeapPageInsertionTest, RejectsCorruptPagesWithoutChangingBytes) {
     const auto expect_invalid_unchanged = [](Page& page, HeapPageValidationError expected_error) {
         const auto before = CopyPageBytes(page);
-        constexpr std::array tuple{std::byte{0x42}};
-        const auto result = HeapPage{page}.Insert(tuple);
+        const auto tuple = MakeTestTuple(60);
+        const auto result = heap_test::TestHeapPage(page).Insert(tuple);
         EXPECT_FALSE(result);
         EXPECT_EQ(result.error, HeapPageInsertError::PAGE_INVALID);
         EXPECT_EQ(result.page_error, expected_error);
@@ -283,9 +313,8 @@ TEST(HeapPageInsertionTest, RejectsCorruptPagesWithoutChangingBytes) {
 
 TEST(HeapPageInsertionTest, TupleBytesRejectsInvalidAndNonNormalSlots) {
     Page page = InitializedHeapPage();
-    HeapPage heap_page{page};
-    constexpr std::array tuple{std::byte{0x31}, std::byte{0x32}};
-    ASSERT_TRUE(heap_page.Insert(tuple));
+    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
+    ASSERT_TRUE(heap_page.Insert(MakeTestTuple(58)));
 
     EXPECT_FALSE(heap_page.TupleBytes(1).has_value());
     auto slot = DecodeHeapSlotEntry(SlotBytes(page, 0));

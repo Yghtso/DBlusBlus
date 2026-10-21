@@ -59,7 +59,6 @@ class TemporaryDirectory {
     return FileSuperblock{
         .file_kind = file_kind,
         .file_id = file_id,
-        .flags = 0xA5F00F5AU,
         .page_lsn = INVALID_LSN,
         .object_id = object_id,
         .creation_epoch = creation_epoch,
