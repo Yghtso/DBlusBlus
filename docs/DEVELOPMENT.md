@@ -532,8 +532,7 @@ when those subsystems are authorized by PROJECT_STATE.
 Use Architecture §§3.3 and 4.7.8–4.7.10 as the lifecycle owners and Verification's
 **Database Lifecycle Tests** as the procedure entry point. Apply this sequence only
 when the relevant subsystem work is authorized; raw page-file creation does not
-stand in for a complete database bootstrap or authorize crossing the BufferPool
-boundary.
+stand in for a complete database bootstrap or for BufferPool-managed page access.
 
 1. Establish retained-directory identity, containment, namespace durability, and
    the lifecycle coordination adapter before exposing staged creation or cleanup.
@@ -628,8 +627,8 @@ subsystem responsibility boundaries defined by `ARCHITECTURE.md` remain authorit
 ### Storage Milestone 1
 
 This end-to-end buffered-storage milestone depends on BufferPool, page guards, and
-HeapFile. It is separate from the raw-storage primitives and does not authorize crossing
-the BufferPool implementation gate.
+HeapFile. It is separate from the raw-storage primitives and does not by itself authorize
+HeapFile implementation.
 
 Before implementing B+ trees or SQL, the storage layer should be able to pass the following end-to-end scenario:
 

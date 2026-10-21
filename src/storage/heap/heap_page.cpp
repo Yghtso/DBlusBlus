@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <optional>
 #include <span>
+#include <tuple>
 
 namespace dblusblus {
 namespace {
@@ -33,9 +35,125 @@ ValidationFailure(HeapPageValidationError error,
     };
 }
 
+// Canonical per-state slot fields and retained-range bounds (ARCHITECTURE.md §4.13.3).
+[[nodiscard]] HeapPageValidationError ValidateSlotDescriptor(const HeapSlotEntry& slot,
+                                                             std::uint16_t upper) noexcept {
+    switch (slot.state) {
+    case HeapSlotState::UNUSED:
+        if (slot.tuple_offset != 0 || slot.tuple_length != 0) {
+            return HeapPageValidationError::NONCANONICAL_UNUSED_SLOT;
+        }
+        return HeapPageValidationError::NONE;
+    case HeapSlotState::REDIRECT_RESERVED:
+        return HeapPageValidationError::UNSUPPORTED_RESERVED_STATE;
+    case HeapSlotState::NORMAL:
+    case HeapSlotState::DEAD:
+        break;
+    }
+
+    if (slot.aux != 0) {
+        return HeapPageValidationError::NONZERO_SLOT_AUX;
+    }
+    if (slot.state == HeapSlotState::DEAD) {
+        const bool zero_offset = slot.tuple_offset == 0;
+        const bool zero_length = slot.tuple_length == 0;
+        if (zero_offset && zero_length) {
+            return HeapPageValidationError::NONE; // Reclaimed DEAD form owns no bytes.
+        }
+        if (zero_offset != zero_length) {
+            return HeapPageValidationError::NONCANONICAL_DEAD_SLOT;
+        }
+    } else if (slot.tuple_length == 0) {
+        return HeapPageValidationError::EMPTY_NORMAL_TUPLE;
+    }
+
+    // A retained range lies wholly in [upper, PAGE_SIZE); since lower <= upper it cannot touch
+    // the headers or the slot directory. Widened arithmetic cannot overflow.
+    const std::size_t tuple_offset = slot.tuple_offset;
+    const std::size_t tuple_end = tuple_offset + slot.tuple_length;
+    if (tuple_offset < upper || tuple_end > PAGE_SIZE) {
+        return HeapPageValidationError::RETAINED_TUPLE_OUT_OF_BOUNDS;
+    }
+    return HeapPageValidationError::NONE;
+}
+
+struct TupleCheck {
+    HeapPageValidationError error{HeapPageValidationError::NONE};
+    TupleCodecError tuple_error{TupleCodecError::NONE};
+    TupleHeaderDecodeError tuple_header_error{TupleHeaderDecodeError::NONE};
+};
+
+// Schema-directed tuple validity plus the bounded tuple-header domain checks that need no
+// status lookup or cross-page fetch. `rid` is where the tuple is (or will be) stored.
+[[nodiscard]] TupleCheck ValidateTupleForSlot(std::span<const std::byte> tuple,
+                                              const HeapTupleSchemaHistory& schema_history,
+                                              Rid rid,
+                                              std::uint16_t slot_count) noexcept {
+    const auto decoded_header = DecodeTupleHeader(tuple);
+    if (!decoded_header.header.has_value()) {
+        return {
+            .error = HeapPageValidationError::INVALID_TUPLE,
+            .tuple_error = TupleCodecError::MALFORMED_TUPLE,
+            .tuple_header_error = decoded_header.error,
+        };
+    }
+    const TupleHeader& header = *decoded_header.header;
+
+    const TuplePhysicalLayout* layout = schema_history.Resolve(header.schema_version);
+    if (layout == nullptr) {
+        return {.error = HeapPageValidationError::UNRESOLVED_SCHEMA_VERSION};
+    }
+    const auto tuple_validation = ValidateTuple(*layout, tuple);
+    if (!tuple_validation) {
+        return {
+            .error = HeapPageValidationError::INVALID_TUPLE,
+            .tuple_error = tuple_validation.error,
+            .tuple_header_error = tuple_validation.header_error,
+        };
+    }
+
+    // xmin is FROZEN or normal; xmax is INVALID or normal; no deleter means cmax == 0.
+    const bool xmin_valid = header.xmin != INVALID_TXN_ID;
+    const bool xmax_valid = header.xmax != FROZEN_TXN_ID;
+    const bool cmax_valid = header.xmax != INVALID_TXN_ID || header.cmax == 0;
+    if (!xmin_valid || !xmax_valid || !cmax_valid) {
+        return {.error = HeapPageValidationError::INVALID_TUPLE_TRANSACTION_FIELDS};
+    }
+
+    // The tuple-header codec already enforces the both-or-neither sentinel pairing.
+    if (header.prev_page_no != INVALID_PAGE_NO) {
+        const bool ordinary_page = header.prev_page_no != 0;
+        const bool same_page = header.prev_page_no == rid.page.page_no;
+        const bool self_reference = same_page && header.prev_slot == rid.slot;
+        const bool same_page_out_of_range = same_page && header.prev_slot >= slot_count;
+        if (!ordinary_page || self_reference || same_page_out_of_range) {
+            return {.error = HeapPageValidationError::INVALID_PREVIOUS_VERSION_POINTER};
+        }
+    }
+    return {};
+}
+
 } // namespace
 
-HeapPage::HeapPage(Page& page) noexcept : page_(&page) {}
+HeapTupleSchemaHistory::HeapTupleSchemaHistory(
+    std::span<const TuplePhysicalLayout> layouts) noexcept
+    : layouts_(layouts) {}
+
+const TuplePhysicalLayout*
+HeapTupleSchemaHistory::Resolve(SchemaVer schema_version) const noexcept {
+    if (schema_version == 0) {
+        return nullptr;
+    }
+    for (const TuplePhysicalLayout& layout : layouts_) {
+        if (layout.SchemaVersion() == schema_version) {
+            return &layout;
+        }
+    }
+    return nullptr;
+}
+
+HeapPage::HeapPage(Page& page, HeapTupleSchemaHistory schema_history) noexcept
+    : page_(&page), schema_history_(schema_history) {}
 
 bool HeapPage::Initialize(Lsn page_lsn) noexcept {
     if (!IsValidHeapPageNumber(page_->Id().page_no)) {
@@ -127,7 +245,11 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
         return ValidationFailure(
             HeapPageValidationError::SLOT_COUNT_LOWER_MISMATCH, common_header, heap_header);
     }
+
+    // Pass 1: canonical slot descriptors and retained-range bounds.
     std::array<HeapSlotEntry, MAX_HEAP_PAGE_SLOT_COUNT> slots{};
+    std::array<SlotId, MAX_HEAP_PAGE_SLOT_COUNT> retained_order{};
+    std::size_t retained_count = 0;
     std::bitset<MAX_HEAP_PAGE_SLOT_COUNT> unused_slots;
 
     for (std::uint32_t index = 0; index < heap_header->slot_count; ++index) {
@@ -149,27 +271,64 @@ HeapPageValidationResult HeapPage::Validate() const noexcept {
 
         const HeapSlotEntry& slot = *decoded_slot.entry;
         slots[index] = slot;
+        const auto slot_error = ValidateSlotDescriptor(slot, heap_header->upper);
+        if (slot_error != HeapPageValidationError::NONE) {
+            return ValidationFailure(slot_error, common_header, heap_header, slot_id);
+        }
         if (slot.state == HeapSlotState::UNUSED) {
-            if (slot.tuple_offset != 0 || slot.tuple_length != 0) {
-                return ValidationFailure(HeapPageValidationError::NONCANONICAL_UNUSED_SLOT,
-                                         common_header,
-                                         heap_header,
-                                         slot_id);
-            }
             unused_slots.set(index);
-        } else if (slot.state == HeapSlotState::NORMAL) {
-            const std::size_t tuple_offset = slot.tuple_offset;
-            const std::size_t tuple_length = slot.tuple_length;
-            if (tuple_offset < heap_header->upper || tuple_offset > PAGE_SIZE ||
-                tuple_length > PAGE_SIZE - tuple_offset) {
-                return ValidationFailure(HeapPageValidationError::NORMAL_TUPLE_OUT_OF_BOUNDS,
-                                         common_header,
-                                         heap_header,
-                                         slot_id);
-            }
+        } else if (slot.tuple_length != 0) {
+            retained_order[retained_count++] = slot_id;
         }
     }
 
+    // Pass 2: no two retained NORMAL/DEAD ranges share a byte. Sorting by (start, end, SlotId)
+    // makes the reported pair deterministic.
+    auto retained = std::span{retained_order}.first(retained_count);
+    std::ranges::sort(retained, [&](SlotId left, SlotId right) {
+        const auto left_key = std::tuple{slots[left].tuple_offset, slots[left].tuple_length, left};
+        const auto right_key =
+            std::tuple{slots[right].tuple_offset, slots[right].tuple_length, right};
+        return left_key < right_key;
+    });
+    for (std::size_t index = 1; index < retained.size(); ++index) {
+        const SlotId previous = retained[index - 1];
+        const SlotId current = retained[index];
+        const std::size_t previous_end =
+            static_cast<std::size_t>(slots[previous].tuple_offset) + slots[previous].tuple_length;
+        if (slots[current].tuple_offset < previous_end) {
+            auto failure = ValidationFailure(HeapPageValidationError::OVERLAPPING_TUPLE_RANGES,
+                                             common_header,
+                                             heap_header,
+                                             current);
+            failure.other_slot_id = previous;
+            return failure;
+        }
+    }
+
+    // Pass 3: every retained tuple, NORMAL or DEAD, is a complete valid tuple. SlotId order keeps
+    // the first reported failure deterministic.
+    for (std::uint32_t index = 0; index < heap_header->slot_count; ++index) {
+        const HeapSlotEntry& slot = slots[index];
+        if (slot.state == HeapSlotState::UNUSED || slot.tuple_length == 0) {
+            continue;
+        }
+        const auto slot_id = static_cast<SlotId>(index);
+        const auto tuple_check =
+            ValidateTupleForSlot(page_->Bytes().subspan(slot.tuple_offset, slot.tuple_length),
+                                 schema_history_,
+                                 Rid{.page = page_->Id(), .slot = slot_id},
+                                 heap_header->slot_count);
+        if (tuple_check.error != HeapPageValidationError::NONE) {
+            auto failure =
+                ValidationFailure(tuple_check.error, common_header, heap_header, slot_id);
+            failure.tuple_error = tuple_check.tuple_error;
+            failure.tuple_header_error = tuple_check.tuple_header_error;
+            return failure;
+        }
+    }
+
+    // Pass 4: the UNUSED free-slot chain.
     for (std::uint32_t index = 0; index < heap_header->slot_count; ++index) {
         if (!unused_slots[index]) {
             continue;
@@ -250,6 +409,21 @@ HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept
         };
     }
 
+    // The after-image must pass the same owner validation future readers apply, so the new tuple
+    // is validated as if already stored in its new slot.
+    const SlotId new_slot_id = updated_header.slot_count;
+    const auto tuple_check = ValidateTupleForSlot(tuple,
+                                                  schema_history_,
+                                                  Rid{.page = page_->Id(), .slot = new_slot_id},
+                                                  static_cast<std::uint16_t>(new_slot_id + 1));
+    if (tuple_check.error != HeapPageValidationError::NONE) {
+        return HeapPageInsertResult{
+            .rid = std::nullopt,
+            .error = HeapPageInsertError::INVALID_TUPLE,
+            .tuple_error = tuple_check.error,
+        };
+    }
+
     const std::size_t available_space =
         static_cast<std::size_t>(updated_header.upper) - updated_header.lower;
     const std::size_t required_space = tuple.size() + HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE;
@@ -260,7 +434,7 @@ HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept
         };
     }
 
-    const SlotId slot_id = updated_header.slot_count;
+    const SlotId slot_id = new_slot_id;
     const std::size_t slot_offset = updated_header.lower;
     const std::size_t new_lower = slot_offset + HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE;
     const std::size_t new_upper = static_cast<std::size_t>(updated_header.upper) - tuple.size();
@@ -294,9 +468,7 @@ HeapPageInsertResult HeapPage::Insert(std::span<const std::byte> tuple) noexcept
     }
 
     auto page_bytes = page_->Bytes();
-    if (!tuple.empty()) {
-        std::memmove(page_bytes.data() + new_upper, tuple.data(), tuple.size());
-    }
+    std::memmove(page_bytes.data() + new_upper, tuple.data(), tuple.size());
     std::ranges::copy(encoded_slot, page_bytes.begin() + static_cast<std::ptrdiff_t>(slot_offset));
     std::ranges::copy(encoded_header,
                       page_bytes.begin() + static_cast<std::ptrdiff_t>(HEAP_PAGE_HEADER_OFFSET));
@@ -377,9 +549,7 @@ HeapPageCompactResult HeapPage::Compact() noexcept {
     std::array<std::uint16_t, MAX_HEAP_PAGE_SLOT_COUNT> source_offsets{};
     std::array<std::uint16_t, MAX_HEAP_PAGE_SLOT_COUNT> source_lengths{};
     std::array<SlotId, MAX_HEAP_PAGE_SLOT_COUNT> live_order{};
-    std::array<SlotId, MAX_HEAP_PAGE_SLOT_COUNT> range_order{};
     std::size_t live_count = 0;
-    std::size_t range_count = 0;
 
     for (std::uint32_t index = 0; index < original_header.slot_count; ++index) {
         const auto slot_id = static_cast<SlotId>(index);
@@ -406,51 +576,15 @@ HeapPageCompactResult HeapPage::Compact() noexcept {
         case HeapSlotState::NORMAL:
             live_order[live_count++] = slot_id;
             break;
-        case HeapSlotState::DEAD: {
-            const std::size_t tuple_offset = slot.tuple_offset;
-            const std::size_t tuple_length = slot.tuple_length;
-            if (tuple_offset > PAGE_SIZE ||
-                (tuple_length > 0 && (tuple_offset < original_header.upper ||
-                                      tuple_length > PAGE_SIZE - tuple_offset))) {
-                return HeapPageCompactResult{
-                    .error = HeapPageCompactError::TUPLE_RANGE_OUT_OF_BOUNDS,
-                    .slot_id = slot_id,
-                };
-            }
+        case HeapSlotState::DEAD:
             planned_slots[index].tuple_offset = 0;
             planned_slots[index].tuple_length = 0;
             break;
-        }
         case HeapSlotState::UNUSED:
         case HeapSlotState::REDIRECT_RESERVED:
             return HeapPageCompactResult{
                 .error = HeapPageCompactError::UNSUPPORTED_SLOT_STATE,
                 .slot_id = slot_id,
-            };
-        }
-
-        if (source_lengths[index] > 0) {
-            range_order[range_count++] = slot_id;
-        }
-    }
-
-    auto ranges = std::span{range_order}.first(range_count);
-    std::ranges::sort(ranges, [&](SlotId left, SlotId right) {
-        if (source_offsets[left] != source_offsets[right]) {
-            return source_offsets[left] < source_offsets[right];
-        }
-        return left < right;
-    });
-    for (std::size_t index = 1; index < ranges.size(); ++index) {
-        const SlotId previous = ranges[index - 1];
-        const SlotId current = ranges[index];
-        const std::size_t previous_end =
-            static_cast<std::size_t>(source_offsets[previous]) + source_lengths[previous];
-        if (source_offsets[current] < previous_end) {
-            return HeapPageCompactResult{
-                .error = HeapPageCompactError::OVERLAPPING_TUPLE_RANGES,
-                .slot_id = current,
-                .other_slot_id = previous,
             };
         }
     }
@@ -466,12 +600,9 @@ HeapPageCompactResult HeapPage::Compact() noexcept {
     std::size_t new_upper = PAGE_SIZE;
     for (const SlotId slot_id : live_slots) {
         new_upper -= source_lengths[slot_id];
-        if (new_upper < source_offsets[slot_id]) {
-            return HeapPageCompactResult{
-                .error = HeapPageCompactError::OVERLAPPING_TUPLE_RANGES,
-                .slot_id = slot_id,
-            };
-        }
+        // Validate() proved retained ranges disjoint and inside [upper, PAGE_SIZE), so packing
+        // in descending source order only ever moves a payload toward the page end.
+        assert(new_upper >= source_offsets[slot_id]);
         planned_slots[slot_id].tuple_offset = static_cast<std::uint16_t>(new_upper);
     }
     if (new_upper < original_header.lower) {

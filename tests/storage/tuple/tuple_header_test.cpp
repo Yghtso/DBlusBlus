@@ -1,7 +1,9 @@
 #include "common/encoding.h"
 #include "storage/heap/heap_page.h"
 #include "storage/page/page.h"
+#include "storage/tuple/tuple_codec.h"
 #include "storage/tuple/tuple_header.h"
+#include "storage/tuple/tuple_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +12,8 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <span>
+#include <variant>
+#include <vector>
 
 namespace dblusblus {
 namespace {
@@ -241,7 +245,7 @@ TEST(TupleHeaderCodecTest, RejectsUndersizedBuffersWithoutModification) {
     EXPECT_EQ(decoded.error, TupleHeaderDecodeError::SOURCE_TOO_SMALL);
 }
 
-TEST(TupleHeaderCodecTest, ComposesWithOpaqueHeapPageInsertion) {
+TEST(TupleHeaderCodecTest, SurvivesValidatedHeapPageInsertion) {
     const TupleHeader expected_header{
         .xmin = TxnId{41},
         .xmax = INVALID_TXN_ID,
@@ -255,6 +259,16 @@ TEST(TupleHeaderCodecTest, ComposesWithOpaqueHeapPageInsertion) {
         .schema_version = SchemaVer{7},
         .reserved = 0,
     };
+    constexpr std::array columns{
+        PhysicalColumnSpec{.type = PhysicalType::INT32, .nullable = true},
+        PhysicalColumnSpec{.type = PhysicalType::VARCHAR, .nullable = false},
+    };
+    const auto built = BuildTuplePhysicalLayout(columns, SchemaVer{7});
+    if (!built.layout.has_value()) {
+        ADD_FAILURE() << "tuple layout did not build";
+        return;
+    }
+    const TuplePhysicalLayout& layout = *built.layout;
     constexpr std::array payload{
         std::byte{0x80},
         std::byte{0x00},
@@ -262,25 +276,31 @@ TEST(TupleHeaderCodecTest, ComposesWithOpaqueHeapPageInsertion) {
         std::byte{0x42},
         std::byte{0x11},
     };
-    std::array<std::byte, TUPLE_HEADER_ENCODED_SIZE + payload.size()> tuple{};
-    ASSERT_TRUE(EncodeTupleHeader(std::span<std::byte>{tuple}.first(TUPLE_HEADER_ENCODED_SIZE),
-                                  expected_header));
-    std::ranges::copy(payload, tuple.begin() + TUPLE_HEADER_ENCODED_SIZE);
+    const std::array values{
+        TupleValue{std::monostate{}},
+        TupleValue{VarcharValue{.bytes = payload}},
+    };
+    const auto encoded = EncodeTuple(layout, TupleVersionMetadata{.xmin = TxnId{41}}, values);
+    if (!encoded.tuple.has_value()) {
+        ADD_FAILURE() << "tuple did not encode";
+        return;
+    }
+    const std::vector<std::byte>& tuple = *encoded.tuple;
 
     const PageId page_id{.file_id = FileId{9}, .page_no = PageNo{4}};
     Page page{page_id};
-    HeapPage heap_page{page};
+    HeapPage heap_page{page, HeapTupleSchemaHistory{std::span{&layout, 1}}};
     ASSERT_TRUE(heap_page.Initialize());
     const auto insertion = heap_page.Insert(tuple);
     if (!insertion.rid.has_value()) {
-        ADD_FAILURE() << "opaque tuple unexpectedly failed to insert";
+        ADD_FAILURE() << "tuple unexpectedly failed to insert";
         return;
     }
     EXPECT_EQ(*insertion.rid, (Rid{.page = page_id, .slot = SlotId{0}}));
 
     const auto stored = heap_page.TupleBytes(0);
     if (!stored.has_value()) {
-        ADD_FAILURE() << "inserted opaque tuple unexpectedly unavailable";
+        ADD_FAILURE() << "inserted tuple unexpectedly unavailable";
         return;
     }
     const auto stored_bytes = *stored;
@@ -293,7 +313,7 @@ TEST(TupleHeaderCodecTest, ComposesWithOpaqueHeapPageInsertion) {
         return;
     }
     EXPECT_EQ(*decoded.header, expected_header);
-    EXPECT_TRUE(std::ranges::equal(stored_bytes.subspan(TUPLE_HEADER_ENCODED_SIZE), payload));
+    EXPECT_TRUE(std::ranges::equal(stored_bytes.last(payload.size()), payload));
 }
 
 } // namespace
