@@ -1,4 +1,5 @@
 #include "storage/disk/disk_manager.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -20,37 +21,7 @@
 namespace dblusblus {
 namespace {
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{
-            '/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u',  's',
-            '-', 'd', 'i', 's', 'k', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0',
-        };
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 [[nodiscard]] std::array<std::byte, PAGE_SIZE> PageFilledWith(std::byte value) {
     std::array<std::byte, PAGE_SIZE> page{};
@@ -68,7 +39,7 @@ class TemporaryDirectory {
 
 TEST(DiskManagerTest, CreatesOpensAndRegistersFilesWithoutTruncatingExistingData) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto first_path = temporary_directory.File("first.pages");
     const auto second_path = temporary_directory.File("second.pages");
     DiskManager manager;
@@ -102,7 +73,7 @@ TEST(DiskManagerTest, CreatesOpensAndRegistersFilesWithoutTruncatingExistingData
 
 TEST(DiskManagerTest, ExtendsByExactlyOnePageAndReturnsMonotonicPageNumbers) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("extend.pages");
     DiskManager manager;
     ASSERT_TRUE(manager.CreateFile(FileId{7}, path));
@@ -120,12 +91,12 @@ TEST(DiskManagerTest, ExtendsByExactlyOnePageAndReturnsMonotonicPageNumbers) {
 }
 
 TEST(DiskManagerTest, ConcurrentExtensionsAllocateUniqueContiguousPageNumbers) {
-    constexpr std::size_t WORKER_COUNT = 8;
-    constexpr std::size_t EXTENSIONS_PER_WORKER = 64;
-    constexpr std::size_t EXTENSION_COUNT = WORKER_COUNT * EXTENSIONS_PER_WORKER;
+    constexpr std::size_t worker_count = 8;
+    constexpr std::size_t extensions_per_worker = 64;
+    constexpr std::size_t extension_count = worker_count * extensions_per_worker;
 
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("concurrent-extend.pages");
     DiskManager manager;
     ASSERT_TRUE(manager.CreateFile(FileId{8}, path));
@@ -133,17 +104,17 @@ TEST(DiskManagerTest, ConcurrentExtensionsAllocateUniqueContiguousPageNumbers) {
     const auto initial_page_count = manager.PageCount(FileId{8});
     ASSERT_TRUE(initial_page_count);
 
-    std::barrier start_barrier{static_cast<std::ptrdiff_t>(WORKER_COUNT + 1U)};
-    std::array<std::uint8_t, EXTENSION_COUNT> successes{};
-    std::array<PageNo, EXTENSION_COUNT> allocated_page_numbers{};
-    std::array<std::thread, WORKER_COUNT> workers;
+    std::barrier start_barrier{static_cast<std::ptrdiff_t>(worker_count + 1U)};
+    std::array<std::uint8_t, extension_count> successes{};
+    std::array<PageNo, extension_count> allocated_page_numbers{};
+    std::array<std::thread, worker_count> workers;
 
-    for (std::size_t worker_index = 0; worker_index < WORKER_COUNT; ++worker_index) {
+    for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
         workers[worker_index] = std::thread{[&, worker_index] {
             start_barrier.arrive_and_wait();
-            for (std::size_t call_index = 0; call_index < EXTENSIONS_PER_WORKER; ++call_index) {
+            for (std::size_t call_index = 0; call_index < extensions_per_worker; ++call_index) {
                 const std::size_t result_index =
-                    (worker_index * EXTENSIONS_PER_WORKER) + call_index;
+                    (worker_index * extensions_per_worker) + call_index;
                 const auto allocated = manager.ExtendFile(FileId{8});
                 successes[result_index] = static_cast<std::uint8_t>(allocated.success);
                 if (allocated) {
@@ -160,15 +131,15 @@ TEST(DiskManagerTest, ConcurrentExtensionsAllocateUniqueContiguousPageNumbers) {
 
     const auto successful_extensions =
         std::ranges::count(successes, static_cast<std::uint8_t>(true));
-    ASSERT_EQ(successful_extensions, EXTENSION_COUNT);
+    ASSERT_EQ(successful_extensions, extension_count);
 
     std::ranges::sort(allocated_page_numbers);
     EXPECT_EQ(std::ranges::adjacent_find(allocated_page_numbers), allocated_page_numbers.end());
-    for (std::size_t index = 0; index < EXTENSION_COUNT; ++index) {
+    for (std::size_t index = 0; index < extension_count; ++index) {
         EXPECT_EQ(allocated_page_numbers[index], initial_page_count.value + index);
     }
 
-    const PageNo expected_page_count = initial_page_count.value + EXTENSION_COUNT;
+    const PageNo expected_page_count = initial_page_count.value + extension_count;
     const std::uint64_t expected_file_size = expected_page_count * PAGE_SIZE;
     const auto final_size = manager.FileSize(FileId{8});
     ASSERT_TRUE(final_size);
@@ -179,7 +150,7 @@ TEST(DiskManagerTest, ConcurrentExtensionsAllocateUniqueContiguousPageNumbers) {
 
 TEST(DiskManagerTest, MapsFileIdsAndReadsWritesPagesPositionally) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto first_path = temporary_directory.File("one.pages");
     const auto second_path = temporary_directory.File("two.pages");
     DiskManager manager;
@@ -208,7 +179,7 @@ TEST(DiskManagerTest, MapsFileIdsAndReadsWritesPagesPositionally) {
 
 TEST(DiskManagerTest, RejectsMissingPagesWithoutChangingReadDestination) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     DiskManager manager;
     ASSERT_TRUE(manager.CreateFile(FileId{21}, temporary_directory.File("missing.pages")));
     ASSERT_TRUE(manager.ExtendFile(FileId{21}));
@@ -232,7 +203,7 @@ TEST(DiskManagerTest, RejectsMissingPagesWithoutChangingReadDestination) {
 
 TEST(DiskManagerTest, RejectsMisalignedFilesAndReportsMidPageShortReads) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("misaligned.pages");
     DiskManager manager;
     ASSERT_TRUE(manager.CreateFile(FileId{31}, path));
@@ -259,7 +230,7 @@ TEST(DiskManagerTest, RejectsMisalignedFilesAndReportsMidPageShortReads) {
 
 TEST(DiskManagerTest, RejectsUnregisteredAndOverflowingPageIdsWithContext) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("overflow.pages");
     DiskManager manager;
     auto output = PageFilledWith(std::byte{0xA5});
@@ -283,7 +254,7 @@ TEST(DiskManagerTest, RejectsUnregisteredAndOverflowingPageIdsWithContext) {
 
 TEST(DiskManagerTest, ReopeningPreservesBytesAndSyncsValidFiles) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("reopen.pages");
     const auto expected = PageFilledWith(std::byte{0x5A});
 
@@ -304,7 +275,7 @@ TEST(DiskManagerTest, ReopeningPreservesBytesAndSyncsValidFiles) {
 
 TEST(DiskManagerTest, RejectsInvalidFileIdsAndMissingPaths) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto missing_path = temporary_directory.File("does-not-exist.pages");
     DiskManager manager;
 

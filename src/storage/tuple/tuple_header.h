@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_TUPLE_HEADER_H_
-#define DBLUSBLUS_STORAGE_TUPLE_HEADER_H_
+#pragma once
 
 #include "common/types.h"
 
@@ -76,5 +75,3 @@ static_assert(sizeof(SchemaVer) == 4);
 static_assert(TUPLE_HEADER_RESERVED_OFFSET + sizeof(std::uint32_t) == TUPLE_HEADER_ENCODED_SIZE);
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_TUPLE_HEADER_H_

@@ -5,6 +5,7 @@
 #include "storage/heap/heap_page.h"
 #include "storage/page/page.h"
 #include "storage/tuple/tuple_codec.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -45,37 +46,7 @@ template <typename Value>
     return std::addressof(*optional);
 }
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{
-            '/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u', 's',  '-',
-            'v', 'a', 'r', 'l', 'e', 'n', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0',
-        };
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 [[nodiscard]] VarcharValue Varchar(std::string_view value) noexcept {
     return VarcharValue{
@@ -672,7 +643,7 @@ TEST(VarlenTupleCodecTest, ComposesWithHeapPageAndPreservesBorrowedVarcharView) 
 
 TEST(VarlenTuplePersistenceTest, SurvivesHeapPageFileWriteReopenAndDecode) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("mixed.heap");
     constexpr FileId file_id = 71;
     const FileSuperblock superblock{

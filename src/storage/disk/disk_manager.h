@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_DISK_MANAGER_H_
-#define DBLUSBLUS_STORAGE_DISK_MANAGER_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/page/page_header.h"
@@ -115,5 +114,3 @@ class DiskManager {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_DISK_MANAGER_H_

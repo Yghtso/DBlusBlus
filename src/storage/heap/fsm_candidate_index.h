@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_FSM_CANDIDATE_INDEX_H_
-#define DBLUSBLUS_STORAGE_FSM_CANDIDATE_INDEX_H_
+#pragma once
 
 #include "common/types.h"
 
@@ -45,5 +44,3 @@ class FsmCandidateIndex {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_FSM_CANDIDATE_INDEX_H_

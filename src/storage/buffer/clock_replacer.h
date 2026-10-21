@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_CLOCK_REPLACER_H_
-#define DBLUSBLUS_STORAGE_BUFFER_CLOCK_REPLACER_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -63,5 +62,3 @@ class ClockReplacer {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_CLOCK_REPLACER_H_

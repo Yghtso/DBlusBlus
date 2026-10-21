@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_PAGE_H_
-#define DBLUSBLUS_STORAGE_PAGE_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/page/page_header.h"
@@ -53,5 +52,3 @@ class Page {
 static_assert(sizeof(Page::ByteStorage) == PAGE_SIZE);
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_PAGE_H_

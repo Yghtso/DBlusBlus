@@ -1,5 +1,6 @@
 #include "common/encoding.h"
 #include "storage/heap/heap_page.h"
+#include "storage/heap/heap_test_support.h"
 #include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
 #include "storage/page/page_header.h"
@@ -16,39 +17,12 @@
 namespace dblusblus {
 namespace {
 
-[[nodiscard]] std::span<std::byte> HeapHeaderBytes(Page& page) {
-    return page.Bytes().subspan(HEAP_PAGE_HEADER_OFFSET, HEAP_PAGE_HEADER_ENCODED_SIZE);
-}
-
-[[nodiscard]] std::span<std::byte> SlotBytes(Page& page, SlotId slot_id) {
-    return page.Bytes().subspan(
-        HEAP_PAGE_SLOT_DIRECTORY_OFFSET +
-            (static_cast<std::size_t>(slot_id) * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE),
-        HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
-}
-
-[[nodiscard]] Page::ByteStorage CopyPageBytes(const Page& page) {
-    Page::ByteStorage copy{};
-    std::ranges::copy(page.Bytes(), copy.begin());
-    return copy;
-}
-
-void WriteHeapHeader(Page& page, const HeapPageHeader& header) {
-    ASSERT_TRUE(EncodeHeapPageHeader(HeapHeaderBytes(page), header));
-}
-
-void WriteCommonHeader(Page& page, const CommonPageHeader& header) {
-    ASSERT_TRUE(page.WriteHeader(header));
-}
-
-[[nodiscard]] Page InitializedHeapPage(PageId page_id = {.file_id = 7, .page_no = 3}) {
-    Page page{page_id};
-    HeapPage heap_page{page, heap_test::TestSchemaHistory()};
-    if (!heap_page.Initialize()) {
-        ADD_FAILURE() << "heap page initialization unexpectedly failed";
-    }
-    return page;
-}
+using heap_test::CopyPageBytes;
+using heap_test::HeapHeaderBytes;
+using heap_test::InitializedHeapPage;
+using heap_test::SlotBytes;
+using heap_test::WriteCommonHeader;
+using heap_test::WriteHeapHeader;
 
 void ConfigureOneNormalSlot(Page& page,
                             std::uint16_t tuple_offset = 8000,

@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_HEAP_PAGE_H_
-#define DBLUSBLUS_STORAGE_HEAP_PAGE_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/heap/heap_page_format.h"
@@ -156,5 +155,3 @@ class HeapPage {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_HEAP_PAGE_H_

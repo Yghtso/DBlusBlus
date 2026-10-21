@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_TESTS_STORAGE_HEAP_HEAP_TEST_TUPLES_H_
-#define DBLUSBLUS_TESTS_STORAGE_HEAP_HEAP_TEST_TUPLES_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/heap/heap_page.h"
@@ -83,5 +82,3 @@ inline void WriteTestTuple(Page& page,
 }
 
 } // namespace dblusblus::heap_test
-
-#endif // DBLUSBLUS_TESTS_STORAGE_HEAP_HEAP_TEST_TUPLES_H_

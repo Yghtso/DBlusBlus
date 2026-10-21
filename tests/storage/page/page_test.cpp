@@ -1,5 +1,6 @@
 #include "storage/disk/disk_manager.h"
 #include "storage/page/page.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -20,37 +21,7 @@ static_assert(sizeof(Page::ByteStorage) == PAGE_SIZE);
 static_assert(sizeof(Page) > PAGE_SIZE);
 static_assert(!std::is_polymorphic_v<Page>);
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{
-            '/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u',  's',
-            '-', 'p', 'a', 'g', 'e', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0',
-        };
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 [[nodiscard]] CommonPageHeader ExampleHeader(PageNo page_no) {
     return CommonPageHeader{
@@ -162,7 +133,7 @@ TEST(PageTest, RejectsCorruptHeaderIdentity) {
 
 TEST(PageTest, InteroperatesWithDiskManagerThroughExactPageSpans) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("raw-page.pages");
     constexpr PageId page_id{.file_id = 41, .page_no = 0};
     DiskManager manager;

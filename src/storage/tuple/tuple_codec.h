@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_TUPLE_CODEC_H_
-#define DBLUSBLUS_STORAGE_TUPLE_CODEC_H_
+#pragma once
 
 #include "storage/tuple/tuple_layout.h"
 
@@ -192,5 +191,3 @@ static_assert(sizeof(double) == sizeof(std::uint64_t));
 static_assert(std::numeric_limits<double>::is_iec559);
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_TUPLE_CODEC_H_

@@ -35,9 +35,9 @@ constexpr FileId FILE_ID = 11;
 // once, shuts down durably, then reopens with a fresh DiskManager and pool and checks every tuple.
 TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndReopen) {
     TemporaryDirectory directory;
-    ASSERT_TRUE(directory.valid());
+    ASSERT_TRUE(directory.Valid());
     const auto path = directory.File("relation.heap");
-    constexpr std::uint32_t TUPLE_COUNT = 600;
+    constexpr std::uint32_t tuple_count = 600;
     std::vector<Rid> rids;
 
     {
@@ -54,7 +54,7 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
         ASSERT_TRUE(pool.RegisterFile(FILE_ID, ValidateHeap));
 
         PageId current{};
-        for (std::uint32_t key = 0; key < TUPLE_COUNT; ++key) {
+        for (std::uint32_t key = 0; key < tuple_count; ++key) {
             const auto tuple = TupleFor(key);
             if (current.file_id != INVALID_FILE_ID) {
                 auto guard = Must(pool.FetchWrite(current));
@@ -84,7 +84,7 @@ TEST(BufferPoolPersistenceTest, PagesWrittenThroughATinyPoolSurviveEvictionAndRe
     ASSERT_TRUE(file);
     BufferPool pool{disk, BufferPoolOptions{.frame_count = 3}};
     ASSERT_TRUE(pool.RegisterFile(FILE_ID, ValidateHeap));
-    for (std::uint32_t key = 0; key < TUPLE_COUNT; ++key) {
+    for (std::uint32_t key = 0; key < tuple_count; ++key) {
         const Rid rid = rids[key];
         auto guard = Must(pool.FetchRead(rid.page));
         ASSERT_TRUE(guard.Valid()) << "page " << rid.page.page_no;

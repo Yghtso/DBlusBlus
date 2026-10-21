@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_COMMON_PAGE_HEADER_H_
-#define DBLUSBLUS_COMMON_PAGE_HEADER_H_
+#pragma once
 
 #include "common/encoding.h"
 #include "common/types.h"
@@ -161,5 +160,3 @@ DecodeCommonPageHeader(std::span<const std::byte> source) noexcept {
 }
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_COMMON_PAGE_HEADER_H_

@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_TESTS_STORAGE_BUFFER_TEST_SUPPORT_H_
-#define DBLUSBLUS_TESTS_STORAGE_BUFFER_TEST_SUPPORT_H_
+#pragma once
 
 #include "storage/buffer/buffer_pool.h"
 #include "storage/buffer/page_io.h"
@@ -10,6 +9,7 @@
 #include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
 #include "storage/page/page_checksum.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -32,37 +32,7 @@
 
 namespace dblusblus::buffer_test {
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{'/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u',
-                                 's', '-', 'b', 'u', 'f', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0'};
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-    TemporaryDirectory(TemporaryDirectory&&) = delete;
-    TemporaryDirectory& operator=(TemporaryDirectory&&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 enum class WriteFault : std::uint8_t {
     NONE,
@@ -92,16 +62,16 @@ class FaultInjectingPageIo final : public PageIo {
         fail_next_extend_ = true;
     }
 
-    [[nodiscard]] std::size_t reads() const noexcept {
+    [[nodiscard]] std::size_t ReadCount() const noexcept {
         return reads_.load();
     }
-    [[nodiscard]] std::size_t writes() const noexcept {
+    [[nodiscard]] std::size_t WriteCount() const noexcept {
         return writes_.load();
     }
-    [[nodiscard]] std::size_t syncs() const noexcept {
+    [[nodiscard]] std::size_t SyncCount() const noexcept {
         return syncs_.load();
     }
-    [[nodiscard]] std::size_t extends() const noexcept {
+    [[nodiscard]] std::size_t ExtendCount() const noexcept {
         return extends_.load();
     }
 
@@ -277,7 +247,7 @@ class HeapFileFixture {
     HeapFileFixture() : io_(disk_) {}
 
     [[nodiscard]] bool Create(FileId file_id = HEAP_FILE_ID) {
-        if (!directory_.valid()) {
+        if (!directory_.Valid()) {
             return false;
         }
         path_ = directory_.File("heap.dat");
@@ -334,16 +304,16 @@ class HeapFileFixture {
         return page;
     }
 
-    [[nodiscard]] DiskManager& disk() noexcept {
+    [[nodiscard]] DiskManager& Disk() noexcept {
         return disk_;
     }
-    [[nodiscard]] FaultInjectingPageIo& io() noexcept {
+    [[nodiscard]] FaultInjectingPageIo& Io() noexcept {
         return io_;
     }
-    [[nodiscard]] FileId file_id() const noexcept {
+    [[nodiscard]] FileId TestFileId() const noexcept {
         return file_id_;
     }
-    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept {
         return path_;
     }
     void ClosePageFile() {
@@ -404,5 +374,3 @@ template <typename Guard>
 }
 
 } // namespace dblusblus::buffer_test
-
-#endif // DBLUSBLUS_TESTS_STORAGE_BUFFER_TEST_SUPPORT_H_

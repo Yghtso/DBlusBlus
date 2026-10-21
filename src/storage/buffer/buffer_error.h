@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_ERROR_H_
-#define DBLUSBLUS_STORAGE_BUFFER_ERROR_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/disk/disk_manager.h"
@@ -67,5 +66,3 @@ struct BufferResult {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_ERROR_H_

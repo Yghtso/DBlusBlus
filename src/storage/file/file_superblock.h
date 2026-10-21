@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_COMMON_FILE_SUPERBLOCK_H_
-#define DBLUSBLUS_COMMON_FILE_SUPERBLOCK_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/page/page_header.h"
@@ -79,5 +78,3 @@ ComputeFileSuperblockChecksum(std::span<const std::byte> page) noexcept;
 DecodeFileSuperblock(std::span<const std::byte> source) noexcept;
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_COMMON_FILE_SUPERBLOCK_H_

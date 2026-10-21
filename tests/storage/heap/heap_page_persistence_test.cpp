@@ -2,8 +2,10 @@
 #include "storage/file/file_superblock.h"
 #include "storage/file/page_file.h"
 #include "storage/heap/heap_page.h"
+#include "storage/heap/heap_test_support.h"
 #include "storage/heap/heap_test_tuples.h"
 #include "storage/page/page.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -20,50 +22,15 @@
 namespace dblusblus {
 namespace {
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{
-            '/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u',  's',
-            '-', 'h', 'e', 'a', 'p', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0',
-        };
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
+using heap_test::SlotBytes;
 
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 using heap_test::MakeTestTuple;
 
-[[nodiscard]] std::span<std::byte> SlotBytes(Page& page, SlotId slot_id) {
-    return page.Bytes().subspan(
-        HEAP_PAGE_SLOT_DIRECTORY_OFFSET +
-            (static_cast<std::size_t>(slot_id) * HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE),
-        HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
-}
-
 TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupleBytes) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap-dead.pages");
     constexpr FileId file_id = 42;
     constexpr std::uint64_t object_id = 7002;
@@ -138,7 +105,7 @@ TEST(HeapPageDeadTransitionIntegrationTest, PersistsDeadStateWithoutRemovingTupl
 
 TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloads) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap-compact.pages");
     constexpr FileId file_id = 52;
     constexpr std::uint64_t object_id = 7003;
@@ -227,7 +194,7 @@ TEST(HeapPageCompactionIntegrationTest, PersistsCompactedGeometryStatesAndPayloa
 
 TEST(HeapPageIntegrationTest, PersistsAllocatedBlankHeapPageThroughDiskManager) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap.pages");
     constexpr FileId file_id = 41;
     DiskManager manager;

@@ -57,9 +57,7 @@ BufferPool::BufferPool(PageIo* page_io, std::unique_ptr<PageIo> owned_io, Buffer
     : owned_io_(std::move(owned_io)), io_(page_io != nullptr ? page_io : owned_io_.get()),
       frame_count_(std::max<std::size_t>(options.frame_count, 1U)),
       max_pin_count_(std::max<std::uint32_t>(options.max_pin_count, 1U)),
-      observer_(options.observer),
-      frames_(std::make_unique<BufferFrame[]>(frame_count_)), // NOLINT(modernize-avoid-c-arrays)
-      replacer_(frame_count_) {
+      observer_(options.observer), frames_(frame_count_), replacer_(frame_count_) {
     assert(options.frame_count > 0U);
     free_list_.reserve(frame_count_);
     // Pop from the back, so frame 0 is handed out first.
@@ -836,10 +834,9 @@ BufferStatus BufferPool::Shutdown() {
     quiescing_ = true;
     state_changed_.notify_all();
     state_changed_.wait(lock, [&] {
-        const bool frames_idle =
-            std::all_of(frames_.get(), frames_.get() + frame_count_, [](const BufferFrame& frame) {
-                return frame.pin_count == 0U && frame.io_state == FrameIoState::NONE;
-            });
+        const bool frames_idle = std::ranges::all_of(frames_, [](const BufferFrame& frame) {
+            return frame.pin_count == 0U && frame.io_state == FrameIoState::NONE;
+        });
         const bool table_idle = std::ranges::all_of(page_table_, [](const auto& item) {
             return item.second.state == PageTableEntryState::RESIDENT;
         });

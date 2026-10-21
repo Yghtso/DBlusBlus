@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_TUPLE_LAYOUT_H_
-#define DBLUSBLUS_STORAGE_TUPLE_LAYOUT_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/tuple/tuple_header.h"
@@ -167,5 +166,3 @@ static_assert(VARCHAR_DESCRIPTOR_LENGTH_OFFSET + sizeof(std::uint32_t) ==
               VARCHAR_DESCRIPTOR_ENCODED_SIZE);
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_TUPLE_LAYOUT_H_

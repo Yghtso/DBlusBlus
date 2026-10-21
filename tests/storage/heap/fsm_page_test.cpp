@@ -5,6 +5,7 @@
 #include "storage/heap/fsm_page.h"
 #include "storage/page/page.h"
 #include "storage/page/page_header.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -51,37 +52,7 @@ template <typename Value>
     return std::addressof(*optional);
 }
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{
-            '/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u',
-            's', '-', 'f', 's', 'm', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0',
-        };
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 [[nodiscard]] Page InitializedFsmPage(std::uint16_t entry_count = 3) {
     Page page{PageId{.file_id = 17, .page_no = 1}};
@@ -473,7 +444,7 @@ TEST(FsmPageValidationTest, EnforcesRepresentableHeapRangeAtPageNumberLimit) {
 
 TEST(FsmPagePersistenceTest, SurvivesPageFileWriteReopenAndValidation) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("table.fsm");
     constexpr FileId file_id = 81;
     constexpr std::uint64_t table_id = 1801;

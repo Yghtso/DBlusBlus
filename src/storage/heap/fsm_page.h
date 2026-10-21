@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_FSM_PAGE_H_
-#define DBLUSBLUS_STORAGE_FSM_PAGE_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/heap/heap_page_format.h"
@@ -184,5 +183,3 @@ static_assert(FSM_PAGE_ENTRIES_OFFSET + FSM_PAGE_ENTRY_CAPACITY == PAGE_SIZE);
 static_assert(FSM_PAGE_ENTRY_CAPACITY <= std::numeric_limits<std::uint16_t>::max());
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_FSM_PAGE_H_

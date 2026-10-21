@@ -38,8 +38,8 @@ class BufferPoolConcurrencyTest : public ::testing::Test {
 
     void MakePool(std::size_t frame_count) {
         pool_ = std::make_unique<BufferPool>(
-            file_.io(), BufferPoolOptions{.frame_count = frame_count, .observer = &observer_});
-        ASSERT_TRUE(pool_->RegisterFile(file_.file_id(), ValidateHeap));
+            file_.Io(), BufferPoolOptions{.frame_count = frame_count, .observer = &observer_});
+        ASSERT_TRUE(pool_->RegisterFile(file_.TestFileId(), ValidateHeap));
     }
 
     void AppendRawPages(std::size_t count) {
@@ -84,7 +84,7 @@ TEST_F(BufferPoolConcurrencyTest, SamePageMissesShareOneLoaderAndOneFrame) {
         fetcher.join();
     }
 
-    EXPECT_EQ(file_.io().reads(), 1U);
+    EXPECT_EQ(file_.Io().ReadCount(), 1U);
     const auto resident = EntryOf(*pool_, Pid(1));
     EXPECT_EQ(resident.state, PageTableEntryState::RESIDENT);
     EXPECT_EQ(FrameOf(*pool_, Pid(1)).pin_count, 3U);
@@ -98,7 +98,7 @@ TEST_F(BufferPoolConcurrencyTest, SamePageMissesShareOneLoaderAndOneFrame) {
 TEST_F(BufferPoolConcurrencyTest, LoadFailureReachesEveryJoinerAndIsNotCached) {
     AppendRawPages(1);
     MakePool(3);
-    file_.io().FailNextRead();
+    file_.Io().FailNextRead();
     observer_.PauseAt(BufferPoolEventType::FRAME_BOUND_LOADING, Pid(1));
 
     std::array<BufferErrorCode, 2> codes{};
@@ -112,7 +112,7 @@ TEST_F(BufferPoolConcurrencyTest, LoadFailureReachesEveryJoinerAndIsNotCached) {
 
     EXPECT_EQ(codes[0], BufferErrorCode::RAW_IO_FAILURE);
     EXPECT_EQ(codes[1], BufferErrorCode::RAW_IO_FAILURE);
-    EXPECT_EQ(file_.io().reads(), 1U);
+    EXPECT_EQ(file_.Io().ReadCount(), 1U);
     EXPECT_FALSE(Entry(Pid(1)).has_value());
     EXPECT_EQ(pool_->FreeFrameCount(), 3U);
     EXPECT_TRUE(pool_->FetchRead(Pid(1)));
@@ -183,13 +183,13 @@ TEST_F(BufferPoolConcurrencyTest, FetchAfterVictimReservationWaitsAndReloads) {
     // pinned. It never pinned the reserved victim.
     const auto code = fetched_code.value_or(BufferErrorCode::INTERNAL_INVARIANT_FAILURE);
     EXPECT_TRUE(code == BufferErrorCode::NONE || code == BufferErrorCode::NO_REPLACEABLE_FRAME);
-    EXPECT_EQ(file_.io().writes(), 1U);
+    EXPECT_EQ(file_.Io().WriteCount(), 1U);
 }
 
 TEST_F(BufferPoolConcurrencyTest, MutationDuringWritebackKeepsTheNewerGenerationDirty) {
     MakePool(3);
     {
-        auto created = Must(pool_->NewPage(file_.file_id(), InitializeHeap));
+        auto created = Must(pool_->NewPage(file_.TestFileId(), InitializeHeap));
         ASSERT_TRUE(created.Valid());
     }
     // Record the frame's dirty flag when the second writeback copies its image.
@@ -221,7 +221,7 @@ TEST_F(BufferPoolConcurrencyTest, MutationDuringWritebackKeepsTheNewerGeneration
 
     // G's completion did not clean G+1; the explicit flush repeated and persisted it.
     EXPECT_TRUE(dirty_after_first_writeback.load());
-    EXPECT_EQ(file_.io().writes(), 2U);
+    EXPECT_EQ(file_.Io().WriteCount(), 2U);
     EXPECT_FALSE(FrameOf(*pool_, Pid(1)).dirty);
     auto on_disk = file_.ReadRawPage(Pid(1));
     EXPECT_EQ(buffer_test::FirstTupleByte(on_disk), std::byte{0x77});
@@ -273,31 +273,31 @@ TEST_F(BufferPoolConcurrencyTest, ReadersShareTheLatchAndAWriterWaitsHoldingItsP
 TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
     HeapFileFixture file;
     ASSERT_TRUE(file.Create());
-    constexpr std::size_t PAGE_COUNT = 12;
-    constexpr std::size_t THREAD_COUNT = 4;
-    constexpr std::size_t OPERATIONS_PER_THREAD = 300;
-    constexpr std::size_t COUNTER_TUPLE_SIZE =
+    constexpr std::size_t page_count = 12;
+    constexpr std::size_t thread_count = 4;
+    constexpr std::size_t operations_per_thread = 300;
+    constexpr std::size_t counter_tuple_size =
         heap_test::TEST_TUPLE_MIN_SIZE + sizeof(std::uint64_t);
 
-    BufferPool pool{file.io(), BufferPoolOptions{.frame_count = 4}};
-    ASSERT_TRUE(pool.RegisterFile(file.file_id(), ValidateHeap));
-    for (std::size_t index = 0; index < PAGE_COUNT; ++index) {
-        auto created = Must(pool.NewPage(file.file_id(), InitializeHeap));
+    BufferPool pool{file.Io(), BufferPoolOptions{.frame_count = 4}};
+    ASSERT_TRUE(pool.RegisterFile(file.TestFileId(), ValidateHeap));
+    for (std::size_t index = 0; index < page_count; ++index) {
+        auto created = Must(pool.NewPage(file.TestFileId(), InitializeHeap));
         ASSERT_TRUE(created.Valid());
         // The counter is the tuple's 8-byte VARCHAR payload, which ends the tuple.
-        const auto zero = heap_test::MakeTestTuple(COUNTER_TUPLE_SIZE, std::byte{0});
+        const auto zero = heap_test::MakeTestTuple(counter_tuple_size, std::byte{0});
         ASSERT_TRUE(heap_test::TestHeapPage(created.MutablePage()).Insert(zero));
         created.MarkDirty();
     }
 
-    std::array<std::atomic<std::uint64_t>, PAGE_COUNT> expected{};
+    std::array<std::atomic<std::uint64_t>, page_count> expected{};
     std::vector<std::thread> workers;
-    for (std::size_t worker = 0; worker < THREAD_COUNT; ++worker) {
+    for (std::size_t worker = 0; worker < thread_count; ++worker) {
         workers.emplace_back([&, worker] {
             std::mt19937 random{static_cast<std::mt19937::result_type>(worker + 1U)};
-            std::uniform_int_distribution<std::size_t> pick{0, PAGE_COUNT - 1U};
+            std::uniform_int_distribution<std::size_t> pick{0, page_count - 1U};
             std::uniform_int_distribution<int> action{0, 9};
-            for (std::size_t op = 0; op < OPERATIONS_PER_THREAD; ++op) {
+            for (std::size_t op = 0; op < operations_per_thread; ++op) {
                 const PageId page_id = Pid(pick(random) + 1U);
                 const int choice = action(random);
                 if (choice < 6) {
@@ -336,11 +336,11 @@ TEST(BufferPoolStressTest, ConcurrentIncrementsSurviveEvictionAndReload) {
     }
     ASSERT_TRUE(pool.Shutdown());
 
-    for (std::size_t index = 0; index < PAGE_COUNT; ++index) {
+    for (std::size_t index = 0; index < page_count; ++index) {
         auto on_disk = file.ReadRawPage(Pid(index + 1U));
         const auto tuple =
             heap_test::TestHeapPage(on_disk).TupleBytes(0).value_or(std::span<const std::byte>{});
-        ASSERT_EQ(tuple.size(), COUNTER_TUPLE_SIZE);
+        ASSERT_EQ(tuple.size(), counter_tuple_size);
         std::uint64_t value = 0;
         std::memcpy(&value, tuple.last(sizeof(value)).data(), sizeof(value));
         EXPECT_EQ(value, expected[index].load()) << "page " << index + 1U;

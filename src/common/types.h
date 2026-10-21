@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_COMMON_TYPES_H_
-#define DBLUSBLUS_COMMON_TYPES_H_
+#pragma once
 
 #include <compare>
 #include <cstddef>
@@ -51,5 +50,3 @@ struct std::hash<dblusblus::PageId> {
         return file_hash ^ (page_hash + 0x9e3779b9U + (file_hash << 6U) + (file_hash >> 2U));
     }
 };
-
-#endif // DBLUSBLUS_COMMON_TYPES_H_

@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_COMMON_ENCODING_H_
-#define DBLUSBLUS_COMMON_ENCODING_H_
+#pragma once
 
 #include "common/types.h"
 
@@ -141,5 +140,3 @@ DecodePageId(std::span<const std::byte> source) noexcept {
 }
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_COMMON_ENCODING_H_

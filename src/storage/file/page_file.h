@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_PAGE_FILE_H_
-#define DBLUSBLUS_STORAGE_PAGE_FILE_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/disk/disk_manager.h"
@@ -113,5 +112,3 @@ struct PageAllocationResult {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_PAGE_FILE_H_

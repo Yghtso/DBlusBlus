@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_HEAP_PAGE_FORMAT_H_
-#define DBLUSBLUS_STORAGE_HEAP_PAGE_FORMAT_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/page/page_header.h"
@@ -88,5 +87,3 @@ static_assert(HEAP_PAGE_RESERVED_OFFSET + sizeof(std::uint32_t) == HEAP_PAGE_TOT
 static_assert(HEAP_SLOT_AUX_OFFSET + sizeof(std::uint16_t) == HEAP_PAGE_SLOT_ENTRY_ENCODED_SIZE);
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_HEAP_PAGE_FORMAT_H_

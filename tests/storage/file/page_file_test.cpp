@@ -3,6 +3,7 @@
 #include "storage/file/page_file.h"
 #include "storage/page/page.h"
 #include "storage/page/page_header.h"
+#include "support/temporary_directory.h"
 
 #include <algorithm>
 #include <array>
@@ -20,37 +21,7 @@
 namespace dblusblus {
 namespace {
 
-class TemporaryDirectory {
-  public:
-    TemporaryDirectory() {
-        std::array path_template{
-            '/', 't', 'm', 'p', '/', 'd', 'b', 'l', 'u', 's', 'b', 'l', 'u', 's', '-',  'p',
-            'a', 'g', 'e', 'f', 'i', 'l', 'e', '-', 'X', 'X', 'X', 'X', 'X', 'X', '\0',
-        };
-        if (char* created = ::mkdtemp(path_template.data()); created != nullptr) {
-            path_ = created;
-        }
-    }
-
-    ~TemporaryDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-    TemporaryDirectory(const TemporaryDirectory&) = delete;
-    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-    [[nodiscard]] bool valid() const noexcept {
-        return !path_.empty();
-    }
-
-    [[nodiscard]] std::filesystem::path File(std::string_view name) const {
-        return path_ / name;
-    }
-
-  private:
-    std::filesystem::path path_;
-};
+using test::TemporaryDirectory;
 
 [[nodiscard]] FileSuperblock MakeSuperblock(FileId file_id,
                                             FileKind file_kind,
@@ -75,7 +46,7 @@ class TemporaryDirectory {
 
 TEST(PageFileTest, CreatesOnePageFileWithValidDurableSuperblock) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("heap.pages");
     const auto expected = MakeSuperblock(FileId{101}, FileKind::HEAP, 7001, 9001);
     DiskManager manager;
@@ -118,7 +89,7 @@ TEST(PageFileTest, CreatesOnePageFileWithValidDurableSuperblock) {
 
 TEST(PageFileTest, ReopensValidatedFileAndRetainsPageCountAfterAllocations) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("reopen.pages");
     const auto expected = MakeSuperblock(FileId{102}, FileKind::HEAP, 7102, 9102);
     DiskManager manager;
@@ -147,7 +118,7 @@ TEST(PageFileTest, ReopensValidatedFileAndRetainsPageCountAfterAllocations) {
 
 TEST(PageFileTest, RejectsIdentityMismatchesWithExpectedAndActualContext) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("identity.pages");
     const auto expected = MakeSuperblock(FileId{103}, FileKind::FSM, 7103, 9103);
     DiskManager manager;
@@ -185,7 +156,7 @@ TEST(PageFileTest, RejectsIdentityMismatchesWithExpectedAndActualContext) {
 
 TEST(PageFileTest, RejectsCorruptAndMissingSuperblocksAndCleansRegistration) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto corrupt_path = temporary_directory.File("corrupt.pages");
     const auto empty_path = temporary_directory.File("empty.pages");
     const auto expected = MakeSuperblock(FileId{104}, FileKind::CATALOG, 7104, 9104);
@@ -222,7 +193,7 @@ TEST(PageFileTest, RejectsCorruptAndMissingSuperblocksAndCleansRegistration) {
 
 TEST(PageFileTest, PropagatesMisalignedFileErrorFromDiskManager) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("misaligned.pages");
     DiskManager manager;
     ASSERT_TRUE(manager.CreateFile(FileId{106}, path));
@@ -239,7 +210,7 @@ TEST(PageFileTest, PropagatesMisalignedFileErrorFromDiskManager) {
 
 TEST(PageFileTest, AllocatesAppendOnlyZeroedPagesBeginningAtOne) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("allocate.pages");
     const auto superblock = MakeSuperblock(FileId{107}, FileKind::HEAP, 7107, 9107);
     DiskManager manager;
@@ -272,7 +243,7 @@ TEST(PageFileTest, AllocatesAppendOnlyZeroedPagesBeginningAtOne) {
 
 TEST(PageFileTest, NeverReturnsPageZeroAsAnOrdinaryAllocation) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("page-zero.pages");
     const auto superblock = MakeSuperblock(FileId{108}, FileKind::HEAP, 7108, 9108);
     DiskManager manager;
@@ -291,7 +262,7 @@ TEST(PageFileTest, NeverReturnsPageZeroAsAnOrdinaryAllocation) {
 
 TEST(PageFileTest, KeepsIndependentFileAllocationSequences) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     DiskManager manager;
     auto first = PageFile::Create(manager,
                                   temporary_directory.File("first.pages"),
@@ -319,7 +290,7 @@ TEST(PageFileTest, KeepsIndependentFileAllocationSequences) {
 
 TEST(PageFileTest, SupportsEveryGenericSuperblockFileKind) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     constexpr std::array file_kinds{
         FileKind::HEAP,
         FileKind::FSM,
@@ -344,7 +315,7 @@ TEST(PageFileTest, SupportsEveryGenericSuperblockFileKind) {
 
 TEST(PageFileTest, RejectsBtreeCreationThroughGenericSuperblockCodec) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("btree.pages");
     const auto superblock = MakeSuperblock(FileId{124}, FileKind::BTREE, 7124, 9124);
     DiskManager manager;
@@ -365,7 +336,7 @@ TEST(PageFileTest, RejectsBtreeCreationThroughGenericSuperblockCodec) {
 
 TEST(PageFileTest, PreservesDiskCreationFailuresWithoutTruncatingOrConflicting) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto first_path = temporary_directory.File("existing.pages");
     const auto duplicate_path = temporary_directory.File("duplicate.pages");
     DiskManager manager;
@@ -394,7 +365,7 @@ TEST(PageFileTest, PreservesDiskCreationFailuresWithoutTruncatingOrConflicting) 
 
 TEST(PageFileTest, LeavesFailedPostCreationFileButCleansRegistration) {
     TemporaryDirectory temporary_directory;
-    ASSERT_TRUE(temporary_directory.valid());
+    ASSERT_TRUE(temporary_directory.Valid());
     const auto path = temporary_directory.File("partial.pages");
     auto invalid = MakeSuperblock(FileId{132}, FileKind::HEAP, 7132, 9132);
     invalid.file_kind = static_cast<FileKind>(0);

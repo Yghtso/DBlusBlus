@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_PAGE_CHECKSUM_H_
-#define DBLUSBLUS_STORAGE_PAGE_CHECKSUM_H_
+#pragma once
 
 #include "storage/page/page_header.h"
 
@@ -22,5 +21,3 @@ void FinalizePageChecksum(std::span<std::byte, PAGE_SIZE> page) noexcept;
 [[nodiscard]] bool VerifyPageChecksum(std::span<const std::byte, PAGE_SIZE> page) noexcept;
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_PAGE_CHECKSUM_H_

@@ -25,7 +25,9 @@ target_sources(
         storage/heap/heap_page_persistence_test.cpp
         storage/heap/heap_page_reclamation_test.cpp
         storage/heap/heap_page_validation_test.cpp
+        storage/heap/heap_test_support.h
         storage/heap/heap_test_tuples.h
+        support/temporary_directory.h
         storage/page/page_checksum_test.cpp
         storage/page/page_header_test.cpp
         storage/page/page_test.cpp

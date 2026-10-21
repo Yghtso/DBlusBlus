@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_PAGE_IO_H_
-#define DBLUSBLUS_STORAGE_BUFFER_PAGE_IO_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/disk/disk_manager.h"
@@ -60,5 +59,3 @@ class DiskPageIo final : public PageIo {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_PAGE_IO_H_

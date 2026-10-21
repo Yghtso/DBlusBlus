@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_POOL_H_
-#define DBLUSBLUS_STORAGE_BUFFER_POOL_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/buffer/buffer_error.h"
@@ -275,7 +274,8 @@ class BufferPool {
 
     mutable std::mutex mutex_;
     std::condition_variable state_changed_;
-    std::unique_ptr<BufferFrame[]> frames_; // NOLINT(modernize-avoid-c-arrays)
+    // Sized once at construction and never resized: BufferFrame holds a latch and cannot move.
+    std::vector<BufferFrame> frames_;
     std::vector<FrameId> free_list_;
     ClockReplacer replacer_;
     std::unordered_map<PageId, PageTableEntry> page_table_;
@@ -284,5 +284,3 @@ class BufferPool {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_POOL_H_

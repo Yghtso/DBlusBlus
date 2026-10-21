@@ -1,5 +1,4 @@
-#ifndef DBLUSBLUS_STORAGE_BUFFER_FRAME_H_
-#define DBLUSBLUS_STORAGE_BUFFER_FRAME_H_
+#pragma once
 
 #include "common/types.h"
 #include "storage/buffer/clock_replacer.h"
@@ -54,5 +53,3 @@ struct BufferFrame {
 };
 
 } // namespace dblusblus
-
-#endif // DBLUSBLUS_STORAGE_BUFFER_FRAME_H_
