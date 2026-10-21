@@ -21,6 +21,7 @@ target_sources(
         storage/heap/heap_page_persistence_test.cpp
         storage/heap/heap_page_reclamation_test.cpp
         storage/heap/heap_page_validation_test.cpp
+        storage/heap/heap_test_tuples.h
         storage/page/page_header_test.cpp
         storage/page/page_test.cpp
         storage/tuple/tuple_codec_property_test.cpp
@@ -28,6 +29,12 @@ target_sources(
         storage/tuple/tuple_header_test.cpp
         storage/tuple/tuple_layout_test.cpp
         storage/tuple/tuple_varlen_codec_test.cpp
+)
+
+target_include_directories(
+    dblusblus_tests
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 target_link_libraries(

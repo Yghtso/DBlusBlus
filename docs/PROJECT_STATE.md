@@ -61,6 +61,9 @@ serialization.
 The generic `FileSuperblock` codec implements the 72-byte common format for `HEAP`, `FSM`,
 and `CATALOG` files, including the 8192-byte page image, magic, file kind, page size,
 logical identities, creation epoch, CRC32C, and required-zero reserved/trailing bytes.
+The common `flags` field is RESERVED_ZERO: the encoder always writes zero, the decoder rejects
+any nonzero value, and the in-memory `FileSuperblock` has no flags member to carry or
+round-trip.
 
 `FileKind::BTREE` and its numeric code are recognized, but the generic encoder and decoder
 reject it. The architecture-defined specialized 128-byte B+ tree superblock codec is not
@@ -105,20 +108,49 @@ page size              8192 bytes
 ```
 
 Initialization writes common flags and reserved fields as zero and rejects page 0 and
-`INVALID_PAGE_NO`. Page-local validation checks common identity/version/geometry,
-required-zero fields, explicit slot-state codes, NORMAL tuple bounds, and canonical
-`UNUSED` slots. The free-slot chain must be valid, acyclic, and contain every `UNUSED`
-slot exactly once.
+`INVALID_PAGE_NO`.
 
-Insertion stores opaque tuple bytes in one page, allocates a stable new slot, and returns a
-physical `Rid`. The maximum raw inline tuple is 8135 bytes. Slot reuse is not implemented,
-so `UNUSED` validation exists without an active writer transition that creates reusable
-slots.
+A `HeapPage` is constructed over caller-owned page bytes together with a
+`HeapTupleSchemaHistory`: a non-owning view of the relation's immutable historical
+`TuplePhysicalLayout`s, resolved by each tuple's `schema_version` (`SchemaVer{0}` never
+resolves). `HeapPage` hands retained tuple bytes to the tuple codec under the resolved layout
+and does not interpret column types itself. No catalog exists, so callers supply the schema
+history directly.
+
+`Validate` implements the complete page-local HEAP owner validation of `ARCHITECTURE.md`
+§4.13.3, in a deterministic order:
+
+- common identity/version/geometry and required-zero header fields;
+- canonical slot descriptors: `UNUSED` with zero coordinates, `NORMAL` and `DEAD` with
+  `aux = 0`, `NORMAL` nonempty, `DEAD` either retained (nonzero coordinates) or reclaimed
+  (`(0,0)`), and `REDIRECT_RESERVED` rejected as `UNSUPPORTED_RESERVED_STATE`;
+- every retained `NORMAL` or `DEAD` range nonempty and inside `[upper, PAGE_SIZE)`, with
+  pairwise non-overlap checked by sorting ranges on `(start, end, SlotId)`;
+- every retained tuple, including retained `DEAD` payloads, passing schema-directed tuple
+  validation under its historical layout;
+- the bounded tuple-header domain checks that need no status lookup: `xmin` is
+  `FROZEN_TXN_ID` or a normal TxnId, `xmax` is not `FROZEN_TXN_ID`, no deleter implies
+  `cmax = 0`, and a present previous-version pointer names an ordinary page `>= 1`, is not
+  the tuple's own RID, and stays within `slot_count` when it targets the same page;
+- the complete free-slot chain: valid, acyclic, and containing every `UNUSED` slot exactly
+  once.
+
+Cross-page previous-version targets and version-chain acyclicity are L2/L3 checks and are
+not performed by the page-local validator.
+
+Every `HeapPage` operation validates the page first. Insertion additionally validates the new
+tuple bytes under the same tuple rules, as if already stored in its new slot, before any
+mutation, so a writer cannot produce a page the validator would reject. It stores the tuple
+in one page, allocates a stable new slot, and returns a physical `Rid`. The maximum raw inline
+tuple is 8135 bytes. Slot reuse is not implemented, so `UNUSED` validation exists without an
+active writer transition that creates reusable slots.
 
 `MarkDead` performs only the physical `NORMAL -> DEAD` transition. It does not decide MVCC
 visibility, transaction outcome, vacuum eligibility, or global death. `Compact` reclaims
 payload bytes from `DEAD` slots while preserving every `SlotId` and every NORMAL payload;
-reclaimed DEAD slots use zero tuple coordinates and are non-reusable.
+reclaimed DEAD slots use the canonical `(0,0)` coordinates with `aux = 0` and are
+non-reusable. `Compact` relies on owner validation for range bounds and non-overlap and
+rejects pages containing `UNUSED` slots.
 
 ### Tuple physical representation
 
@@ -149,7 +181,9 @@ unreferenced bytes are rejected, and decoded VARCHAR values borrow from the tupl
 All encoded tuples are subject to the 8135-byte inline limit.
 
 Tuple headers carry MVCC/version-chain fields, but transaction visibility, version-chain
-coordination, and transaction outcome semantics are not implemented.
+coordination, and transaction outcome semantics are not implemented. The structural domain
+checks on those fields are applied by heap-page owner validation; the standalone tuple codec
+does not apply them.
 
 ### Free-space metadata
 
@@ -235,22 +269,9 @@ document.
 
 ## Architecture and implementation consistency
 
-The architecture contract is clear for the implemented storage area, but two implementation
-mismatches are present:
-
-1. The generic `FileSuperblock` encoder and decoder preserve nonzero common `flags`, and
-   tests exercise that behavior. `ARCHITECTURE.md` §4.10.4 assigns no v1 superblock flag
-   bits and requires writers and readers to enforce zero.
-2. `HeapPage::Validate` does not provide the complete HEAP owner validation required by
-   `ARCHITECTURE.md` §§4.13.3 and 5.21. It accepts `REDIRECT_RESERVED`, does not validate
-   retained DEAD ranges and `aux` canonically, and does not enforce pairwise
-   NORMAL/DEAD range non-overlap or schema-directed tuple validity. `Compact` performs
-   additional DEAD-range and overlap checks before mutation, but that is not equivalent to
-   ordinary owner validation.
-
-These are implementation defects against settled architecture rules, not unresolved
-architecture questions. They require implementation repair rather than an architecture
-revision.
+The implemented storage area has no known mismatch with the architecture contract. The
+generic file-superblock codec enforces zero common flags (§4.10.4), and `HeapPage::Validate`
+provides the complete page-local HEAP owner validation (§§4.13.3, 5.21).
 
 The generic BTREE superblock guard is not a noncanonical substitute: B+ tree support and
 its specialized codec are absent.

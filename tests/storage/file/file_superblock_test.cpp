@@ -13,6 +13,7 @@
 namespace dblusblus {
 namespace {
 
+constexpr std::size_t FLAGS_OFFSET = 4;
 constexpr std::size_t CHECKSUM_OFFSET = 16;
 constexpr std::size_t HEADER_SIZE_OFFSET = 20;
 constexpr std::size_t PAGE_NO_OFFSET = 24;
@@ -76,7 +77,6 @@ TEST(FileSuperblockTest, EmitsExactPersistedLayoutAndDeterministicReservedBytes)
     const FileSuperblock superblock{
         .file_kind = FileKind::HEAP,
         .file_id = FileId{0x0C0B0A09U},
-        .flags = std::uint32_t{0x04030201U},
         .page_lsn = Lsn{0x0C0B0A0908070605ULL},
         .object_id = std::uint64_t{0x14131211100F0E0DULL},
         .creation_epoch = std::uint64_t{0x1C1B1A1918171615ULL},
@@ -88,10 +88,10 @@ TEST(FileSuperblockTest, EmitsExactPersistedLayoutAndDeterministicReservedBytes)
         std::byte{0x00},
         std::byte{0x01},
         std::byte{0x00},
-        std::byte{0x01},
-        std::byte{0x02},
-        std::byte{0x03},
-        std::byte{0x04},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
         std::byte{0x05},
         std::byte{0x06},
         std::byte{0x07},
@@ -132,7 +132,7 @@ TEST(FileSuperblockTest, EmitsExactPersistedLayoutAndDeterministicReservedBytes)
         ADD_FAILURE() << "superblock checksum unexpectedly missing";
         return;
     }
-    EXPECT_EQ(*stored_checksum, std::uint32_t{0xFE76015CU});
+    EXPECT_EQ(*stored_checksum, std::uint32_t{0x477A0961U});
     EXPECT_EQ(*stored_checksum, *computed_checksum);
 }
 
@@ -147,7 +147,6 @@ TEST(FileSuperblockTest, RoundTripsEveryGenericFileKindAndBoundaryValues) {
         ExpectRoundTrip(FileSuperblock{
             .file_kind = file_kind,
             .file_id = std::numeric_limits<FileId>::max(),
-            .flags = std::numeric_limits<std::uint32_t>::max(),
             .page_lsn = std::numeric_limits<Lsn>::max(),
             .object_id = std::numeric_limits<std::uint64_t>::max(),
             .creation_epoch = std::numeric_limits<std::uint64_t>::max(),
@@ -243,6 +242,41 @@ TEST(FileSuperblockTest, RejectsInvalidCommonHeaderInvariants) {
     page = original;
     ReplaceFieldAndRefreshChecksum(page, HEADER_SIZE_OFFSET, std::uint16_t{32});
     ExpectDecodeError(page, FileSuperblockDecodeError::WRONG_HEADER_SIZE);
+}
+
+TEST(FileSuperblockTest, EncoderWritesZeroFlags) {
+    std::array<std::byte, PAGE_SIZE> page{};
+    page.fill(std::byte{0xA5});
+    ASSERT_TRUE(EncodeFileSuperblock(page,
+                                     FileSuperblock{
+                                         .file_kind = FileKind::FSM,
+                                         .file_id = FileId{9},
+                                         .page_lsn = Lsn{77},
+                                         .object_id = 11,
+                                         .creation_epoch = 13,
+                                     }));
+
+    const auto flags = DecodeLittleEndian<std::uint32_t>(std::span{page}.subspan(FLAGS_OFFSET, 4));
+    if (!flags.has_value()) {
+        ADD_FAILURE() << "flags field did not decode";
+        return;
+    }
+    EXPECT_EQ(*flags, std::uint32_t{0});
+}
+
+TEST(FileSuperblockTest, RejectsEveryNonzeroFlagBit) {
+    std::array<std::byte, PAGE_SIZE> original{};
+    ASSERT_TRUE(EncodeFileSuperblock(original, FileSuperblock{}));
+
+    for (std::uint32_t bit = 0; bit < 32; ++bit) {
+        auto page = original;
+        ReplaceFieldAndRefreshChecksum(page, FLAGS_OFFSET, std::uint32_t{1} << bit);
+        ExpectDecodeError(page, FileSuperblockDecodeError::NONZERO_FLAGS);
+    }
+
+    auto page = original;
+    ReplaceFieldAndRefreshChecksum(page, FLAGS_OFFSET, std::numeric_limits<std::uint32_t>::max());
+    ExpectDecodeError(page, FileSuperblockDecodeError::NONZERO_FLAGS);
 }
 
 TEST(FileSuperblockTest, RejectsNonzeroReservedBytes) {

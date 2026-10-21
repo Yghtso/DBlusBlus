@@ -635,7 +635,7 @@ TEST(VarlenTupleCodecTest, ComposesWithHeapPageAndPreservesBorrowedVarcharView) 
         TupleValue{Varchar("heap bytes")},
         TupleValue{true},
     };
-    const auto encoded = EncodeTuple(*layout, TupleVersionMetadata{}, values);
+    const auto encoded = EncodeTuple(*layout, TupleVersionMetadata{.xmin = TxnId{2}}, values);
     const auto* tuple = RequireOptional(encoded.tuple, "HeapPage varlen tuple");
     if (tuple == nullptr) {
         return;
@@ -643,7 +643,7 @@ TEST(VarlenTupleCodecTest, ComposesWithHeapPageAndPreservesBorrowedVarcharView) 
 
     const PageId page_id{.file_id = FileId{15}, .page_no = PageNo{3}};
     Page page{page_id};
-    HeapPage heap_page{page};
+    HeapPage heap_page{page, HeapTupleSchemaHistory{std::span{layout, 1}}};
     ASSERT_TRUE(heap_page.Initialize());
     const auto inserted = heap_page.Insert(*tuple);
     const auto* rid = RequireOptional(inserted.rid, "HeapPage varlen RID");
@@ -719,7 +719,7 @@ TEST(VarlenTuplePersistenceTest, SurvivesHeapPageFileWriteReopenAndDecode) {
         page_id = *allocated_page;
 
         Page page{page_id};
-        HeapPage heap_page{page};
+        HeapPage heap_page{page, HeapTupleSchemaHistory{std::span{layout, 1}}};
         ASSERT_TRUE(heap_page.Initialize());
         const auto inserted = heap_page.Insert(*tuple);
         const auto* rid = RequireOptional(inserted.rid, "persisted tuple RID");
@@ -738,7 +738,7 @@ TEST(VarlenTuplePersistenceTest, SurvivesHeapPageFileWriteReopenAndDecode) {
     }
     Page read_page{page_id};
     ASSERT_TRUE(manager.ReadPage(page_id, read_page.Bytes()));
-    HeapPage read_heap_page{read_page};
+    HeapPage read_heap_page{read_page, HeapTupleSchemaHistory{std::span{layout, 1}}};
     EXPECT_TRUE(read_heap_page.Validate());
     const auto stored = read_heap_page.TupleBytes(slot_id);
     const auto* stored_tuple = RequireOptional(stored, "persisted stored tuple");

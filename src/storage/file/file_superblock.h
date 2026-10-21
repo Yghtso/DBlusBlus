@@ -37,7 +37,8 @@ enum class FileKind : std::uint16_t {
 struct FileSuperblock {
     FileKind file_kind{FileKind::HEAP};
     FileId file_id{INVALID_FILE_ID};
-    std::uint32_t flags{0};
+    // V1 assigns no common superblock flag bits: the codec writes flags as zero and rejects
+    // any nonzero value, so there is no flags field to carry or round-trip.
     Lsn page_lsn{INVALID_LSN};
     std::uint64_t object_id{0};
     std::uint64_t creation_epoch{0};
@@ -57,6 +58,7 @@ enum class FileSuperblockDecodeError : std::uint8_t {
     INVALID_FILE_KIND,
     UNSUPPORTED_FILE_KIND,
     WRONG_PAGE_SIZE,
+    NONZERO_FLAGS,
     NONZERO_RESERVED_BYTES,
 };
 
