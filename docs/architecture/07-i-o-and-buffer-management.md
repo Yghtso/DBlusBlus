@@ -327,6 +327,22 @@ The following transitions are canonical. “Mapping” includes the in-progress 
 | `EVICTING + WRITEBACK_IN_PROGRESS` | WAL, page-write, or file-sync failure | `RESIDENT + NONE` | restore the old mapping to pinnable resident state | remains zero until a fetch pins it | remains dirty with all recovery metadata | release victim reservation, wake old-page fetchers, and fail the requesting load intent with the same error |
 | `RESIDENT` | file-retirement drain has blocked new pins and all pins/I/O/latches have drained | `FREE + NONE` | remove mapping under §7.12.5 | zero | obsolete object bytes may be discarded only after the retirement owner authorizes it | no unlink follows until the drain succeeds |
 
+The diagram summarizes the ownership-state changes in the table, which is canonical. Fetch hits, published mutations and copied writeback keep a frame `RESIDENT`.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> FREE
+    FREE --> LOADING: bind intent
+    LOADING --> RESIDENT: loaded and valid
+    LOADING --> FREE: load fails
+    RESIDENT --> EVICTING: victim reserved
+    EVICTING --> FREE: evicted
+    EVICTING --> LOADING: evicted, load waiting
+    EVICTING --> RESIDENT: writeback fails
+    RESIDENT --> FREE: file retired
+```
+
 Every transition that changes the mapping, ownership state, PageId, public pin count, or victim reservation is atomic with respect to competing fetch/victim decisions. The architecture does not require one global mutex; it requires the table's observable outcomes.
 
 ### 7.6.3 Fetch linearization

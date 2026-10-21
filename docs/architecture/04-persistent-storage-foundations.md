@@ -1747,6 +1747,20 @@ The exact slot-state table is:
 | `REDIRECT_RESERVED=3` | No v1 field/payload interpretation exists. | Forbidden. | Recognized numeric reservation but unsupported in v1; writers MUST NOT emit it and L1 returns `UNSUPPORTED_RESERVED_STATE`. The page is not ordinarily published, scanned, or repaired by guessing forwarding semantics. |
 | Any other code | No interpretation. | Forbidden. | `CORRUPT_HEAP`. |
 
+The lifecycle of one SlotId through these states, summarizing §5 and Chapter 14:
+
+```mermaid
+stateDiagram-v2
+    [*] --> NORMAL: insertion appends a new slot
+    UNUSED --> NORMAL: insertion pops the free-slot chain
+    NORMAL --> DEAD_retained: NORMAL to DEAD transition
+    DEAD_retained --> DEAD_reclaimed: compaction discards the payload
+    DEAD_retained --> UNUSED: grace-complete reuse (Chapter 14)
+    DEAD_reclaimed --> UNUSED: grace-complete reuse (Chapter 14)
+    DEAD_retained: DEAD, retained form
+    DEAD_reclaimed: DEAD, reclaimed form (0,0)
+```
+
 Thus a retained DEAD payload is not weakly validated merely because MVCC no longer returns it. Before `DEAD -> UNUSED`, either its complete original tuple remains structurally valid or compaction has produced the exact reclaimed form. Vacuum promptness and transaction visibility are not L1 facts.
 
 Compaction may move a retained DEAD payload while atomically updating its slot coordinates, exactly as for retained NORMAL bytes, or may discard it and install the reclaimed DEAD form. It cannot leave stale coordinates or a partially decodable retained tuple.
