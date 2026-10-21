@@ -7,6 +7,15 @@ target_sources(
         common/crc32c.h
         common/encoding.h
         common/types.h
+        storage/buffer/buffer_error.h
+        storage/buffer/buffer_frame.h
+        storage/buffer/buffer_pool.cpp
+        storage/buffer/buffer_pool.h
+        storage/buffer/clock_replacer.cpp
+        storage/buffer/clock_replacer.h
+        storage/buffer/page_guard.cpp
+        storage/buffer/page_guard.h
+        storage/buffer/page_io.h
         storage/disk/disk_manager.cpp
         storage/disk/disk_manager.h
         storage/file/file_superblock.cpp
@@ -15,6 +24,8 @@ target_sources(
         storage/file/page_file.h
         storage/page/page.cpp
         storage/page/page.h
+        storage/page/page_checksum.cpp
+        storage/page/page_checksum.h
         storage/page/page_header.h
         storage/heap/fsm_candidate_index.cpp
         storage/heap/fsm_candidate_index.h
