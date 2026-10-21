@@ -21,11 +21,11 @@ differ on intended behavior, `ARCHITECTURE.md` is authoritative.
 
 ---
 
-# Part I — Development Environment and Workflow
+## Part I — Development Environment and Workflow
 
-## Development baseline
+### Development baseline
 
-The architecture's initial platform baseline is Linux on x86-64 or ARM64 with POSIX file
+The architecture's supported platform is Linux on x86-64 or ARM64 with POSIX file
 APIs. Production code uses C++20 without compiler extensions. Clang is the primary
 development compiler, and production code is expected to compile with both Clang and GCC.
 
@@ -44,7 +44,7 @@ source and standard library.
 The build expects system-provided dependencies. It does not use CMake `FetchContent` or
 otherwise download GoogleTest or Google Benchmark.
 
-## Required tools
+### Required tools
 
 | Tool or dependency | Purpose | Required for | Repository requirement |
 |---|---|---|---|
@@ -70,7 +70,7 @@ merely to configure and build the primary Clang Debug tree, except that a distri
 package some of them together. They are required for their corresponding full-matrix
 checks.
 
-## Linux package installation
+### Linux package installation
 
 Package names vary by distribution. Install packages that provide the conceptual
 requirements in the table above. The names below are an Arch-family example, not project
@@ -99,7 +99,7 @@ sudo pacman -S --needed git cmake ninja clang gcc gtest benchmark
 This is an installation example only. The project does not install system packages
 automatically; package installation is a user-controlled system-administration action.
 
-## Clone the repository
+### Clone the repository
 
 ```sh
 git clone <repository-url>
@@ -109,7 +109,7 @@ cd DBlusBlus
 Use the clone URL appropriate for your access. Build and test commands below run from the
 repository root.
 
-## First build: Clang Debug
+### First build: Clang Debug
 
 This is the canonical first build and normal development tree:
 
@@ -122,7 +122,7 @@ ctest --preset clang-debug
 The preset creates `build/clang-debug`, selects `clang++`, uses `Debug`, enables tests,
 and exports `build/clang-debug/compile_commands.json`.
 
-## CMake presets
+### CMake presets
 
 | Preset | Purpose | Configure and build | Test command |
 |---|---|---|---|
@@ -136,7 +136,7 @@ and exports `build/clang-debug/compile_commands.json`.
 Only `clang-debug`, `clang-asan`, and `gcc-debug` have named CTest presets. The explicit
 `--test-dir` commands above are supported for the other test-enabled build trees.
 
-## Running tests
+### Running tests
 
 List the tests CMake discovered without running them:
 
@@ -158,7 +158,7 @@ expression, for example:
 ctest --preset clang-debug -R '^ProjectSmokeTest\.' --output-on-failure
 ```
 
-## GCC portability verification
+### GCC portability verification
 
 Run the secondary compiler check with the repository's GCC preset:
 
@@ -172,7 +172,7 @@ This is part of the full local matrix rather than the fastest per-edit loop. Pro
 code is expected to compile with both Clang and GCC; individual compiler-run results
 belong in CI artifacts, task reports, or `devlog/`.
 
-## Sanitizers
+### Sanitizers
 
 The sanitizer preset independently enables AddressSanitizer and UndefinedBehaviorSanitizer
 in a Clang Debug build:
@@ -199,7 +199,7 @@ ASAN_OPTIONS=detect_leaks=0 ctest --preset clang-asan
 This workaround disables LeakSanitizer only. ASan and UBSan remain compiled and linked
 into the targets.
 
-## clang-tidy
+### clang-tidy
 
 The analysis preset locates `clang-tidy` and applies the repository's `.clang-tidy`
 checks while compiling production code, tests, and the normal executable:
@@ -212,7 +212,7 @@ cmake --build --preset clang-tidy
 Configuration fails explicitly with `clang-tidy requested but not found` if the tool is
 absent.
 
-## clang-format
+### clang-format
 
 The repository has no formatting wrapper script or formatting build target. Perform a
 non-mutating project-wide check against `.clang-format` with:
@@ -226,7 +226,7 @@ clang-format major version reports differences, treat that as a tool-version
 compatibility finding and review it before reformatting files. Do not mix
 repository-wide formatting with unrelated implementation work.
 
-## Warnings as errors
+### Warnings as errors
 
 Warnings are enabled for project targets by default. To additionally promote them to
 errors in the primary tree, reconfigure that preset with the project option and rebuild:
@@ -239,7 +239,7 @@ cmake --build --preset clang-debug
 This option adds `-Werror` for Clang and GCC project targets. It is a stronger local
 verification build, not a redefinition of the project's warning policy.
 
-## Benchmark build
+### Benchmark build
 
 Google Benchmark is required only for the benchmark preset. Configure and compile it
 with:
@@ -254,7 +254,7 @@ disables unit-test compilation. Successful configuration and compilation verify 
 target availability; they are not a performance claim. Detailed benchmark methodology
 remains in [`VERIFICATION.md`](VERIFICATION.md).
 
-## compile_commands.json / clangd
+### compile_commands.json / clangd
 
 The root CMake file and every configure preset enable `CMAKE_EXPORT_COMPILE_COMMANDS`.
 After the primary configure, point clangd-compatible tooling at the primary database with
@@ -268,7 +268,7 @@ The command is intended for a fresh clone where no root link exists. Both the ge
 database and root link are ignored and must not be committed. No editor-specific
 configuration is required.
 
-## Normal development loop
+### Normal development loop
 
 For most edits, keep the primary tree configured and use this short loop:
 
@@ -283,7 +283,7 @@ A developer need not run the entire sanitizer, GCC, analysis, and formatting mat
 every tiny edit. Use the broader matrix below before declaring a non-trivial milestone
 complete, in proportion to the change.
 
-## Full local verification workflow
+### Full local verification workflow
 
 The following is the full local toolchain verification matrix. The LeakSanitizer fallback
 is conditional and should be used only when the default sanitizer commands fail with the
@@ -328,7 +328,7 @@ This matrix compiles the benchmark target but intentionally does not execute ben
 Detailed test, crash-injection, fuzzing, regression, and benchmark procedures are defined
 in [`VERIFICATION.md`](VERIFICATION.md).
 
-## Build directories and generated files
+### Build directories and generated files
 
 Each configure preset writes to its own `build/<preset-name>` directory:
 
@@ -354,7 +354,7 @@ cmake --preset clang-debug
 Do not remove the repository root or arbitrary paths. Recreate the root
 `compile_commands.json` symlink after removing its target tree if needed.
 
-## Troubleshooting
+### Troubleshooting
 
 - **CMake rejects the project or presets:** verify `cmake --version` is at least 3.25.
   Both the root project and presets declare this minimum.
@@ -384,7 +384,7 @@ Do not remove the repository root or arbitrary paths. Recreate the root
 
 ---
 
-# Part II — Implementation Sequencing and Module Layout
+## Part II — Implementation Sequencing and Module Layout
 
 The sequence below defines dependency-driven implementation order and capability targets.
 It does not report active project status or authorize crossing an implementation gate.
@@ -392,11 +392,11 @@ It does not report active project status or authorize crossing an implementation
 requirements remain controlling. The BufferPool implementation boundary requires explicit
 authorization.
 
-## Suggested Implementation Order
+### Suggested Implementation Order
 
 This order intentionally follows dependency direction and maximizes learning.
 
-## Phase 1 — Raw storage
+#### Phase 1 — Raw storage
 
 1. byte serialization utilities,
 2. DiskManager and PageFile primitives,
@@ -406,7 +406,7 @@ This order intentionally follows dependency direction and maximizes learning.
 6. tuple encoding,
 7. persisted FSM page and in-memory candidate-index foundations.
 
-## Phase 2 — Buffer management
+#### Phase 2 — Buffer management
 
 8. buffer frames,
 9. page guards,
@@ -415,7 +415,7 @@ This order intentionally follows dependency direction and maximizes learning.
 12. HeapFile and relation-wide FreeSpaceMap integration through BufferPool-managed page lifetimes,
 13. buffer-pool and buffered-storage benchmarks.
 
-## Phase 3 — Indexes
+#### Phase 3 — Indexes
 
 14. B+ tree page formats,
 15. lookup,
@@ -425,7 +425,7 @@ This order intentionally follows dependency direction and maximizes learning.
 19. latch coupling,
 20. randomized B+ tree tests.
 
-## Phase 4 — Transactions and durability
+#### Phase 4 — Transactions and durability
 
 21. transaction manager,
 22. selected MVCC representation,
@@ -437,7 +437,7 @@ This order intentionally follows dependency direction and maximizes learning.
 28. crash recovery,
 29. vacuum/GC.
 
-## Phase 5 — Catalog and SQL
+#### Phase 5 — Catalog and SQL
 
 30. type system,
 31. bootstrap catalog,
@@ -447,7 +447,7 @@ This order intentionally follows dependency direction and maximizes learning.
 35. AST,
 36. binder.
 
-## Phase 6 — Query execution
+#### Phase 6 — Query execution
 
 37. logical plans,
 38. physical plans,
@@ -461,7 +461,7 @@ This order intentionally follows dependency direction and maximizes learning.
 46. sort,
 47. index scan.
 
-## Phase 7 — Optimization
+#### Phase 7 — Optimization
 
 48. statistics,
 49. rule rewrites,
@@ -472,7 +472,7 @@ This order intentionally follows dependency direction and maximizes learning.
 54. `EXPLAIN`,
 55. `EXPLAIN ANALYZE`.
 
-## Phase 8 — Performance work
+#### Phase 8 — Performance work
 
 56. profiling,
 57. allocation reduction,
@@ -483,9 +483,88 @@ This order intentionally follows dependency direction and maximizes learning.
 
 ---
 
-## Module Layout Guidance
+### Capability integration prerequisites
 
-### Foundational storage layout
+Use the capability boundaries in `ARCHITECTURE.md` Appendix C when applying the
+implementation sequences below. Implementation prerequisites do not authorize an
+excluded capability or override the active gate in `PROJECT_STATE.md`.
+
+- Establish manual vacuum correctness before optional background scheduling
+  (Phase T7; Architecture §14.17).
+- Establish single-worker correctness before parallel scheduling integration
+  (Phase E10; Architecture Chapter 32).
+- Integrate basic join implementations before optional MergeJoin
+  (Phase E6; Architecture §28.12).
+- Establish query-memory accounting and spill ownership before external sorting
+  (Phases E5/E8; Architecture Chapters 24 and 30).
+- Integrate an object's physical-page/slot reuse only after its reclamation and
+  lifetime protocol is in place (Architecture Chapters 8 and 14).
+- Profile the correct paths before introducing optional scheduler, WAL, SIMD,
+  NUMA, or prefetch optimizations permitted by their Architecture owners.
+
+### VACUUM and index-publication integration
+
+Use Architecture §§11.13.5, 14.17.1 and 21.8.2 as the coordination owners and
+Verification's **VACUUM manifest admission versus CREATE INDEX publication**
+procedure as the integration checkpoint. After manual reclamation, transaction
+terminal handling and catalog descriptor publication are independently usable:
+
+1. Connect per-table maintenance admission and pass ownership to the catalog
+   manifest resolver. Exercise the stale cached-descriptor fixture before allowing
+   resumed passes to mutate heap or index state.
+2. Connect CREATE INDEX publication to that admission boundary and its terminal
+   cleanup paths. Exercise commit, abort, canceled drain and repeated same-owner
+   DDL with deterministic ownership barriers before combining this with RID reuse.
+3. Compose the independent full-index-absence oracle with exact B+ cleanup,
+   DEAD/UNUSED and reuse fixtures; then add the crash/reopen cases and the existing
+   DROP/ANALYZE transaction-gate schedules.
+4. Observe unrelated-table maintenance progress and inspect wait dependencies
+   before enabling background scheduling or optimizing publication wait time.
+
+Keep catalog manifest resolution, maintenance admission and transaction cleanup
+as explicit integration boundaries. Their concrete module/lock decomposition may
+follow the implementation's ownership model; this sequence does not redefine
+manifest visibility, gate compatibility or transaction outcomes. Apply it only
+when those subsystems are authorized by PROJECT_STATE.
+
+### Database-root lifecycle integration
+
+Use Architecture §§3.3 and 4.7.8–4.7.10 as the lifecycle owners and Verification's
+**Database Lifecycle Tests** as the procedure entry point. Apply this sequence only
+when the relevant subsystem work is authorized; raw page-file creation does not
+stand in for a complete database bootstrap or for BufferPool-managed page access.
+
+1. Establish retained-directory identity, containment, namespace durability, and
+   the lifecycle coordination adapter before exposing staged creation or cleanup.
+   Document how administrative tools satisfy Architecture §4.7.10's cooperative
+   namespace prerequisite. Exercise Verification's compliant-actor schedule and
+   observed-change refusal cases before exposing lifecycle entry points.
+   Validate the chosen gate primitive with the pre-bootstrap exclusion procedure,
+   including aliases, same-process contention, owner death, and independent targets.
+2. Integrate the process-local root reservation and control-owner lifetime before
+   publication/removal entry points. Exercise the common descriptor fixture and
+   acquisition-order traces before adding recursive cleanup.
+3. Compose bootstrap with the control codec, system-catalog/status initialization,
+   and initial WAL prerequisites. Keep a private bootstrap checkpoint distinct from
+   the complete database API: public create/open integration also requires the
+   ordinary recovery and READY dependencies.
+4. Integrate retirement publication independently of physical reclamation. Use
+   failure barriers to validate semantic removal before adding deferred cleanup.
+5. Add control-authorized recursive cleanup and empty terminal finalization as
+   separately exercisable paths. Reuse the terminal crash/refusal procedures before
+   integrating retries, concurrent finalizers, and creation of a distinct new root.
+
+Keep the namespace-gate adapter, control-owner lifetime, retained-directory
+operations, and publication/reclamation coordinator in responsibility-focused
+modules when those implementations are needed. Their exact filenames and gate
+representation remain implementation choices constrained by Architecture. A useful
+integration checkpoint includes independently captured owner/descriptor events,
+test-owned tree manifests, and directory-durability fault traces from Verification;
+a successful recursive filesystem deletion alone is insufficient evidence.
+
+### Module Layout Guidance
+
+#### Foundational storage layout
 
 The raw-storage foundation uses ownership-oriented modules:
 
@@ -523,7 +602,7 @@ src/
 Tests should mirror these responsibility groups under `tests/common/` and `tests/storage/`,
 with cross-project smoke coverage at the test root.
 
-### Subsystem expansion guidance
+#### Subsystem expansion guidance
 
 When a subsystem is authorized for implementation, introduce ownership-oriented modules
 according to its dependency boundary, such as:
@@ -545,11 +624,11 @@ subsystem responsibility boundaries defined by `ARCHITECTURE.md` remain authorit
 
 ---
 
-## Storage Milestone 1
+### Storage Milestone 1
 
 This end-to-end buffered-storage milestone depends on BufferPool, page guards, and
-HeapFile. It is separate from the raw-storage primitives and does not authorize crossing
-the BufferPool implementation gate.
+HeapFile. It is separate from the raw-storage primitives and does not by itself authorize
+HeapFile implementation.
 
 Before implementing B+ trees or SQL, the storage layer should be able to pass the following end-to-end scenario:
 
@@ -564,9 +643,9 @@ insert enough tuples to create many pages
     ↓
 force repeated eviction
     ↓
-close database
+close the buffered-storage test harness
     ↓
-reopen database
+reopen heap storage in a fresh test harness
     ↓
 sequentially scan heap
     ↓
@@ -576,6 +655,13 @@ verify exact values
 ```
 
 No WAL/MVCC durability guarantees are required for this first milestone.
+Before WAL integration, raw page/controller fixtures may use `INVALID_LSN` for
+an unset page WAL position. Keep this harness convention distinct from persisted
+database pages, whose initialization, publication and checksum obligations are
+owned by Architecture §§4.8.2, 4.11–4.14 and the specific page format.
+This scenario exercises the page-file and buffered-storage owners directly. It
+does not expose `OpenDatabase`, return a READY database handle, or substitute for
+the bootstrap/recovery prerequisites in **Database-root lifecycle integration**.
 
 The purpose is to validate:
 
@@ -589,7 +675,7 @@ The purpose is to validate:
 
 ---
 
-## B+ Tree Development
+### B+ Tree Development
 
 Before implementing the B+ tree, read and follow the canonical B+ tree contract in `ARCHITECTURE.md` Chapter 8.
 
@@ -611,7 +697,8 @@ Implement in dependency order:
 
 This checklist controls implementation order only. Any proposed change to a settled Chapter 8 contract requires an explicit architecture revision before implementation.
 
-The transaction/durability core depends on the persistent B+ tree capability together with:
+Integrate the persistent B+ tree capability with the transaction/durability core
+through the coordinated components below:
 
 ```text
 transaction manager
@@ -625,7 +712,7 @@ crash recovery
 
 ---
 
-## B+ Tree Milestone 1
+### B+ Tree Milestone 1
 
 Single-threaded persistent tree through the real buffer pool must support:
 
@@ -648,7 +735,7 @@ Do not add concurrency before this milestone survives heavy randomized verificat
 
 ---
 
-## B+ Tree Milestone 2
+### B+ Tree Milestone 2
 
 Add:
 
@@ -666,7 +753,7 @@ Benchmark contention before considering a more optimistic tree algorithm.
 
 ---
 
-## B+ Tree Milestone 3
+### B+ Tree Milestone 3
 
 Integrate:
 
@@ -683,7 +770,7 @@ by the architecture.
 
 ---
 
-## Transaction and Durability Development
+### Transaction and Durability Development
 
 The transaction and durability core should be implemented as one coordinated dependency group, following `ARCHITECTURE.md` Chapters 9–15:
 
@@ -715,16 +802,15 @@ Before implementation, verify the relevant canonical contracts for:
 - log-buffer organization,
 - group commit,
 - checkpoints,
-- redo,
-- undo,
-- compensation log records,
+- redo and loser-transaction status resolution (`ARCHITECTURE.md` §§13.13–13.15),
+- the exclusion of ordinary user-DML physical undo and CLRs (`ARCHITECTURE.md` §13.16),
 - B+ tree system-SMO recovery,
-- transaction-ID wraparound strategy,
+- checked transaction-ID allocation and exhaustion (`ARCHITECTURE.md` §4.3.2),
 - global vacuum-safe horizon.
 
 ---
 
-## Recommended Transaction/Durability Module Layout
+### Recommended Transaction/Durability Module Layout
 
 ```text
 src/
@@ -775,11 +861,11 @@ Responsibility boundaries may not silently collapse into one global "transaction
 
 ---
 
-## Implementation Order for the Transaction/Durability Core
+### Implementation Order for the Transaction/Durability Core
 
 Implement in this order because each stage produces testable invariants.
 
-### Phase T1 — Transaction identity and visibility
+#### Phase T1 — Transaction identity and visibility
 
 1. database control file,
 2. durable TxnId block reservation,
@@ -789,7 +875,7 @@ Implement in this order because each stage produces testable invariants.
 6. transaction-status store,
 7. `xmin/xmax/cmin/cmax` visibility tests.
 
-### Phase T2 — Logical conflict control
+#### Phase T2 — Logical conflict control
 
 8. tuple-write LockManager,
 9. unique-key LockManager,
@@ -798,7 +884,7 @@ Implement in this order because each stage produces testable invariants.
 12. READ COMMITTED retry,
 13. REPEATABLE READ conflict abort.
 
-### Phase T3 — WAL foundations
+#### Phase T3 — WAL foundations
 
 14. segmented WAL files,
 15. WAL codec/checksums,
@@ -808,7 +894,7 @@ Implement in this order because each stage produces testable invariants.
 19. buffer recLSN,
 20. WAL-before-data tests.
 
-### Phase T4 — Commit durability
+#### Phase T4 — Commit durability
 
 21. TXN_COMMIT/TXN_ABORT,
 22. WAL flusher,
@@ -817,7 +903,7 @@ Implement in this order because each stage produces testable invariants.
 25. terminal status publication,
 26. durability/crash tests.
 
-### Phase T5 — B+ tree durability
+#### Phase T5 — B+ tree durability
 
 27. no-flush MTR page guards,
 28. BTREE_MTR encoding,
@@ -825,7 +911,7 @@ Implement in this order because each stage produces testable invariants.
 30. structural crash tests,
 31. aborted transaction + persistent index-garbage tests.
 
-### Phase T6 — Checkpoint and recovery
+#### Phase T6 — Checkpoint and recovery
 
 32. checkpoint DPT,
 33. active writer checkpoint table,
@@ -837,7 +923,7 @@ Implement in this order because each stage produces testable invariants.
 39. loser abort resolution,
 40. recovery checkpoint.
 
-### Phase T7 — Vacuum
+#### Phase T7 — Vacuum
 
 41. snapshot global horizon,
 42. garbage candidate selection,
@@ -850,11 +936,13 @@ Implement in this order because each stage produces testable invariants.
 49. freezing,
 50. vacuum benchmarks.
 
-Do not begin SERIALIZABLE or replication work before all seven phases are reliable.
+The sequence covers the supported transaction and durability scope in
+`ARCHITECTURE.md` Chapters 9–15. SERIALIZABLE and replication require an accepted
+architecture revision; completing these phases does not authorize either capability.
 
 ---
 
-## Transaction/Durability Milestone 1
+### Transaction/Durability Milestone 1
 
 Without B+ tree integration yet:
 
@@ -874,7 +962,7 @@ Aborted tuple garbage may remain.
 
 ---
 
-## Transaction/Durability Milestone 2
+### Transaction/Durability Milestone 2
 
 Add:
 
@@ -891,7 +979,7 @@ The tree must remain structurally valid after every injected crash.
 
 ---
 
-## Transaction/Durability Milestone 3
+### Transaction/Durability Milestone 3
 
 Add:
 
@@ -910,7 +998,7 @@ collection of isolated features.
 
 ---
 
-## Recommended Module Layout for the Upper Layer
+### Recommended Module Layout for the Upper Layer
 
 ```text
 src/
@@ -984,9 +1072,9 @@ The layer boundaries may not.
 
 ---
 
-## Implementation Order for Catalog + SQL Front End
+### Implementation Order for Catalog + SQL Front End
 
-### Phase U1 — Type system
+#### Phase U1 — Type system
 
 1. `LogicalType`
 2. generic `Value`
@@ -996,7 +1084,7 @@ The layer boundaries may not.
 6. operator registry
 7. type-resolution tests
 
-### Phase U2 — Catalog
+#### Phase U2 — Catalog
 
 8. bootstrap descriptors
 9. system-table schemas
@@ -1006,7 +1094,7 @@ The layer boundaries may not.
 13. transactional metadata visibility
 14. create/drop metadata tests
 
-### Phase U3 — Lexer/parser
+#### Phase U3 — Lexer/parser
 
 15. token model
 16. lexer
@@ -1020,7 +1108,7 @@ The layer boundaries may not.
 24. transaction statements
 25. parser fuzzing
 
-### Phase U4 — Binder
+#### Phase U4 — Binder
 
 26. scopes and BindingId
 27. column resolution
@@ -1033,7 +1121,7 @@ The layer boundaries may not.
 34. subquery binding
 35. binder test suite
 
-### Phase U5 — Logical planning
+#### Phase U5 — Logical planning
 
 36. logical output slots
 37. LogicalGet/Values
@@ -1045,7 +1133,7 @@ The layer boundaries may not.
 43. plan validator
 44. logical EXPLAIN
 
-### Phase U6 — Initial logical rewrites
+#### Phase U6 — Initial logical rewrites
 
 45. constant folding
 46. boolean simplification
@@ -1056,9 +1144,19 @@ The layer boundaries may not.
 
 Do not start cost-based physical optimization before this logical layer can represent and validate real queries.
 
+Before integrating EXISTS projection pruning or demand-sensitive constant folding,
+connect the bound subquery's consumer context to the canonical logical clause
+shape under Architecture §§17.10.2 and 20.14.5. Validate that handoff with
+Verification V20-13's DISTINCT/OFFSET class-count and error-demand fixtures, then
+apply the same oracle to physical fallback and optimized plans. Establish this
+semantic checkpoint before using NDV estimates or required-row costing in plan
+selection; those inputs are not demand proofs. Keep clause semantics and folding
+rules in their Architecture owners rather than encoding a separate development
+rule for which expressions may disappear.
+
 ---
 
-## Upper-Layer Milestone 1
+### Upper-Layer Milestone 1
 
 Without physical execution:
 
@@ -1095,7 +1193,7 @@ must work deterministically.
 
 ---
 
-## Upper-Layer Milestone 2
+### Upper-Layer Milestone 2
 
 Connect catalog DDL to the transactional storage core:
 
@@ -1119,7 +1217,7 @@ must work.
 
 ---
 
-## Upper-Layer Milestone 3
+### Upper-Layer Milestone 3
 
 Connect logical plans to the vectorized executor defined by `ARCHITECTURE.md` Chapters 22–32.
 
@@ -1141,11 +1239,13 @@ Vectorized Executor
 Transactional Heap/B+ Tree
 ```
 
-Only after this path works should broad SQL syntax expansion become a priority.
+Establish this end-to-end path before prioritizing proposals to expand the closed
+SQL scope defined by `ARCHITECTURE.md` Chapters 17–21. Additional syntax or semantics
+requires acceptance through the architecture revision process.
 
 ---
 
-## Recommended Execution Module Layout
+### Recommended Execution Module Layout
 
 ```text
 src/
@@ -1236,9 +1336,9 @@ The architectural responsibilities may not collapse into one giant executor clas
 
 ---
 
-## Execution Implementation Order
+### Execution Implementation Order
 
-### Phase E1 — Vector foundation
+#### Phase E1 — Vector foundation
 
 1. ValidityMask
 2. SelectionVector
@@ -1250,7 +1350,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 8. DataChunk reuse
 9. vector correctness tests
 
-### Phase E2 — Expression execution
+#### Phase E2 — Expression execution
 
 10. constants/column refs
 11. arithmetic
@@ -1260,7 +1360,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 15. selection-based filter evaluation
 16. vectorized hashing
 
-### Phase E3 — Pipeline skeleton
+#### Phase E3 — Pipeline skeleton
 
 17. source/operator/sink interfaces
 18. pipeline builder
@@ -1269,7 +1369,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 21. physical plan validator
 22. profiling counters
 
-### Phase E4 — Streaming operators
+#### Phase E4 — Streaming operators
 
 23. Values
 24. SeqScan
@@ -1279,7 +1379,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 28. Limit
 29. ResultSink
 
-### Phase E5 — Blocking memory infrastructure
+#### Phase E5 — Blocking memory infrastructure
 
 30. RowLayout
 31. RowCollection
@@ -1288,7 +1388,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 34. SpillManager
 35. temporary block serialization
 
-### Phase E6 — Joins
+#### Phase E6 — Joins
 
 36. NestedLoopJoin
 37. HashJoin in memory
@@ -1298,7 +1398,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 41. Grace spill
 42. skew handling
 
-### Phase E7 — Aggregation/distinct
+#### Phase E7 — Aggregation/distinct
 
 43. aggregate state API
 44. global aggregate
@@ -1307,7 +1407,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 47. DISTINCT reuse
 48. aggregate spill
 
-### Phase E8 — Sorting
+#### Phase E8 — Sorting
 
 49. sort comparator
 50. normalized prefix
@@ -1316,7 +1416,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 53. k-way merge
 54. TopN
 
-### Phase E9 — DML execution
+#### Phase E9 — DML execution
 
 55. target spool
 56. Halloween-safe UPDATE
@@ -1326,7 +1426,7 @@ The architectural responsibilities may not collapse into one giant executor clas
 60. buffered RETURNING
 61. statement-retry integration
 
-### Phase E10 — Parallel execution
+#### Phase E10 — Parallel execution
 
 62. fixed worker pool
 63. morselized SeqScan
@@ -1336,11 +1436,13 @@ The architectural responsibilities may not collapse into one giant executor clas
 67. parallel sort runs
 68. parallel profiling
 
-Do not begin JIT or exotic SIMD work before these phases are correct.
+Establish correctness and profile the execution paths before considering the optional
+SIMD optimizations permitted by `ARCHITECTURE.md` §32.11. JIT remains outside the
+supported scope under §1.3 and requires an accepted architecture revision.
 
 ---
 
-## Execution Milestone 1
+### Execution Milestone 1
 
 End-to-end:
 
@@ -1364,7 +1466,7 @@ No hash join/spill required yet.
 
 ---
 
-## Execution Milestone 2
+### Execution Milestone 2
 
 Add:
 
@@ -1384,7 +1486,7 @@ All work single-threaded but vectorized.
 
 ---
 
-## Execution Milestone 3
+### Execution Milestone 3
 
 Run with intentionally tiny query memory limits and correctly spill:
 
@@ -1395,11 +1497,14 @@ Sort
 DML target spool
 ```
 
-Results must match unlimited-memory execution.
+Validate constrained-memory execution using the relevant spill procedures in
+`VERIFICATION.md`, including V29-K/V29-N for aggregation. Compare each result with its
+Architecture-owned semantic contract; §29.3.7 permits FLOAT64 SUM/AVG reduction-tree
+variation across spill and execution shapes.
 
 ---
 
-## Execution Milestone 4
+### Execution Milestone 4
 
 DML is fully integrated:
 
@@ -1416,7 +1521,7 @@ with crash-safe lower-layer transactional behavior.
 
 ---
 
-## Execution Milestone 5
+### Execution Milestone 5
 
 Parallelize:
 
@@ -1444,7 +1549,7 @@ and identify synchronization/memory-bandwidth limits.
 
 ---
 
-## Recommended Optimizer Module Layout
+### Recommended Optimizer Module Layout
 
 ```text
 src/
@@ -1527,9 +1632,9 @@ as separable concepts.
 
 ---
 
-## Optimizer Implementation Order
+### Optimizer Implementation Order
 
-### Phase O1 — Statistics foundation
+#### Phase O1 — Statistics foundation
 
 1. table statistics descriptor
 2. column statistics descriptor
@@ -1541,7 +1646,7 @@ as separable concepts.
 8. ANALYZE persistence
 9. statistics tests
 
-### Phase O2 — Selectivity/cardinality
+#### Phase O2 — Selectivity/cardinality
 
 10. PredicateTruthEstimate
 11. equality
@@ -1556,7 +1661,7 @@ as separable concepts.
 20. MCV-aware join estimator
 21. estimation q-error tests
 
-### Phase O3 — Cost model
+#### Phase O3 — Cost model
 
 22. Cost structure
 23. cost parameters
@@ -1570,7 +1675,7 @@ as separable concepts.
 31. spill cost
 32. calibration benchmarks
 
-### Phase O4 — Base access planning
+#### Phase O4 — Base access planning
 
 33. predicate classification
 34. B+ tree sargability
@@ -1580,7 +1685,7 @@ as separable concepts.
 38. ordering properties
 39. access-path tests
 
-### Phase O5 — Join optimization
+#### Phase O5 — Join optimization
 
 40. join graph
 41. RelationSet
@@ -1593,7 +1698,7 @@ as separable concepts.
 48. large-join heuristic
 49. join-order regression tests
 
-### Phase O6 — Property enforcement
+#### Phase O6 — Property enforcement
 
 50. final ordering requirements
 51. Sort enforcement
@@ -1603,7 +1708,7 @@ as separable concepts.
 55. deterministic tie-breaking
 56. PhysicalPlan finalization
 
-### Phase O7 — Diagnostics
+#### Phase O7 — Diagnostics
 
 57. EXPLAIN estimates
 58. optimizer trace
@@ -1611,11 +1716,13 @@ as separable concepts.
 60. EXPLAIN ANALYZE q-error
 61. plan regression suite
 
-Do not begin Cascades/adaptive optimization before these phases produce strong plans reliably.
+Implement and measure the optimizer organization defined by `ARCHITECTURE.md`
+§§33.1–33.2 before proposing a revision for a full Cascades/Volcano framework or
+adaptive runtime reoptimization. This sequence does not authorize either extension.
 
 ---
 
-## Optimizer Milestone 1
+### Optimizer Milestone 1
 
 For single-table queries:
 
@@ -1644,7 +1751,7 @@ different access path where appropriate
 
 ---
 
-## Optimizer Milestone 2
+### Optimizer Milestone 2
 
 For inner joins up to the exhaustive threshold:
 
@@ -1662,7 +1769,7 @@ must choose join order/algorithm by cost.
 
 ---
 
-## Optimizer Milestone 3
+### Optimizer Milestone 3
 
 Add physical property reasoning:
 
@@ -1678,7 +1785,7 @@ A non-cheapest local plan must sometimes win globally because it provides useful
 
 ---
 
-## Optimizer Milestone 4
+### Optimizer Milestone 4
 
 Cost memory pressure and spill:
 
@@ -1694,7 +1801,7 @@ Plan decisions should respond sensibly to query-memory budget changes.
 
 ---
 
-## Optimizer Milestone 5
+### Optimizer Milestone 5
 
 Handle large join graphs with bounded planning time:
 
@@ -1707,7 +1814,7 @@ Planning time and plan quality must be benchmarked.
 
 ---
 
-## Document Maintenance
+### Document Maintenance
 
 Update this guide when stable development requirements, tooling workflows, dependency
 sequencing, milestone capability definitions, or module-layout guidance change. Replace

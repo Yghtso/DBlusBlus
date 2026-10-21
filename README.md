@@ -26,7 +26,7 @@ still representing realistic database responsibilities and invariants.
 
 ## System characteristics
 
-The authoritative v1 architecture specifies:
+The authoritative architecture specifies:
 
 - a Linux-first C++20 platform using POSIX file APIs;
 - page-oriented storage with 8 KiB pages, row-oriented heap tables, and explicit
@@ -43,7 +43,8 @@ These are architectural design characteristics, not a claim that every subsystem
 already implemented. See [`PROJECT_STATE.md`](docs/PROJECT_STATE.md) for implemented
 capabilities, limitations, and active development boundaries.
 
-The architecture follows a strict downward dependency direction:
+The architecture uses this high-level coordination and representation flow
+([Architecture §2.1](docs/ARCHITECTURE.md#21-layered-system-model)):
 
 ```text
 SQL / Parser
